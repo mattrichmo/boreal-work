@@ -22,6 +22,52 @@ pub struct RouteContextDto {
     pub expected_revision: Option<u64>,
 }
 
+/// Read-only, versioned workflow package metadata exposed by the application
+/// adapter. Workflow assets guide agents; they do not authorize lifecycle
+/// transitions or carry project state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowInputDto {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub input_type: String,
+    pub source: String,
+    pub validation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowCriterionDto {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub criterion_type: String,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowAssetDto {
+    pub reference: String,
+    pub kind: String,
+    pub title: String,
+    pub allowed_commands: Vec<String>,
+    pub typed_inputs: Vec<WorkflowInputDto>,
+    pub finish_criteria: Vec<WorkflowCriterionDto>,
+    pub next_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowPackageDto {
+    pub schema_version: String,
+    pub package_id: String,
+    pub package_version: String,
+    pub asset_identity: String,
+    pub assets: Vec<WorkflowAssetDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowShowDto {
+    pub package: WorkflowPackageDto,
+    pub asset: WorkflowAssetDto,
+}
+
 /// Versioned payload for the public dependency-add route.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DependencyAddDto {
@@ -51,6 +97,9 @@ pub struct StatusDto {
     pub lifecycle: String,
     #[serde(default)]
     pub reason_codes: Vec<String>,
+    /// Additive M02 field; absent in pre-M02 readers/fixtures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<StatusDiagnosticDto>,
     pub claimable_for_actor: bool,

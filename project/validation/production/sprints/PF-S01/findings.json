@@ -1,0 +1,154 @@
+{
+  "schema": "boreal.pf-s01-t90.review-findings.v2",
+  "status": "worker-produced-unaccepted",
+  "task_id": "PF-S01-T90",
+  "attempt": 7,
+  "reviewer": {
+    "role": "independent validation reviewer",
+    "agent_id": "01a0c7b0-5953-7aa2-b1b5-3db17b4975d2",
+    "independence_statement": "The reviewer did not implement any PF-S01 leaf and is distinct from every accepted PF-S01-T01..T11 reviewer and from the prior attempt-6 reviewer that also owned PF-S01-T09."
+  },
+  "source_identity": {
+    "observed_head": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "branch": "codex/apply-responsive-terminal-overlay",
+    "working_tree": "dirty",
+    "contract_manifest_sha256": "131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa1"
+  },
+  "scope": [
+    "accepted PF-S01-T01..T11 handoffs and evidence",
+    "accepted PF-S00-T92 entry gate",
+    "prior PF-S01-T90 attempt-6 review/findings/evidence",
+    "PF-S01-T91 reconciliation records",
+    "contract-manifest artifact identity",
+    "conformance obligation/vector/vector_metadata joins",
+    "contract and plan structural validation",
+    "reviewer attribution and evidence-layer honesty"
+  ],
+  "checks": {
+    "contract_validator": "passed; 8 protocol envelopes, 11 guidance fixtures, 10 workflow assets, 18 legal/15 illegal transition vectors, 19 clock/dependency cases, 52 conformance mappings, SQLite schema parsed",
+    "plan_validate": "passed on current in-progress-attempt tree; 22 sprints, 265 tasks, 48 obligations, 56 acceptance rows, acyclic graph",
+    "plan_graph_ready": "passed advisory query; no tasks; not authorization",
+    "plan_verify_package": "passed; 444 files, 0 mismatches",
+    "manifest_internal_hashes": "passed; 19 entries, 0 mismatches",
+    "conformance_join": "passed; 48 obligations, 49 vectors, 49 metadata rows, 0 dangling references, one-to-one join, all required categories, all dispositions unmeasured",
+    "t11_accepted_source_identity": "failed; current contract-manifest.json hash 131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa1 is absent from the T11 accepted_source, which records dcb757903063fd1aef64f910ebc3f1a5c6fa01990c38bb955f1901aa644fad99",
+    "accepted_handoff_pointer_audit": "failed; 21 accepted task/attempt pointers bind to START.md instead of HANDOFF.md",
+    "application_review_candidate_query": "blocked; review workflow resolved, but work review-candidates returned service_busy from the local database owner",
+    "prior_t90_attribution": "confirmed historical defect; attempt-6 agent 01a0c76b-d1a3-7be0-890a-d3cec4defbae equals the PF-S01-T09 reviewer",
+    "current_attempt_attribution": "passed; attempt-7 agent 01a0c7b0-5953-7aa2-b1b5-3db17b4975d2 is distinct from accepted T01..T11 reviewer identities"
+  },
+  "historical_findings": [
+    {
+      "id": "PF-S01-T90-6-ATTR",
+      "severity": "blocker",
+      "classification": "reviewer-attribution-conflict",
+      "source_task_id": "PF-S01-T90 attempt-6 / PF-S01-T09",
+      "source": [
+        "project/build-plan/production-completion/execution/STATE.json",
+        "project/validation/production/tasks/PF-S01-T90/attempt-6/HANDOFF.md",
+        "project/validation/production/tasks/PF-S01-T09/attempt-2/HANDOFF.md",
+        "project/validation/production/tasks/PF-S01-T91/attempt-1/HANDOFF.md"
+      ],
+      "reproduction": "STATE records PF-S01-T90 attempt-6 agent/reviewer 01a0c76b-d1a3-7be0-890a-d3cec4defbae, and records the same identity as PF-S01-T09's reviewer. T91 explicitly marks attempt 6 superseded for this conflict.",
+      "requirement": "The independent reviewer must not be the implementation/review principal for the reviewed S01 leaf; historical self/overlapping acceptance must remain visible.",
+      "owner": "Coordinator; current PF-S01-T90 attempt-7 reviewer",
+      "fix_boundary": "Supersede attempt 6 as the independent gate result with this fresh attempt; retain attempt-6 files and attribution history unchanged. Do not reclassify it as an independent pass.",
+      "reruns": [
+        "Recheck reviewer identity against accepted PF-S01-T01..T11 reviewers before PF-S01-T92.",
+        "Rerun the exact contract, plan, manifest, and handoff-link checks on the reconciled tree."
+      ],
+      "disposition": "fixed_by_superseding_attempt_7",
+      "status": "historical_superseded"
+    }
+  ],
+  "findings": [
+    {
+      "id": "PF-S01-T90-7-001",
+      "severity": "blocker",
+      "classification": "accepted-source-identity-drift",
+      "status": "unresolved",
+      "source_task_id": "PF-S01-T11",
+      "source": [
+        "project/build-plan/production-completion/execution/STATE.json",
+        "project/spec/production/contract-manifest.json",
+        "project/validation/production/tasks/PF-S01-T11/attempt-2/HANDOFF.md"
+      ],
+      "summary": "The T11 accepted_source does not identify the current contract-manifest.json bytes.",
+      "reproduction": "SHA-256 of current project/spec/production/contract-manifest.json is 131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa1, while STATE records dcb757903063fd1aef64f910ebc3f1a5c6fa01990c38bb955f1901aa644fad99. The manifest's 19 internal artifact/integration entries still match; this is the external accepted-source binding for the manifest itself.",
+      "requirement": "T90 must verify the exact integrated source/artifact identity; T11's accepted identity must bind the exact combined contract set before reconciliation/revalidation can accept it.",
+      "owner": "PF-S01-T91 coordinator/reconciliation owner, with coordinator-owned execution-state correction",
+      "fix_boundary": "Update only the coordinator acceptance identity to the exact intended manifest bytes, retain the stale identity in historical acceptance history, and do not alter contract-manifest content from this review.",
+      "reruns": [
+        "python3 project/spec/validate_contracts.py",
+        "python3 tools/plan.py validate",
+        "python3 tools/plan.py verify-package",
+        "Fresh 19-entry manifest hash and T11 accepted_source identity assertion",
+        "PF-S01-T92 exact-tree source identity and conformance readback"
+      ],
+      "disposition": "open_blocker"
+    },
+    {
+      "id": "PF-S01-T90-7-002",
+      "severity": "blocker",
+      "classification": "accepted-handoff-linkage-drift",
+      "status": "unresolved",
+      "source_task_id": "PF-S01-T01..T11",
+      "source": [
+        "project/build-plan/production-completion/execution/STATE.json",
+        "project/validation/production/tasks/PF-S01-T01/attempt-2/HANDOFF.md",
+        "project/validation/production/tasks/PF-S01-T02/attempt-2/HANDOFF.md",
+        "project/validation/production/tasks/PF-S01-T11/attempt-2/HANDOFF.md"
+      ],
+      "summary": "The coordinator ledger does not point accepted S01 records at their complete HANDOFF.md files.",
+      "reproduction": "The accepted task-level pointers for PF-S01-T02 through PF-S01-T11 point to START.md. The accepted attempt-level pointers for PF-S01-T01 through PF-S01-T11 point to START.md. This yields 21 accepted pointer errors; the corresponding HANDOFF.md files exist separately.",
+      "requirement": "The startup/evidence policy requires a complete handoff and exact evidence identity, and T90 must verify every prerequisite's accepted handoff rather than relying on a start marker.",
+      "owner": "PF-S01-T91 coordinator/reconciliation owner and execution-state steward",
+      "fix_boundary": "Repair only the coordinator handoff linkage to the complete HANDOFF.md records or an explicit superseding handoff record; preserve all START.md and historical attempts, and do not edit Rust, TypeScript, plan JSON, or contract artifacts.",
+      "reruns": [
+        "Accepted task/attempt handoff-pointer and file-presence assertion",
+        "python3 tools/plan.py validate",
+        "PF-S01-T92 prerequisite handoff and exact-source audit"
+      ],
+      "disposition": "open_blocker"
+    },
+    {
+      "id": "PF-S01-T90-7-003",
+      "severity": "major",
+      "classification": "stale-accepted-handoff",
+      "status": "unresolved",
+      "source_task_id": "PF-S01-T01",
+      "source": [
+        "project/validation/production/tasks/PF-S01-T01/attempt-2/HANDOFF.md",
+        "project/build-plan/production-completion/execution/STATE.json",
+        "project/validation/production/tasks/PF-S01-T01/attempt-2/REVIEW-KEPLER-2.md"
+      ],
+      "summary": "The T01 handoff still describes the accepted contract as pending independent review.",
+      "reproduction": "T01 HANDOFF.md says 'implementation complete, pending independent review' and says not to start T02/T03. STATE marks T01 accepted with an independent reviewer, REVIEW-KEPLER-2.md says ACCEPT, and T02/T03 are accepted in the same ledger.",
+      "requirement": "Accepted handoffs must truthfully state their disposition and next safe action; stale evidence cannot be used as an accepted prerequisite without an explicit correction.",
+      "owner": "PF-S01-T91 coordinator/reconciliation owner, with T01 evidence steward",
+      "fix_boundary": "Add a bounded correction or superseding accepted handoff linkage that states the artifact-only acceptance and retains the original stale handoff unchanged; do not silently rewrite failed or historical evidence.",
+      "reruns": [
+        "Readback of T01 state, independent review, handoff, and source hash",
+        "Accepted prerequisite handoff consistency assertion",
+        "PF-S01-T92 exact-tree evidence and attribution review"
+      ],
+      "disposition": "open_major"
+    }
+  ],
+  "non_findings": [
+    "The contract validator passes on the current tree.",
+    "The plan validator passes on the current in-progress-attempt tree; the earlier T91 accepted-without-agent result is historical and was not silently reused.",
+    "All 19 contract-manifest artifact/integration hashes match current bytes.",
+    "All 48 obligations remain unaccepted; the 49 vectors and 49 metadata rows join one-to-one with all required categories and unmeasured dispositions.",
+    "No runtime, service, native, package, publication, backup/restore, or release result was inferred from structural checks."
+  ],
+  "limitations": [
+    "The read-only application review-candidates query returned service_busy because the local database owner is held by another process; no typed review receipt was fabricated and no lock was broken.",
+    "No Rust/service lifecycle, database migration, real verifier, multi-process race/fault, TUI, native-platform, installer, backup/restore, signing, performance, publication, or production-release check was run.",
+    "Conformance vector dispositions remain unmeasured and the source worktree is dirty.",
+    "PF-S01-T91 reconciliation and PF-S01-T92 exact-tree revalidation remain required."
+  ],
+  "decision": "rejected",
+  "disposition": "rejected_pending_pf_s01_t91_reconciliation_and_pf_s01_t92_revalidation",
+  "authority_limit": "This is an independent bounded contract/plan review only. It does not accept PF-S01, authorize successors, advertise target capabilities, or claim product/runtime/release completion."
+}

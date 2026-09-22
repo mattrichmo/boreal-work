@@ -2,14 +2,59 @@
   "schema_version": "boreal.acceptance_profile.v1",
   "fixture_version": "p0-03.v2",
   "profiles": [
-    {"id":"focused","version":"v1","review_gate":false,"required_gates":["checkpoint","verification","audit"],"close_requires":"durable_close_intent"},
-    {"id":"reviewed","version":"v1","review_gate":true,"required_gates":["checkpoint","verification","review","audit"],"close_requires":"durable_close_intent"},
-    {"id":"operator","version":"v1","review_gate":false,"required_gates":["verification","operator_approval","audit"],"close_requires":"durable_close_intent"}
+    {
+      "id": "focused",
+      "version": "1",
+      "review_gate": false,
+      "required_gates": [
+        "checkpoint",
+        "verification",
+        "summary"
+      ],
+      "close_requires": "durable_close_intent",
+      "implementation": "existing built-in"
+    },
+    {
+      "id": "reviewed",
+      "version": "1",
+      "review_gate": true,
+      "required_gates": [
+        "checkpoint",
+        "verification",
+        "review",
+        "summary"
+      ],
+      "close_requires": "durable_close_intent",
+      "implementation": "existing built-in"
+    },
+    {
+      "id": "operator",
+      "version": "1",
+      "review_gate": false,
+      "required_gates": [
+        "verification",
+        "operator_approval",
+        "summary"
+      ],
+      "close_requires": "durable_close_intent",
+      "implementation": "target only; unavailable until S03-T02"
+    }
   ],
   "rules": {
     "independent_review": "required only when review_gate=true",
     "auto_finalize": "only after close intent and last matching receipt/review for same attempt, source snapshot, config, and policy",
-    "invalidators": ["attempt_changed","source_snapshot_changed","policy_version_changed"],
-    "failed_receipts": "immutable and queryable"
-  }
+    "invalidators": [
+      "attempt_changed",
+      "source_snapshot_changed",
+      "policy_version_changed",
+      "fence_changed",
+      "configuration_changed"
+    ],
+    "failed_receipts": "immutable and queryable",
+    "gate_identity": "Definitions use local IDs; persisted instance IDs are WORK_ID:LOCAL_ID. Classify gates by GateKind, never by a bare instance ID.",
+    "audit_vs_summary": "summary is a required closeout gate; an audit event is mandatory operation history, not a substitute receipt. The optional audit gate is distinct.",
+    "migration": "Do not rename stored gate IDs or rewrite historical receipts. Existing focused/1 and reviewed/1 retain their summary gates. v1/audit fixtures were planning drift, not evidence of a deployed schema migration."
+  },
+  "status": "candidate; S00-T07 and S03 profile/public-route gates remain open",
+  "candidate_revision": "m02-candidate.1"
 }

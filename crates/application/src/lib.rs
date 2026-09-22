@@ -39,7 +39,9 @@ pub use session::{
 pub use sqlite_adapter::SqliteAttemptAdapter;
 pub use status::*;
 use std::fmt;
-pub use workflow_assets::{WorkflowAsset, WorkflowAssetError, WorkflowRegistry};
+pub use workflow_assets::{
+    WorkflowAsset, WorkflowAssetError, WorkflowCriterion, WorkflowInput, WorkflowRegistry,
+};
 // Re-export the v3 planning vocabulary at the application boundary so CLI,
 // service adapters, and integration tests do not reach through the adapter
 // layer into the domain crate for request/response types.
@@ -826,9 +828,9 @@ mod tests {
                 "op-claim",
                 "sha256:req",
                 Some(2),
-                "2026-01-01T00:00:00Z",
-                "2026-01-01T00:30:00Z",
-                "2026-01-01T02:00:00Z",
+                "unix-ms:1767225600000",
+                "unix-ms:1767227400000",
+                "unix-ms:1767232800000",
             )
             .unwrap();
         assert_eq!(claim.value.fence, 1);

@@ -1,0 +1,11 @@
+python=3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]
+platform=macOS-15.2-arm64-arm-64bit-Mach-O
+cargo=/opt/homebrew/bin/cargo cargo 1.85.0
+rustc=/opt/homebrew/bin/rustc rustc 1.85.0 (4d91de4e4 2025-02-17) (Homebrew)
+rustfmt=/opt/homebrew/bin/rustfmt rustfmt 1.8.0
+node=/opt/homebrew/bin/node v26.8.2
+npm=/Users/cybertron/.npm-global/bin/npm 11.7.0
+python3=/opt/homebrew/bin/python3 Python 3.14.3
+git=/opt/homebrew/bin/git git version 2.47.0
+sh=/bin/sh GNU bash, version 3.2.57(1)-release (arm64-apple-darwin24)
+Copyright (C) 2007 Free Software Foundation, Inc.

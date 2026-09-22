@@ -5,7 +5,7 @@ use boreal_application::{
     IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle,
     KnowledgeApplication, LivenessMetadata, OperationResult, ReceiptCoverage, ReceiptExpectation,
     ReceiptPayload, SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter,
-    SummaryPayload, WorkApplication,
+    SummaryPayload, WorkApplication, WorkflowRegistry,
 };
 use boreal_domain::{
     AcceptanceProfile, ActorId, AttemptId, AttemptPhase, ConfigIdentity, DispatchPolicy, Fence,
@@ -16,11 +16,14 @@ use boreal_protocol::{
     models::{
         AgentGuideDto, AgentNextDto, ContextRefDto, GuidanceContextDto, GuidanceProvenanceDto,
         GuidanceStatusDto, NextActionDto, NextReasonDto, NextStatusDto, RequirementDto, SubjectDto,
+        WorkflowAssetDto, WorkflowCriterionDto, WorkflowInputDto, WorkflowPackageDto,
+        WorkflowShowDto,
     },
     schema, ApplicationOutcome, DetailReference, Envelope, ErrorCode, ProtocolError,
     TransportOutcome, API_VERSION,
 };
 use boreal_source::SourceCatalog;
+use boreal_store::identity::{IdentityError, IdentityStore, WorkspaceBinding};
 use boreal_store::{
     AttemptRecord, EvidenceExecutionState, OperationOutcome as StoreOperationOutcome,
     OperationRecord, ReceiptAttestation, ReceiptOutcome, ReceiptRecord, SqliteStore, StoreError,
@@ -46,8 +49,8 @@ use std::os::unix::process::CommandExt;
 
 mod command_registry;
 mod dashboard;
-mod setup;
 mod service;
+mod setup;
 mod update;
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -66,6 +69,8 @@ Usage:
   bwrk commands [PATH] [--json]
   bwrk help [PATH] [--json]
   bwrk version [--json]
+  bwrk workflows list [--json]
+  bwrk workflows show WORKFLOW_REF [--json]
   bwrk init [PROJECT] [--interactive|--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk setup [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk install [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
@@ -291,11 +296,7 @@ impl CliError {
     }
 
     fn unknown_delivery(operation: &str, message: impl Into<String>) -> Self {
-        let mut error = ProtocolError::new(
-            ErrorCode::UnknownOutcome,
-            message.into(),
-            false,
-        );
+        let mut error = ProtocolError::new(ErrorCode::UnknownOutcome, message.into(), false);
         error.operation_id = Some(operation.to_owned());
         error.operation_preserved = Some(true);
         error.readback_required = Some(true);
@@ -342,7 +343,9 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let json_output = args.iter().any(|arg| arg == "--json");
-    let discovery = args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h" | "--version"));
+    let discovery = args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h" | "--version"));
     if discovery {
         let wants_version = args.iter().any(|arg| arg == "--version");
         let has_data_operand = args.iter().enumerate().any(|(index, arg)| {
@@ -380,7 +383,8 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         if has_data_operand {
-            let message = "help/version flags must be a command discovery request, not a data operand";
+            let message =
+                "help/version flags must be a command discovery request, not a data operand";
             if json_output {
                 let error = CliError::invalid(message);
                 print_envelope(
@@ -392,11 +396,9 @@ fn main() -> ExitCode {
                     error.next_status_change_at,
                     error.detail_ref,
                     error.transport,
-                    error.protocol_error.or_else(|| Some(ProtocolError::new(
-                        error.code,
-                        error.message.clone(),
-                        false,
-                    ))),
+                    error.protocol_error.or_else(|| {
+                        Some(ProtocolError::new(error.code, error.message.clone(), false))
+                    }),
                 );
                 return ExitCode::from(error.exit);
             }
@@ -582,6 +584,11 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     if command_registry::is_registry_path(&parsed.path) {
         return command_registry::result(&parsed);
     }
+    if parsed.options.socket.is_none()
+        && parsed.path.first().map(String::as_str) == Some("workflows")
+    {
+        return workflow_result(&parsed);
+    }
     if command_registry::is_unavailable_path(&parsed.path) {
         return Err(CliError::with(
             ErrorCode::UnknownCommandNamespace,
@@ -596,9 +603,7 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     if parsed.path == ["dashboard"] {
         return dashboard::run_dashboard(&parsed);
     }
-    if parsed.path.len() == 1
-        && matches!(parsed.path[0].as_str(), "update" | "upgrade")
-    {
+    if parsed.path.len() == 1 && matches!(parsed.path[0].as_str(), "update" | "upgrade") {
         return update::run(&parsed);
     }
     let setup_command = setup::is_setup_command(&parsed.path);
@@ -648,9 +653,10 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
             ..CliResult::default()
         });
     }
-    let path = setup_plan
-        .as_ref()
-        .map_or_else(|| PathBuf::from(&parsed.options.db), |plan| plan.database.clone());
+    let path = setup_plan.as_ref().map_or_else(
+        || PathBuf::from(&parsed.options.db),
+        |plan| plan.database.clone(),
+    );
     ensure_db_parent(&path)?;
     let owner_parsed = if let Some(plan) = setup_plan.as_ref() {
         let mut owner = parsed.clone();
@@ -666,16 +672,28 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         } else {
             project_argument(&parsed, 0)?
         };
+        let binding_root = if let Some(plan) = setup_plan.as_ref() {
+            plan.project_root.clone()
+        } else {
+            env::current_dir().map_err(|error| {
+                CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    format!("cannot resolve the project folder: {error}"),
+                )
+            })?
+        };
         let store = SqliteStore::open(&path, SCHEMA).map_err(map_store_error)?;
         let app = WorkApplication::new(&store);
+        let initialized_at = now();
         let result = app
             .init_project(
-                &ProjectId::new(project),
+                &ProjectId::new(project.clone()),
                 &parsed.options.actor,
                 "agent",
                 "cli",
                 "CLI agent",
-                &now(),
+                &initialized_at,
                 operation.to_owned(),
             )
             .map_err(map_application_error)?;
@@ -697,6 +715,13 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         } else {
             (None, None)
         };
+        bind_project_workspace(
+            &store,
+            &project,
+            &binding_root,
+            result.changed.then_some(operation),
+            &initialized_at,
+        )?;
         return Ok(CliResult {
             outcome,
             revision: Some(result.snapshot_revision),
@@ -709,6 +734,95 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
     dispatch(&parsed, operation, &app, &adapter, &store)
+}
+
+fn workflow_result(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
+    let registry = WorkflowRegistry::embedded().map_err(|error| {
+        CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Failed,
+            error.to_string(),
+        )
+    })?;
+    let package = workflow_package_json(&registry);
+    match parsed.path.get(1).map(String::as_str) {
+        Some("list") if parsed.options.positionals.is_empty() => {
+            bounded_result(Some(package), None)
+        }
+        Some("show") if parsed.options.positionals.len() == 1 => {
+            let reference = &parsed.options.positionals[0];
+            let asset = registry.get(reference).map_err(|error| {
+                CliError::with(
+                    ErrorCode::NotFound,
+                    ApplicationOutcome::Rejected,
+                    error.to_string(),
+                )
+            })?;
+            bounded_result(Some(workflow_show_json(&registry, asset)), None)
+        }
+        _ => Err(CliError::invalid(
+            "workflows requires `list` or `show WORKFLOW_REF`",
+        )),
+    }
+}
+
+fn workflow_package_json(registry: &WorkflowRegistry) -> Value {
+    let mut package = serde_json::to_value(workflow_package_dto(registry))
+        .expect("workflow package DTO is serializable");
+    package["command"] = json!("workflows list");
+    package
+}
+
+fn workflow_asset_dto(asset: &boreal_application::WorkflowAsset) -> WorkflowAssetDto {
+    WorkflowAssetDto {
+        reference: asset.reference.clone(),
+        kind: asset.kind.clone(),
+        title: asset.title.clone(),
+        allowed_commands: asset.allowed_commands.clone(),
+        typed_inputs: asset
+            .typed_inputs
+            .iter()
+            .map(|input| WorkflowInputDto {
+                name: input.name.clone(),
+                input_type: input.input_type.clone(),
+                source: input.source.clone(),
+                validation: input.validation.clone(),
+            })
+            .collect(),
+        finish_criteria: asset
+            .finish_criteria
+            .iter()
+            .map(|criterion| WorkflowCriterionDto {
+                id: criterion.id.clone(),
+                criterion_type: criterion.criterion_type.clone(),
+                required: criterion.required,
+            })
+            .collect(),
+        next_refs: asset.next_refs.clone(),
+    }
+}
+
+fn workflow_package_dto(registry: &WorkflowRegistry) -> WorkflowPackageDto {
+    WorkflowPackageDto {
+        schema_version: registry.schema_version().to_owned(),
+        package_id: registry.package_id().to_owned(),
+        package_version: registry.package_version().to_owned(),
+        asset_identity: registry.asset_identity().to_owned(),
+        assets: registry.assets().iter().map(workflow_asset_dto).collect(),
+    }
+}
+
+fn workflow_show_json(
+    registry: &WorkflowRegistry,
+    asset: &boreal_application::WorkflowAsset,
+) -> Value {
+    let mut show = serde_json::to_value(WorkflowShowDto {
+        package: workflow_package_dto(registry),
+        asset: workflow_asset_dto(asset),
+    })
+    .expect("workflow show DTO is serializable");
+    show["command"] = json!("workflows show");
+    show
 }
 
 fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
@@ -914,7 +1028,9 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         }
         if arg == "--machine" {
             if path.as_slice() != ["upgrade"] {
-                return Err(CliError::invalid("--machine is only valid with `bwrk upgrade`"));
+                return Err(CliError::invalid(
+                    "--machine is only valid with `bwrk upgrade`",
+                ));
             }
             options.machine = true;
             index += 1;
@@ -1175,7 +1291,10 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
             index += 1;
         }
     }
-    if path.first().is_some_and(|value| matches!(value.as_str(), "init" | "setup" | "install")) {
+    if path
+        .first()
+        .is_some_and(|value| matches!(value.as_str(), "init" | "setup" | "install"))
+    {
         options.positionals.extend(path.drain(1..));
     } else if matches!(
         path.first().map(String::as_str),
@@ -1217,6 +1336,8 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
     let positionals = options.positionals.len();
     let valid = match path.as_slice() {
         ["version"] => options.positionals.is_empty(),
+        ["workflows", "list"] => options.positionals.is_empty(),
+        ["workflows", "show"] => options.positionals.len() == 1,
         ["update"] => options.positionals.is_empty() && !options.machine,
         ["upgrade"] => options.positionals.is_empty() && options.machine,
         ["init"] | ["setup"] | ["install"] => positionals <= 1,
@@ -2460,6 +2581,7 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "display_status": status_name(item.display_status()),
         "claimable": item.decision.claimable_for_actor,
         "claimable_for_actor": item.decision.claimable_for_actor,
+        "primary_reason": item.decision.primary_reason.stable_code(),
         "reason_codes": item.decision.reason_codes.iter().map(|reason| reason.stable_code()).collect::<Vec<_>>(),
         "next_action": item.decision.next_action.map(domain_action_name),
         "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
@@ -2657,9 +2779,10 @@ fn operation_show_result(
                 "evidence execution does not belong to the selected project",
             ));
         }
-        if operation.as_ref().is_some_and(|operation| {
-            operation.project_id != execution.project_id
-        }) {
+        if operation
+            .as_ref()
+            .is_some_and(|operation| operation.project_id != execution.project_id)
+        {
             return Err(CliError::with(
                 ErrorCode::ProtocolMismatch,
                 ApplicationOutcome::Failed,
@@ -3988,14 +4111,13 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
     // is part of the closeout identity, not a post-receipt presentation step.
     let summary_body = read_summary_body(parsed)?;
     let summary = summary_payload(&receipt, &summary_body, operation);
-    let receipt_result = app
-        .record_receipt(
-            &parsed.options.actor,
-            Some(parsed.options.session.as_str()),
-            &receipt,
-            parsed.options.expected_revision,
-            TimestampMs::from_millis(now_ms_u64()),
-        );
+    let receipt_result = app.record_receipt(
+        &parsed.options.actor,
+        Some(parsed.options.session.as_str()),
+        &receipt,
+        parsed.options.expected_revision,
+        TimestampMs::from_millis(now_ms_u64()),
+    );
     let receipt_replayed = match receipt_result {
         Ok(result) => result.replayed,
         Err(error) if receipt.attestation == ExecutorAttestation::BorealWitnessed => {
@@ -4095,7 +4217,7 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             None,
             TimestampMs::from_millis(now_ms_u64()),
             &sub_operation(operation, "finalize"),
-    )
+        )
         .map_err(map_application_error)?;
     let diagnostics = finalized.diagnostics.as_ref();
     let close_outcome = if diagnostics.is_some() {
@@ -4104,26 +4226,26 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         ApplicationOutcome::Changed
     };
     let close_data = json!({
-            "attempt": submitted.data,
-            "receipt_id": receipt.receipt_id.as_str(),
-            "receipt_replayed": receipt_replayed,
-            "summary_id": summary.summary_id,
-            "summary_replayed": summary_result.replayed,
-            "close_intent": format!("{:?}", requested.close_intent.state).to_ascii_lowercase(),
-            "close_state": format!("{:?}", finalized.close_intent.state).to_ascii_lowercase(),
-            "close_replayed": finalized.replayed,
-            "gates": diagnostics.map(|diagnostics| json!({
-                "missing": diagnostics.missing,
-                "gates": diagnostics.gates.iter().map(|gate| json!({
-                    "gate_id": gate.gate_id,
-                    "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
-                    "required": gate.required,
-                    "state": format!("{:?}", gate.state).to_ascii_lowercase(),
-                    "receipt_id": gate.receipt_id,
-                    "reason": gate.reason,
-                })).collect::<Vec<_>>(),
-            })),
-        });
+        "attempt": submitted.data,
+        "receipt_id": receipt.receipt_id.as_str(),
+        "receipt_replayed": receipt_replayed,
+        "summary_id": summary.summary_id,
+        "summary_replayed": summary_result.replayed,
+        "close_intent": format!("{:?}", requested.close_intent.state).to_ascii_lowercase(),
+        "close_state": format!("{:?}", finalized.close_intent.state).to_ascii_lowercase(),
+        "close_replayed": finalized.replayed,
+        "gates": diagnostics.map(|diagnostics| json!({
+            "missing": diagnostics.missing,
+            "gates": diagnostics.gates.iter().map(|gate| json!({
+                "gate_id": gate.gate_id,
+                "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
+                "required": gate.required,
+                "state": format!("{:?}", gate.state).to_ascii_lowercase(),
+                "receipt_id": gate.receipt_id,
+                "reason": gate.reason,
+            })).collect::<Vec<_>>(),
+        })),
+    });
     append_finish_parent_operation(
         store,
         operation,
@@ -4859,6 +4981,97 @@ fn resolve_workspace_root(gate_root: &Path) -> Result<PathBuf, CliError> {
         ));
     }
     Ok(root)
+}
+
+/// Installs the project/workspace identity after `init` has created the
+/// project-local files. The database lineage comes from the store's
+/// canonical opener; the CLI contributes only the resolved workspace root.
+fn bind_project_workspace(
+    store: &SqliteStore,
+    project_id: &str,
+    project_root: &Path,
+    operation_id: Option<&str>,
+    now: &str,
+) -> Result<(), CliError> {
+    let canonical_root = fs::canonicalize(project_root).map_err(|error| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Failed,
+            format!(
+                "cannot establish the project workspace identity for {}: {error}",
+                project_root.display()
+            ),
+        )
+    })?;
+    let canonical_root_text = canonical_root.to_string_lossy().into_owned();
+    let binding_material = format!(
+        "boreal.workspace-binding/v1\nroot={canonical_root_text}\nworktree={canonical_root_text}\n"
+    );
+    let binding_digest = sha256_content_digest(binding_material.as_bytes());
+    let binding = WorkspaceBinding::new(
+        canonical_root_text.clone(),
+        canonical_root_text,
+        binding_digest,
+    )
+    .map_err(|error| {
+        CliError::with(
+            ErrorCode::InvalidArgument,
+            ApplicationOutcome::Rejected,
+            format!("cannot establish the project workspace identity: {error}"),
+        )
+    })?;
+    let identity = IdentityStore::new(store);
+    let context = identity
+        .bind_project(project_id, &binding, now)
+        .map_err(map_identity_error)?;
+    if let Some(operation_id) = operation_id {
+        identity
+            .record_operation_context(&context, operation_id)
+            .map_err(map_identity_error)?;
+    }
+    Ok(())
+}
+
+fn map_identity_error(error: IdentityError) -> CliError {
+    match error {
+        IdentityError::Store(error) => map_store_error(error),
+        IdentityError::Invalid { .. } => CliError::with(
+            ErrorCode::InvalidArgument,
+            ApplicationOutcome::Rejected,
+            error.to_string(),
+        ),
+        IdentityError::ProjectNotFound { .. } | IdentityError::WorkNotFound { .. } => {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                error.to_string(),
+            )
+        }
+        IdentityError::ForeignSubject { .. }
+        | IdentityError::DatabaseInstanceConflict { .. }
+        | IdentityError::RestoreEpochConflict { .. }
+        | IdentityError::WorkspaceConflict { .. }
+        | IdentityError::RestoreEpochRegression { .. } => CliError::with(
+            ErrorCode::OperationConflict,
+            ApplicationOutcome::Conflict,
+            error.to_string(),
+        ),
+        IdentityError::StaleEntity { .. } | IdentityError::StaleProof { .. } => CliError::with(
+            ErrorCode::StaleRevision,
+            ApplicationOutcome::Conflict,
+            error.to_string(),
+        ),
+        IdentityError::StaleFence { .. } | IdentityError::FenceRevoked { .. } => CliError::with(
+            ErrorCode::StaleFence,
+            ApplicationOutcome::Rejected,
+            error.to_string(),
+        ),
+        IdentityError::OperationInvalidated { .. } => CliError::with(
+            ErrorCode::OperationConflict,
+            ApplicationOutcome::Conflict,
+            error.to_string(),
+        ),
+    }
 }
 
 fn parse_gate_kind(value: &str) -> Result<GateKind, CliError> {
@@ -5661,7 +5874,11 @@ fn append_finish_parent_operation(
     revision: u64,
     result: &Value,
 ) -> Result<(), CliError> {
-    if store.operation(operation).map_err(map_store_error)?.is_some() {
+    if store
+        .operation(operation)
+        .map_err(map_store_error)?
+        .is_some()
+    {
         return Ok(());
     }
     let outcome = match outcome {
@@ -5962,9 +6179,10 @@ fn direct_database_owner(
                 format!("database parent identity is unavailable: {error}"),
             )
         })?;
-        parent.join(path.file_name().ok_or_else(|| {
-            CliError::invalid("database path must name a database file")
-        })?)
+        parent.join(
+            path.file_name()
+                .ok_or_else(|| CliError::invalid("database path must name a database file"))?,
+        )
     };
     let runtime_dir = canonical_db
         .parent()
@@ -6295,8 +6513,8 @@ mod tests {
         assert_eq!(update.path, vec!["update"]);
         assert!(!update.options.machine);
 
-        let upgrade = parse(&args(&["upgrade", "--machine", "--json"]))
-            .expect("machine upgrade parses");
+        let upgrade =
+            parse(&args(&["upgrade", "--machine", "--json"])).expect("machine upgrade parses");
         assert_eq!(upgrade.path, vec!["upgrade"]);
         assert!(upgrade.options.machine);
     }
@@ -6318,6 +6536,19 @@ mod tests {
         .expect("service dispatch bounds parse");
         assert_eq!(parsed.options.dispatch_workers, Some(1));
         assert_eq!(parsed.options.dispatch_capacity, Some(2));
+    }
+
+    #[test]
+    fn parser_routes_workflow_and_registry_queries_without_project_context() {
+        let workflow = parse(&args(&["workflows", "list", "--json"]))
+            .expect("workflow discovery parses without a project");
+        assert_eq!(workflow.path, vec!["workflows", "list"]);
+        assert!(workflow.options.positionals.is_empty());
+
+        let commands = parse(&args(&["commands", "workflows", "list", "--json"]))
+            .expect("registry discovery parses without a project");
+        assert_eq!(commands.path, vec!["commands", "workflows", "list"]);
+        assert!(commands.options.positionals.is_empty());
     }
 
     #[test]
@@ -6438,9 +6669,8 @@ mod tests {
             MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET + 2),
         ));
         assert!(bounded_result(Some(near_bound), None).is_ok());
-        let over_bound = Value::String("x".repeat(
-            MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET) + 1,
-        ));
+        let over_bound =
+            Value::String("x".repeat(MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET) + 1));
         let error = bounded_result(Some(over_bound), None)
             .expect_err("data must leave room for envelope metadata");
         assert_eq!(error.code, ErrorCode::InvalidArgument);
@@ -6847,7 +7077,7 @@ mod tests {
             "--project",
             "p",
             "--actor",
-            "unfamiliar-agent",
+            "agent-1",
             "--session",
             "unfamiliar-session",
             "--db",
@@ -6967,7 +7197,7 @@ mod tests {
             .find(|item| item["work_id"] == "container")
             .expect("container row");
         assert_eq!(container["kind"], "milestone");
-        assert_eq!(container["display_status"], "blocked");
+        assert_eq!(container["display_status"], "queued");
         assert_eq!(container["claimable_for_actor"], false);
         let task = items
             .iter()
@@ -7013,8 +7243,7 @@ mod tests {
         let db_path = env::temp_dir().join(format!("boreal-cli-finish-{}.sqlite", now_ms_u64()));
         let receipt_path =
             env::temp_dir().join(format!("boreal-cli-receipt-{}.json", now_ms_u64()));
-        let summary_path =
-            env::temp_dir().join(format!("boreal-cli-summary-{}.md", now_ms_u64()));
+        let summary_path = env::temp_dir().join(format!("boreal-cli-summary-{}.md", now_ms_u64()));
         let db = db_path.to_string_lossy().to_string();
         let receipt_file = receipt_path.to_string_lossy().to_string();
         let summary_file = summary_path.to_string_lossy().to_string();
@@ -7087,8 +7316,11 @@ mod tests {
             .expect("receipt serializes"),
         )
         .expect("receipt writes");
-        fs::write(&summary_path, "Finish remains open pending the required checkpoint.")
-            .expect("summary writes");
+        fs::write(
+            &summary_path,
+            "Finish remains open pending the required checkpoint.",
+        )
+        .expect("summary writes");
 
         let finished = run(&args(&[
             "agent",

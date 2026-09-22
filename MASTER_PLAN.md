@@ -32,6 +32,12 @@ behavior contracts. Each [sprint file](milestones/M01-v2-product/README.md)
 owns its task assignments and gates. If these disagree, stop dispatch and
 reconcile the documents; do not choose a convenient interpretation.
 
+The focused completion plan for the next full planning/status release is
+[M02 — Deterministic Planning, Lifecycle Hardening, and v1
+Parity](project/build-plan/M02-DETERMINISTIC-PLANNING-AND-PARITY.md). It
+consolidates the known thin-slice gaps into executable, parallel-safe tasks
+and release gates without changing this M01 history.
+
 ## Sprint map
 
 | Sprint | Scope and file | Entry gate | Exit gate | May overlap |

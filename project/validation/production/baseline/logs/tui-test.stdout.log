@@ -1,0 +1,4 @@
+
+> test
+> tsc && node dist/test.js && node --test tests/*.test.mjs
+

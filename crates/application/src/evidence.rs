@@ -9,6 +9,11 @@ use boreal_domain::{
     GateState, OperationId, ProfileId, ReceiptId, ReceiptResult, SourceVersionId, TimestampMs,
     WorkId,
 };
+use boreal_store::{
+    identity::IdentityContext,
+    jobs::{ExternalJobInput, ExternalJobRecord, ExternalJobTransitionInput},
+    SqliteStore, StoreError,
+};
 
 use crate::{ApplicationError, AttemptSnapshot};
 
@@ -18,6 +23,370 @@ pub const MAX_COMMAND_BYTES: usize = 16 * 1024;
 pub const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 pub const MAX_TEXT_LENGTH: usize = 4_096;
 pub const MAX_OBSERVABLES: usize = 32;
+
+/// The durable identity used when an application adapter invokes an external
+/// verifier or other side-effecting worker.  The store job is registered
+/// before the external effect starts; an uncertain effect therefore remains
+/// visible to readback instead of being converted into a successful receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalEffectRequest {
+    pub job_id: String,
+    pub operation_id: String,
+    pub project_id: String,
+    pub subject_type: String,
+    pub subject_id: String,
+    pub kind: String,
+    pub request_digest: String,
+    pub source_identity: Option<String>,
+    pub config_identity: Option<String>,
+    pub actor_id: String,
+    pub session_id: Option<String>,
+    pub deadline: Option<String>,
+    pub created_at: String,
+}
+
+impl ExternalEffectRequest {
+    fn validate(&self) -> Result<(), StoreError> {
+        for (value, label) in [
+            (&self.job_id, "external job id"),
+            (&self.operation_id, "external operation id"),
+            (&self.project_id, "external project id"),
+            (&self.subject_type, "external subject type"),
+            (&self.subject_id, "external subject id"),
+            (&self.kind, "external job kind"),
+            (&self.request_digest, "external request digest"),
+            (&self.actor_id, "external actor id"),
+            (&self.created_at, "external creation timestamp"),
+        ] {
+            if value.trim().is_empty() {
+                return Err(StoreError::Invalid(format!("{label} must not be empty")));
+            }
+        }
+        Ok(())
+    }
+
+    fn as_store_input(&self) -> ExternalJobInput {
+        ExternalJobInput {
+            job_id: self.job_id.clone(),
+            operation_id: self.operation_id.clone(),
+            project_id: self.project_id.clone(),
+            subject_type: self.subject_type.clone(),
+            subject_id: self.subject_id.clone(),
+            kind: self.kind.clone(),
+            request_digest: self.request_digest.clone(),
+            source_identity: self.source_identity.clone(),
+            config_identity: self.config_identity.clone(),
+            actor_id: self.actor_id.clone(),
+            session_id: self.session_id.clone(),
+            deadline: self.deadline.clone(),
+            created_at: self.created_at.clone(),
+        }
+    }
+}
+
+/// The only input accepted for resolving a side effect after the external
+/// process has run. Every field is read back or supplied by the attributable
+/// adapter result; a bare result digest is not enough to authorize
+/// reconciliation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalEffectReadback {
+    pub project_id: String,
+    pub job_id: String,
+    pub operation_id: String,
+    pub request_digest: String,
+    pub side_effect_ref: String,
+    pub result_digest: String,
+    pub observed_at: String,
+}
+
+/// A readback result is deliberately not a boolean.  Only `Reconciled` or
+/// `Committed` represents a resolved external effect; pending and
+/// readback-required stages cannot authorize a passing evidence receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExternalEffectResolution {
+    Pending(ExternalJobRecord),
+    ReadbackRequired(ExternalJobRecord),
+    Reconciled(ExternalJobRecord),
+    Committed(ExternalJobRecord),
+    Rejected(ExternalJobRecord),
+    Failed(ExternalJobRecord),
+}
+
+impl ExternalEffectResolution {
+    pub fn is_resolved(&self) -> bool {
+        matches!(self, Self::Reconciled(_) | Self::Committed(_))
+    }
+
+    pub fn record(&self) -> &ExternalJobRecord {
+        match self {
+            Self::Pending(record)
+            | Self::ReadbackRequired(record)
+            | Self::Reconciled(record)
+            | Self::Committed(record)
+            | Self::Rejected(record)
+            | Self::Failed(record) => record,
+        }
+    }
+}
+
+/// Application-owned adapter for the durable external-job/readback seam.
+///
+/// This is intentionally narrower than a process runner: it records the
+/// identity and lifecycle of an effect, while the caller remains responsible
+/// for invoking the verifier and supplying an attributable side-effect or
+/// result identity.  It never manufactures a receipt or treats a timeout as
+/// success.
+pub struct ExternalEffectAdapter<'a> {
+    store: &'a SqliteStore,
+    identity: Option<&'a IdentityContext>,
+}
+
+impl<'a> ExternalEffectAdapter<'a> {
+    pub fn new(store: &'a SqliteStore) -> Self {
+        Self {
+            store,
+            identity: None,
+        }
+    }
+
+    /// Constructs the production adapter. The context is captured so every
+    /// job read and mutation uses the identity-bound store seam; callers must
+    /// not downgrade a canonical project to the legacy fixture path.
+    pub fn new_with_identity(store: &'a SqliteStore, identity: &'a IdentityContext) -> Self {
+        Self {
+            store,
+            identity: Some(identity),
+        }
+    }
+
+    pub fn admit(
+        &self,
+        request: &ExternalEffectRequest,
+    ) -> Result<ExternalEffectResolution, StoreError> {
+        request.validate()?;
+        let registration = if let Some(identity) = self.identity {
+            self.store
+                .register_external_job_with_identity(identity, &request.as_store_input())?
+        } else {
+            self.store
+                .register_external_job(&request.as_store_input())?
+        };
+        if registration.job.stage == "registered" {
+            let job = self.transition(&registration.job, "admitted", None, None, None)?;
+            Ok(ExternalEffectResolution::Pending(job))
+        } else {
+            Ok(resolve_stage(registration.job))
+        }
+    }
+
+    pub fn start(
+        &self,
+        project_id: &str,
+        job_id: &str,
+        at: &str,
+    ) -> Result<ExternalEffectResolution, StoreError> {
+        let job = self.require_job(project_id, job_id)?;
+        let job = if job.stage == "admitted" {
+            self.transition(&job, "running", Some(at), None, None)?
+        } else {
+            job
+        };
+        Ok(resolve_stage(job))
+    }
+
+    pub fn mark_side_effect_started(
+        &self,
+        project_id: &str,
+        job_id: &str,
+        side_effect_ref: &str,
+        at: &str,
+    ) -> Result<ExternalEffectResolution, StoreError> {
+        require_external_text(side_effect_ref, "external side-effect reference")?;
+        let job = self.require_job(project_id, job_id)?;
+        let job = if job.stage == "running" {
+            self.transition(
+                &job,
+                "side_effect_started",
+                Some(at),
+                Some(side_effect_ref),
+                None,
+            )?
+        } else if job.stage == "side_effect_started"
+            && job.side_effect_ref.as_deref() != Some(side_effect_ref)
+        {
+            return Err(StoreError::Conflict(
+                "external side-effect reference changed during replay".to_owned(),
+            ));
+        } else {
+            job
+        };
+        Ok(resolve_stage(job))
+    }
+
+    pub fn mark_readback_required(
+        &self,
+        project_id: &str,
+        job_id: &str,
+        side_effect_ref: &str,
+        at: &str,
+    ) -> Result<ExternalEffectResolution, StoreError> {
+        require_external_text(side_effect_ref, "external side-effect reference")?;
+        let job = if let Some(identity) = self.identity {
+            self.store
+                .mark_external_job_readback_required_with_identity(
+                    identity,
+                    job_id,
+                    side_effect_ref,
+                    at,
+                )?
+        } else {
+            self.store.mark_external_job_readback_required(
+                project_id,
+                job_id,
+                side_effect_ref,
+                at,
+            )?
+        };
+        Ok(ExternalEffectResolution::ReadbackRequired(job))
+    }
+
+    pub fn reconcile_readback(
+        &self,
+        readback: &ExternalEffectReadback,
+    ) -> Result<ExternalEffectResolution, StoreError> {
+        for (value, label) in [
+            (&readback.project_id, "readback project id"),
+            (&readback.job_id, "readback job id"),
+            (&readback.operation_id, "readback operation id"),
+            (&readback.request_digest, "readback request digest"),
+            (&readback.side_effect_ref, "readback side-effect reference"),
+            (&readback.result_digest, "readback result digest"),
+            (&readback.observed_at, "readback timestamp"),
+        ] {
+            require_external_text(value, label)?;
+        }
+        let job = self.require_job(&readback.project_id, &readback.job_id)?;
+        if job.operation_id != readback.operation_id
+            || job.request_digest != readback.request_digest
+        {
+            return Err(StoreError::Conflict(
+                "external readback identity does not match the admitted operation".to_owned(),
+            ));
+        }
+        if job.side_effect_ref.as_deref() != Some(readback.side_effect_ref.as_str()) {
+            return Err(StoreError::Conflict(
+                "external readback side-effect identity does not match the admitted effect"
+                    .to_owned(),
+            ));
+        }
+        if job.stage == "reconciled" {
+            if job.result_digest.as_deref() != Some(readback.result_digest.as_str()) {
+                return Err(StoreError::Conflict(
+                    "external operation was reconciled with a different result".to_owned(),
+                ));
+            }
+            return Ok(ExternalEffectResolution::Reconciled(job));
+        }
+        if job.stage != "readback_required" {
+            return Err(StoreError::Conflict(
+                "external effect must be read back before reconciliation".to_owned(),
+            ));
+        }
+        let job = self.transition(
+            &job,
+            "reconciled",
+            Some(&readback.observed_at),
+            None,
+            Some(&readback.result_digest),
+        )?;
+        Ok(ExternalEffectResolution::Reconciled(job))
+    }
+
+    pub fn readback(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+    ) -> Result<ExternalEffectResolution, StoreError> {
+        require_external_text(request_digest, "external request digest")?;
+        let job = if let Some(identity) = self.identity {
+            self.store
+                .external_job_by_operation_with_identity(identity, operation_id)?
+        } else {
+            self.store
+                .external_job_by_operation(project_id, operation_id)?
+        }
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "external_job",
+            id: operation_id.to_owned(),
+        })?;
+        if job.request_digest != request_digest {
+            return Err(StoreError::Conflict(
+                "external effect operation was reused with a different request digest".to_owned(),
+            ));
+        }
+        Ok(resolve_stage(job))
+    }
+
+    fn require_job(&self, project_id: &str, job_id: &str) -> Result<ExternalJobRecord, StoreError> {
+        let job = if let Some(identity) = self.identity {
+            self.store.external_job_with_identity(identity, job_id)?
+        } else {
+            self.store.external_job(project_id, job_id)?
+        };
+        job.ok_or_else(|| StoreError::NotFound {
+            entity: "external_job",
+            id: job_id.to_owned(),
+        })
+    }
+
+    fn transition(
+        &self,
+        job: &ExternalJobRecord,
+        next_stage: &str,
+        at: Option<&str>,
+        side_effect_ref: Option<&str>,
+        result_digest: Option<&str>,
+    ) -> Result<ExternalJobRecord, StoreError> {
+        let input = ExternalJobTransitionInput {
+            project_id: job.project_id.clone(),
+            job_id: job.job_id.clone(),
+            expected_stage: job.stage.clone(),
+            next_stage: next_stage.to_owned(),
+            at: at.unwrap_or(&job.updated_at).to_owned(),
+            side_effect_ref: side_effect_ref.map(str::to_owned),
+            result_digest: result_digest.map(str::to_owned),
+            error_message: None,
+        };
+        if let Some(identity) = self.identity {
+            self.store
+                .advance_external_job_with_identity(identity, &input)
+        } else {
+            self.store.advance_external_job(&input)
+        }
+    }
+}
+
+fn require_external_text(value: &str, label: &str) -> Result<(), StoreError> {
+    if value.trim().is_empty() {
+        Err(StoreError::Invalid(format!("{label} must not be empty")))
+    } else {
+        Ok(())
+    }
+}
+
+fn resolve_stage(job: ExternalJobRecord) -> ExternalEffectResolution {
+    match job.stage.as_str() {
+        "readback_required" | "side_effect_started" | "side_effect_finished" => {
+            ExternalEffectResolution::ReadbackRequired(job)
+        }
+        "reconciled" => ExternalEffectResolution::Reconciled(job),
+        "committed" => ExternalEffectResolution::Committed(job),
+        "rejected" => ExternalEffectResolution::Rejected(job),
+        "failed" => ExternalEffectResolution::Failed(job),
+        _ => ExternalEffectResolution::Pending(job),
+    }
+}
 
 /// The command identity expected by a declared acceptance gate.
 #[derive(Clone, Debug, Eq, PartialEq)]

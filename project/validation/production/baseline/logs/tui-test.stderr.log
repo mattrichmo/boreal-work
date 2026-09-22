@@ -1,0 +1,19 @@
+node:net:2306
+      const error = new UVExceptionWithHostPort(rval, 'listen', address, port);
+                    ^
+
+Error: listen EPERM: operation not permitted /tmp/boreal-tui-test-1790028777265-1-fs6g0c75qsw.sock
+    at Server.setupListenHandle [as _listen2] (node:net:2306:21)
+    at listenInCluster (node:net:2437:12)
+    at Server.listen (node:net:2579:5)
+    at UnixSocketFramedTransport.max_payload_bytes (file:///Users/cybertron/Code/boreal-work/apps/tui/dist/test.js:741:16)
+    at new Promise (<anonymous>)
+    at file:///Users/cybertron/Code/boreal-work/apps/tui/dist/test.js:739:7 {
+  code: 'EPERM',
+  errno: -1,
+  syscall: 'listen',
+  address: '/tmp/boreal-tui-test-1790028777265-1-fs6g0c75qsw.sock',
+  port: -1
+}
+
+Node.js v26.8.2

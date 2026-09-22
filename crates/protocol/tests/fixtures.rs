@@ -169,7 +169,7 @@ fn every_registered_error_code_is_typed() {
     ))
     .unwrap();
     let entries = registry["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 63);
+    assert_eq!(entries.len(), 69);
     for entry in entries {
         let code = entry["code"].as_str().unwrap();
         assert_eq!(code.parse::<ErrorCode>().unwrap().as_str(), code);

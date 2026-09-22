@@ -1,0 +1,207 @@
+{
+  "schema": "boreal.production.legacy-source-inventory.v1",
+  "task_id": "PF-S00-T05",
+  "attempt": 1,
+  "generated_at": "2026-09-21T22:16:01Z",
+  "classification_vocabulary": [
+    "available",
+    "missing",
+    "restricted",
+    "not_applicable",
+    "available_with_completeness_limits"
+  ],
+  "inventory_only": true,
+  "claims": {
+    "parity_proven": false,
+    "migration_executed": false,
+    "acceptance_claimed": false,
+    "release_claimed": false,
+    "publication_attempted": false
+  },
+  "source_identity": {
+    "workspace": "/Users/cybertron/Code/boreal-work",
+    "head": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "branch": "codex/apply-responsive-terminal-overlay",
+    "dirty": true,
+    "coordinator_input_source": "working-tree-aggregate:419d74713fcc64ef371322582943a3e820c75e7b8a2b142c119f800ae8d3317f7; HEAD:784a41b3; dirty",
+    "plan_state": "not_adopted",
+    "pf_s00_t01_state": "accepted",
+    "pf_s00_t01_handoff_discrepancy": "linked handoff prose says not accepted while execution/STATE.json records accepted; preserved without inference",
+    "fresh_v2_archive": {
+      "path": "scratch/reference-zips/boreal-v2-reference-20260921T195305840Z.zip",
+      "bytes": 1358639,
+      "sha256": "09d72813db6b68728f567b14132454fb24fee289747cf9ca799830c9ee749d8c",
+      "zip_root": "boreal-v2/",
+      "contains_v1_members": false
+    }
+  },
+  "external_inputs": [
+    {
+      "id": "EXT-LEGACY",
+      "status": "available_with_completeness_limits",
+      "owner": "MIGRATION",
+      "first_gate": "PF-S12-T01",
+      "downstream_gates": ["PF-S12", "final cutover"],
+      "evidence": [
+        "v1/",
+        "v1/reference-zips/boreal-v1-reference.zip",
+        "v1/.boreal/ledgers/manifest.json",
+        "v1/schemas/",
+        "v1/workflows/",
+        "v1/tests/",
+        "v1/memory/"
+      ],
+      "limits": [
+        "v1 source/data is outside the fresh v2 T01 archive",
+        "no completeness certification or v1-to-v2 parity proof",
+        "raw SQLite/cache stores were not opened"
+      ]
+    },
+    {
+      "id": "EXT-MACOS",
+      "status": "missing",
+      "owner": "RELEASE",
+      "first_gate": "PF-S18-T08",
+      "downstream_gates": ["PF-S18-T08", "PF-S20"],
+      "observed_fragment": "real local macOS 15.2 arm64 executor",
+      "required_matrix": ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+      "missing": ["executed macOS x86_64 executor"],
+      "reason": "workflow labels are declarations, not native execution evidence"
+    },
+    {
+      "id": "EXT-LINUX",
+      "status": "missing",
+      "owner": "RELEASE",
+      "first_gate": "PF-S18-T08",
+      "downstream_gates": ["PF-S18-T08", "PF-S20"],
+      "declared_matrix": ["x86_64-unknown-linux-gnu"],
+      "missing": ["native Linux executor and installed-package verification"],
+      "reason": "current executor is macOS; CI/release labels do not establish availability"
+    },
+    {
+      "id": "EXT-HARNESSES",
+      "status": "missing",
+      "owner": "WORKFLOW",
+      "first_gate": "PF-S14-T07",
+      "downstream_gates": ["PF-S14-T07"],
+      "observed_fragment": "repository scripted CLI/service/process/PTY/TUI harnesses",
+      "missing": ["two attributable supported agent harness entry points", "model-operated sessions"],
+      "reason": "synthetic or scripted harnesses cannot close model-operated acceptance"
+    },
+    {
+      "id": "EXT-INDEPENDENT-REVIEW",
+      "status": "missing",
+      "owner": "COORD",
+      "first_gate": "PF-S00-T90",
+      "downstream_gates": ["PF-S00-T90", "PF-S00-T92"],
+      "observed_fragment": "PF-S00-T05 and PF-S00-T90 have reviewer=null in execution/STATE.json",
+      "missing": ["named independent reviewer identity and capacity"],
+      "reason": "worker/coordinator self-review is not independent review"
+    },
+    {
+      "id": "EXT-RELEASE-AUTHORITY",
+      "status": "missing",
+      "owner": "RELEASE",
+      "first_gate": "PF-S20-T08",
+      "downstream_gates": ["PF-S20-T08", "PF-S21"],
+      "observed_fragment": ".github/workflows/release.yml declares GitHub contents:write and optional HOMEBREW_TAP_TOKEN paths",
+      "missing": ["release-owner approval", "signing identity", "publishing rights", "credentials"],
+      "reason": "no authority or credential was supplied or accessed"
+    }
+  ],
+  "raw_sources": [
+    {"path": "v1/reference-zips/boreal-v1-reference.zip", "bytes": 1526770, "sha256": "5980e75e6580a31399519c5d1d2ee2accbe49c2dd5f3cbf77d827fed14b8d7d7", "status": "available"},
+    {"path": "v1/reference-zips/boreal-v2-reference.zip", "bytes": 469275, "sha256": "8f55f699b10eaa2d342391349fed4f869e5a979aab8c7d28227fad6b19d469c2", "status": "available"},
+    {"path": "v1/apps/tui.zip", "bytes": 398323, "sha256": "6ee515a76bba2404e71de04fae531e870828f1d022fd37e21aef91848c5ad6fd", "status": "available"},
+    {"path": "scratch/incoming/m02-candidate-20260921/boreal-v2-reference-20260921T183825612Z.zip", "bytes": 1322856, "sha256": "602fefd065bcc1011128dc24704a2b1dae1e76fd067122588d1a220718f68f5a", "status": "available"},
+    {"path": "scratch/reference-zips/boreal-v2-reference-20260918T183853968Z.zip", "bytes": 946816, "sha256": "be61c7fa4f92deebf8557f2ccdb8d4bc6826bb19bbb2c9c991d0ff721a53b992", "status": "available"},
+    {"path": "scratch/reference-zips/boreal-v2-reference-20260918T213056272Z.zip", "bytes": 1042915, "sha256": "39c02f49daad327c4691dec4dd6eb976d0106f3e02d112c04df5ab885babe911", "status": "available"},
+    {"path": "scratch/reference-zips/boreal-v2-reference-20260919T000202896Z.zip", "bytes": 1099436, "sha256": "1aacd5fa4e8441a8165e667194acd07a375be3303b1faddeb7472da64275e17b", "status": "available"},
+    {"path": "scratch/reference-zips/boreal-v2-reference-20260921T175404486Z.zip", "bytes": 1185771, "sha256": "cc7353ea0bee23969982e47af54a4705fc2625df632c2ad818d6307d5dec7c39", "status": "available"},
+    {"path": "scratch/reference-zips/boreal-v2-reference-20260921T191737350Z.zip", "bytes": 1217974, "sha256": "b7a8cf3294c07f9ee1d5385c0e561ca77562bfa1f86ae89256d813489a889261", "status": "available"},
+    {"path": "scratch/reference-zips/boreal-v2-reference-20260921T191820001Z.zip", "bytes": 1217996, "sha256": "522e112e2ddd8164972a0ef4553661c7cda02a73330f522613759c992c95f50f", "status": "available"},
+    {"path": "scratch/reference-zips/boreal-v2-reference-20260921T192532887Z.zip", "bytes": 1240570, "sha256": "7379601d682e6ba1f97ae2380a26b41dd18f8a10adb49af10327cc44fd13d7b8", "status": "available"},
+    {"path": "scratch/reference-zips/boreal-v2-reference-20260921T195305840Z.zip", "bytes": 1358639, "sha256": "09d72813db6b68728f567b14132454fb24fee289747cf9ca799830c9ee749d8c", "status": "available"},
+    {"path": "v1/.boreal/ledgers/manifest.json", "bytes": 4842, "sha256": "53236e7ffc7a989f8287a28796c6fef0f06d67bfc4c80233c035e9132fea0890", "status": "available"},
+    {"path": "project/spec/schema-v2.sql", "bytes": 19298, "sha256": "ae5febe8a491404f7cc4103164b82369b24fb19977239a00860978b30ca545e1", "status": "available"},
+    {"path": "project/spec/schema-v3.sql", "bytes": 21795, "sha256": "c8c47ab7202a0db3e9ae73196827c04ab116b4ddaa19d4cd8760fcb395051d74", "status": "available"},
+    {"path": "v1/apps/cli/src/command-registry.ts", "bytes": 242832, "sha256": "94e7bb5e72ba11b65597883cc3d67eb352ca060cfa529059231f43229ee5428d", "status": "available"},
+    {"path": "v1/apps/cli/src/import-export.ts", "bytes": 103058, "sha256": "f60b50cfe71f932247a0032c968eaa3d16b1901dfe83ec1f884f772e9298be01", "status": "available"},
+    {"path": "v1/.boreal/ledgers/work-items.jsonl", "bytes": 1134421, "sha256": "b55758a52d89b5b612a5619087488ebd70c9e409cd8b55966714eecfd6c16f6e", "status": "available"},
+    {"path": "v1/.boreal/ledgers/evidence.jsonl", "bytes": 765913, "sha256": "f749bba549efc021525a5d7ba175612cd41c802073bdd494d5eb98d2e51e8645", "status": "available"},
+    {"path": "v1/.boreal/ledgers/reservations.jsonl", "bytes": 249875, "sha256": "7e606289fc587c8239fcfbc6c972ff31552e1b29a5486fbe0ebf1bdc5d861e3b", "status": "available"},
+    {"path": "v1/.boreal/ledgers/agent-summaries.jsonl", "bytes": 1162954, "sha256": "41d57e1d6a9e4126cd8837807da089c6c89fe9fd8a73f4aca88a9d97de7cbf42", "status": "available"},
+    {"path": "v1/memory/raw/index.jsonl", "bytes": 6790, "sha256": "c2201cb45fefe5336113b64dcb39c241d31119c7a259742abf1d629037ef7099", "status": "available"}
+  ],
+  "record_completeness": {
+    "work": {"status": "available", "source": "v1/.boreal/ledgers/work-items.jsonl", "records": 565, "deleted_records": 6, "status_counts": {"closed": 473, "ready": 50, "blocked": 42}},
+    "dependencies": {"status": "available", "source": "v1/.boreal/ledgers/graph-edges.jsonl", "records": 902, "validated_for_cycles_or_dangling_refs": false},
+    "reviews": {"status": "restricted", "dedicated_reviewer_heartbeats": 0, "review_kind_evidence": 95, "independent_reviewer_identity": "missing"},
+    "failed_receipts": {"status": "available", "evidence_records": 786, "failed_evidence": 1, "verification_records": 499, "failed_verifications": 1, "passed_evidence": 631, "passed_verifications": 498},
+    "overrides": {"status": "missing", "dedicated_ledger_records": 0, "reason": "no explicit override/waiver record section or inspected top-level override fields"},
+    "attempts": {"status": "missing", "runs": 0, "checkpoints": 0, "reason": "reservations and summaries are not durable execution attempts"},
+    "reservations": {"status": "available", "records": 400, "released": 399, "expired": 1},
+    "summaries": {"status": "available", "records": 486, "final": 485, "draft": 1, "legacy_backfill": 144},
+    "memory": {"status": "available_with_completeness_limits", "knowledge_sources": 2, "raw_sources": 9, "wiki_markdown": 10, "work_markdown": 2, "dashboard_markdown": 1, "agent_summary_markdown": 487, "markdown_export_files": 418, "memory_graph_relationships": 0, "publication_state_validated": false},
+    "events": {"status": "available", "records": 6505, "deletion_records": 7}
+  },
+  "schemas_and_commands": {
+    "v1_json_schemas": {"count": 26, "record_schemas": 12, "project_schemas": 3, "projection_schemas": 3, "run_schemas": 2, "path_hash_aggregate_sha256": "464ef11756c68794ae15033499dcd4318d277d0542924504422f885a2c0a1939"},
+    "v1_command_modules": 29,
+    "v1_command_definitions": 183,
+    "v1_workflow_files": 43,
+    "v1_runtime_tests": 96,
+    "current_v2_registry_specs": 80,
+    "current_v2_registry_is_v1_parity_proof": false,
+    "current_sql_schema_hashes": {"schema-v2.sql": "ae5febe8a491404f7cc4103164b82369b24fb19977239a00860978b30ca545e1", "schema-v3.sql": "c8c47ab7202a0db3e9ae73196827c04ab116b4ddaa19d4cd8760fcb395051d74"}
+  },
+  "executors": {
+    "local": {"status": "available", "system": "Darwin", "os_version": "15.2", "kernel": "24.2.0", "arch": "arm64", "observed_tools": ["cargo", "rustc", "node", "pnpm", "bwrk"]},
+    "declared_release_matrix": ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
+    "macos_x86_64": {"status": "missing"},
+    "linux_x86_64": {"status": "missing"},
+    "native_release_execution_proven": false
+  },
+  "harnesses": [
+    {"path": "scripts/validation/creation/run_suite.py", "scope": "black_box local CLI/service lifecycle", "status": "available_not_run"},
+    {"path": "scripts/validation/run_full_suite.py", "scope": "aggregate cross-layer validation", "status": "available_not_run"},
+    {"path": "scripts/validation/process/claim_race.py", "scope": "child-process claim race", "status": "available_not_run"},
+    {"path": "scripts/validation/tui/pty_smoke.py", "scope": "real Unix-socket service plus PTY TUI", "status": "available_not_run"},
+    {"path": "scripts/validation/concurrency/production_host.py", "scope": "production-composition service host", "status": "available_not_run"},
+    {"path": "scripts/validation/concurrency/run_matrix.py", "scope": "one-process Rust-thread concurrency proxy", "status": "available_not_run", "limitation": "not multi-process fairness or release capacity"},
+    {"path": "scripts/validation/fault/run_matrix.py", "scope": "early deterministic fault/reorder matrix", "status": "available_not_run", "limitation": "not full release gate"},
+    {"path": "scripts/validation/security/probe.sh", "scope": "security boundary fixture", "status": "available_not_run"},
+    {"path": "scripts/release/test_release_identity.py", "scope": "release identity fixture", "status": "available_not_run"}
+  ],
+  "review_and_publication": {
+    "pf_s00_t05_reviewer": null,
+    "pf_s00_t90_reviewer": null,
+    "independent_review_capacity": "missing",
+    "release_owner": null,
+    "signing_authority": "missing",
+    "github_publication_authority": "not_supplied",
+    "homebrew_publication_authority": "not_supplied",
+    "publication_attempted": false
+  },
+  "restricted_inputs": [
+    {"path": ".boreal/boreal.sqlite", "reason": "live/local SQLite state; not opened"},
+    {"path": "test-project/.boreal/**/boreal.sqlite", "reason": "fixture SQLite state; not opened"},
+    {"path": "v1/.boreal/cache/*.sqlite", "reason": "derived/cache SQLite state; not opened"},
+    {"path": "v1/.claude/settings.local.json", "reason": "local settings may contain private values; not opened"},
+    {"path": "release credentials and tokens", "reason": "not supplied and not accessed"}
+  ],
+  "downstream_blockers": [
+    {"missing_input": "legacy completeness/parity disposition", "gates": ["PF-S12-T01", "PF-S12", "final cutover"]},
+    {"missing_input": "macOS x86_64 and Linux x86_64 native executors", "gates": ["PF-S18-T08", "PF-S20"]},
+    {"missing_input": "two model-operated harness sessions", "gates": ["PF-S14-T07"]},
+    {"missing_input": "independent reviewer identity/capacity", "gates": ["PF-S00-T90", "PF-S00-T92"]},
+    {"missing_input": "release owner/signing/publishing authority", "gates": ["PF-S20-T08", "PF-S21"]}
+  ],
+  "discrepancies": [
+    {"id": "T01-HANDOFF-STATE-TEXT", "observation": "STATE.json accepts PF-S00-T01 while linked handoff prose says not accepted", "disposition": "preserve for coordinator/reviewer reconciliation"},
+    {"id": "V2-ARCHIVE-V1-BOUNDARY", "observation": "fresh v2 T01 archive has only boreal-v2 root while current repository has v1 source/data", "disposition": "pin both identities; do not treat v2 archive as full legacy corpus"},
+    {"id": "LEDGER-EXPORT-ABSENT-SECTIONS", "observation": "runs, checkpoints, reviewer heartbeats, projections, and context packs are zero in the v1 export", "disposition": "retain zero counts; request source-backed records or classify unsupported during PF-S12"}
+  ],
+  "secret_handling": "No secret values, credentials, tokens, environment contents, or restricted SQLite contents are included. Restricted paths are named only for acquisition/disposition.",
+  "next_safe_action": "Independent coordinator/reviewer should reconcile this inventory, acquire or disposition missing EXT-* inputs, and keep PF-S12/PF-S18/PF-S14/PF-S20/PF-S21 gates blocked until their required evidence exists."
+}

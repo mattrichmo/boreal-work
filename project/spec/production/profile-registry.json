@@ -1,0 +1,76 @@
+{
+  "contract": "boreal.acceptance/2",
+  "profiles": [
+    {
+      "profile_id": "focused",
+      "version": 1,
+      "digest_algorithm": "sha256-canonical-json",
+      "content_digest": "sha256:2decc9edb99c4f20e7128464ae2e51462f65a6c98bfd89772b01cb3b4c3911fa",
+      "author": "boreal.coordinator",
+      "publisher": "boreal.owner",
+      "published_at": "2026-09-21T00:00:00Z",
+      "supersedes": null,
+      "verifier_policy": "trusted_registered_verifier",
+      "subject_rules": {"work_id":"exact","proof_revision":"exact","source_snapshot":"exact","configuration_identity":"exact"},
+      "required_observables": ["exit_status","output_digest","source_snapshot","configuration_identity"],
+      "review_policy": {"required":false,"independence":"none","outcomes":["pending","approved","rejected","returned","revoked"]},
+      "gates": [
+        {"id":"checkpoint","kind":"checkpoint","required":true},
+        {"id":"verification","kind":"verification","required":true,"requires_attestation":true},
+        {"id":"summary","kind":"summary","required":true}
+      ],
+      "review": {"required":false,"independence":"none"},
+      "exception_policy": "operator_scoped_additional_decision"
+    },
+    {
+      "profile_id": "reviewed",
+      "version": 1,
+      "digest_algorithm": "sha256-canonical-json",
+      "content_digest": "sha256:62eb7eff53418a9f040aef276134fa9a2591e48e340efe4c19a84d8a2872b932",
+      "author": "boreal.coordinator",
+      "publisher": "boreal.owner",
+      "published_at": "2026-09-21T00:00:00Z",
+      "supersedes": null,
+      "verifier_policy": "trusted_registered_verifier",
+      "subject_rules": {"work_id":"exact","proof_revision":"exact","source_snapshot":"exact","configuration_identity":"exact"},
+      "required_observables": ["exit_status","output_digest","source_snapshot","configuration_identity","executor_attestation"],
+      "review_policy": {"required":true,"independence":"authenticated_principal","outcomes":["pending","approved","rejected","returned","revoked"]},
+      "gates": [
+        {"id":"checkpoint","kind":"checkpoint","required":true},
+        {"id":"verification","kind":"verification","required":true,"requires_attestation":true},
+        {"id":"summary","kind":"summary","required":true},
+        {"id":"independent-review","kind":"review","required":true}
+      ],
+      "review": {"required":true,"independence":"authenticated_principal"},
+      "exception_policy": "operator_scoped_additional_decision"
+    },
+    {
+      "profile_id": "operator",
+      "version": 1,
+      "digest_algorithm": "sha256-canonical-json",
+      "content_digest": "sha256:33d267ca18f0fc9d7db01adda512ae28ff31a27cf6ca59647a9ac3256dfc5af3",
+      "author": "boreal.coordinator",
+      "publisher": "boreal.owner",
+      "published_at": "2026-09-21T00:00:00Z",
+      "supersedes": null,
+      "verifier_policy": "trusted_registered_verifier",
+      "subject_rules": {"work_id":"exact","proof_revision":"exact","source_snapshot":"exact","configuration_identity":"exact"},
+      "required_observables": ["exit_status","output_digest","source_snapshot","configuration_identity","operator_decision"],
+      "review_policy": {"required":false,"independence":"none","outcomes":["pending","approved","rejected","returned","revoked"]},
+      "gates": [
+        {"id":"verification","kind":"verification","required":true,"requires_attestation":true},
+        {"id":"summary","kind":"summary","required":true},
+        {"id":"operator-approval","kind":"audit","required":true}
+      ],
+      "review": {"required":false,"independence":"none"},
+      "exception_policy": "operator_scoped_additional_decision"
+    }
+  ],
+  "rules": {
+    "profile_versions_are_immutable": true,
+    "work_pins_resolved_requirements": true,
+    "deleting_observation_does_not_delete_requirement": true,
+    "rejected_review_is_distinct_from_missing_review": true,
+    "selection_filters_complete_subject_before_recency": true
+  }
+}

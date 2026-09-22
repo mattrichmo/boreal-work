@@ -9,7 +9,46 @@
     "agent_next": "boreal.agent_next.v1",
     "receipt": "boreal.receipt.v1",
     "gate_diagnostics": "boreal.gate_diagnostics.v1",
-    "error_registry": "boreal.errors.v1"
+    "error_registry": "boreal.errors.v1",
+    "production_contract": "boreal.production-contract/1",
+    "status_target": "boreal.work-status/3",
+    "work_model_target": "boreal.work-model/3",
+    "cycle_target": "boreal.cycle/1",
+    "acceptance_target": "boreal.acceptance/2",
+    "service_target": "boreal.service/2",
+    "external_job_target": "boreal.external-job/1",
+    "support_release_target": "boreal.support-release/1"
+  },
+  "target_contracts": {
+    "advertisement": "target-only-until-implementation-and-gates-authorize",
+    "runtime_capabilities": [],
+    "required_before_advertisement": [
+      "production contract manifest accepted",
+      "conformance oracle integrated",
+      "protocol/error registry integrated",
+      "implementation and migration tests accepted",
+      "real-service and release gates accepted"
+    ],
+    "unknown_target_capability": "fail_closed_protocol_mismatch",
+    "status_3_to_status_2": "status/3 integrity and availability are preserved as typed reasons; quarantined maps to blocked/integrity_quarantined, scheduled maps to queued/scheduled_start, and complete remains complete/closeout_pending",
+    "error_registry_extension": {
+      "code": "integrity_quarantined",
+      "outcome": "rejected",
+      "exit_class": "blocked",
+      "retryable": false,
+      "message": "Canonical facts for this scope are quarantined and require repair.",
+      "recovery": "inspect_integrity_diagnostics",
+      "integration_owner": "PF-S01-T11",
+      "runtime_advertisement": "not_before_registry_and_service_implementation"
+    }
+  },
+  "compatibility": {
+    "current_runtime": "protocol/2 with envelope/schema v1 fixtures",
+    "target_runtime": "production contract identities are additive and not advertised by this manifest yet",
+    "supported_client_policy": "N and N-1 reads where the compatibility matrix defines a lossless mapping; new lifecycle/proof writes fail closed when required fields or capabilities are absent",
+    "unknown_enum_policy": "protocol_mismatch",
+    "unknown_required_field_policy": "protocol_mismatch",
+    "unknown_additive_field_policy": "ignore_after_validation_never_policy"
   },
   "envelope": {
     "required_fields": [

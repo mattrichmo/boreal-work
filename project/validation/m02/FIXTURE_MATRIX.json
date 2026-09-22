@@ -1,0 +1,205 @@
+{
+  "schema": "boreal.m02.fixture-inventory/1",
+  "accepted_complete": false,
+  "note": "An inventory, not an executable second evaluator. Existing structural vectors do not certify M02. Null references are deliberate gaps.",
+  "statuses": [
+    {
+      "display_status": "draft",
+      "positive_source": null,
+      "negative_or_combined_source": null,
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "No dedicated M02 combined-condition positive/negative draft fixture."
+    },
+    {
+      "display_status": "queued",
+      "positive_source": "crates/domain/tests/m02_status.rs::idle_retry_precedes_dependency_and_ends_at_exact_boundary",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::paused_precedes_retry_and_dependency_without_hiding_reasons",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Read/service/CLI parity still unrun."
+    },
+    {
+      "display_status": "ready",
+      "positive_source": "crates/domain/tests/m02_status.rs::actor_roles_change_claimability_not_display_readiness",
+      "negative_or_combined_source": "crates/store/tests/m02_claim.rs::a_visible_hard_hold_cannot_be_bypassed_by_the_raw_claim_transaction",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "No real service claimability proof."
+    },
+    {
+      "display_status": "claimed",
+      "positive_source": "crates/domain/src/lib.rs::claimed_differs_from_in_progress_until_acceptance_and_start",
+      "negative_or_combined_source": null,
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Baseline test is not full M02 negative actor/session coverage."
+    },
+    {
+      "display_status": "in_progress",
+      "positive_source": "crates/domain/tests/m02_status.rs::active_attempt_precedes_dispatch_and_dependencies_but_not_a_hold",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::attempt_for_another_work_is_blocked_without_mutating_inputs",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Actor-specific mutation permission matrix remains."
+    },
+    {
+      "display_status": "needs_verification",
+      "positive_source": "crates/domain/tests/m02_status.rs::failed_review_blocks_and_failed_technical_gate_still_needs_proof",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::reviewed_profile_uses_gate_kind_with_work_scoped_ids",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Failed/stale genuine receipt service acceptance missing."
+    },
+    {
+      "display_status": "awaiting_review",
+      "positive_source": "crates/domain/tests/m02_status.rs::reviewed_profile_uses_gate_kind_with_work_scoped_ids",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::failed_review_blocks_and_failed_technical_gate_still_needs_proof",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Public independent review path unavailable."
+    },
+    {
+      "display_status": "complete",
+      "positive_source": "crates/domain/tests/m02_status.rs::complete_and_cancelled_never_satisfy_close_only_edges",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::missing_or_duplicate_declared_gates_are_integrity_errors",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Store declarations are not independently persisted; closeout gate still incomplete."
+    },
+    {
+      "display_status": "closed",
+      "positive_source": "crates/domain/tests/m02_status.rs::closed_and_cancelled_win_over_all_nonterminal_inputs",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::complete_and_cancelled_never_satisfy_close_only_edges",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "No genuine new service-backed closeout run."
+    },
+    {
+      "display_status": "blocked",
+      "positive_source": "crates/domain/tests/m02_status.rs::hold_precedes_pause_retry_and_dependency",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::actor_roles_change_claimability_not_display_readiness",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Malformed gate/attempt prefetch and full corruption coverage missing."
+    },
+    {
+      "display_status": "paused",
+      "positive_source": "crates/domain/tests/m02_status.rs::paused_precedes_retry_and_dependency_without_hiding_reasons",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::active_attempt_precedes_dispatch_and_dependencies_but_not_a_hold",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Public pause/resume parity still incomplete."
+    },
+    {
+      "display_status": "retry_wait",
+      "positive_source": "crates/domain/tests/m02_status.rs::idle_retry_precedes_dependency_and_ends_at_exact_boundary",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::active_attempt_precedes_dispatch_and_dependencies_but_not_a_hold",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Due/not-before and full mutation retry policy missing."
+    },
+    {
+      "display_status": "expired_review",
+      "positive_source": "crates/domain/tests/m02_status.rs::expiry_has_one_primary_reason_and_retains_both_elapsed_clocks",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::historical_failure_release_and_cancel_do_not_skip_idle_predicates",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Critical persistent expiry obligation still missing after current attempt cleared."
+    },
+    {
+      "display_status": "cancelled",
+      "positive_source": "crates/domain/tests/m02_status.rs::closed_and_cancelled_win_over_all_nonterminal_inputs",
+      "negative_or_combined_source": "crates/domain/tests/m02_status.rs::complete_and_cancelled_never_satisfy_close_only_edges",
+      "execution": "not run: Rust toolchain unavailable",
+      "remaining": "Public cancellation dependency disposition not complete."
+    }
+  ],
+  "transitions": [
+    {
+      "transition": "publish",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "claim",
+      "candidate_tests": [
+        "crates/store/tests/m02_claim.rs"
+      ],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "accept",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "start",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "evidence",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "verify",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "review",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "close",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "release",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "pause",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "resume",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "cancel",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "reopen",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "expiry_disposition",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "gate_force",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    },
+    {
+      "transition": "dependency_waiver",
+      "candidate_tests": [],
+      "full_positive_and_negative_acceptance": "not met",
+      "remaining": "Full supported-boundary positive/negative fixture, immutable audit and no-effect denial evidence required."
+    }
+  ]
+}

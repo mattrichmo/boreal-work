@@ -1,0 +1,75 @@
+test_cli_only_removes_only_the_previously_installed_dashboard (__main__.InstallerTests.test_cli_only_removes_only_the_previously_installed_dashboard) ... ok
+test_failure_during_second_backup_restores_first_and_preserves_unmoved_files (__main__.InstallerTests.test_failure_during_second_backup_restores_first_and_preserves_unmoved_files) ... ok
+test_install_and_reinstall_without_prompts (__main__.InstallerTests.test_install_and_reinstall_without_prompts) ... ok
+test_interactive_machine_flow_installs_selected_components (__main__.InstallerTests.test_interactive_machine_flow_installs_selected_components) ... FAIL
+test_invalid_prefix_fails_before_installation (__main__.InstallerTests.test_invalid_prefix_fails_before_installation) ... ok
+test_legacy_binary_is_preserved_without_explicit_permission (__main__.InstallerTests.test_legacy_binary_is_preserved_without_explicit_permission) ... ok
+test_lock_blocks_concurrent_publish_without_touching_current_install (__main__.InstallerTests.test_lock_blocks_concurrent_publish_without_touching_current_install) ... ok
+test_parent_traversal_member_is_rejected (__main__.InstallerTests.test_parent_traversal_member_is_rejected) ... ok
+test_signal_after_backup_rename_restores_original_without_a_marker_gap (__main__.InstallerTests.test_signal_after_backup_rename_restores_original_without_a_marker_gap) ... ok
+test_symlink_archive_is_rejected_before_extraction (__main__.InstallerTests.test_symlink_archive_is_rejected_before_extraction) ... ok
+test_dashboard_narrow_resize_search_palette_and_quit (__main__.TerminalTests.test_dashboard_narrow_resize_search_palette_and_quit) ... ok
+test_dashboard_signal_restores_terminal (__main__.TerminalTests.test_dashboard_signal_restores_terminal) ... ok
+test_embedded_rust_invocation_shape_executes_same_project_wizard (__main__.TerminalTests.test_embedded_rust_invocation_shape_executes_same_project_wizard) ... FAIL
+test_project_wizard_cancel_restores_terminal_and_emits_no_selection (__main__.TerminalTests.test_project_wizard_cancel_restores_terminal_and_emits_no_selection) ... FAIL
+test_project_wizard_returns_multiselect_json_without_creating_project (__main__.TerminalTests.test_project_wizard_returns_multiselect_json_without_creating_project) ... FAIL
+
+======================================================================
+FAIL: test_interactive_machine_flow_installs_selected_components (__main__.InstallerTests.test_interactive_machine_flow_installs_selected_components)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 193, in test_interactive_machine_flow_installs_selected_components
+    session=PtySession(['sh',str(INSTALLER),'--interactive','--archive',str(self.archive),'--prefix',str(self.prefix)])
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_embedded_rust_invocation_shape_executes_same_project_wizard (__main__.TerminalTests.test_embedded_rust_invocation_shape_executes_same_project_wizard)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 218, in test_embedded_rust_invocation_shape_executes_same_project_wizard
+    result=self.root/'embedded.json';session=PtySession([NODE,'-e',WIZARD.read_text(),'project',json.dumps(self.project_args())],result)
+                                             ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_project_wizard_cancel_restores_terminal_and_emits_no_selection (__main__.TerminalTests.test_project_wizard_cancel_restores_terminal_and_emits_no_selection)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 225, in test_project_wizard_cancel_restores_terminal_and_emits_no_selection
+    result=self.root/'cancel.json';session=PtySession([NODE,str(WIZARD),'project',json.dumps(self.project_args())],result)
+                                           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_project_wizard_returns_multiselect_json_without_creating_project (__main__.TerminalTests.test_project_wizard_returns_multiselect_json_without_creating_project)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 210, in test_project_wizard_returns_multiselect_json_without_creating_project
+    result=self.root/'result.json';session=PtySession([NODE,str(WIZARD),'project',json.dumps(self.project_args())],result)
+                                           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+----------------------------------------------------------------------
+Ran 15 tests in 28.029s
+
+FAILED (failures=4)

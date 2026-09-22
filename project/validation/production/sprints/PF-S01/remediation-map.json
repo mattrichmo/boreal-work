@@ -1,0 +1,109 @@
+{
+  "schema": "boreal.pf-s01-t91.remediation-map.v1",
+  "status": "reconciliation-produced-with-t92-structural-blocker",
+  "task_id": "PF-S01-T91",
+  "attempt": 1,
+  "source_review": "project/validation/production/sprints/PF-S01/findings.json",
+  "source_identity": {
+    "revision": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "branch": "codex/apply-responsive-terminal-overlay",
+    "worktree": "dirty",
+    "note": "The source identity is the accepted T90 integration identity; it is not a release identity."
+  },
+  "review_result": {
+    "decision": "no_findings",
+    "finding_ids": [],
+    "finding_count": 0,
+    "disposition": "no_change",
+    "decision_basis": "T90 attempt 6 reports no contract/plan-layer findings and its findings array is empty.",
+    "no_synthetic_finding": true
+  },
+  "dispositions": [],
+  "no_findings_disposition": {
+    "finding_ids": [],
+    "disposition": "no_change",
+    "decision": "Keep the accepted T01-T11 contract artifacts and T90 review artifacts unchanged; create no corrective child.",
+    "owner": "PF-S01-T92 independent gate owner for verification",
+    "successor_effect": "No PF-S01 successor is authorized until PF-S01-T92 accepts the exact-tree matrix."
+  },
+  "limitations": [
+    {
+      "id": "PF-S01-T90-L01",
+      "source_text": "No Rust or service runtime evidence was run.",
+      "classification": "authority_limit",
+      "disposition": "deferred_to_existing_downstream_gates",
+      "owner_tasks_or_gates": ["PF-S02-T09", "PF-S05-T03", "PF-S05-T06", "PF-S16-T02", "PF-S16-T04", "PF-S16-T05", "PF-S16-T06", "PF-S16-T92"],
+      "acceptance_rows": ["AC-02", "AC-04", "AC-05", "AC-07", "AC-11", "AC-12", "AC-37", "AC-45"],
+      "required_evidence": "Built Rust/service execution with attributable operations, readback, identity, and required negative cases at the registered acceptance layer.",
+      "successor_effect": "T90/T91 structural evidence cannot unlock runtime-dependent downstream gates."
+    },
+    {
+      "id": "PF-S01-T90-L02",
+      "source_text": "No database migration, real verifier, race/fault, or TUI evidence was run.",
+      "classification": "authority_limit",
+      "disposition": "deferred_to_existing_downstream_gates",
+      "owner_tasks_or_gates": ["PF-S02-T09", "PF-S06-T09", "PF-S07-T08", "PF-S15-T10", "PF-S16-T04", "PF-S16-T05", "PF-S16-T07", "PF-S16-T08", "PF-S17-T02", "PF-S17-T07"],
+      "acceptance_rows": ["AC-06", "AC-13", "AC-14", "AC-15", "AC-16", "AC-17", "AC-18", "AC-19", "AC-20", "AC-21", "AC-22", "AC-43", "AC-44", "AC-47", "AC-48"],
+      "required_evidence": "Fresh/upgrade/rollback migration checks, genuine verifier receipts, multi-process/fault cases, and mounted real-service TUI evidence at the named owners.",
+      "successor_effect": "These unrun evidence classes remain open and cannot be represented as PF-S01 acceptance."
+    },
+    {
+      "id": "PF-S01-T90-L03",
+      "source_text": "No native-platform, installer, backup/restore, signing, performance, or production-release check was run or claimed.",
+      "classification": "authority_limit",
+      "disposition": "deferred_to_existing_downstream_gates",
+      "owner_tasks_or_gates": ["PF-S12-T07", "PF-S12-T10", "PF-S17-T02", "PF-S17-T04", "PF-S17-T05", "PF-S17-T06", "PF-S17-T07", "PF-S18-T02", "PF-S18-T04", "PF-S18-T05", "PF-S19-T07", "PF-S20-T03", "PF-S20-T04", "PF-S20-T05", "PF-S20-T06", "PF-S20-T08", "PF-S20-T92", "PF-S21-T04", "PF-S21-T92"],
+      "acceptance_rows": ["AC-03", "AC-17", "AC-41", "AC-44", "AC-49", "AC-50", "AC-51", "AC-52", "AC-53", "AC-54", "AC-55", "AC-56"],
+      "required_evidence": "Exact native binaries/packages, installer/update/rollback, backup/restore, security/signing, performance, and published-channel evidence at the existing later gates.",
+      "successor_effect": "PF-S01-T91 and PF-S01-T92 make no production or release decision."
+    },
+    {
+      "id": "PF-S01-T90-L04",
+      "source_text": "Conformance vector dispositions remain unmeasured.",
+      "classification": "authority_limit",
+      "disposition": "preserved_and_routed",
+      "owner_tasks_or_gates": ["PF-S01-T92", "PF-S04-T08", "PF-S06-T09", "PF-S07-T08", "PF-S08-T10", "PF-S08-T11", "PF-S09-T09", "PF-S10-T08", "PF-S11-T09", "PF-S12-T10", "PF-S14-T07", "PF-S15-T10", "PF-S16-T02", "PF-S16-T03", "PF-S16-T04", "PF-S16-T05", "PF-S16-T06", "PF-S16-T07", "PF-S16-T08", "PF-S17-T01", "PF-S17-T02", "PF-S17-T03", "PF-S17-T05", "PF-S17-T07", "PF-S20-T03", "PF-S20-T04", "PF-S20-T05", "PF-S20-T06", "PF-S20-T92", "PF-S21-T04", "PF-S21-T92"],
+      "acceptance_rows": ["AC-01", "AC-02", "AC-03", "AC-04", "AC-05", "AC-06", "AC-07", "AC-08", "AC-09", "AC-10", "AC-11", "AC-12", "AC-13", "AC-14", "AC-15", "AC-16", "AC-17", "AC-18", "AC-19", "AC-20", "AC-21", "AC-22", "AC-23", "AC-24", "AC-25", "AC-26", "AC-27", "AC-28", "AC-29", "AC-30", "AC-31", "AC-32", "AC-33", "AC-34", "AC-35", "AC-36", "AC-37", "AC-38", "AC-39", "AC-40", "AC-41", "AC-42", "AC-43", "AC-44", "AC-45", "AC-46", "AC-47", "AC-48", "AC-49", "AC-50", "AC-51", "AC-52", "AC-53", "AC-54", "AC-55", "AC-56"],
+      "required_evidence": "Keep all 49 vector metadata dispositions as unmeasured until each registered implementation/acceptance owner produces the required evidence. T92 evaluates only the AC-01 contract-layer gate.",
+      "successor_effect": "No downstream vector is treated as accepted by this reconciliation."
+    },
+    {
+      "id": "PF-S01-T90-L05",
+      "source_text": "PF-S01-T91 reconciliation and PF-S01-T92 revalidation remain required; T90 does not accept PF-S01 as a sprint or authorize successors.",
+      "classification": "authority_limit",
+      "disposition": "preserved",
+      "owner_tasks_or_gates": ["PF-S01-T91", "PF-S01-T92", "PF-S02-T92", "PF-S03-T92", "PF-S04-T92"],
+      "acceptance_rows": ["AC-01"],
+      "required_evidence": "Independent T92 reviewer, exact-tree structural reruns, source identity, and an explicit gate decision.",
+      "successor_effect": "PF-S01-T92 is the only unlock for the existing PF-S02/PF-S03/PF-S04 entry gates."
+    }
+  ],
+  "observed_gate_blocker": {
+    "id": "PF-S01-T91-OBS-001",
+    "source": "T91 structural validator rerun",
+    "not_a_t90_finding": true,
+    "command": "python3 tools/plan.py validate",
+    "cwd": "project/build-plan/production-completion",
+    "observed_exit": 1,
+    "observed_error": "PF-S01-T90: accepted without agent",
+    "disposition": "open_for_t92",
+    "decision": "Do not edit execution/STATE.json within this write boundary. T92 must rerun the validator and retain the blocker if the accepted-task attribution remains invalid."
+  },
+  "new_remediation_tasks": [],
+  "required_revalidation": [
+    "Capture exact combined-tree revision, branch, dirty state, and aggregate/archive digest.",
+    "Rerun python3 project/spec/validate_contracts.py from the repository root.",
+    "Rerun python3 tools/plan.py validate from project/build-plan/production-completion and require zero errors.",
+    "Rerun python3 tools/plan.py graph-ready from project/build-plan/production-completion as advisory only.",
+    "Rerun python3 tools/plan.py verify-package from project/build-plan/production-completion and retain mismatches.",
+    "Rerun the read-only 19-manifest-entry, 48-obligation, 49-vector, 49-metadata identity/join check with all vector dispositions unmeasured.",
+    "Independently read back T90 findings, T91 dispositions, all accepted T01-T11 handoffs, and the authority limits before deciding AC-01/PF-S01-T92."
+  ],
+  "non_dispositions": [
+    "No T90 finding was changed to fixed or deferred because T90 findings is an empty array.",
+    "No Rust, TypeScript, shared contract manifest, protocol registry, plan authority, or execution state was edited.",
+    "No runtime, service, native, installer, publication, or release acceptance was claimed.",
+    "No failed, interrupted, unsupported, or unmeasured evidence was deleted or relabeled.",
+    "No new remediation leaf was added; the existing downstream tasks and gates remain the owners."
+  ]
+}

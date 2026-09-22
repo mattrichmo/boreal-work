@@ -288,7 +288,7 @@ pub fn project_status(
             .filter(|(_, policy)| matches!(policy, DependencyPolicy::ClosedOnly))
             .map(|(prerequisite_index, _)| inputs[*prerequisite_index].work.clone())
             .collect::<Vec<_>>();
-        let mut decision = evaluate_status(StatusContext {
+        let decision = evaluate_status(StatusContext {
             work: &input.work,
             prerequisites: &prerequisite_rows,
             current_attempt: input.current_attempt.as_ref(),
@@ -299,22 +299,6 @@ pub fn project_status(
             retry_not_before: input.retry_not_before,
             affected_dependents: &affected_dependents[index],
         });
-        if decision.display_status == DerivedStatus::ExpiredReview
-            || input
-                .current_attempt
-                .as_ref()
-                .is_some_and(|attempt| attempt.phase.is_terminal())
-        {
-            decision.next_status_change_at = None;
-        } else if decision.display_status == DerivedStatus::RetryWait {
-            if let Some(retry_at) = input.retry_not_before.filter(|retry_at| *retry_at > as_of) {
-                decision.next_status_change_at = Some(
-                    decision
-                        .next_status_change_at
-                        .map_or(retry_at, |current| current.min(retry_at)),
-                );
-            }
-        }
         all.push(decision);
     }
 
@@ -394,8 +378,8 @@ pub fn project_status_from_store(
     limit: u64,
     offset: u64,
 ) -> Result<StatusSnapshot, String> {
-    let persisted = store
-        .read_project_status(project_id.as_str())
+    let (persisted, authorized_actor) = store
+        .read_project_status_for_actor(project_id.as_str(), actor.actor_id.as_str())
         .map_err(|error| error.to_string())?;
     let mut diagnostics = persisted.diagnostics.clone();
     let mut inputs = Vec::with_capacity(persisted.works.len());
@@ -442,7 +426,7 @@ pub fn project_status_from_store(
         .collect::<Vec<_>>();
     let mut snapshot = project_status(
         project_id,
-        actor,
+        &authorized_actor,
         as_of,
         Revision(persisted.revision.0),
         &inputs,
@@ -459,10 +443,8 @@ pub fn project_status_from_store(
 fn status_input_from_store_row(row: &StatusWorkRecord) -> Result<StatusWorkInput, String> {
     let mut input = status_input(row.work.clone());
     input.retry_not_before = row
-        .retry_not_before
-        .as_deref()
-        .map(parse_status_timestamp)
-        .transpose()?;
+        .status_retry_not_before()
+        .map_err(|error| error.to_string())?;
     input.gates = row
         .gate_diagnostics
         .gates
@@ -485,52 +467,8 @@ fn status_input_from_store_row(row: &StatusWorkRecord) -> Result<StatusWorkInput
             reason: gate.reason.clone(),
         })
         .collect();
-    input.current_attempt = row
-        .current_attempt
-        .as_ref()
-        .map(attempt_from_store)
-        .transpose()?;
+    input.current_attempt = row.status_attempt().map_err(|error| error.to_string())?;
     Ok(input)
-}
-
-fn attempt_from_store(attempt: &boreal_store::AttemptRecord) -> Result<Attempt, String> {
-    Ok(Attempt {
-        work_id: attempt.work_id.clone().into(),
-        attempt_id: attempt.attempt_id.clone().into(),
-        actor_id: attempt.actor_id.clone().into(),
-        harness_id: attempt.harness_id.clone().map(Into::into),
-        session_id: attempt.session_id.clone().map(Into::into),
-        fence: boreal_domain::Fence::new(attempt.fence),
-        phase: attempt.phase,
-        claimed_at: parse_status_timestamp(&attempt.claimed_at)?,
-        accepted_at: attempt
-            .accepted_at
-            .as_deref()
-            .map(parse_status_timestamp)
-            .transpose()?,
-        lease_deadline: parse_status_timestamp(&attempt.lease_deadline)?,
-        max_attempt_deadline: parse_status_timestamp(&attempt.hard_deadline)?,
-        deadline_source: boreal_domain::DeadlineSource::Explicit,
-        last_heartbeat_at: attempt
-            .last_heartbeat_at
-            .as_deref()
-            .map(parse_status_timestamp)
-            .transpose()?,
-        last_checkpoint_at: attempt
-            .last_checkpoint_at
-            .as_deref()
-            .map(parse_status_timestamp)
-            .transpose()?,
-        review_required_after_expiry: attempt.review_required_after_expiry,
-    })
-}
-
-fn parse_status_timestamp(value: &str) -> Result<TimestampMs, String> {
-    value
-        .strip_prefix("unix-ms:")
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(TimestampMs)
-        .ok_or_else(|| format!("invalid canonical timestamp: {value}"))
 }
 
 #[cfg(test)]

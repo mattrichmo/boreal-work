@@ -14,16 +14,35 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, NulError};
 use std::fmt;
+use std::fmt::Write as _;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use profiles::{PinnedRequirements, ProfileStore, ProfileVersion, RequirementSubjectKind};
+
+pub mod acceptance;
+pub mod execution;
+pub mod identity;
+pub mod jobs;
 mod knowledge;
+mod migrations;
+pub mod operations;
+pub mod profiles;
+pub mod recovery;
+mod status_evaluation;
+pub mod transactions;
 mod work_model_v3;
 pub use knowledge::*;
+pub use migrations::{
+    checksum, MigrationBackend, MigrationDiagnostic, MigrationError, MigrationLedgerEntry,
+    MigrationOutcome, MigrationPlan, MigrationRunner, MigrationState, MigrationStep,
+    SchemaIdentity, MIGRATION_DIAGNOSTIC_TABLE, MIGRATION_LEDGER_TABLE, SCHEMA_IDENTITY_TABLE,
+};
 pub use work_model_v3::*;
 
 pub const SCHEMA_VERSION: i64 = 2;
@@ -33,6 +52,72 @@ pub const SCHEMA_VERSION: i64 = 2;
 /// the extension explicitly.
 pub const WORK_MODEL_SCHEMA_VERSION: i64 = 3;
 pub const STATUS_CONTRACT_VERSION: &str = "boreal.work-status/2";
+pub const PRODUCTION_SCHEMA_ID: &str = "boreal.sqlite";
+pub const PRODUCTION_SCHEMA_CONTRACT_VERSION: &str = "boreal.work-model/3";
+
+const PRODUCTION_SCHEMA_SQL: &str = include_str!("../../../project/spec/schema-production.sql");
+const LEGACY_SCHEMA_V2_SQL: &str = include_str!("../../../project/spec/schema-v2.sql");
+const WORK_MODEL_SCHEMA_V3_SQL: &str = include_str!("../../../project/spec/schema-v3.sql");
+
+const PRODUCTION_VERIFY_SQL: &str = r#"
+CREATE TEMP TABLE boreal_production_verify (sentinel INTEGER NOT NULL CHECK (sentinel = 1));
+INSERT INTO boreal_production_verify
+  SELECT CASE WHEN
+    (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'project') = 1
+    AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'attempt') = 1
+    AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'work_model_v3_meta') = 1
+    AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'work_node_v3') = 1
+    AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cycle_v3') = 1
+    AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'intake_item_v3') = 1
+    AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'container_disposition_v3') = 1
+    THEN 1 ELSE 0 END;
+DROP TABLE boreal_production_verify;
+"#;
+
+const PRODUCTION_METADATA_SCHEMA_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS boreal_migration_ledger (
+  migration_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK (attempt > 0),
+  from_version INTEGER NOT NULL CHECK (from_version >= 0),
+  to_version INTEGER NOT NULL CHECK (to_version > from_version),
+  checksum TEXT NOT NULL CHECK (trim(checksum) <> ''),
+  state TEXT NOT NULL CHECK (state IN ('running','applied','failed')),
+  diagnostics_json TEXT NOT NULL DEFAULT '[]',
+  failure_message TEXT,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  PRIMARY KEY (migration_id, attempt),
+  CHECK (state = 'running' OR completed_at IS NOT NULL),
+  CHECK (state <> 'failed' OR failure_message IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS boreal_migration_ledger_latest
+  ON boreal_migration_ledger(migration_id, attempt DESC);
+
+CREATE TABLE IF NOT EXISTS boreal_migration_diagnostic (
+  diagnostic_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  migration_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK (attempt > 0),
+  code TEXT NOT NULL CHECK (trim(code) <> ''),
+  entity_type TEXT NOT NULL CHECK (trim(entity_type) <> ''),
+  entity_id TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL CHECK (trim(message) <> ''),
+  blocking INTEGER NOT NULL CHECK (blocking IN (0,1)),
+  raw_payload TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE (migration_id, attempt, code, entity_type, entity_id, raw_payload)
+);
+CREATE INDEX IF NOT EXISTS boreal_migration_diagnostic_subject
+  ON boreal_migration_diagnostic(migration_id, entity_type, entity_id);
+
+CREATE TABLE IF NOT EXISTS boreal_schema_identity (
+  identity_id INTEGER PRIMARY KEY CHECK (identity_id = 1),
+  schema_id TEXT NOT NULL CHECK (trim(schema_id) <> ''),
+  schema_version INTEGER NOT NULL CHECK (schema_version >= 0),
+  contract_version TEXT NOT NULL CHECK (trim(contract_version) <> ''),
+  schema_checksum TEXT NOT NULL CHECK (trim(schema_checksum) <> ''),
+  updated_at TEXT NOT NULL
+);
+"#;
 
 const CREATE_WORK_HOLD_TABLE: &str = r#"
 CREATE TABLE IF NOT EXISTS work_hold (
@@ -1139,22 +1224,37 @@ pub struct SqliteStore {
     database: *mut sqlite3,
     database_path: Option<PathBuf>,
     query_metrics: Arc<SqliteQueryMetricsAtomic>,
+    migration_transaction: AtomicBool,
+    /// True only when this handle was opened through the exact canonical
+    /// production schema request.  The legacy schema-v2 fixture still uses
+    /// the production migration runner for compatibility, but is explicitly
+    /// non-production so existing isolated tests do not need a workspace
+    /// binding just to exercise the historical store API.
+    canonical_production: bool,
 }
 
 unsafe impl Send for SqliteStore {}
 
 impl SqliteStore {
-    /// Opens a database and applies the supplied versioned schema only when it
-    /// is fresh. Existing databases are opened without compatibility repair;
-    /// callers that need additive repair must invoke [`apply_schema`]
-    /// explicitly under the owning migration boundary.
+    /// Opens a database through the production migration boundary when the
+    /// canonical v2 schema is requested. Existing production v2 databases are
+    /// upgraded to the additive v3 work model before callers can mutate them;
+    /// established pre-runner v3 databases receive only the explicit,
+    /// verified production metadata repair. Noncanonical test/setup SQL keeps
+    /// the historical schema behavior and is never treated as production.
     pub fn open(path: impl AsRef<Path>, schema_sql: &str) -> Result<Self, StoreError> {
-        let store = Self::open_connection(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)?;
-        match store.schema_version()? {
-            0 => store.apply_schema(schema_sql)?,
-            SCHEMA_VERSION => store.verify_schema_contract()?,
-            WORK_MODEL_SCHEMA_VERSION => store.verify_work_model_v3_contract()?,
-            found => return Err(StoreError::UnsupportedSchema { found }),
+        let canonical_production = is_canonical_production_schema_request(schema_sql);
+        let mut store = Self::open_connection(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)?;
+        store.canonical_production = canonical_production;
+        if is_production_schema_request(schema_sql) {
+            store.ensure_production_schema()?;
+        } else {
+            match store.schema_version()? {
+                0 => store.apply_schema(schema_sql)?,
+                SCHEMA_VERSION => store.verify_schema_contract()?,
+                WORK_MODEL_SCHEMA_VERSION => store.verify_work_model_v3_contract()?,
+                found => return Err(StoreError::UnsupportedSchema { found }),
+            }
         }
         Ok(store)
     }
@@ -1219,6 +1319,8 @@ impl SqliteStore {
             database,
             database_path: (path != Path::new(":memory:")).then(|| path.to_path_buf()),
             query_metrics: Arc::new(SqliteQueryMetricsAtomic::default()),
+            migration_transaction: AtomicBool::new(false),
+            canonical_production: false,
         };
         unsafe { sqlite3_busy_timeout(store.database, 250) };
         store.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -1243,6 +1345,393 @@ impl SqliteStore {
             ))
         })?;
         Self::open(path, &schema)
+    }
+
+    /// Runs the ordered production migration plan on this already-open
+    /// connection. The runner owns the schema identity/ledger verification;
+    /// this method only translates its typed result into the store boundary.
+    pub fn migrate_production(&self) -> Result<MigrationOutcome, StoreError> {
+        let legacy_v2 = self.schema_version()? == SCHEMA_VERSION;
+        let plan = production_migration_plan().map_err(map_migration_error)?;
+        if legacy_v2 {
+            // The runner's preflight is intentionally retained, but v2 repair
+            // must not happen before this connection owns the writer boundary.
+            // Otherwise a live attempt (or a concurrent writer entering the
+            // gap) could be observed only after repair DDL had committed.
+            store_try_acquire_migration_lock(self)?;
+            if let Err(error) = production_preflight(self) {
+                store_release_migration_lock(self);
+                return Err(error);
+            }
+            // Older v2 databases may be structurally valid enough to identify
+            // themselves but still lack additive objects repaired by the
+            // historical setup path. Complete that repair atomically before
+            // the ordered v2 -> v3 runner records its ledger entry. A failed
+            // repair leaves the legacy database unchanged and never lets the
+            // production migration advertise a partial target.
+            if let Err(error) = self.repair_schema_v2() {
+                store_release_migration_lock(self);
+                return Err(error);
+            }
+        }
+        let mut runner = match MigrationRunner::new(self, plan).map_err(map_migration_error) {
+            Ok(runner) => runner,
+            Err(error) => {
+                if legacy_v2 {
+                    store_release_migration_lock(self);
+                }
+                return Err(error);
+            }
+        };
+        let result = runner.apply().map_err(map_migration_error);
+        if legacy_v2 && self.migration_transaction.load(Ordering::Acquire) {
+            store_release_migration_lock(self);
+        }
+        result
+    }
+
+    /// Repairs metadata for a pre-runner schema-v3 database without changing
+    /// canonical work, attempt, evidence, or planning rows. The repair is
+    /// allowed only after the complete v3 contract verifies and only when all
+    /// production metadata tables are absent. A partial or mismatched set is
+    /// corruption, not permission to overwrite history.
+    pub fn repair_production_schema(&self) -> Result<MigrationOutcome, StoreError> {
+        if self.schema_version()? != WORK_MODEL_SCHEMA_VERSION {
+            return Err(StoreError::Invalid(
+                "production metadata repair requires schema version 3".to_owned(),
+            ));
+        }
+        self.verify_work_model_v3_contract()?;
+        let metadata_present = [
+            MIGRATION_LEDGER_TABLE,
+            MIGRATION_DIAGNOSTIC_TABLE,
+            SCHEMA_IDENTITY_TABLE,
+        ]
+        .map(|table| self.table_exists(table));
+        let mut present = 0;
+        for result in metadata_present {
+            if result? {
+                present += 1;
+            }
+        }
+        if present != 0 {
+            if present != 3 {
+                return Err(StoreError::Corrupt(
+                    "production migration metadata is partially provisioned; refusing repair"
+                        .to_owned(),
+                ));
+            }
+            self.verify_production_schema_current()?;
+            return Ok(MigrationOutcome::AlreadyCurrent {
+                version: WORK_MODEL_SCHEMA_VERSION,
+            });
+        }
+
+        let plan = production_migration_plan().map_err(map_migration_error)?;
+        let bootstrap = production_bootstrap_step(&plan).map_err(map_migration_error)?;
+        let now = production_now();
+        store_try_acquire_migration_lock(self)?;
+        if let Err(error) = production_preflight(self) {
+            store_release_migration_lock(self);
+            return Err(error);
+        }
+        let result = (|| {
+            self.execute_batch(PRODUCTION_METADATA_SCHEMA_SQL)?;
+            self.execute_batch(&format!(
+                "INSERT INTO {SCHEMA_IDENTITY_TABLE}
+                 (identity_id, schema_id, schema_version, contract_version,
+                  schema_checksum, updated_at)
+                 VALUES (1, {}, {}, {}, {}, {});",
+                sql_text(PRODUCTION_SCHEMA_ID),
+                WORK_MODEL_SCHEMA_VERSION,
+                sql_text(PRODUCTION_SCHEMA_CONTRACT_VERSION),
+                sql_text(&plan.target_schema_checksum),
+                sql_text(&now),
+            ))?;
+            self.execute_batch(&format!(
+                "INSERT INTO {MIGRATION_DIAGNOSTIC_TABLE}
+                 (migration_id, attempt, code, entity_type, entity_id,
+                  message, blocking, raw_payload, created_at)
+                 VALUES ({}, 1, 'production_metadata_repaired', 'database', '',
+                         'Reconciled pre-runner schema-v3 metadata without changing canonical rows.',
+                         0, '', {});",
+                sql_text("repair-production-v3"),
+                sql_text(&now),
+            ))?;
+            self.execute_batch(&format!(
+                "INSERT INTO {MIGRATION_LEDGER_TABLE}
+                 (migration_id, attempt, from_version, to_version, checksum,
+                  state, diagnostics_json, started_at, completed_at)
+                 VALUES ({}, 1, 0, {}, {}, 'applied',
+                         '[{{\"code\":\"production_metadata_repaired\"}}]', {}, {});",
+                sql_text(&bootstrap.migration_id),
+                WORK_MODEL_SCHEMA_VERSION,
+                sql_text(&bootstrap.checksum),
+                sql_text(&now),
+                sql_text(&now),
+            ))?;
+            self.execute_batch(PRODUCTION_VERIFY_SQL)?;
+            self.verify_work_model_v3_contract()
+        })();
+        match result {
+            Ok(()) => store_commit(self)?,
+            Err(error) => {
+                store_release_migration_lock(self);
+                return Err(error);
+            }
+        }
+        Ok(MigrationOutcome::AlreadyCurrent {
+            version: WORK_MODEL_SCHEMA_VERSION,
+        })
+    }
+
+    fn ensure_production_schema(&self) -> Result<(), StoreError> {
+        match self.schema_version()? {
+            0 | SCHEMA_VERSION => {
+                self.migrate_production()?;
+                self.ensure_additive_store_schema()?;
+                Ok(())
+            }
+            WORK_MODEL_SCHEMA_VERSION => {
+                let metadata_present = [
+                    MIGRATION_LEDGER_TABLE,
+                    MIGRATION_DIAGNOSTIC_TABLE,
+                    SCHEMA_IDENTITY_TABLE,
+                ]
+                .iter()
+                .map(|table| self.table_exists(table))
+                .collect::<Result<Vec<_>, _>>()?;
+                if metadata_present.iter().all(|present| *present) {
+                    self.verify_production_schema_current()?;
+                } else if metadata_present.iter().all(|present| !*present) {
+                    self.repair_production_schema()?;
+                } else {
+                    return Err(StoreError::Corrupt(
+                        "production migration metadata is partially provisioned".to_owned(),
+                    ));
+                }
+                self.ensure_additive_store_schema()?;
+                Ok(())
+            }
+            found => Err(StoreError::UnsupportedSchema { found }),
+        }
+    }
+
+    /// Installs the additive identity, recovery, and external-job seams at
+    /// the canonical production-open boundary. These records must exist
+    /// before application code treats operation, attempt, or workspace facts
+    /// as authoritative; they are deliberately not installed by individual
+    /// lifecycle call sites or test fixtures.
+    fn ensure_additive_store_schema(&self) -> Result<(), StoreError> {
+        // In-memory stores are also used by focused tests that deliberately
+        // install a controlled database identity after opening. Do not claim
+        // a generated persistent identity for those ephemeral connections;
+        // persistent production paths, or an already identity-bound in-memory
+        // connection, still pass through the canonical install boundary.
+        let identity_installed = self.table_exists("boreal_database_identity")?;
+        let install_identity = || -> Result<(), StoreError> {
+            let source = self
+                .database_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ":memory:".to_owned());
+            let mut encoded = String::new();
+            for byte in source.as_bytes() {
+                write!(&mut encoded, "{byte:02x}")
+                    .expect("writing hexadecimal identity into String cannot fail");
+            }
+            let identity = identity::DatabaseIdentity::new(format!("boreal-db-{encoded}"), 1)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?;
+            identity::IdentityStore::new(self)
+                .install(&identity, &production_now())
+                .map(|_| ())
+                .map_err(|error| StoreError::Corrupt(error.to_string()))
+        };
+        if identity_installed {
+            match identity::IdentityStore::new(self).database_identity() {
+                Ok(_) => {}
+                Err(identity::IdentityError::Invalid { field, message })
+                    if field == "database_identity"
+                        && message == "database identity is not installed" =>
+                {
+                    if self.database_path.is_some() {
+                        install_identity()?;
+                    }
+                }
+                Err(error) => return Err(StoreError::Corrupt(error.to_string())),
+            }
+        } else {
+            return Err(StoreError::Corrupt(
+                "production schema is missing required additive table boreal_database_identity"
+                    .to_owned(),
+            ));
+        }
+        self.verify_additive_store_schema_contract()
+    }
+
+    /// Verifies the complete additive contract at the production-open
+    /// boundary.  Checking only table names is insufficient: a copied or
+    /// partially restored database can retain a table while losing the
+    /// columns, indexes, or append-only guards that make its records safe to
+    /// use.  This method is intentionally read-only; repair belongs to the
+    /// ordered migration runner, never to a lifecycle mutation.
+    fn verify_additive_store_schema_contract(&self) -> Result<(), StoreError> {
+        let required_columns = [
+            (
+                "boreal_database_identity",
+                "identity_id,database_instance_id,restore_epoch,created_at,updated_at",
+            ),
+            (
+                "boreal_project_identity",
+                "project_id,database_instance_id,restore_epoch,canonical_root,canonical_worktree,binding_digest,bound_at,updated_at",
+            ),
+            (
+                "boreal_entity_revision",
+                "project_id,work_id,entity_revision,proof_revision,updated_at",
+            ),
+            (
+                "boreal_attempt_fence_identity",
+                "project_id,work_id,attempt_id,fence,database_instance_id,restore_epoch,revoked,recorded_at",
+            ),
+            (
+                "boreal_operation_identity",
+                "operation_id,project_id,database_instance_id,restore_epoch,state,invalidated_at,invalidation_code",
+            ),
+            (
+                "boreal_revision_migration",
+                "project_id,work_id,legacy_snapshot_revision,entity_revision,proof_revision,disposition,provenance_json,migrated_at",
+            ),
+            (
+                "boreal_recovery_obligation",
+                "obligation_id,project_id,work_id,attempt_id,fence,reason,state,resource_state,owner_actor_id,next_action,created_at,resolved_at,resolved_by,resolution_id",
+            ),
+            (
+                "boreal_recovery_decision",
+                "decision_id,obligation_id,project_id,actor_id,outcome,reason,resource_state,created_at",
+            ),
+            (
+                "boreal_resource_reservation",
+                "reservation_id,project_id,work_id,attempt_id,fence,resource_key,resource_kind,state,owner_actor_id,created_at,release_requested_at,released_at,release_ack_id",
+            ),
+            (
+                "boreal_resource_release_event",
+                "event_id,reservation_id,project_id,state,actor_id,evidence_ref,created_at",
+            ),
+            (
+                "boreal_external_job",
+                "job_id,operation_id,project_id,subject_type,subject_id,kind,request_digest,stage,side_effect_ref,source_identity,config_identity,actor_id,session_id,started_at,deadline,result_digest,reconciliation_state,error_message,created_at,updated_at",
+            ),
+            (
+                "boreal_pinned_requirement",
+                "project_id,work_id,proof_revision,subject_kind,profile_id,profile_version,profile_digest,provenance_json,declarations_json,resolved_digest,pinned_at",
+            ),
+            (
+                "boreal_pinned_requirement_gate",
+                "project_id,work_id,proof_revision,requirement_id,gate_id,kind,required,subject_kind,profile_id,profile_version,profile_digest,provenance_json,declaration_json",
+            ),
+        ];
+        for (table, columns) in required_columns {
+            if !self.table_exists(table)? {
+                return Err(StoreError::Corrupt(format!(
+                    "production schema is missing required additive table {table}"
+                )));
+            }
+            for column in columns.split(',') {
+                if !self.table_has_column(table, column)? {
+                    return Err(StoreError::Corrupt(format!(
+                        "production schema table {table} is missing required column {column}"
+                    )));
+                }
+            }
+        }
+
+        for index in [
+            "boreal_attempt_fence_subject",
+            "boreal_operation_identity_scope",
+            "boreal_recovery_unresolved",
+            "boreal_recovery_decision_subject",
+            "boreal_resource_live_key",
+            "boreal_resource_attempt",
+            "boreal_resource_release_subject",
+            "boreal_external_job_project_stage",
+            "boreal_external_job_readback",
+            "boreal_pinned_requirement_project",
+            "attempt_current_work_owner",
+            "attempt_current_session_owner",
+        ] {
+            if !self.schema_object_exists("index", index)? {
+                return Err(StoreError::Corrupt(format!(
+                    "production schema is missing required additive index {index}"
+                )));
+            }
+        }
+        for trigger in [
+            "boreal_recovery_decision_append_only_update",
+            "boreal_recovery_decision_append_only_delete",
+            "boreal_pinned_requirement_immutable_update",
+            "boreal_pinned_requirement_immutable_delete",
+            "boreal_pinned_requirement_gate_immutable_update",
+            "boreal_pinned_requirement_gate_immutable_delete",
+        ] {
+            if !self.schema_object_exists("trigger", trigger)? {
+                return Err(StoreError::Corrupt(format!(
+                    "production schema is missing required additive trigger {trigger}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_production_schema_current(&self) -> Result<(), StoreError> {
+        // The v3 verifier checks the hierarchy extension; the base lifecycle
+        // contract remains independently authoritative for operation/audit
+        // and evidence semantics.
+        self.verify_schema_contract()?;
+        self.verify_work_model_v3_contract()?;
+        let plan = production_migration_plan().map_err(map_migration_error)?;
+        let identity = store_schema_identity(self)?;
+        if identity.schema_id != plan.schema_id
+            || identity.schema_version != plan.target_version
+            || identity.contract_version != plan.contract_version
+            || identity.schema_checksum.as_deref() != Some(plan.target_schema_checksum.as_str())
+        {
+            return Err(StoreError::Corrupt(
+                "production schema identity does not match the migration plan".to_owned(),
+            ));
+        }
+        self.execute_batch(PRODUCTION_VERIFY_SQL)?;
+        let entries = store_read_ledger(self)?;
+        let bootstrap = production_bootstrap_step(&plan).map_err(map_migration_error)?;
+        let step = plan
+            .steps
+            .first()
+            .ok_or_else(|| StoreError::Corrupt("production migration plan is empty".to_owned()))?;
+        let mut current_entry = false;
+        for (migration_id, expected_checksum) in [
+            (&bootstrap.migration_id, &bootstrap.checksum),
+            (&step.migration_id, &step.checksum),
+        ] {
+            let Some(latest) = entries
+                .iter()
+                .filter(|entry| entry.migration_id == *migration_id)
+                .max_by_key(|entry| entry.attempt)
+            else {
+                continue;
+            };
+            if latest.state == MigrationState::Applied && latest.checksum == *expected_checksum {
+                current_entry = true;
+            } else {
+                return Err(StoreError::Corrupt(format!(
+                    "production ledger entry {migration_id} is not the applied plan checksum"
+                )));
+            }
+        }
+        if !current_entry {
+            return Err(StoreError::Corrupt(
+                "production schema is missing an applied migration ledger entry".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Returns the identity of the SQLite library linked by this process.
@@ -1407,6 +1896,33 @@ impl SqliteStore {
                         "operation request digest mismatch".to_owned(),
                     ));
                 }
+                if existing.project_id != project_id
+                    || existing.command != "project.init"
+                    || existing.actor_id != actor_id
+                {
+                    return Err(StoreError::Conflict(
+                        "project initialization operation identity mismatch".to_owned(),
+                    ));
+                }
+                if self.canonical_production {
+                    let context =
+                        self.operation_identity_context(project_id)?
+                            .ok_or_else(|| {
+                                StoreError::Corrupt(
+                                    "canonical production operation has no identity context"
+                                        .to_owned(),
+                                )
+                            })?;
+                    let identity = operations::OperationIdentity::from_record(&existing, None);
+                    operations::OperationJournal::new(self)
+                        .replay_in_context(&context, &identity)?
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(
+                                "canonical production initialization replay is unreadable"
+                                    .to_owned(),
+                            )
+                        })?;
+                }
                 return Ok(MutationResult {
                     operation_id: operation_id.to_owned(),
                     revision: existing.revision,
@@ -1414,30 +1930,26 @@ impl SqliteStore {
                 });
             }
             self.ensure_actor(actor_id, actor_role, credential_ref, display_name, now)?;
-            self.ensure_acceptance_profile("focused", 1, "sha256:focused", "{}", now)?;
+            let focused_profile = profile_version_for_work(&AcceptanceProfile::focused(), now)?;
+            self.ensure_acceptance_profile(
+                &focused_profile.profile_id,
+                focused_profile.version,
+                &focused_profile.policy_digest,
+                &focused_profile.definition_json,
+                now,
+            )?;
             if self
                 .list_project_ids()?
                 .iter()
                 .any(|existing| existing == project_id)
             {
                 let revision = self.project_revision(project_id)?;
-                let payload = json_object(json!({"project_id": project_id}))?;
-                self.append_operation(&OperationRecord {
-                    operation_id: operation_id.to_owned(),
-                    project_id: project_id.to_owned(),
-                    command: "project.init".to_owned(),
-                    actor_id: actor_id.to_owned(),
-                    session_id: None,
-                    expected_revision: None,
-                    attempt_id: None,
-                    fence: None,
-                    request_digest: request_digest.to_owned(),
-                    outcome: OperationOutcome::Unchanged,
-                    result_json: payload,
-                    revision: revision.0,
-                    created_at: now.to_owned(),
-                    completed_at: Some(now.to_owned()),
-                })?;
+                // A project that already exists is a safe readback of the
+                // requested initialization state.  Do not manufacture an
+                // operation or audit event for a no-op, because there is no
+                // committed state transition to describe.  If the caller
+                // needs a durable operation, it must use the project-bound
+                // mutation boundary with an authenticated context.
                 return Ok(MutationResult {
                     operation_id: operation_id.to_owned(),
                     revision: revision.0,
@@ -1447,35 +1959,37 @@ impl SqliteStore {
             self.create_project(project_id, now)?;
             let revision = self.bump_revision_in_transaction(project_id)?;
             let payload = json_object(json!({"project_id": project_id}))?;
-            self.append_operation(&OperationRecord {
-                operation_id: operation_id.to_owned(),
-                project_id: project_id.to_owned(),
-                command: "project.init".to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                expected_revision: None,
-                attempt_id: None,
-                fence: None,
-                request_digest: request_digest.to_owned(),
-                outcome: OperationOutcome::Changed,
-                result_json: payload.clone(),
-                revision: revision.0,
-                created_at: now.to_owned(),
-                completed_at: Some(now.to_owned()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: project_id.to_owned(),
-                revision: revision.0,
-                operation_id: operation_id.to_owned(),
-                event_type: "work.created".to_owned(),
-                subject_type: "project".to_owned(),
-                subject_id: project_id.to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                fence: None,
-                as_of: now.to_owned(),
-                payload_json: payload,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: operation_id.to_owned(),
+                    project_id: project_id.to_owned(),
+                    command: "project.init".to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    expected_revision: None,
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request_digest.to_owned(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: revision.0,
+                    created_at: now.to_owned(),
+                    completed_at: Some(now.to_owned()),
+                },
+                AuditEventRecord {
+                    project_id: project_id.to_owned(),
+                    revision: revision.0,
+                    operation_id: operation_id.to_owned(),
+                    event_type: "work.created".to_owned(),
+                    subject_type: "project".to_owned(),
+                    subject_id: project_id.to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    fence: None,
+                    as_of: now.to_owned(),
+                    payload_json: payload,
+                },
+            )?;
             Ok(MutationResult {
                 operation_id: operation_id.to_owned(),
                 revision: revision.0,
@@ -1576,38 +2090,40 @@ impl SqliteStore {
                 "actor_id": request.actor_id,
                 "harness_id": request.harness_id,
             }))?;
-            self.append_operation(&OperationRecord {
-                operation_id: request.operation_id.clone(),
-                project_id: request.project_id.clone(),
-                command: "session.register".to_owned(),
-                actor_id: request.actor_id.clone(),
-                session_id: Some(request.session_id.clone()),
-                expected_revision: request.expected_project_revision,
-                attempt_id: None,
-                fence: None,
-                request_digest: request.request_digest.clone(),
-                outcome: OperationOutcome::Changed,
-                result_json: payload.clone(),
-                revision: revision.0,
-                created_at: request.started_at.clone(),
-                completed_at: Some(request.started_at.clone()),
-            })?;
-            // The frozen schema does not include a session-specific event
-            // value. Preserve the typed event in the payload while using the
-            // schema's generic correction event as the audit envelope.
-            self.append_audit_event(&AuditEventRecord {
-                project_id: request.project_id.clone(),
-                revision: revision.0,
-                operation_id: request.operation_id.clone(),
-                event_type: "repair.correction".to_owned(),
-                subject_type: "project".to_owned(),
-                subject_id: request.project_id.clone(),
-                actor_id: request.actor_id.clone(),
-                session_id: Some(request.session_id.clone()),
-                fence: None,
-                as_of: request.started_at.clone(),
-                payload_json: payload,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: request.operation_id.clone(),
+                    project_id: request.project_id.clone(),
+                    command: "session.register".to_owned(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: Some(request.session_id.clone()),
+                    expected_revision: request.expected_project_revision,
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request.request_digest.clone(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: revision.0,
+                    created_at: request.started_at.clone(),
+                    completed_at: Some(request.started_at.clone()),
+                },
+                AuditEventRecord {
+                    // The frozen schema does not include a session-specific event
+                    // value. Preserve the typed event in the payload while using
+                    // the schema's generic correction event as the audit envelope.
+                    project_id: request.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: request.operation_id.clone(),
+                    event_type: "repair.correction".to_owned(),
+                    subject_type: "project".to_owned(),
+                    subject_id: request.project_id.clone(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: Some(request.session_id.clone()),
+                    fence: None,
+                    as_of: request.started_at.clone(),
+                    payload_json: payload,
+                },
+            )?;
 
             let session = self
                 .session(&request.project_id, &request.session_id)?
@@ -1760,38 +2276,40 @@ impl SqliteStore {
                 "session_id": session_id,
                 "actor_id": actor_id,
             }))?;
-            self.append_operation(&OperationRecord {
-                operation_id: operation_id.to_owned(),
-                project_id: project_id.to_owned(),
-                command: "session.end".to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: Some(session_id.to_owned()),
-                expected_revision: expected_project_revision,
-                attempt_id: None,
-                fence: None,
-                request_digest: request_digest.to_owned(),
-                outcome: OperationOutcome::Changed,
-                result_json: payload.clone(),
-                revision: revision.0,
-                created_at: ended_at.to_owned(),
-                completed_at: Some(ended_at.to_owned()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: project_id.to_owned(),
-                revision: revision.0,
-                operation_id: operation_id.to_owned(),
-                event_type: "repair.correction".to_owned(),
-                // Schema-2 audit envelopes predate a `session` subject type;
-                // retain the precise session identity in payload while using
-                // the compatible project subject for the envelope.
-                subject_type: "project".to_owned(),
-                subject_id: project_id.to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: Some(session_id.to_owned()),
-                fence: None,
-                as_of: ended_at.to_owned(),
-                payload_json: payload,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: operation_id.to_owned(),
+                    project_id: project_id.to_owned(),
+                    command: "session.end".to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: Some(session_id.to_owned()),
+                    expected_revision: expected_project_revision,
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request_digest.to_owned(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: revision.0,
+                    created_at: ended_at.to_owned(),
+                    completed_at: Some(ended_at.to_owned()),
+                },
+                AuditEventRecord {
+                    project_id: project_id.to_owned(),
+                    revision: revision.0,
+                    operation_id: operation_id.to_owned(),
+                    event_type: "repair.correction".to_owned(),
+                    // Schema-2 audit envelopes predate a `session` subject type;
+                    // retain the precise session identity in payload while using
+                    // the compatible project subject for the envelope.
+                    subject_type: "project".to_owned(),
+                    subject_id: project_id.to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: Some(session_id.to_owned()),
+                    fence: None,
+                    as_of: ended_at.to_owned(),
+                    payload_json: payload,
+                },
+            )?;
             let session = self
                 .session(project_id, session_id)?
                 .ok_or_else(|| StoreError::Corrupt("ended session was not readable".to_owned()))?;
@@ -1961,11 +2479,57 @@ impl SqliteStore {
         definition_json: &str,
         now: &str,
     ) -> Result<(), StoreError> {
+        let mut existing = self.prepare(
+            "SELECT policy_digest, definition_json
+             FROM acceptance_profile
+             WHERE profile_id = ?1 AND version = ?2",
+        )?;
+        existing.bind_text(1, profile_id)?;
+        existing.bind_i64(2, version)?;
+        if existing.step()? == SQLITE_ROW {
+            let existing_digest = existing.column_text(0)?;
+            let existing_definition = existing.column_text(1)?;
+            if existing_digest == policy_digest && existing_definition == definition_json {
+                return Ok(());
+            }
+            // An empty legacy row is an explicitly non-authoritative
+            // placeholder. Replace it only when the caller supplies a
+            // complete, immutable definition; never overwrite non-empty
+            // profile content.
+            if existing_definition == "{}" && definition_json != "{}" {
+                let mut repair = self.prepare(
+                    "UPDATE acceptance_profile
+                     SET policy_digest = ?1, definition_json = ?2, created_at = ?3
+                     WHERE profile_id = ?4 AND version = ?5 AND definition_json = '{}'",
+                )?;
+                repair.bind_text(1, policy_digest)?;
+                repair.bind_text(2, definition_json)?;
+                repair.bind_text(3, now)?;
+                repair.bind_text(4, profile_id)?;
+                repair.bind_i64(5, version)?;
+                repair.run()?;
+                if repair.changes()? == 1 {
+                    return Ok(());
+                }
+                return Err(StoreError::Conflict(format!(
+                    "acceptance profile {profile_id} v{version} placeholder changed during reconstruction"
+                )));
+            }
+            // Empty definitions are legacy placeholders, not authoritative
+            // profile content. Preserve the row for the explicit quarantine
+            // or provenance-backed reconstruction path instead of treating a
+            // historical placeholder digest as immutable policy content.
+            if existing_definition == "{}" && definition_json == "{}" {
+                return Ok(());
+            }
+            return Err(StoreError::Conflict(format!(
+                "acceptance profile {profile_id} v{version} conflicts with immutable content"
+            )));
+        }
         let mut statement = self.prepare(
             "INSERT INTO acceptance_profile
              (profile_id, version, policy_digest, definition_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(profile_id, version) DO NOTHING",
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
         statement.bind_text(1, profile_id)?;
         statement.bind_i64(2, version)?;
@@ -1983,11 +2547,12 @@ impl SqliteStore {
 
     fn create_work_in_transaction(&self, work: &WorkItem, now: &str) -> Result<(), StoreError> {
         let profile_version = profile_version(&work.acceptance_profile.version)?;
+        let profile = profile_version_for_work(&work.acceptance_profile, now)?;
         self.ensure_acceptance_profile(
             work.acceptance_profile.id.as_str(),
             profile_version,
-            &format!("sha256:{}", work.acceptance_profile.id),
-            "{}",
+            &profile.policy_digest,
+            &profile.definition_json,
             now,
         )?;
         let mut statement = self.prepare(
@@ -2010,6 +2575,19 @@ impl SqliteStore {
         statement.bind_text(11, &work.description)?;
         statement.bind_text(12, now)?;
         statement.run()?;
+
+        let requirements = PinnedRequirements::resolve(
+            &profile,
+            work.project_id.as_str(),
+            work.id.as_str(),
+            1,
+            match work.kind {
+                WorkKind::Task => RequirementSubjectKind::Task,
+                WorkKind::Milestone | WorkKind::Sprint => RequirementSubjectKind::Container,
+            },
+            now,
+        )?;
+        ProfileStore::new(self).persist_pinned_requirements_in_transaction(&requirements)?;
 
         for (index, hold) in work.hard_holds.iter().enumerate() {
             let hold_id = format!("{}:hold:{}", work.id, index);
@@ -2063,11 +2641,13 @@ impl SqliteStore {
     /// indexed, keyset-paginated lookup for adapter selection; the canonical
     /// claim transaction still rechecks eligibility under its write lock.
     /// Callers must continue with the returned last ID rather than treating a
-    /// first page as an existence boundary.
+    /// first page as an existence boundary. This is a superset: timer/profile
+    /// eligibility is evaluated by the domain inside claim, not by lexical SQL
+    /// timestamp comparison. Continue after a rejected candidate.
     pub fn claimable_work_candidates(
         &self,
         project_id: &str,
-        now: &str,
+        _now: &str,
         limit: u64,
         after_work_id: Option<&str>,
     ) -> Result<Vec<String>, StoreError> {
@@ -2083,8 +2663,7 @@ impl SqliteStore {
                AND wi.lifecycle = 'open'
                AND wi.kind = 'task'
                AND wi.dispatch_policy = 'automatic'
-               AND (wi.retry_not_before IS NULL OR wi.retry_not_before <= ?2)
-               AND (?3 IS NULL OR wi.work_id > ?3)
+               AND (?2 IS NULL OR wi.work_id > ?2)
                AND NOT EXISTS (
                  SELECT 1 FROM attempt a
                  WHERE a.work_id = wi.work_id AND a.current = 1
@@ -2102,18 +2681,40 @@ impl SqliteStore {
                    AND d.dependent_id = wi.work_id
                    AND blocker.lifecycle <> 'closed'
                )
+               AND NOT EXISTS (
+                 SELECT 1 FROM boreal_recovery_obligation r
+                 WHERE r.project_id = wi.project_id
+                   AND r.work_id = wi.work_id
+                   AND r.state = 'unresolved'
+               )
              ORDER BY wi.work_id
-             LIMIT ?4",
+             LIMIT ?3",
         )?;
         statement.bind_text(1, project_id)?;
-        statement.bind_text(2, now)?;
-        statement.bind_optional_text(3, after_work_id)?;
-        statement.bind_i64(4, limit)?;
+        statement.bind_optional_text(2, after_work_id)?;
+        statement.bind_i64(3, limit)?;
         let mut ids = Vec::new();
         while statement.step()? == SQLITE_ROW {
             ids.push(statement.column_text(0)?);
         }
         Ok(ids)
+    }
+
+    fn has_unresolved_recovery(&self, project_id: &str, work_id: &str) -> Result<bool, StoreError> {
+        if !self.table_exists("boreal_recovery_obligation")? {
+            return Err(StoreError::Corrupt(
+                "production schema is missing recovery obligations".to_owned(),
+            ));
+        }
+        let mut statement = self.prepare(
+            "SELECT 1
+             FROM boreal_recovery_obligation
+             WHERE project_id = ?1 AND work_id = ?2 AND state = 'unresolved'
+             LIMIT 1",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, work_id)?;
+        Ok(statement.step()? == SQLITE_ROW)
     }
 
     pub fn work_holds(&self, work_id: &str) -> Result<Vec<WorkHoldRecord>, StoreError> {
@@ -2345,7 +2946,7 @@ impl SqliteStore {
             self.create_work_in_transaction(work, now)?;
             let revision = self.bump_revision_in_transaction(work.project_id.as_str())?;
             let payload = json_object(json!({"work_id": work.id.as_str()}))?;
-            self.append_operation(&OperationRecord {
+            let operation = OperationRecord {
                 operation_id: operation_id.to_owned(),
                 project_id: work.project_id.to_string(),
                 command: "work.create".to_owned(),
@@ -2360,8 +2961,8 @@ impl SqliteStore {
                 revision: revision.0,
                 created_at: now.to_owned(),
                 completed_at: Some(now.to_owned()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
+            };
+            let audit = AuditEventRecord {
                 project_id: work.project_id.to_string(),
                 revision: revision.0,
                 operation_id: operation_id.to_owned(),
@@ -2373,7 +2974,8 @@ impl SqliteStore {
                 fence: None,
                 as_of: now.to_owned(),
                 payload_json: payload,
-            })?;
+            };
+            self.append_operation_audit_in_transaction(operation, audit)?;
             Ok(MutationResult {
                 operation_id: operation_id.to_owned(),
                 revision: revision.0,
@@ -2514,35 +3116,37 @@ impl SqliteStore {
                     "dispatch_policy": input.dispatch_policy,
                 }
             }))?;
-            self.append_operation(&OperationRecord {
-                operation_id: operation_id.to_owned(),
-                project_id: input.project_id.clone(),
-                command: "work.edit".to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                expected_revision: Some(expected_revision),
-                attempt_id: None,
-                fence: None,
-                request_digest: request_digest.to_owned(),
-                outcome: OperationOutcome::Changed,
-                result_json: payload.clone(),
-                revision: revision.0,
-                created_at: now.to_owned(),
-                completed_at: Some(now.to_owned()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: input.project_id.clone(),
-                revision: revision.0,
-                operation_id: operation_id.to_owned(),
-                event_type: "repair.correction".to_owned(),
-                subject_type: "work".to_owned(),
-                subject_id: input.work_id.clone(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                fence: None,
-                as_of: now.to_owned(),
-                payload_json: payload,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: operation_id.to_owned(),
+                    project_id: input.project_id.clone(),
+                    command: "work.edit".to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    expected_revision: Some(expected_revision),
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request_digest.to_owned(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: revision.0,
+                    created_at: now.to_owned(),
+                    completed_at: Some(now.to_owned()),
+                },
+                AuditEventRecord {
+                    project_id: input.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: operation_id.to_owned(),
+                    event_type: "repair.correction".to_owned(),
+                    subject_type: "work".to_owned(),
+                    subject_id: input.work_id.clone(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    fence: None,
+                    as_of: now.to_owned(),
+                    payload_json: payload,
+                },
+            )?;
             Ok(MutationResult {
                 operation_id: operation_id.to_owned(),
                 revision: revision.0,
@@ -2596,35 +3200,37 @@ impl SqliteStore {
                 "prerequisite_id": prerequisite_id,
                 "dependent_id": dependent_id,
             }))?;
-            self.append_operation(&OperationRecord {
-                operation_id: operation_id.to_owned(),
-                project_id: project_id.to_owned(),
-                command: "dependency.remove".to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                expected_revision: Some(expected_revision),
-                attempt_id: None,
-                fence: None,
-                request_digest: request_digest.to_owned(),
-                outcome: OperationOutcome::Changed,
-                result_json: payload.clone(),
-                revision: revision.0,
-                created_at: now.to_owned(),
-                completed_at: Some(now.to_owned()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: project_id.to_owned(),
-                revision: revision.0,
-                operation_id: operation_id.to_owned(),
-                event_type: "repair.correction".to_owned(),
-                subject_type: "dependency".to_owned(),
-                subject_id: dependent_id.to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                fence: None,
-                as_of: now.to_owned(),
-                payload_json: payload,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: operation_id.to_owned(),
+                    project_id: project_id.to_owned(),
+                    command: "dependency.remove".to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    expected_revision: Some(expected_revision),
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request_digest.to_owned(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: revision.0,
+                    created_at: now.to_owned(),
+                    completed_at: Some(now.to_owned()),
+                },
+                AuditEventRecord {
+                    project_id: project_id.to_owned(),
+                    revision: revision.0,
+                    operation_id: operation_id.to_owned(),
+                    event_type: "repair.correction".to_owned(),
+                    subject_type: "dependency".to_owned(),
+                    subject_id: dependent_id.to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    fence: None,
+                    as_of: now.to_owned(),
+                    payload_json: payload,
+                },
+            )?;
             Ok(MutationResult {
                 operation_id: operation_id.to_owned(),
                 revision: revision.0,
@@ -2688,35 +3294,37 @@ impl SqliteStore {
             let payload = json_object(
                 json!({"work_id": input.work_id, "hold_id": hold_id, "reason_code": input.reason_code}),
             )?;
-            self.append_operation(&OperationRecord {
-                operation_id: operation_id.to_owned(),
-                project_id: input.project_id.clone(),
-                command: "work.hold.add".to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                expected_revision: Some(expected_revision),
-                attempt_id: None,
-                fence: None,
-                request_digest: request_digest.to_owned(),
-                outcome: OperationOutcome::Changed,
-                result_json: payload.clone(),
-                revision: revision.0,
-                created_at: now.to_owned(),
-                completed_at: Some(now.to_owned()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: input.project_id.clone(),
-                revision: revision.0,
-                operation_id: operation_id.to_owned(),
-                event_type: "repair.correction".to_owned(),
-                subject_type: "hold".to_owned(),
-                subject_id: input.work_id.clone(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                fence: None,
-                as_of: now.to_owned(),
-                payload_json: payload,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: operation_id.to_owned(),
+                    project_id: input.project_id.clone(),
+                    command: "work.hold.add".to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    expected_revision: Some(expected_revision),
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request_digest.to_owned(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: revision.0,
+                    created_at: now.to_owned(),
+                    completed_at: Some(now.to_owned()),
+                },
+                AuditEventRecord {
+                    project_id: input.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: operation_id.to_owned(),
+                    event_type: "repair.correction".to_owned(),
+                    subject_type: "hold".to_owned(),
+                    subject_id: input.work_id.clone(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    fence: None,
+                    as_of: now.to_owned(),
+                    payload_json: payload,
+                },
+            )?;
             Ok(MutationResult {
                 operation_id: operation_id.to_owned(),
                 revision: revision.0,
@@ -2742,6 +3350,11 @@ impl SqliteStore {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             if let Some(existing) = self.operation(operation_id)? {
+                if existing.actor_id != actor_id || existing.command != "work.hold.resolve" {
+                    return Err(StoreError::Conflict(
+                        "operation actor or command differs".to_owned(),
+                    ));
+                }
                 return replay_mutation_operation(
                     project_id,
                     operation_id,
@@ -2749,7 +3362,17 @@ impl SqliteStore {
                     &existing,
                 );
             }
-            self.require_actor(actor_id)?;
+            if self.actor_context(actor_id)?.role != boreal_domain::ActorRole::Operator {
+                return Err(StoreError::Conflict(
+                    "role_denied: hold resolution requires operator".to_owned(),
+                ));
+            }
+            if self.work(project_id, work_id)?.is_none() {
+                return Err(StoreError::NotFound {
+                    entity: "project work",
+                    id: work_id.to_owned(),
+                });
+            }
             if resolution_reason.trim().is_empty() {
                 return Err(StoreError::Invalid(
                     "hold resolution reason is required".to_owned(),
@@ -2777,35 +3400,37 @@ impl SqliteStore {
             let payload = json_object(
                 json!({"work_id": work_id, "hold_id": hold_id, "resolution_reason": resolution_reason}),
             )?;
-            self.append_operation(&OperationRecord {
-                operation_id: operation_id.to_owned(),
-                project_id: project_id.to_owned(),
-                command: "work.hold.resolve".to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                expected_revision: Some(expected_revision),
-                attempt_id: None,
-                fence: None,
-                request_digest: request_digest.to_owned(),
-                outcome: OperationOutcome::Changed,
-                result_json: payload.clone(),
-                revision: revision.0,
-                created_at: now.to_owned(),
-                completed_at: Some(now.to_owned()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: project_id.to_owned(),
-                revision: revision.0,
-                operation_id: operation_id.to_owned(),
-                event_type: "hold.resolved".to_owned(),
-                subject_type: "hold".to_owned(),
-                subject_id: hold_id.to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                fence: None,
-                as_of: now.to_owned(),
-                payload_json: payload,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: operation_id.to_owned(),
+                    project_id: project_id.to_owned(),
+                    command: "work.hold.resolve".to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    expected_revision: Some(expected_revision),
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request_digest.to_owned(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: revision.0,
+                    created_at: now.to_owned(),
+                    completed_at: Some(now.to_owned()),
+                },
+                AuditEventRecord {
+                    project_id: project_id.to_owned(),
+                    revision: revision.0,
+                    operation_id: operation_id.to_owned(),
+                    event_type: "hold.resolved".to_owned(),
+                    subject_type: "hold".to_owned(),
+                    subject_id: hold_id.to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    fence: None,
+                    as_of: now.to_owned(),
+                    payload_json: payload,
+                },
+            )?;
             Ok(MutationResult {
                 operation_id: operation_id.to_owned(),
                 revision: revision.0,
@@ -2874,35 +3499,37 @@ impl SqliteStore {
                 "prerequisite_id": prerequisite_id,
                 "dependent_id": dependent_id,
             }))?;
-            self.append_operation(&OperationRecord {
-                operation_id: operation_id.to_owned(),
-                project_id: project_id.to_owned(),
-                command: "dependency.add".to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                expected_revision: Some(expected_revision),
-                attempt_id: None,
-                fence: None,
-                request_digest: request_digest.to_owned(),
-                outcome: OperationOutcome::Changed,
-                result_json: payload.clone(),
-                revision: revision.0,
-                created_at: now.to_owned(),
-                completed_at: Some(now.to_owned()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: project_id.to_owned(),
-                revision: revision.0,
-                operation_id: operation_id.to_owned(),
-                event_type: "work.created".to_owned(),
-                subject_type: "dependency".to_owned(),
-                subject_id: dependent_id.to_owned(),
-                actor_id: actor_id.to_owned(),
-                session_id: None,
-                fence: None,
-                as_of: now.to_owned(),
-                payload_json: payload,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: operation_id.to_owned(),
+                    project_id: project_id.to_owned(),
+                    command: "dependency.add".to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    expected_revision: Some(expected_revision),
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request_digest.to_owned(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: revision.0,
+                    created_at: now.to_owned(),
+                    completed_at: Some(now.to_owned()),
+                },
+                AuditEventRecord {
+                    project_id: project_id.to_owned(),
+                    revision: revision.0,
+                    operation_id: operation_id.to_owned(),
+                    event_type: "work.created".to_owned(),
+                    subject_type: "dependency".to_owned(),
+                    subject_id: dependent_id.to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    fence: None,
+                    as_of: now.to_owned(),
+                    payload_json: payload,
+                },
+            )?;
             Ok(MutationResult {
                 operation_id: operation_id.to_owned(),
                 revision: revision.0,
@@ -2980,129 +3607,133 @@ impl SqliteStore {
     /// may apply the application projection and pagination afterward.
     pub fn read_project_status(&self, project_id: &str) -> Result<ProjectStatusRead, StoreError> {
         self.execute_batch("BEGIN")?;
-        let result = (|| {
-            let revision = self.project_revision(project_id)?;
-            let mut count = self.prepare("SELECT COUNT(*) FROM work_item WHERE project_id = ?1")?;
-            count.bind_text(1, project_id)?;
-            let total = match count.step()? {
-                SQLITE_ROW => count.column_u64(0)?,
-                _ => return Err(StoreError::Corrupt("missing work total".to_owned())),
-            };
-
-            // These two relations are independent of each work row. Fetching
-            // them once keeps the canonical read consistent while removing
-            // two avoidable N+1 query families from large status snapshots.
-            let current_attempts = self.current_attempts_for_project(project_id)?;
-            let active_holds = self.active_hard_holds_for_project(project_id)?;
-            let gate_diagnostics = self.status_gate_diagnostics_for_project(
-                project_id,
-                &current_attempts,
-                revision.0,
-            )?;
-
-            let mut rows = self.prepare(
-                "SELECT work_id, project_id, kind, parent_id, lifecycle,
-                        dispatch_policy, retry_not_before, priority,
-                        acceptance_profile_id, acceptance_profile_version,
-                        title, description
-                 FROM work_item WHERE project_id = ?1 ORDER BY work_id",
-            )?;
-            rows.bind_text(1, project_id)?;
-            let mut works = Vec::with_capacity(total as usize);
-            let mut record_diagnostics = Vec::new();
-            while rows.step()? == SQLITE_ROW {
-                let work_id = rows.column_text(0)?;
-                let current_attempt = current_attempts.get(&work_id).cloned();
-                let diagnostics =
-                    gate_diagnostics
-                        .get(&work_id)
-                        .cloned()
-                        .unwrap_or_else(|| GateDiagnostics {
-                            project_id: project_id.to_owned(),
-                            work_id: work_id.clone(),
-                            attempt_id: current_attempt
-                                .as_ref()
-                                .map(|attempt| attempt.attempt_id.clone()),
-                            fence: current_attempt.as_ref().map(|attempt| attempt.fence),
-                            revision: revision.0,
-                            gates: Vec::new(),
-                            missing: Vec::new(),
-                        });
-                let gates = diagnostics
-                    .gates
-                    .iter()
-                    .map(|gate| GateRequirement {
-                        id: gate.gate_id.clone().into(),
-                        kind: gate.kind,
-                        required: gate.required,
-                        state: gate.state,
-                    })
-                    .collect();
-                let title = rows.column_text(10).ok();
-                let work = (|| {
-                    Ok::<WorkItem, StoreError>(WorkItem {
-                        id: WorkId::new(work_id.clone()),
-                        project_id: ProjectId::new(rows.column_text(1)?),
-                        kind: parse_work_kind(&rows.column_text(2)?)?,
-                        parent_id: rows.column_optional_text(3)?.map(WorkId::new),
-                        title: rows.column_text(10)?,
-                        description: rows.column_text(11)?,
-                        lifecycle: parse_lifecycle(&rows.column_text(4)?)?,
-                        priority: u8::try_from(rows.column_u64(7)?).map_err(|_| {
-                            StoreError::Corrupt(format!(
-                                "work {work_id} has priority outside u8 range"
-                            ))
-                        })?,
-                        dispatch_policy: parse_dispatch_policy(&rows.column_text(5)?)?,
-                        hard_holds: active_holds.get(&work_id).cloned().unwrap_or_default(),
-                        acceptance_profile: AcceptanceProfile {
-                            id: ProfileId::new(rows.column_text(8)?),
-                            version: rows.column_u64(9)?.to_string(),
-                            gates,
-                        },
-                    })
-                })();
-                match work {
-                    Ok(work) => works.push(StatusWorkRecord {
-                        work,
-                        retry_not_before: rows.column_optional_text(6)?,
-                        current_attempt,
-                        gate_diagnostics: diagnostics,
-                    }),
-                    Err(error) => record_diagnostics.push(StatusRecordDiagnostic {
-                        work_id,
-                        title,
-                        code: "corrupt_record".to_owned(),
-                        detail: error.to_string(),
-                    }),
-                }
-            }
-
-            let mut dependencies = Vec::new();
-            let mut edges = self.prepare(
-                "SELECT prerequisite_id, dependent_id, satisfaction_policy
-                 FROM dependency WHERE project_id = ?1
-                 ORDER BY prerequisite_id, dependent_id",
-            )?;
-            edges.bind_text(1, project_id)?;
-            while edges.step()? == SQLITE_ROW {
-                dependencies.push(StatusDependencyRecord {
-                    prerequisite_id: WorkId::new(edges.column_text(0)?),
-                    dependent_id: WorkId::new(edges.column_text(1)?),
-                    policy: parse_dependency_policy(&edges.column_text(2)?)?,
-                });
-            }
-
-            Ok(ProjectStatusRead {
-                project_id: ProjectId::new(project_id),
-                revision,
-                total,
-                works,
-                diagnostics: record_diagnostics,
-                dependencies,
-            })
-        })();
+        let result = self.read_project_status_in_transaction(project_id);
         finish_transaction(self, result)
+    }
+
+    // Used by both read transactions and the canonical claim write transaction.
+    // The caller owns the transaction boundary; never open a nested BEGIN here.
+    fn read_project_status_in_transaction(
+        &self,
+        project_id: &str,
+    ) -> Result<ProjectStatusRead, StoreError> {
+        let revision = self.project_revision(project_id)?;
+        let mut count = self.prepare("SELECT COUNT(*) FROM work_item WHERE project_id = ?1")?;
+        count.bind_text(1, project_id)?;
+        let total = match count.step()? {
+            SQLITE_ROW => count.column_u64(0)?,
+            _ => return Err(StoreError::Corrupt("missing work total".to_owned())),
+        };
+
+        // These two relations are independent of each work row. Fetching
+        // them once keeps the canonical read consistent while removing
+        // two avoidable N+1 query families from large status snapshots.
+        let current_attempts = self.current_attempts_for_project(project_id)?;
+        let active_holds = self.active_hard_holds_for_project(project_id)?;
+        let gate_diagnostics =
+            self.status_gate_diagnostics_for_project(project_id, &current_attempts, revision.0)?;
+
+        let mut rows = self.prepare(
+            "SELECT work_id, project_id, kind, parent_id, lifecycle,
+                    dispatch_policy, retry_not_before, priority,
+                    acceptance_profile_id, acceptance_profile_version,
+                    title, description
+             FROM work_item WHERE project_id = ?1 ORDER BY work_id",
+        )?;
+        rows.bind_text(1, project_id)?;
+        let mut works = Vec::with_capacity(total as usize);
+        let mut record_diagnostics = Vec::new();
+        while rows.step()? == SQLITE_ROW {
+            let work_id = rows.column_text(0)?;
+            let current_attempt = current_attempts.get(&work_id).cloned();
+            let diagnostics =
+                gate_diagnostics
+                    .get(&work_id)
+                    .cloned()
+                    .unwrap_or_else(|| GateDiagnostics {
+                        project_id: project_id.to_owned(),
+                        work_id: work_id.clone(),
+                        attempt_id: current_attempt
+                            .as_ref()
+                            .map(|attempt| attempt.attempt_id.clone()),
+                        fence: current_attempt.as_ref().map(|attempt| attempt.fence),
+                        revision: revision.0,
+                        gates: Vec::new(),
+                        missing: Vec::new(),
+                    });
+            let gates = diagnostics
+                .gates
+                .iter()
+                .map(|gate| GateRequirement {
+                    id: gate.gate_id.clone().into(),
+                    kind: gate.kind,
+                    required: gate.required,
+                    state: gate.state,
+                })
+                .collect();
+            let title = rows.column_text(10).ok();
+            let work = (|| {
+                Ok::<WorkItem, StoreError>(WorkItem {
+                    id: WorkId::new(work_id.clone()),
+                    project_id: ProjectId::new(rows.column_text(1)?),
+                    kind: parse_work_kind(&rows.column_text(2)?)?,
+                    parent_id: rows.column_optional_text(3)?.map(WorkId::new),
+                    title: rows.column_text(10)?,
+                    description: rows.column_text(11)?,
+                    lifecycle: parse_lifecycle(&rows.column_text(4)?)?,
+                    priority: u8::try_from(rows.column_u64(7)?).map_err(|_| {
+                        StoreError::Corrupt(format!("work {work_id} has priority outside u8 range"))
+                    })?,
+                    dispatch_policy: parse_dispatch_policy(&rows.column_text(5)?)?,
+                    hard_holds: active_holds.get(&work_id).cloned().unwrap_or_default(),
+                    acceptance_profile: AcceptanceProfile {
+                        id: ProfileId::new(rows.column_text(8)?),
+                        version: rows.column_u64(9)?.to_string(),
+                        gates,
+                    },
+                })
+            })();
+            match work {
+                Ok(work) => works.push(StatusWorkRecord {
+                    work,
+                    retry_not_before: rows.column_optional_text(6)?,
+                    current_attempt,
+                    gate_diagnostics: diagnostics,
+                }),
+                Err(error) => record_diagnostics.push(StatusRecordDiagnostic {
+                    work_id,
+                    title,
+                    code: "corrupt_record".to_owned(),
+                    detail: error.to_string(),
+                }),
+            }
+        }
+
+        let mut dependencies = Vec::new();
+        let mut edges = self.prepare(
+            "SELECT prerequisite_id, dependent_id, satisfaction_policy
+             FROM dependency WHERE project_id = ?1
+             ORDER BY prerequisite_id, dependent_id",
+        )?;
+        edges.bind_text(1, project_id)?;
+        while edges.step()? == SQLITE_ROW {
+            dependencies.push(StatusDependencyRecord {
+                prerequisite_id: WorkId::new(edges.column_text(0)?),
+                dependent_id: WorkId::new(edges.column_text(1)?),
+                policy: parse_dependency_policy(&edges.column_text(2)?)?,
+            });
+        }
+
+        let mut snapshot = ProjectStatusRead {
+            project_id: ProjectId::new(project_id),
+            revision,
+            total,
+            works,
+            diagnostics: record_diagnostics,
+            dependencies,
+        };
+        status_evaluation::diagnose_status_integrity(&mut snapshot);
+        Ok(snapshot)
     }
 
     /// Atomically reserves one eligible task, records its operation and audit
@@ -3202,33 +3833,28 @@ impl SqliteStore {
                 self.session_for_claim(project_id, session_id, actor_id, harness_id)?;
             }
 
-            let mut candidate = self.prepare(
-                "SELECT wi.work_id
-                 FROM work_item wi
-                 WHERE wi.project_id = ?1 AND wi.work_id = ?2
-                   AND wi.lifecycle = 'open'
-                   AND wi.kind = 'task'
-                   AND wi.dispatch_policy = 'automatic'
-                   AND (wi.retry_not_before IS NULL OR wi.retry_not_before <= ?3)
-                   AND NOT EXISTS (
-                     SELECT 1 FROM attempt a WHERE a.work_id = wi.work_id AND a.current = 1
-                   )
-                   AND NOT EXISTS (
-                     SELECT 1 FROM dependency d
-                     JOIN work_item blocker
-                       ON blocker.project_id = d.project_id AND blocker.work_id = d.prerequisite_id
-                     WHERE d.project_id = wi.project_id
-                       AND d.dependent_id = wi.work_id
-                       AND blocker.lifecycle <> 'closed'
-                   )",
-            )?;
-            candidate.bind_text(1, project_id)?;
-            candidate.bind_text(2, work_id)?;
-            candidate.bind_text(3, claimed_at)?;
-            if candidate.step()? != SQLITE_ROW {
+            if self.has_unresolved_recovery(project_id, work_id)? {
                 return Err(StoreError::Conflict(
-                    "work is not currently claimable at the requested revision".to_owned(),
+                    "recovery_required: resolve the prior attempt obligation before claiming"
+                        .to_owned(),
                 ));
+            }
+
+            let claimed_at_ms = status_evaluation::canonical_status_timestamp(claimed_at)?;
+            let lease_at_ms = status_evaluation::canonical_status_timestamp(lease_deadline)?;
+            let hard_at_ms = status_evaluation::canonical_status_timestamp(max_attempt_deadline)?;
+            if lease_at_ms <= claimed_at_ms || hard_at_ms <= claimed_at_ms {
+                return Err(StoreError::Invalid(
+                    "claim deadlines must be strictly after claimed_at".to_owned(),
+                ));
+            }
+            let decision =
+                self.status_decision_in_transaction(project_id, work_id, actor_id, claimed_at_ms)?;
+            if !decision.claimable_for_actor {
+                return Err(StoreError::Conflict(format!(
+                    "not_claimable: {}",
+                    decision.primary_reason.stable_code()
+                )));
             }
 
             let fence = self.next_fence(work_id)?;
@@ -3286,8 +3912,7 @@ impl SqliteStore {
                 created_at: claimed_at.to_owned(),
                 completed_at: Some(claimed_at.to_owned()),
             };
-            self.append_operation(&operation)?;
-            self.append_audit_event(&AuditEventRecord {
+            let audit = AuditEventRecord {
                 project_id: project_id.to_owned(),
                 revision: revision.0,
                 operation_id: operation_id.to_owned(),
@@ -3299,7 +3924,8 @@ impl SqliteStore {
                 fence: Some(fence),
                 as_of: claimed_at.to_owned(),
                 payload_json: operation.result_json.clone(),
-            })?;
+            };
+            self.append_operation_audit_in_transaction(operation, audit)?;
             Ok(ClaimResult {
                 operation_id: operation_id.to_owned(),
                 attempt_id: attempt_id.to_owned(),
@@ -3468,13 +4094,47 @@ impl SqliteStore {
         revision: u64,
     ) -> Result<BTreeMap<String, GateDiagnostics>, StoreError> {
         let mut gate_rows = Vec::new();
-        let mut statement = self.prepare(
+        let gate_query = if self.table_exists("boreal_pinned_requirement")?
+            && self.table_exists("boreal_pinned_requirement_gate")?
+        {
+            "SELECT p.work_id, p.work_id || ':' || r.gate_id,
+                    p.profile_id, p.profile_version, r.kind, r.required,
+                    COALESCE(observed.state, 'open')
+             FROM boreal_pinned_requirement p
+             JOIN boreal_pinned_requirement_gate r
+               ON r.project_id = p.project_id
+              AND r.work_id = p.work_id
+              AND r.proof_revision = p.proof_revision
+             LEFT JOIN gate observed
+               ON observed.work_id = p.work_id
+              AND observed.gate_id = p.work_id || ':' || r.gate_id
+             WHERE p.project_id = ?1
+               AND p.proof_revision = (
+                 SELECT MAX(current.proof_revision)
+                 FROM boreal_pinned_requirement current
+                 WHERE current.project_id = p.project_id
+                   AND current.work_id = p.work_id
+               )
+             UNION ALL
+             SELECT g.work_id, g.gate_id, g.profile_id, g.profile_version,
+                    g.kind, g.required, g.state
+             FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
+             WHERE wi.project_id = ?1
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM boreal_pinned_requirement p
+                 WHERE p.project_id = wi.project_id
+                   AND p.work_id = wi.work_id
+               )
+             ORDER BY 1, 2"
+        } else {
             "SELECT g.work_id, g.gate_id, g.profile_id, g.profile_version,
                     g.kind, g.required, g.state
              FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
              WHERE wi.project_id = ?1
-             ORDER BY g.work_id, g.gate_id",
-        )?;
+             ORDER BY g.work_id, g.gate_id"
+        };
+        let mut statement = self.prepare(gate_query)?;
         statement.bind_text(1, project_id)?;
         while statement.step()? == SQLITE_ROW {
             gate_rows.push(StatusGateRow {
@@ -3809,6 +4469,9 @@ impl SqliteStore {
                 .ok_or_else(|| {
                     StoreError::Corrupt("attempt disappeared during mutation".to_owned())
                 })?;
+            if let Some(obligation) = recovery_obligation_for_attempt_mutation(request) {
+                self.create_recovery_obligation_in_transaction(&obligation)?;
+            }
             let revision = self.bump_revision_in_transaction(&request.project_id)?;
             let result_json = attempt_result_json(
                 &request.attempt_id,
@@ -3835,8 +4498,7 @@ impl SqliteStore {
                 created_at: request.at.clone(),
                 completed_at: Some(request.at.clone()),
             };
-            self.append_operation(&operation)?;
-            self.append_audit_event(&AuditEventRecord {
+            let audit = AuditEventRecord {
                 project_id: request.project_id.clone(),
                 revision: revision.0,
                 operation_id: request.operation_id.clone(),
@@ -3854,7 +4516,8 @@ impl SqliteStore {
                     &updated.lease_deadline,
                     &updated.hard_deadline,
                 )?,
-            })?;
+            };
+            self.append_operation_audit_in_transaction(operation, audit)?;
 
             Ok(AttemptMutationResult {
                 operation_id: request.operation_id.clone(),
@@ -4280,6 +4943,10 @@ impl SqliteStore {
     /// 2 for compatibility; required object/column/index/trigger checks make
     /// same-version drift fail closed instead of being silently accepted.
     pub fn apply_schema(&self, schema_sql: &str) -> Result<(), StoreError> {
+        if is_production_schema_request(schema_sql) {
+            self.migrate_production()?;
+            return Ok(());
+        }
         let version = self.schema_version()?;
         match version {
             0 => {
@@ -4324,6 +4991,10 @@ impl SqliteStore {
     /// we explicitly roll back so a syntax or I/O failure cannot leave a
     /// version-3-labelled partial database behind.
     pub fn apply_work_model_v3(&self, schema_sql: &str) -> Result<(), StoreError> {
+        if is_production_schema_request(schema_sql) {
+            self.migrate_production()?;
+            return Ok(());
+        }
         match self.schema_version()? {
             WORK_MODEL_SCHEMA_VERSION => return self.verify_work_model_v3_contract(),
             SCHEMA_VERSION => {}
@@ -4653,6 +5324,10 @@ impl SqliteStore {
     }
 
     pub fn append_operation(&self, operation: &OperationRecord) -> Result<(), StoreError> {
+        // Preflight the bound project before inserting so a failed lineage
+        // check cannot leave an operation row behind when a legacy caller is
+        // not already inside a rollback-owned transaction.
+        let identity_context = self.operation_identity_context(&operation.project_id)?;
         let mut statement = self.prepare(
             "INSERT INTO operation (
                 operation_id, project_id, command, actor_id, session_id,
@@ -4674,7 +5349,76 @@ impl SqliteStore {
         statement.bind_i64(12, operation.revision)?;
         statement.bind_text(13, &operation.created_at)?;
         statement.bind_optional_text(14, operation.completed_at.as_deref())?;
-        statement.run()
+        statement.run()?;
+        // Once a project has an explicit workspace binding, every legacy
+        // operation writer also receives the database-lineage identity row.
+        // This does not replace the operation+audit bundle requirement, but
+        // it prevents direct root call sites from creating unbound operation
+        // history on an already-bound production project.
+        if let Some(context) = identity_context {
+            identity::IdentityStore::new(self)
+                .record_operation_context(&context, &operation.operation_id)
+                .map_err(|error| StoreError::Conflict(format!("operation identity: {error}")))?;
+        }
+        Ok(())
+    }
+
+    /// Appends a terminal operation and its audit envelope at the caller's
+    /// transaction boundary. Production databases must have a bound project
+    /// identity before this path is admitted; legacy test schemas retain the
+    /// compatibility append only when the identity seam is not installed.
+    fn append_operation_audit_in_transaction(
+        &self,
+        operation: OperationRecord,
+        audit: AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        if let Some(context) = self.operation_identity_context(&operation.project_id)? {
+            operations::OperationJournal::new(self).append_in_transaction_with_identity(
+                &context,
+                &operations::OperationBundle::new(operation, Some(audit)),
+            )
+        } else {
+            self.append_operation(&operation)?;
+            self.append_audit_event(&audit)
+        }
+    }
+
+    fn project_identity_is_bound(&self, project_id: &str) -> Result<bool, StoreError> {
+        let mut statement =
+            self.prepare("SELECT 1 FROM boreal_project_identity WHERE project_id = ?1 LIMIT 1")?;
+        statement.bind_text(1, project_id)?;
+        Ok(statement.step()? == SQLITE_ROW)
+    }
+
+    fn operation_identity_context(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<identity::IdentityContext>, StoreError> {
+        let identity_tables = self.identity_tables_installed()?;
+        if self.canonical_production && !identity_tables {
+            return Err(StoreError::Corrupt(
+                "canonical production schema is missing its identity tables".to_owned(),
+            ));
+        }
+        if !identity_tables || !self.project_identity_is_bound(project_id)? {
+            if self.canonical_production {
+                return Err(StoreError::Conflict(format!(
+                    "production project {project_id} requires a workspace identity binding before consequential operation writes"
+                )));
+            }
+            return Ok(None);
+        }
+        Ok(Some(
+            identity::IdentityStore::new(self)
+                .context(project_id)
+                .map_err(|error| StoreError::Conflict(format!("operation identity: {error}")))?,
+        ))
+    }
+
+    fn identity_tables_installed(&self) -> Result<bool, StoreError> {
+        Ok(self.table_exists("boreal_database_identity")?
+            && self.table_exists("boreal_project_identity")?
+            && self.table_exists("boreal_operation_identity")?)
     }
 
     pub fn operation_exists(&self, operation_id: &str) -> Result<bool, StoreError> {
@@ -4771,6 +5515,42 @@ impl SqliteStore {
     }
 
     pub fn append_audit_event(&self, event: &AuditEventRecord) -> Result<(), StoreError> {
+        let identity_context = self.operation_identity_context(&event.project_id)?;
+        let operation = self.operation(&event.operation_id)?.ok_or_else(|| {
+            StoreError::Corrupt("audit event has no operation outcome".to_owned())
+        })?;
+        if operation.project_id != event.project_id {
+            return Err(StoreError::WrongSubject {
+                expected: operation.project_id,
+                actual: event.project_id.clone(),
+            });
+        }
+        if operation.actor_id != event.actor_id
+            || operation.session_id != event.session_id
+            || operation.fence != event.fence
+        {
+            return Err(StoreError::Conflict(
+                "operation and audit actor/session/fence identities disagree".to_owned(),
+            ));
+        }
+        if operation.revision != event.revision {
+            return Err(StoreError::Conflict(
+                "operation and audit revision identities disagree".to_owned(),
+            ));
+        }
+        if identity_context.is_some() {
+            let mut identity = self.prepare(
+                "SELECT 1 FROM boreal_operation_identity
+                 WHERE operation_id = ?1 AND project_id = ?2 AND state = 'current'",
+            )?;
+            identity.bind_text(1, &event.operation_id)?;
+            identity.bind_text(2, &event.project_id)?;
+            if identity.step()? != SQLITE_ROW {
+                return Err(StoreError::Corrupt(
+                    "identity-bound audit event has no committed operation identity".to_owned(),
+                ));
+            }
+        }
         let mut statement = self.prepare(
             "INSERT INTO audit_event (
                 project_id, revision, operation_id, event_type, subject_type,
@@ -5152,44 +5932,46 @@ impl SqliteStore {
             }
             let revision = self.bump_revision_in_transaction(&retained.project_id)?;
             let result_json = receipt_result_json(&retained, revision.0)?;
-            self.append_operation(&OperationRecord {
-                operation_id: retained.operation_id.clone(),
-                project_id: retained.project_id.clone(),
-                command: "receipt.insert".to_owned(),
-                actor_id: retained.actor_id.clone(),
-                session_id: retained.session_id.clone(),
-                expected_revision: retained.expected_project_revision,
-                attempt_id: Some(retained.attempt_id.clone()),
-                fence: Some(retained.fence),
-                request_digest: replay_digest.clone(),
-                outcome: if validation_error.is_some() {
-                    OperationOutcome::Rejected
-                } else {
-                    OperationOutcome::Changed
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: retained.operation_id.clone(),
+                    project_id: retained.project_id.clone(),
+                    command: "receipt.insert".to_owned(),
+                    actor_id: retained.actor_id.clone(),
+                    session_id: retained.session_id.clone(),
+                    expected_revision: retained.expected_project_revision,
+                    attempt_id: Some(retained.attempt_id.clone()),
+                    fence: Some(retained.fence),
+                    request_digest: replay_digest.clone(),
+                    outcome: if validation_error.is_some() {
+                        OperationOutcome::Rejected
+                    } else {
+                        OperationOutcome::Changed
+                    },
+                    result_json: result_json.clone(),
+                    revision: revision.0,
+                    created_at: retained.created_at.clone(),
+                    completed_at: Some(retained.created_at.clone()),
                 },
-                result_json: result_json.clone(),
-                revision: revision.0,
-                created_at: retained.created_at.clone(),
-                completed_at: Some(retained.created_at.clone()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: retained.project_id.clone(),
-                revision: revision.0,
-                operation_id: retained.operation_id.clone(),
-                event_type: if validation_error.is_some() {
-                    "receipt.rejected"
-                } else {
-                    "receipt.recorded"
-                }
-                .to_owned(),
-                subject_type: "receipt".to_owned(),
-                subject_id: retained.receipt_id.clone(),
-                actor_id: retained.actor_id.clone(),
-                session_id: retained.session_id.clone(),
-                fence: Some(retained.fence),
-                as_of: retained.created_at.clone(),
-                payload_json: result_json,
-            })?;
+                AuditEventRecord {
+                    project_id: retained.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: retained.operation_id.clone(),
+                    event_type: if validation_error.is_some() {
+                        "receipt.rejected"
+                    } else {
+                        "receipt.recorded"
+                    }
+                    .to_owned(),
+                    subject_type: "receipt".to_owned(),
+                    subject_id: retained.receipt_id.clone(),
+                    actor_id: retained.actor_id.clone(),
+                    session_id: retained.session_id.clone(),
+                    fence: Some(retained.fence),
+                    as_of: retained.created_at.clone(),
+                    payload_json: result_json,
+                },
+            )?;
             Ok((
                 ReceiptInsertResult {
                     receipt: receipt_record(&retained),
@@ -5307,40 +6089,42 @@ impl SqliteStore {
                 "gate_id": request.gate_id,
                 "state": gate_state_name(request.state),
             }))?;
-            self.append_operation(&OperationRecord {
-                operation_id: request.operation_id.clone(),
-                project_id: request.project_id.clone(),
-                command: "gate.update".to_owned(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                expected_revision: request.expected_project_revision,
-                attempt_id: None,
-                fence: None,
-                request_digest: request.request_digest.clone(),
-                outcome: OperationOutcome::Changed,
-                result_json: result_json.clone(),
-                revision: revision.0,
-                created_at: request.updated_at.clone(),
-                completed_at: Some(request.updated_at.clone()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: request.project_id.clone(),
-                revision: revision.0,
-                operation_id: request.operation_id.clone(),
-                event_type: if request.state == GateState::Satisfied {
-                    "gate.satisfied"
-                } else {
-                    "repair.correction"
-                }
-                .to_owned(),
-                subject_type: "gate".to_owned(),
-                subject_id: request.gate_id.clone(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                fence: None,
-                as_of: request.updated_at.clone(),
-                payload_json: result_json,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: request.operation_id.clone(),
+                    project_id: request.project_id.clone(),
+                    command: "gate.update".to_owned(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    expected_revision: request.expected_project_revision,
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request.request_digest.clone(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: result_json.clone(),
+                    revision: revision.0,
+                    created_at: request.updated_at.clone(),
+                    completed_at: Some(request.updated_at.clone()),
+                },
+                AuditEventRecord {
+                    project_id: request.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: request.operation_id.clone(),
+                    event_type: if request.state == GateState::Satisfied {
+                        "gate.satisfied"
+                    } else {
+                        "repair.correction"
+                    }
+                    .to_owned(),
+                    subject_type: "gate".to_owned(),
+                    subject_id: request.gate_id.clone(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    fence: None,
+                    as_of: request.updated_at.clone(),
+                    payload_json: result_json,
+                },
+            )?;
             Ok(MutationResult {
                 operation_id: request.operation_id.clone(),
                 revision: revision.0,
@@ -5489,44 +6273,46 @@ impl SqliteStore {
                 "review_id": request.review_id,
                 "decision": review_decision_name(request.decision),
             }))?;
-            self.append_operation(&OperationRecord {
-                operation_id: request.operation_id.clone(),
-                project_id: request.project_id.clone(),
-                command: "review.insert".to_owned(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                expected_revision: request.expected_project_revision,
-                attempt_id: Some(request.attempt_id.clone()),
-                fence: Some(request.fence),
-                request_digest: request.request_digest.clone(),
-                outcome: if request.decision == ReviewDecision::Accepted {
-                    OperationOutcome::Changed
-                } else {
-                    OperationOutcome::Rejected
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: request.operation_id.clone(),
+                    project_id: request.project_id.clone(),
+                    command: "review.insert".to_owned(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    expected_revision: request.expected_project_revision,
+                    attempt_id: Some(request.attempt_id.clone()),
+                    fence: Some(request.fence),
+                    request_digest: request.request_digest.clone(),
+                    outcome: if request.decision == ReviewDecision::Accepted {
+                        OperationOutcome::Changed
+                    } else {
+                        OperationOutcome::Rejected
+                    },
+                    result_json: result_json.clone(),
+                    revision: revision.0,
+                    created_at: request.created_at.clone(),
+                    completed_at: Some(request.created_at.clone()),
                 },
-                result_json: result_json.clone(),
-                revision: revision.0,
-                created_at: request.created_at.clone(),
-                completed_at: Some(request.created_at.clone()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: request.project_id.clone(),
-                revision: revision.0,
-                operation_id: request.operation_id.clone(),
-                event_type: if request.decision == ReviewDecision::Accepted {
-                    "review.accepted"
-                } else {
-                    "review.rejected"
-                }
-                .to_owned(),
-                subject_type: "review".to_owned(),
-                subject_id: request.review_id.clone(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                fence: Some(request.fence),
-                as_of: request.created_at.clone(),
-                payload_json: result_json,
-            })?;
+                AuditEventRecord {
+                    project_id: request.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: request.operation_id.clone(),
+                    event_type: if request.decision == ReviewDecision::Accepted {
+                        "review.accepted"
+                    } else {
+                        "review.rejected"
+                    }
+                    .to_owned(),
+                    subject_type: "review".to_owned(),
+                    subject_id: request.review_id.clone(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    fence: Some(request.fence),
+                    as_of: request.created_at.clone(),
+                    payload_json: result_json,
+                },
+            )?;
             Ok(MutationResult {
                 operation_id: request.operation_id.clone(),
                 revision: revision.0,
@@ -5615,39 +6401,41 @@ impl SqliteStore {
 
             let revision = self.bump_revision_in_transaction(&request.project_id)?;
             let result_json = summary_result_json(&request.summary_id)?;
-            self.append_operation(&OperationRecord {
-                operation_id: request.operation_id.clone(),
-                project_id: request.project_id.clone(),
-                command: "summary.insert".to_owned(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                expected_revision: request.expected_project_revision,
-                attempt_id: Some(request.attempt_id.clone()),
-                fence: Some(request.fence),
-                request_digest: replay_digest,
-                outcome: OperationOutcome::Changed,
-                result_json: result_json.clone(),
-                revision: revision.0,
-                created_at: request.created_at.clone(),
-                completed_at: Some(request.created_at.clone()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: request.project_id.clone(),
-                revision: revision.0,
-                operation_id: request.operation_id.clone(),
-                // Schema v2 has no dedicated summary event discriminator;
-                // subject_type/subject_id identify this as the typed summary
-                // fact while the closeout event family remains compatible
-                // with existing v2 databases.
-                event_type: "close.requested".to_owned(),
-                subject_type: "summary".to_owned(),
-                subject_id: request.summary_id.clone(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                fence: Some(request.fence),
-                as_of: request.created_at.clone(),
-                payload_json: result_json,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: request.operation_id.clone(),
+                    project_id: request.project_id.clone(),
+                    command: "summary.insert".to_owned(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    expected_revision: request.expected_project_revision,
+                    attempt_id: Some(request.attempt_id.clone()),
+                    fence: Some(request.fence),
+                    request_digest: replay_digest,
+                    outcome: OperationOutcome::Changed,
+                    result_json: result_json.clone(),
+                    revision: revision.0,
+                    created_at: request.created_at.clone(),
+                    completed_at: Some(request.created_at.clone()),
+                },
+                AuditEventRecord {
+                    project_id: request.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: request.operation_id.clone(),
+                    // Schema v2 has no dedicated summary event discriminator;
+                    // subject_type/subject_id identify this as the typed summary
+                    // fact while the closeout event family remains compatible
+                    // with existing v2 databases.
+                    event_type: "close.requested".to_owned(),
+                    subject_type: "summary".to_owned(),
+                    subject_id: request.summary_id.clone(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    fence: Some(request.fence),
+                    as_of: request.created_at.clone(),
+                    payload_json: result_json,
+                },
+            )?;
             Ok(SummaryInsertResult {
                 summary: self
                     .summary(&request.project_id, &request.summary_id)?
@@ -5766,35 +6554,37 @@ impl SqliteStore {
             statement.run()?;
             let revision = self.bump_revision_in_transaction(&request.project_id)?;
             let result_json = close_intent_result_json(&request.close_intent_id, "open")?;
-            self.append_operation(&OperationRecord {
-                operation_id: request.operation_id.clone(),
-                project_id: request.project_id.clone(),
-                command: "close.create".to_owned(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                expected_revision: request.expected_project_revision,
-                attempt_id: Some(request.attempt_id.clone()),
-                fence: Some(request.fence),
-                request_digest: request.request_digest.clone(),
-                outcome: OperationOutcome::Changed,
-                result_json: result_json.clone(),
-                revision: revision.0,
-                created_at: request.at.clone(),
-                completed_at: Some(request.at.clone()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: request.project_id.clone(),
-                revision: revision.0,
-                operation_id: request.operation_id.clone(),
-                event_type: "close.requested".to_owned(),
-                subject_type: "work".to_owned(),
-                subject_id: request.work_id.clone(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                fence: Some(request.fence),
-                as_of: request.at.clone(),
-                payload_json: result_json,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: request.operation_id.clone(),
+                    project_id: request.project_id.clone(),
+                    command: "close.create".to_owned(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    expected_revision: request.expected_project_revision,
+                    attempt_id: Some(request.attempt_id.clone()),
+                    fence: Some(request.fence),
+                    request_digest: request.request_digest.clone(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: result_json.clone(),
+                    revision: revision.0,
+                    created_at: request.at.clone(),
+                    completed_at: Some(request.at.clone()),
+                },
+                AuditEventRecord {
+                    project_id: request.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: request.operation_id.clone(),
+                    event_type: "close.requested".to_owned(),
+                    subject_type: "work".to_owned(),
+                    subject_id: request.work_id.clone(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    fence: Some(request.fence),
+                    as_of: request.at.clone(),
+                    payload_json: result_json,
+                },
+            )?;
             Ok(CloseIntentResult {
                 close_intent: self
                     .close_intent(&request.project_id, &request.close_intent_id)?
@@ -5878,35 +6668,37 @@ impl SqliteStore {
                 let revision = self.bump_revision_in_transaction(&request.project_id)?;
                 let result_json =
                     close_rejected_result_json(&request.close_intent_id, &diagnostics.missing)?;
-                self.append_operation(&OperationRecord {
-                    operation_id: request.operation_id.clone(),
-                    project_id: request.project_id.clone(),
-                    command: "close.finalize".to_owned(),
-                    actor_id: request.actor_id.clone(),
-                    session_id: request.session_id.clone(),
-                    expected_revision: request.expected_project_revision,
-                    attempt_id: Some(request.attempt_id.clone()),
-                    fence: Some(request.fence),
-                    request_digest: request.request_digest.clone(),
-                    outcome: OperationOutcome::Rejected,
-                    result_json: result_json.clone(),
-                    revision: revision.0,
-                    created_at: request.at.clone(),
-                    completed_at: Some(request.at.clone()),
-                })?;
-                self.append_audit_event(&AuditEventRecord {
-                    project_id: request.project_id.clone(),
-                    revision: revision.0,
-                    operation_id: request.operation_id.clone(),
-                    event_type: "close.requested".to_owned(),
-                    subject_type: "work".to_owned(),
-                    subject_id: request.work_id.clone(),
-                    actor_id: request.actor_id.clone(),
-                    session_id: request.session_id.clone(),
-                    fence: Some(request.fence),
-                    as_of: request.at.clone(),
-                    payload_json: result_json,
-                })?;
+                self.append_operation_audit_in_transaction(
+                    OperationRecord {
+                        operation_id: request.operation_id.clone(),
+                        project_id: request.project_id.clone(),
+                        command: "close.finalize".to_owned(),
+                        actor_id: request.actor_id.clone(),
+                        session_id: request.session_id.clone(),
+                        expected_revision: request.expected_project_revision,
+                        attempt_id: Some(request.attempt_id.clone()),
+                        fence: Some(request.fence),
+                        request_digest: request.request_digest.clone(),
+                        outcome: OperationOutcome::Rejected,
+                        result_json: result_json.clone(),
+                        revision: revision.0,
+                        created_at: request.at.clone(),
+                        completed_at: Some(request.at.clone()),
+                    },
+                    AuditEventRecord {
+                        project_id: request.project_id.clone(),
+                        revision: revision.0,
+                        operation_id: request.operation_id.clone(),
+                        event_type: "close.requested".to_owned(),
+                        subject_type: "work".to_owned(),
+                        subject_id: request.work_id.clone(),
+                        actor_id: request.actor_id.clone(),
+                        session_id: request.session_id.clone(),
+                        fence: Some(request.fence),
+                        as_of: request.at.clone(),
+                        payload_json: result_json,
+                    },
+                )?;
                 return Ok(CloseIntentResult {
                     close_intent: intent,
                     revision: revision.0,
@@ -5917,35 +6709,37 @@ impl SqliteStore {
             self.finalize_close_rows(request)?;
             let revision = self.bump_revision_in_transaction(&request.project_id)?;
             let result_json = close_intent_result_json(&request.close_intent_id, "finalized")?;
-            self.append_operation(&OperationRecord {
-                operation_id: request.operation_id.clone(),
-                project_id: request.project_id.clone(),
-                command: "close.finalize".to_owned(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                expected_revision: request.expected_project_revision,
-                attempt_id: Some(request.attempt_id.clone()),
-                fence: Some(request.fence),
-                request_digest: request.request_digest.clone(),
-                outcome: OperationOutcome::Changed,
-                result_json: result_json.clone(),
-                revision: revision.0,
-                created_at: request.at.clone(),
-                completed_at: Some(request.at.clone()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: request.project_id.clone(),
-                revision: revision.0,
-                operation_id: request.operation_id.clone(),
-                event_type: "work.closed".to_owned(),
-                subject_type: "work".to_owned(),
-                subject_id: request.work_id.clone(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                fence: Some(request.fence),
-                as_of: request.at.clone(),
-                payload_json: result_json,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: request.operation_id.clone(),
+                    project_id: request.project_id.clone(),
+                    command: "close.finalize".to_owned(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    expected_revision: request.expected_project_revision,
+                    attempt_id: Some(request.attempt_id.clone()),
+                    fence: Some(request.fence),
+                    request_digest: request.request_digest.clone(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: result_json.clone(),
+                    revision: revision.0,
+                    created_at: request.at.clone(),
+                    completed_at: Some(request.at.clone()),
+                },
+                AuditEventRecord {
+                    project_id: request.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: request.operation_id.clone(),
+                    event_type: "work.closed".to_owned(),
+                    subject_type: "work".to_owned(),
+                    subject_id: request.work_id.clone(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    fence: Some(request.fence),
+                    as_of: request.at.clone(),
+                    payload_json: result_json,
+                },
+            )?;
             Ok(CloseIntentResult {
                 close_intent: self
                     .close_intent(&request.project_id, &request.close_intent_id)?
@@ -6002,38 +6796,40 @@ impl SqliteStore {
             update.run()?;
             let revision = self.bump_revision_in_transaction(&request.project_id)?;
             let result_json = close_intent_result_json(&request.close_intent_id, "rejected")?;
-            self.append_operation(&OperationRecord {
-                operation_id: request.operation_id.clone(),
-                project_id: request.project_id.clone(),
-                command: "close.reject".to_owned(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                expected_revision: request.expected_project_revision,
-                attempt_id: Some(request.attempt_id.clone()),
-                fence: Some(request.fence),
-                request_digest: request.request_digest.clone(),
-                outcome: OperationOutcome::Rejected,
-                result_json: result_json.clone(),
-                revision: revision.0,
-                created_at: request.at.clone(),
-                completed_at: Some(request.at.clone()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: request.project_id.clone(),
-                revision: revision.0,
-                operation_id: request.operation_id.clone(),
-                event_type: "repair.correction".to_owned(),
-                subject_type: "work".to_owned(),
-                subject_id: request.work_id.clone(),
-                actor_id: request.actor_id.clone(),
-                session_id: request.session_id.clone(),
-                fence: Some(request.fence),
-                as_of: request.at.clone(),
-                payload_json: json_object(json!({
-                    "close_intent_id": request.close_intent_id,
-                    "rejection_code": rejection_code,
-                }))?,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: request.operation_id.clone(),
+                    project_id: request.project_id.clone(),
+                    command: "close.reject".to_owned(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    expected_revision: request.expected_project_revision,
+                    attempt_id: Some(request.attempt_id.clone()),
+                    fence: Some(request.fence),
+                    request_digest: request.request_digest.clone(),
+                    outcome: OperationOutcome::Rejected,
+                    result_json: result_json.clone(),
+                    revision: revision.0,
+                    created_at: request.at.clone(),
+                    completed_at: Some(request.at.clone()),
+                },
+                AuditEventRecord {
+                    project_id: request.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: request.operation_id.clone(),
+                    event_type: "repair.correction".to_owned(),
+                    subject_type: "work".to_owned(),
+                    subject_id: request.work_id.clone(),
+                    actor_id: request.actor_id.clone(),
+                    session_id: request.session_id.clone(),
+                    fence: Some(request.fence),
+                    as_of: request.at.clone(),
+                    payload_json: json_object(json!({
+                        "close_intent_id": request.close_intent_id,
+                        "rejection_code": rejection_code,
+                    }))?,
+                },
+            )?;
             Ok(CloseIntentResult {
                 close_intent: self
                     .close_intent(&request.project_id, &request.close_intent_id)?
@@ -6510,12 +7306,44 @@ impl SqliteStore {
         fence: Option<u64>,
         revision: u64,
     ) -> Result<GateDiagnostics, StoreError> {
-        let mut statement = self.prepare(
+        let gate_query = if self.table_exists("boreal_pinned_requirement")?
+            && self.table_exists("boreal_pinned_requirement_gate")?
+        {
+            "SELECT p.work_id || ':' || r.gate_id, r.kind, r.required,
+                    COALESCE(observed.state, 'open')
+             FROM boreal_pinned_requirement p
+             JOIN boreal_pinned_requirement_gate r
+               ON r.project_id = p.project_id
+              AND r.work_id = p.work_id
+              AND r.proof_revision = p.proof_revision
+             LEFT JOIN gate observed
+               ON observed.work_id = p.work_id
+              AND observed.gate_id = p.work_id || ':' || r.gate_id
+             WHERE p.project_id = ?1 AND p.work_id = ?2
+               AND p.proof_revision = (
+                 SELECT MAX(current.proof_revision)
+                 FROM boreal_pinned_requirement current
+                 WHERE current.project_id = p.project_id
+                   AND current.work_id = p.work_id
+               )
+             UNION ALL
+             SELECT g.gate_id, g.kind, g.required, g.state
+             FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
+             WHERE wi.project_id = ?1 AND g.work_id = ?2
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM boreal_pinned_requirement p
+                 WHERE p.project_id = wi.project_id
+                   AND p.work_id = wi.work_id
+               )
+             ORDER BY 1"
+        } else {
             "SELECT g.gate_id, g.kind, g.required, g.state
              FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
              WHERE wi.project_id = ?1 AND g.work_id = ?2
-             ORDER BY g.gate_id",
-        )?;
+             ORDER BY g.gate_id"
+        };
+        let mut statement = self.prepare(gate_query)?;
         statement.bind_text(1, project_id)?;
         statement.bind_text(2, work_id)?;
         let mut gates = Vec::new();
@@ -6947,6 +7775,677 @@ impl Drop for SqliteStore {
             unsafe { sqlite3_close(self.database) };
         }
     }
+}
+
+impl MigrationBackend for SqliteStore {
+    type Error = StoreError;
+
+    fn schema_identity(&mut self) -> Result<SchemaIdentity, Self::Error> {
+        let version = self.schema_version()?;
+        if version == 0 {
+            return Ok(SchemaIdentity::uninitialized());
+        }
+        if self.table_exists(SCHEMA_IDENTITY_TABLE)? {
+            let mut statement = self.prepare(&format!(
+                "SELECT schema_id, schema_version, contract_version, schema_checksum
+                 FROM {SCHEMA_IDENTITY_TABLE} WHERE identity_id = 1"
+            ))?;
+            if statement.step()? != SQLITE_ROW {
+                return Err(StoreError::Corrupt(
+                    "production schema identity row is missing".to_owned(),
+                ));
+            }
+            return Ok(SchemaIdentity {
+                schema_id: statement.column_text(0)?,
+                schema_version: statement.column_i64(1)?,
+                contract_version: statement.column_text(2)?,
+                schema_checksum: Some(statement.column_text(3)?),
+            });
+        }
+
+        match version {
+            SCHEMA_VERSION => {
+                self.verify_schema_contract()?;
+                Ok(SchemaIdentity {
+                    schema_id: PRODUCTION_SCHEMA_ID.to_owned(),
+                    schema_version: SCHEMA_VERSION,
+                    contract_version: "boreal.sqlite/2".to_owned(),
+                    schema_checksum: Some(checksum(LEGACY_SCHEMA_V2_SQL.as_bytes())),
+                })
+            }
+            WORK_MODEL_SCHEMA_VERSION => {
+                self.verify_work_model_v3_contract()?;
+                Ok(SchemaIdentity {
+                    schema_id: PRODUCTION_SCHEMA_ID.to_owned(),
+                    schema_version: WORK_MODEL_SCHEMA_VERSION,
+                    contract_version: PRODUCTION_SCHEMA_CONTRACT_VERSION.to_owned(),
+                    schema_checksum: Some(checksum(PRODUCTION_SCHEMA_SQL.as_bytes())),
+                })
+            }
+            found => Ok(SchemaIdentity {
+                schema_id: PRODUCTION_SCHEMA_ID.to_owned(),
+                schema_version: found,
+                contract_version: String::new(),
+                schema_checksum: None,
+            }),
+        }
+    }
+
+    fn live_attempt_diagnostics(&mut self) -> Result<Vec<MigrationDiagnostic>, Self::Error> {
+        if !self.table_exists("attempt")? {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.prepare(
+            "SELECT attempt_id, work_id, state
+             FROM attempt
+             WHERE state IN ('claimed','accepted','running','verifying','expiry_pending')
+             ORDER BY attempt_id",
+        )?;
+        let mut diagnostics = Vec::new();
+        while statement.step()? == SQLITE_ROW {
+            let attempt_id = statement.column_text(0)?;
+            let work_id = statement.column_text(1)?;
+            let state = statement.column_text(2)?;
+            diagnostics.push(MigrationDiagnostic {
+                code: "live_attempt_blocks_migration".to_owned(),
+                entity_type: "attempt".to_owned(),
+                entity_id: attempt_id.clone(),
+                message: format!(
+                    "live attempt {attempt_id} for work {work_id} remains in state {state}"
+                ),
+                blocking: true,
+                raw_payload: Some(format!(
+                    "{{\"attempt_id\":{},\"work_id\":{},\"state\":{}}}",
+                    json_text(&attempt_id),
+                    json_text(&work_id),
+                    json_text(&state),
+                )),
+            });
+        }
+        Ok(diagnostics)
+    }
+
+    fn legacy_diagnostics(&mut self) -> Result<Vec<MigrationDiagnostic>, Self::Error> {
+        if self.schema_version()? != SCHEMA_VERSION || !self.table_exists("work_item")? {
+            return Ok(Vec::new());
+        }
+        let mut diagnostics = vec![MigrationDiagnostic::retained(
+            "schema_v2_compatibility_source",
+            "database",
+            "",
+            "schema-v2 rows remain the compatibility source for the additive v3 migration",
+            format!(
+                "{{\"schema_id\":{},\"schema_version\":{}}}",
+                json_text(PRODUCTION_SCHEMA_ID),
+                SCHEMA_VERSION
+            ),
+        )];
+
+        let mut sprint_rows = self.prepare(
+            "SELECT work_id FROM work_item WHERE kind = 'sprint' ORDER BY work_id LIMIT 10000",
+        )?;
+        while sprint_rows.step()? == SQLITE_ROW {
+            let work_id = sprint_rows.column_text(0)?;
+            diagnostics.push(MigrationDiagnostic::retained(
+                "legacy_sprint_preserved",
+                "work_item",
+                work_id.clone(),
+                "legacy sprint remains readable as a compatibility subject",
+                format!("{{\"work_id\":{}}}", json_text(&work_id)),
+            ));
+        }
+
+        let mut malformed = self.prepare(
+            "SELECT work_id FROM work_item
+             WHERE trim(work_id) = '' OR trim(project_id) = ''
+             ORDER BY work_id LIMIT 10000",
+        )?;
+        while malformed.step()? == SQLITE_ROW {
+            let work_id = malformed.column_text(0)?;
+            diagnostics.push(MigrationDiagnostic::blocking(
+                "malformed_legacy_work_item",
+                "work_item",
+                work_id,
+                "legacy work row has an empty identity and cannot be mapped safely",
+            ));
+        }
+
+        let mut ambiguous = self.prepare(
+            "SELECT d.prerequisite_id, d.dependent_id
+             FROM dependency d
+             JOIN work_item prerequisite
+               ON prerequisite.project_id = d.project_id
+              AND prerequisite.work_id = d.prerequisite_id
+             JOIN work_item dependent
+               ON dependent.project_id = d.project_id
+              AND dependent.work_id = d.dependent_id
+             WHERE prerequisite.kind <> 'task' OR dependent.kind <> 'task'
+             ORDER BY d.prerequisite_id, d.dependent_id LIMIT 10000",
+        )?;
+        while ambiguous.step()? == SQLITE_ROW {
+            let prerequisite_id = ambiguous.column_text(0)?;
+            let dependent_id = ambiguous.column_text(1)?;
+            diagnostics.push(MigrationDiagnostic::blocking(
+                "ambiguous_legacy_dependency",
+                "dependency",
+                format!("{prerequisite_id}->{dependent_id}"),
+                "dependency endpoint is not a direct task and requires an explicit disposition",
+            ));
+        }
+        Ok(diagnostics)
+    }
+
+    fn try_acquire_migration_lock(&mut self) -> Result<(), Self::Error> {
+        store_try_acquire_migration_lock(self)
+    }
+
+    fn release_migration_lock(&mut self) {
+        if self.migration_transaction.swap(false, Ordering::AcqRel) {
+            let _ = self.execute_batch("ROLLBACK");
+        }
+    }
+
+    fn begin_immediate(&mut self) -> Result<(), Self::Error> {
+        if self.migration_transaction.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            self.execute_batch("BEGIN IMMEDIATE")
+        }
+    }
+
+    fn execute(&mut self, sql: &str) -> Result<(), Self::Error> {
+        self.execute_batch(sql)
+    }
+
+    fn read_ledger(&mut self) -> Result<Vec<MigrationLedgerEntry>, Self::Error> {
+        if !self.table_exists(MIGRATION_LEDGER_TABLE)? {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.prepare(&format!(
+            "SELECT migration_id, attempt, from_version, to_version, checksum, state,
+                    diagnostics_json, failure_message, started_at, completed_at
+             FROM {MIGRATION_LEDGER_TABLE} ORDER BY migration_id, attempt"
+        ))?;
+        let mut entries = Vec::new();
+        while statement.step()? == SQLITE_ROW {
+            let state = match statement.column_text(5)?.as_str() {
+                "running" => MigrationState::Running,
+                "applied" => MigrationState::Applied,
+                "failed" => MigrationState::Failed,
+                value => {
+                    return Err(StoreError::Corrupt(format!(
+                        "unknown migration ledger state {value:?}"
+                    )))
+                }
+            };
+            entries.push(MigrationLedgerEntry {
+                migration_id: statement.column_text(0)?,
+                attempt: statement.column_u64(1)?,
+                from_version: statement.column_i64(2)?,
+                to_version: statement.column_i64(3)?,
+                checksum: statement.column_text(4)?,
+                state,
+                diagnostics_json: statement.column_text(6)?,
+                failure_message: statement.column_optional_text(7)?,
+                started_at: statement.column_text(8)?,
+                completed_at: statement.column_optional_text(9)?,
+            });
+        }
+        Ok(entries)
+    }
+
+    fn commit(&mut self) -> Result<(), Self::Error> {
+        let result = self.execute_batch("COMMIT");
+        if result.is_ok() {
+            self.migration_transaction.store(false, Ordering::Release);
+        }
+        result
+    }
+
+    fn rollback(&mut self) -> Result<(), Self::Error> {
+        let result = self.execute_batch("ROLLBACK");
+        self.migration_transaction.store(false, Ordering::Release);
+        result
+    }
+
+    fn now(&self) -> String {
+        production_now()
+    }
+
+    fn is_busy(&self, error: &Self::Error) -> bool {
+        matches!(error, StoreError::Busy(_))
+    }
+}
+
+impl MigrationBackend for &SqliteStore {
+    type Error = StoreError;
+
+    fn schema_identity(&mut self) -> Result<SchemaIdentity, Self::Error> {
+        store_schema_identity(self)
+    }
+
+    fn live_attempt_diagnostics(&mut self) -> Result<Vec<MigrationDiagnostic>, Self::Error> {
+        store_live_attempt_diagnostics(self)
+    }
+
+    fn legacy_diagnostics(&mut self) -> Result<Vec<MigrationDiagnostic>, Self::Error> {
+        store_legacy_diagnostics(self)
+    }
+
+    fn try_acquire_migration_lock(&mut self) -> Result<(), Self::Error> {
+        store_try_acquire_migration_lock(self)
+    }
+
+    fn release_migration_lock(&mut self) {
+        store_release_migration_lock(self)
+    }
+
+    fn begin_immediate(&mut self) -> Result<(), Self::Error> {
+        store_begin_immediate(self)
+    }
+
+    fn execute(&mut self, sql: &str) -> Result<(), Self::Error> {
+        (*self).execute_batch(sql)
+    }
+
+    fn read_ledger(&mut self) -> Result<Vec<MigrationLedgerEntry>, Self::Error> {
+        store_read_ledger(self)
+    }
+
+    fn commit(&mut self) -> Result<(), Self::Error> {
+        store_commit(self)
+    }
+
+    fn rollback(&mut self) -> Result<(), Self::Error> {
+        store_rollback(self)
+    }
+
+    fn now(&self) -> String {
+        production_now()
+    }
+
+    fn is_busy(&self, error: &Self::Error) -> bool {
+        matches!(error, StoreError::Busy(_))
+    }
+}
+
+fn store_schema_identity(store: &SqliteStore) -> Result<SchemaIdentity, StoreError> {
+    let version = store.schema_version()?;
+    if version == 0 {
+        return Ok(SchemaIdentity::uninitialized());
+    }
+    if store.table_exists(SCHEMA_IDENTITY_TABLE)? {
+        let mut statement = store.prepare(&format!(
+            "SELECT schema_id, schema_version, contract_version, schema_checksum
+             FROM {SCHEMA_IDENTITY_TABLE} WHERE identity_id = 1"
+        ))?;
+        if statement.step()? != SQLITE_ROW {
+            return Err(StoreError::Corrupt(
+                "production schema identity row is missing".to_owned(),
+            ));
+        }
+        return Ok(SchemaIdentity {
+            schema_id: statement.column_text(0)?,
+            schema_version: statement.column_i64(1)?,
+            contract_version: statement.column_text(2)?,
+            schema_checksum: Some(statement.column_text(3)?),
+        });
+    }
+
+    match version {
+        SCHEMA_VERSION => {
+            store.verify_schema_contract()?;
+            Ok(SchemaIdentity {
+                schema_id: PRODUCTION_SCHEMA_ID.to_owned(),
+                schema_version: SCHEMA_VERSION,
+                contract_version: "boreal.sqlite/2".to_owned(),
+                schema_checksum: Some(checksum(LEGACY_SCHEMA_V2_SQL.as_bytes())),
+            })
+        }
+        WORK_MODEL_SCHEMA_VERSION => {
+            store.verify_work_model_v3_contract()?;
+            Ok(SchemaIdentity {
+                schema_id: PRODUCTION_SCHEMA_ID.to_owned(),
+                schema_version: WORK_MODEL_SCHEMA_VERSION,
+                contract_version: PRODUCTION_SCHEMA_CONTRACT_VERSION.to_owned(),
+                schema_checksum: Some(checksum(PRODUCTION_SCHEMA_SQL.as_bytes())),
+            })
+        }
+        found => Ok(SchemaIdentity {
+            schema_id: PRODUCTION_SCHEMA_ID.to_owned(),
+            schema_version: found,
+            contract_version: String::new(),
+            schema_checksum: None,
+        }),
+    }
+}
+
+fn store_live_attempt_diagnostics(
+    store: &SqliteStore,
+) -> Result<Vec<MigrationDiagnostic>, StoreError> {
+    if !store.table_exists("attempt")? {
+        return Ok(Vec::new());
+    }
+    let mut statement = store.prepare(
+        "SELECT attempt_id, work_id, state
+         FROM attempt
+         WHERE state IN ('claimed','accepted','running','verifying','expiry_pending')
+         ORDER BY attempt_id",
+    )?;
+    let mut diagnostics = Vec::new();
+    while statement.step()? == SQLITE_ROW {
+        let attempt_id = statement.column_text(0)?;
+        let work_id = statement.column_text(1)?;
+        let state = statement.column_text(2)?;
+        diagnostics.push(MigrationDiagnostic {
+            code: "live_attempt_blocks_migration".to_owned(),
+            entity_type: "attempt".to_owned(),
+            entity_id: attempt_id.clone(),
+            message: format!(
+                "live attempt {attempt_id} for work {work_id} remains in state {state}"
+            ),
+            blocking: true,
+            raw_payload: Some(format!(
+                "{{\"attempt_id\":{},\"work_id\":{},\"state\":{}}}",
+                json_text(&attempt_id),
+                json_text(&work_id),
+                json_text(&state),
+            )),
+        });
+    }
+    Ok(diagnostics)
+}
+
+fn store_legacy_diagnostics(store: &SqliteStore) -> Result<Vec<MigrationDiagnostic>, StoreError> {
+    if store.schema_version()? != SCHEMA_VERSION || !store.table_exists("work_item")? {
+        return Ok(Vec::new());
+    }
+    let mut diagnostics = vec![MigrationDiagnostic::retained(
+        "schema_v2_compatibility_source",
+        "database",
+        "",
+        "schema-v2 rows remain the compatibility source for the additive v3 migration",
+        format!(
+            "{{\"schema_id\":{},\"schema_version\":{}}}",
+            json_text(PRODUCTION_SCHEMA_ID),
+            SCHEMA_VERSION
+        ),
+    )];
+
+    let mut sprint_rows = store.prepare(
+        "SELECT work_id FROM work_item WHERE kind = 'sprint' ORDER BY work_id LIMIT 10000",
+    )?;
+    while sprint_rows.step()? == SQLITE_ROW {
+        let work_id = sprint_rows.column_text(0)?;
+        diagnostics.push(MigrationDiagnostic::retained(
+            "legacy_sprint_preserved",
+            "work_item",
+            work_id.clone(),
+            "legacy sprint remains readable as a compatibility subject",
+            format!("{{\"work_id\":{}}}", json_text(&work_id)),
+        ));
+    }
+
+    let mut malformed = store.prepare(
+        "SELECT work_id FROM work_item
+         WHERE trim(work_id) = '' OR trim(project_id) = ''
+         ORDER BY work_id LIMIT 10000",
+    )?;
+    while malformed.step()? == SQLITE_ROW {
+        let work_id = malformed.column_text(0)?;
+        diagnostics.push(MigrationDiagnostic::blocking(
+            "malformed_legacy_work_item",
+            "work_item",
+            work_id,
+            "legacy work row has an empty identity and cannot be mapped safely",
+        ));
+    }
+
+    let mut ambiguous = store.prepare(
+        "SELECT d.prerequisite_id, d.dependent_id
+         FROM dependency d
+         JOIN work_item prerequisite
+           ON prerequisite.project_id = d.project_id
+          AND prerequisite.work_id = d.prerequisite_id
+         JOIN work_item dependent
+           ON dependent.project_id = d.project_id
+          AND dependent.work_id = d.dependent_id
+         WHERE prerequisite.kind <> 'task' OR dependent.kind <> 'task'
+         ORDER BY d.prerequisite_id, d.dependent_id LIMIT 10000",
+    )?;
+    while ambiguous.step()? == SQLITE_ROW {
+        let prerequisite_id = ambiguous.column_text(0)?;
+        let dependent_id = ambiguous.column_text(1)?;
+        diagnostics.push(MigrationDiagnostic::blocking(
+            "ambiguous_legacy_dependency",
+            "dependency",
+            format!("{prerequisite_id}->{dependent_id}"),
+            "dependency endpoint is not a direct task and requires an explicit disposition",
+        ));
+    }
+    Ok(diagnostics)
+}
+
+fn production_preflight(store: &SqliteStore) -> Result<(), StoreError> {
+    let mut diagnostics = store_live_attempt_diagnostics(store)?;
+    diagnostics.extend(store_legacy_diagnostics(store)?);
+    if diagnostics.iter().any(|diagnostic| diagnostic.blocking) {
+        return Err(map_migration_error(MigrationError::PreflightBlocked {
+            diagnostics,
+        }));
+    }
+    Ok(())
+}
+
+fn store_try_acquire_migration_lock(store: &SqliteStore) -> Result<(), StoreError> {
+    // A production v2 upgrade acquires this boundary before repairing the
+    // legacy schema. The ordered runner then reuses the same connection and
+    // transaction rather than opening a window between repair and migration.
+    if store.migration_transaction.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    if store
+        .migration_transaction
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(StoreError::Busy(
+            "this store connection already owns the migration transaction".to_owned(),
+        ));
+    }
+    if let Err(error) = store.execute_batch("BEGIN IMMEDIATE") {
+        store.migration_transaction.store(false, Ordering::Release);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn store_release_migration_lock(store: &SqliteStore) {
+    if store.migration_transaction.swap(false, Ordering::AcqRel) {
+        let _ = store.execute_batch("ROLLBACK");
+    }
+}
+
+fn store_begin_immediate(store: &SqliteStore) -> Result<(), StoreError> {
+    if store.migration_transaction.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        store.execute_batch("BEGIN IMMEDIATE")
+    }
+}
+
+fn store_read_ledger(store: &SqliteStore) -> Result<Vec<MigrationLedgerEntry>, StoreError> {
+    if !store.table_exists(MIGRATION_LEDGER_TABLE)? {
+        return Ok(Vec::new());
+    }
+    let mut statement = store.prepare(&format!(
+        "SELECT migration_id, attempt, from_version, to_version, checksum, state,
+                diagnostics_json, failure_message, started_at, completed_at
+         FROM {MIGRATION_LEDGER_TABLE} ORDER BY migration_id, attempt"
+    ))?;
+    let mut entries = Vec::new();
+    while statement.step()? == SQLITE_ROW {
+        let state = match statement.column_text(5)?.as_str() {
+            "running" => MigrationState::Running,
+            "applied" => MigrationState::Applied,
+            "failed" => MigrationState::Failed,
+            value => {
+                return Err(StoreError::Corrupt(format!(
+                    "unknown migration ledger state {value:?}"
+                )))
+            }
+        };
+        entries.push(MigrationLedgerEntry {
+            migration_id: statement.column_text(0)?,
+            attempt: statement.column_u64(1)?,
+            from_version: statement.column_i64(2)?,
+            to_version: statement.column_i64(3)?,
+            checksum: statement.column_text(4)?,
+            state,
+            diagnostics_json: statement.column_text(6)?,
+            failure_message: statement.column_optional_text(7)?,
+            started_at: statement.column_text(8)?,
+            completed_at: statement.column_optional_text(9)?,
+        });
+    }
+    Ok(entries)
+}
+
+fn store_commit(store: &SqliteStore) -> Result<(), StoreError> {
+    let result = store.execute_batch("COMMIT");
+    if result.is_ok() {
+        store.migration_transaction.store(false, Ordering::Release);
+    }
+    result
+}
+
+fn store_rollback(store: &SqliteStore) -> Result<(), StoreError> {
+    let result = store.execute_batch("ROLLBACK");
+    store.migration_transaction.store(false, Ordering::Release);
+    result
+}
+
+fn production_migration_plan() -> Result<MigrationPlan, MigrationError> {
+    let target_checksum = checksum(PRODUCTION_SCHEMA_SQL.as_bytes());
+    let step = MigrationStep::new(
+        "work-model-2-to-3",
+        SCHEMA_VERSION,
+        WORK_MODEL_SCHEMA_VERSION,
+        runner_schema_sql(WORK_MODEL_SCHEMA_V3_SQL),
+        r#"
+CREATE TEMP TABLE boreal_production_precondition (sentinel INTEGER NOT NULL CHECK (sentinel = 1));
+INSERT INTO boreal_production_precondition
+  SELECT CASE WHEN
+    (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'project') = 1
+    AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'work_item') = 1
+    AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'attempt') = 1
+    THEN 1 ELSE 0 END;
+DROP TABLE boreal_production_precondition;
+"#,
+        PRODUCTION_VERIFY_SQL,
+        target_checksum.clone(),
+    )?;
+    Ok(MigrationPlan::new(
+        PRODUCTION_SCHEMA_ID,
+        PRODUCTION_SCHEMA_CONTRACT_VERSION,
+        WORK_MODEL_SCHEMA_VERSION,
+        target_checksum,
+        runner_schema_sql(PRODUCTION_SCHEMA_SQL),
+        PRODUCTION_VERIFY_SQL,
+        vec![step],
+    )
+    .with_supported_source_checksum(SCHEMA_VERSION, checksum(LEGACY_SCHEMA_V2_SQL.as_bytes())))
+}
+
+fn production_bootstrap_step(plan: &MigrationPlan) -> Result<MigrationStep, MigrationError> {
+    MigrationStep::new(
+        format!("bootstrap-v{}", plan.target_version),
+        0,
+        plan.target_version,
+        plan.fresh_schema_sql.clone(),
+        String::new(),
+        plan.verify_sql.clone(),
+        plan.target_schema_checksum.clone(),
+    )
+}
+
+fn map_migration_error(error: MigrationError) -> StoreError {
+    match error {
+        MigrationError::Busy(message) => StoreError::Busy(message),
+        MigrationError::UnsupportedNewer { found, .. } => StoreError::UnsupportedSchema { found },
+        MigrationError::UnsupportedOlder { found } => StoreError::Invalid(format!(
+            "unsupported older production schema version: {found}"
+        )),
+        MigrationError::PreflightBlocked { diagnostics } => StoreError::Conflict(format!(
+            "production migration preflight blocked: {}",
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        MigrationError::Backend(message) => {
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("busy") || lower.contains("locked") {
+                StoreError::Busy(message)
+            } else {
+                StoreError::Invalid(message)
+            }
+        }
+        other @ (MigrationError::SchemaIdentityMismatch(_)
+        | MigrationError::ChecksumMismatch { .. }
+        | MigrationError::LedgerMismatch(_)
+        | MigrationError::InvariantViolation(_)
+        | MigrationError::RecoveryRequired { .. }) => StoreError::Corrupt(other.to_string()),
+        MigrationError::InvalidPlan(message) => StoreError::Invalid(message),
+    }
+}
+
+fn is_production_schema_request(schema_sql: &str) -> bool {
+    let requested = schema_sql.trim();
+    requested == LEGACY_SCHEMA_V2_SQL.trim() || requested == PRODUCTION_SCHEMA_SQL.trim()
+}
+
+fn is_canonical_production_schema_request(schema_sql: &str) -> bool {
+    schema_sql.trim() == PRODUCTION_SCHEMA_SQL.trim()
+}
+
+fn runner_schema_sql(sql: &str) -> String {
+    let mut lines = sql.lines();
+    let mut protected = Vec::new();
+    while let Some(line) = lines.next() {
+        if line.trim() == "BEGIN" {
+            if let Some(body) = lines.next() {
+                protected.push(format!("{line} {body}"));
+                continue;
+            }
+        }
+        protected.push(line.to_owned());
+    }
+    protected.join("\n")
+}
+
+fn sql_text(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn json_text(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    )
+}
+
+fn production_now() -> String {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("unix-ms:{milliseconds}")
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -8098,6 +9597,91 @@ fn profile_version(value: &str) -> Result<u64, StoreError> {
         StoreError::Invalid(format!(
             "acceptance profile version is not numeric: {value}"
         ))
+    })
+}
+
+fn profile_version_for_work(
+    profile: &AcceptanceProfile,
+    now: &str,
+) -> Result<ProfileVersion, StoreError> {
+    let gates = profile
+        .gates
+        .iter()
+        .map(|gate| {
+            json!({
+                "id": gate.id.as_str(),
+                "kind": gate_kind(gate.kind),
+                "required": gate.required,
+            })
+        })
+        .collect::<Vec<_>>();
+    let definition_json = json!({
+        "gates": gates,
+        "review_policy": {"required": profile.requires_review()},
+        "subject_rules": {"work_id": "exact"},
+        "required_observables": [],
+        "verifier_policy": "trusted_registered_verifier",
+        "exception_policy": "operator_scoped_additional_decision",
+    })
+    .to_string();
+    let provisional = ProfileVersion::new(
+        profile.id.as_str(),
+        profile_version(&profile.version)?,
+        "sha256:placeholder",
+        definition_json.clone(),
+        now,
+    )?;
+    let digest = provisional.computed_digest()?;
+    ProfileVersion::from_canonical_definition(
+        profile.id.as_str(),
+        provisional.version,
+        digest,
+        definition_json,
+        now,
+    )
+}
+
+fn recovery_obligation_for_attempt_mutation(
+    request: &AttemptMutationRequest,
+) -> Option<recovery::RecoveryObligationInput> {
+    let (reason, next_action) = match request.mutation {
+        AttemptMutationKind::Expire { .. } => (
+            "expired",
+            "confirm the stopped runtime and resolve the expiry obligation before reuse",
+        ),
+        AttemptMutationKind::Fail => (
+            "failed",
+            "review the failed attempt and resolve resource disposition before retry",
+        ),
+        AttemptMutationKind::Release => (
+            "resource_unknown",
+            "acknowledge resource release before reusing the execution resource",
+        ),
+        AttemptMutationKind::Cancel { .. } => (
+            "cancel_requested",
+            "confirm cancellation and resolve resource disposition before replacement",
+        ),
+        AttemptMutationKind::Accept
+        | AttemptMutationKind::Start
+        | AttemptMutationKind::Heartbeat { .. }
+        | AttemptMutationKind::RenewLease { .. }
+        | AttemptMutationKind::Submit => return None,
+    };
+    Some(recovery::RecoveryObligationInput {
+        obligation_id: format!(
+            "{}:recovery:{}",
+            request.operation_id,
+            reason.replace('_', "-")
+        ),
+        project_id: request.project_id.clone(),
+        work_id: request.work_id.clone(),
+        attempt_id: Some(request.attempt_id.clone()),
+        fence: Some(request.fence),
+        reason: reason.to_owned(),
+        resource_state: "unknown".to_owned(),
+        owner_actor_id: Some(request.actor_id.clone()),
+        next_action: next_action.to_owned(),
+        created_at: request.at.clone(),
     })
 }
 

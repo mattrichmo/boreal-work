@@ -1,0 +1,94 @@
+{
+  "schema": "boreal.pf-s01-t92.gate.v1",
+  "sprint_id": "PF-S01",
+  "task_id": "PF-S01-T92",
+  "attempt": 3,
+  "decision": "accepted",
+  "accepted_scope": [
+    "AC-01"
+  ],
+  "reviewer": {
+    "identity": "independent validation reviewer",
+    "implemented_pf_s01_leaf": false,
+    "relationship": "separate from PF-S01-T01 through PF-S01-T11 implementers and T90/T91 authors"
+  },
+  "source_identity": {
+    "head": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "branch": "codex/apply-responsive-terminal-overlay",
+    "worktree": "dirty",
+    "dirty_entry_count": 54,
+    "state_sha256": "05b1efb15d2b74fecccc6cf913b11a08a80e57db84ea5b6a5cac5bc801b75704",
+    "contract_manifest_sha256": "131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa"
+  },
+  "prerequisites": {
+    "PF-S00-T92": "accepted",
+    "PF-S01-T91": "accepted_at_provenance_remediation_layer",
+    "PF-S01-T90": "accepted_at_bounded_finding_classification_layer_after_T91",
+    "PF-S01-T01_through_T11": "canonical_handoffs_read_and_provenance_assertions_passed"
+  },
+  "checks": {
+    "state_json_tool": {
+      "status": "passed",
+      "command": "python3 -m json.tool project/build-plan/production-completion/execution/STATE.json"
+    },
+    "t11_digest_pointer_t01_assertions": {
+      "status": "passed",
+      "manifest_entries_bound": 1,
+      "task_level_pointers": 10,
+      "accepted_attempt_pointers": 11,
+      "total_pointers": 21,
+      "zero_start_targets": true,
+      "t01_attempt_2_preserved": true,
+      "t01_attempt_3_canonical_supersession": true
+    },
+    "contract_validator": {
+      "status": "passed",
+      "command": "python3 project/spec/validate_contracts.py"
+    },
+    "plan_validate": {
+      "status": "passed",
+      "sprints": 22,
+      "tasks": 265,
+      "obligations": 48,
+      "acceptance_rows": 56,
+      "acyclic_tasks": 265,
+      "local_links": 17134,
+      "errors": []
+    },
+    "graph_ready": {
+      "status": "passed_advisory",
+      "tasks": [],
+      "authorization": false
+    },
+    "verify_package": {
+      "status": "passed",
+      "files_checked": 444,
+      "mismatches": []
+    },
+    "manifest_conformance_join": {
+      "status": "passed",
+      "manifest_entries": 19,
+      "obligations": 48,
+      "vectors": 49,
+      "vector_metadata": 49,
+      "hash_mismatches": 0,
+      "dangling": 0,
+      "join_difference": 0,
+      "required_categories": 14,
+      "all_vector_dispositions": "unmeasured"
+    },
+    "git_diff_check": {
+      "status": "passed",
+      "command": "git diff --check"
+    }
+  },
+  "successor_effect": {
+    "ordinary_successor_entry": "may be evaluated under each successor's own gates; this record does not bypass them",
+    "target_capabilities_advertised": false
+  },
+  "authority_limits": [
+    "No runtime, service, migration, verifier, race/fault, TUI, native, installer, backup/restore, signing, performance, publication, or production-release acceptance.",
+    "All conformance vector evidence dispositions remain unmeasured.",
+    "Dirty worktree is recorded and is not a release identity."
+  ]
+}

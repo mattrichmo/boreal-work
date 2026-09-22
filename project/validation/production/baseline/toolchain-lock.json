@@ -1,0 +1,48 @@
+{
+  "schema": "boreal.pf-s00-t02.toolchain-lock.v1",
+  "captured_at": "2026-09-21",
+  "cwd": "/Users/cybertron/Code/boreal-work",
+  "probe_policy": {
+    "locale": "LC_ALL=C LANG=C",
+    "timeout_wrapper": "not used for authoritative direct probes",
+    "long_commands": "skipped unless bounded and actually attempted"
+  },
+  "tools": {
+    "python3": {"command": "python3 --version", "version": "Python 3.14.3", "classification": "pass"},
+    "node": {"command": "node --version", "version": "v26.8.2", "classification": "pass"},
+    "npm": {"command": "npm --version", "version": "11.7.0", "classification": "pass"},
+    "npx": {"command": "command -v npx", "path": "/Users/cybertron/.npm-global/bin/npx", "classification": "pass"},
+    "tsc": {"command": "tsc --version", "version": "Version 5.4.5", "classification": "pass"},
+    "cargo": {"command": "cargo --version", "version": "cargo 1.85.0", "classification": "pass"},
+    "rustc": {"command": "rustc --version", "version": "rustc 1.85.0 (4d91de4e4 2025-02-17) (Homebrew)", "classification": "pass"},
+    "rustfmt": {"command": "rustfmt --version", "version": "rustfmt 1.8.0", "classification": "pass"},
+    "git": {"command": "git --version", "version": "git version 2.47.0", "classification": "pass"},
+    "zsh": {"command": "zsh --version", "version": "zsh 5.9 (arm64-apple-darwin24.0)", "classification": "pass"},
+    "tar": {"command": "tar --version", "version": "bsdtar 3.5.3 - libarchive 3.5.3", "classification": "pass"},
+    "sqlite3": {"command": "sqlite3 --version", "version": "3.43.2", "classification": "pass"}
+  },
+  "sqlite": {
+    "cli_version": "3.43.2",
+    "python_runtime_version": "3.51.1",
+    "repository_release_floor_reported_by_scripts": "3.51.3",
+    "unix_socket_probe": "pass",
+    "classification": "environment_gap"
+  },
+  "repository": {
+    "node_engine": ">=20 <27",
+    "root_lockfiles": ["Cargo.lock"],
+    "additional_lockfiles": ["crates/protocol/Cargo.lock", "crates/service/Cargo.lock", "scripts/validation/concurrency/Cargo.lock", "scripts/validation/fault/notification-fixture/Cargo.lock"],
+    "package_lockfiles_found": [],
+    "manifest_sha256": {
+      "Cargo.lock": "778a9da8ca277723a6652de0c5283fecbf73b7bf99aebedf7822e5deb064204b",
+      "Cargo.toml": "8ffcbaba22ec6b4378c18f53c2d9e2ff8a714ba46fc20d1b795e9986fcbba2a6",
+      "apps/tui/package.json": "1c2c90da7d5fdc98c8648193c825678a3e465f18fb4a461f721f8050fb5300f1"
+    }
+  },
+  "validation_scope": {
+    "builds_tests_attempted": false,
+    "builds_tests_classification": "skipped",
+    "acceptance_or_release_readiness": "not_established",
+    "raw_transcript": "project/validation/production/tasks/PF-S00-T02/attempt-3/COMMANDS.md"
+  }
+}

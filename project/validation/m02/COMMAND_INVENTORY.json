@@ -1,0 +1,746 @@
+{
+  "source": "crates/cli/src/command_registry.rs",
+  "scope": "provided v2 registry only; not independently verified legacy completeness",
+  "routes": [
+    {
+      "path": "commands",
+      "syntax": "bwrk commands [PATH] [--json]",
+      "action": "read",
+      "output": "command_registry",
+      "summary": "discover executable routes and their transport support",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "help",
+      "syntax": "bwrk help [PATH]",
+      "action": "read",
+      "output": "help",
+      "summary": "show the same registry-backed command help",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "version",
+      "syntax": "bwrk version [--json]",
+      "action": "read",
+      "output": "version",
+      "summary": "show binary, protocol, schema, and registry identity",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "init",
+      "syntax": "bwrk init [PROJECT] [--interactive|--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]",
+      "action": "mutate",
+      "output": "project",
+      "summary": "initialize and scaffold a project; prompts for agent skill targets in a terminal",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "setup",
+      "syntax": "bwrk setup [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]",
+      "action": "mutate",
+      "output": "project_setup",
+      "summary": "recommended project setup alias for init",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "install",
+      "syntax": "bwrk install [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]",
+      "action": "mutate",
+      "output": "project_setup",
+      "summary": "compatibility alias for project setup",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "update",
+      "syntax": "bwrk update [--json]",
+      "action": "mutate",
+      "output": "machine_update",
+      "summary": "update a release-installed bwrk binary and its packaged TUI",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "upgrade",
+      "syntax": "bwrk upgrade --machine [--json]",
+      "action": "mutate",
+      "output": "machine_update",
+      "summary": "v1-compatible alias for the machine update operation",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "status",
+      "syntax": "bwrk status PROJECT [--limit N] [--offset N] [--json]",
+      "action": "read",
+      "output": "status",
+      "summary": "read the revisioned derived project status",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "prime",
+      "syntax": "bwrk prime PROJECT [--limit N] [--offset N] [--json]",
+      "action": "read",
+      "output": "status",
+      "summary": "status compatibility alias",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "dashboard",
+      "syntax": "bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH]",
+      "action": "read",
+      "output": "dashboard",
+      "summary": "launch the managed one-terminal dashboard",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "view",
+      "syntax": "bwrk view [PROJECT] [--project PROJECT] [--db PATH]",
+      "action": "read",
+      "output": "dashboard",
+      "summary": "dashboard compatibility alias",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work list",
+      "syntax": "bwrk work list PROJECT [--limit N] [--offset N]",
+      "action": "read",
+      "output": "work_list",
+      "summary": "list work with bounded pagination",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work show",
+      "syntax": "bwrk work show PROJECT WORK_ID",
+      "action": "read",
+      "output": "work",
+      "summary": "read one exact work item",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work create",
+      "syntax": "bwrk work create PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--hold CODE]",
+      "action": "mutate",
+      "output": "work",
+      "summary": "create typed planning or executable work",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work edit",
+      "syntax": "bwrk work edit PROJECT WORK_ID [--title TEXT] [--description TEXT] [--parent WORK_ID] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N",
+      "action": "mutate",
+      "output": "work",
+      "summary": "edit planning fields under an expected project revision",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "dep add",
+      "syntax": "bwrk dep add PROJECT PREREQUISITE_ID DEPENDENT_ID [--expected-revision N]",
+      "action": "mutate",
+      "output": "dependency",
+      "summary": "add a close-only dependency with cycle protection",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "dep remove",
+      "syntax": "bwrk dep remove PROJECT PREREQUISITE_ID DEPENDENT_ID --expected-revision N",
+      "action": "mutate",
+      "output": "dependency",
+      "summary": "remove one dependency under an expected project revision",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "dep tree",
+      "syntax": "bwrk dep tree PROJECT",
+      "action": "read",
+      "output": "dependency_graph",
+      "summary": "read the canonical dependency graph and cycle diagnostics",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "dep cycles",
+      "syntax": "bwrk dep cycles PROJECT",
+      "action": "read",
+      "output": "dependency_graph",
+      "summary": "report dependency cycles found in the project snapshot",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work claim",
+      "syntax": "bwrk work claim PROJECT WORK_ID [--session ID] [--lease-ttl DURATION]",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "atomically claim one work item",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work accept",
+      "syntax": "bwrk work accept PROJECT WORK_ID --attempt ID --fence N",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "acknowledge a claimed attempt",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work heartbeat",
+      "syntax": "bwrk work heartbeat PROJECT WORK_ID --attempt ID --fence N",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "record liveness without extending the hard deadline",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work renew",
+      "syntax": "bwrk work renew PROJECT WORK_ID --attempt ID --fence N [--lease-ttl DURATION]",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "renew only the bounded renewable lease",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work release",
+      "syntax": "bwrk work release PROJECT WORK_ID --attempt ID --fence N [--reason CODE]",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "release the current attempt while retaining history",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work finish",
+      "syntax": "bwrk work finish PROJECT WORK_ID --attempt ID --fence N",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "submit an attempt to the proof/closeout workflow",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "agent status",
+      "syntax": "bwrk agent status --project PROJECT [--session ID]",
+      "action": "read",
+      "output": "status",
+      "summary": "read current status in agent context",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "agent guide",
+      "syntax": "bwrk agent guide --project PROJECT [--work WORK_ID]",
+      "action": "read",
+      "output": "agent_guide",
+      "summary": "return a trusted contextual next action",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "agent resume",
+      "syntax": "bwrk agent resume --project PROJECT --session SESSION_ID [--attempt ATTEMPT_ID]",
+      "action": "read",
+      "output": "agent_guide",
+      "summary": "reload the session's current fenced handoff",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "agent start",
+      "syntax": "bwrk agent start [WORK_ID] --project PROJECT [--session ID]",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "resume or atomically select, claim, accept, and start",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "agent heartbeat",
+      "syntax": "bwrk agent heartbeat --project PROJECT --work WORK_ID --attempt ID --fence N",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "agent-context liveness update",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "agent renew",
+      "syntax": "bwrk agent renew --project PROJECT --work WORK_ID --attempt ID --fence N [--lease-ttl DURATION]",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "agent-context renewable lease update",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "agent release",
+      "syntax": "bwrk agent release WORK_ID --project PROJECT --attempt ID --fence N",
+      "action": "mutate",
+      "output": "attempt",
+      "summary": "release an agent-owned attempt",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "agent finish",
+      "syntax": "bwrk agent finish WORK_ID (--close|--release) --project PROJECT --attempt ID --fence N",
+      "action": "mutate",
+      "output": "work",
+      "summary": "proof-gated close or explicit release",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "next",
+      "syntax": "bwrk next --project PROJECT [--work WORK_ID]",
+      "action": "read",
+      "output": "agent_next",
+      "summary": "select the next safe guided action",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "agent next",
+      "syntax": "bwrk agent next --project PROJECT [--work WORK_ID]",
+      "action": "read",
+      "output": "agent_next",
+      "summary": "guided next compatibility spelling",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "evidence add",
+      "syntax": "bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH",
+      "action": "mutate",
+      "output": "receipt",
+      "summary": "import external evidence without minting witness identity",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "evidence run",
+      "syntax": "bwrk evidence run --project PROJECT --work WORK_ID --gate GATE_ID",
+      "action": "mutate",
+      "output": "receipt",
+      "summary": "run an admitted bounded verifier",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "session start",
+      "syntax": "bwrk session start --project PROJECT --session SESSION_ID --harness HARNESS_ID",
+      "action": "mutate",
+      "output": "session",
+      "summary": "register a durable actor/harness session",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "session show",
+      "syntax": "bwrk session show --project PROJECT --session SESSION_ID",
+      "action": "read",
+      "output": "session",
+      "summary": "read an exact session binding",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "session end",
+      "syntax": "bwrk session end --project PROJECT --session SESSION_ID",
+      "action": "mutate",
+      "output": "session",
+      "summary": "end an idle session without abandoning live work",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "operation show",
+      "syntax": "bwrk operation show PROJECT OPERATION_ID",
+      "action": "read",
+      "output": "operation",
+      "summary": "read back a possibly delivered mutation",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "doctor",
+      "syntax": "bwrk doctor [--project PROJECT] [--db PATH] [--json]",
+      "action": "read",
+      "output": "doctor",
+      "summary": "run bounded read-only database/runtime diagnostics",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work hold add",
+      "syntax": "bwrk work hold add PROJECT WORK_ID --reason CODE --expected-revision N",
+      "action": "mutate",
+      "output": "work",
+      "summary": "add an operator hold while preserving the hold history",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work hold resolve",
+      "syntax": "bwrk work hold resolve PROJECT WORK_ID HOLD_ID --reason TEXT --expected-revision N",
+      "action": "mutate",
+      "output": "work",
+      "summary": "resolve one active hold with an explicit reason",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "work dispatch set",
+      "syntax": "bwrk work dispatch set PROJECT WORK_ID --dispatch automatic|operator_only|paused --expected-revision N",
+      "action": "mutate",
+      "output": "work",
+      "summary": "change dispatch policy under an expected project revision",
+      "direct": true,
+      "service": true,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "source add",
+      "syntax": "bwrk source add PROJECT --input PATH --origin ORIGIN [--media-type TYPE]",
+      "action": "mutate",
+      "output": "source",
+      "summary": "capture and register a bounded immutable source file",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "source show",
+      "syntax": "bwrk source show PROJECT SOURCE_VERSION_ID",
+      "action": "read",
+      "output": "source",
+      "summary": "read one exact source version and its registration",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "source list",
+      "syntax": "bwrk source list PROJECT [--limit N] [--offset N]",
+      "action": "read",
+      "output": "sources",
+      "summary": "list bounded source versions for a project",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "source verify",
+      "syntax": "bwrk source verify PROJECT SOURCE_VERSION_ID",
+      "action": "read",
+      "output": "source_verification",
+      "summary": "verify a source blob against its immutable digest",
+      "direct": true,
+      "service": false,
+      "baseline": "available_registry_entry"
+    },
+    {
+      "path": "summary|review",
+      "code": "closeout_routes_not_implemented",
+      "summary": "typed summary/review records are currently reachable through finish_close only",
+      "owner": "closeout",
+      "scope": "family",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "memory|migration",
+      "code": "knowledge_routes_not_implemented",
+      "summary": "memory and migration still need public application/CLI adapters",
+      "owner": "integration",
+      "scope": "family",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "cycle board",
+      "code": "work_model_v3_not_enabled",
+      "summary": "cycle boards are future capability; v2 scheduling remains the sprint facade",
+      "owner": "planning",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "cycle report",
+      "code": "work_model_v3_not_enabled",
+      "summary": "cycle reports are future capability; v2 scheduling remains the sprint facade",
+      "owner": "planning",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "cycle create",
+      "code": "cycle_create_not_implemented",
+      "summary": "cycle persistence is awaiting the complete v3 application/store adapter",
+      "owner": "planning",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "cycle activate",
+      "code": "cycle_activate_not_implemented",
+      "summary": "cycle activation requires a durable expected-revision mutation",
+      "owner": "planning",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "sprint create",
+      "code": "sprint_create_not_implemented",
+      "summary": "sprint is a compatibility planning fa\u00e7ade awaiting cycle persistence",
+      "owner": "planning",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "sprint activate",
+      "code": "sprint_activate_not_implemented",
+      "summary": "sprint activation is awaiting durable cycle assignment semantics",
+      "owner": "planning",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "sprint board",
+      "code": "sprint_board_not_implemented",
+      "summary": "sprint board is awaiting the canonical cycle projection",
+      "owner": "planning",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "sprint report",
+      "code": "sprint_report_not_implemented",
+      "summary": "sprint report is awaiting the canonical cycle projection",
+      "owner": "planning",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake note",
+      "code": "intake_note_not_implemented",
+      "summary": "use intake capture --kind note; this compatibility alias is not exposed",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake discovery",
+      "code": "intake_discovery_not_implemented",
+      "summary": "use intake capture --kind discovery; this compatibility alias is not exposed",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake question",
+      "code": "intake_question_not_implemented",
+      "summary": "use intake capture --kind question; this compatibility alias is not exposed",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake revisit",
+      "code": "intake_revisit_not_implemented",
+      "summary": "use intake capture --kind revisit; this compatibility alias is not exposed",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake list",
+      "code": "work_model_v3_not_enabled",
+      "summary": "v2 does not expose additive intake rows; use work create for accepted work",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake show",
+      "code": "work_model_v3_not_enabled",
+      "summary": "v2 does not expose additive intake rows; use work show for accepted work",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake bucket",
+      "code": "work_model_v3_not_enabled",
+      "summary": "v2 does not expose additive intake buckets or install work-model/3 implicitly",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake capture",
+      "code": "work_model_v3_not_enabled",
+      "summary": "v2 does not expose additive intake capture or install work-model/3 implicitly",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake promote",
+      "code": "intake_promote_not_implemented",
+      "summary": "typed intake promotion needs a public application adapter",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "intake disposition",
+      "code": "intake_disposition_not_implemented",
+      "summary": "intake disposition needs a public application adapter",
+      "owner": "knowledge",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "summary compose",
+      "code": "summary_compose_not_implemented",
+      "summary": "typed summary composition is not exposed as a public route",
+      "owner": "closeout",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "summary create",
+      "code": "summary_create_not_implemented",
+      "summary": "typed summary creation is not exposed as a public route",
+      "owner": "closeout",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "summary show",
+      "code": "summary_show_not_implemented",
+      "summary": "typed summary inspection is not exposed as a public route",
+      "owner": "closeout",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "summary list",
+      "code": "summary_list_not_implemented",
+      "summary": "typed summary listing is not exposed as a public route",
+      "owner": "closeout",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "summary render",
+      "code": "summary_render_not_implemented",
+      "summary": "typed summary rendering is not exposed as a public route",
+      "owner": "closeout",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "review list",
+      "code": "review_list_not_implemented",
+      "summary": "independent review listing is not exposed as a public route",
+      "owner": "closeout",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "review show",
+      "code": "review_show_not_implemented",
+      "summary": "independent review inspection is not exposed as a public route",
+      "owner": "closeout",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "review decide",
+      "code": "review_decide_not_implemented",
+      "summary": "independent review decisions are not exposed as a public route",
+      "owner": "closeout",
+      "scope": "route",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "memory",
+      "code": "memory_routes_not_implemented",
+      "summary": "memory draft, review, publication, and search routes need application adapters",
+      "owner": "integration",
+      "scope": "family",
+      "baseline": "unavailable_registry_gap"
+    },
+    {
+      "path": "migration",
+      "code": "migration_routes_not_implemented",
+      "summary": "migration dry-run/apply/verify routes need a public adapter",
+      "owner": "integration",
+      "scope": "family",
+      "baseline": "unavailable_registry_gap"
+    }
+  ]
+}

@@ -1,0 +1,159 @@
+{
+  "schema": "boreal.pf-s01-t91.remediation-map.v2",
+  "task_id": "PF-S01-T91",
+  "attempt": 2,
+  "status": "accepted_at_t91_provenance_remediation_layer",
+  "acceptance_claimed": true,
+  "accepted_scope": "Coordinator provenance remediation only; not T90 review acceptance, PF-S01 sprint acceptance, T92 revalidation, product, runtime, service, native, publication, or release acceptance.",
+  "source_review": {
+    "findings": "project/validation/production/sprints/PF-S01/findings.json",
+    "review_handoff": "project/validation/production/tasks/PF-S01-T90/attempt-7/HANDOFF.md",
+    "review_attempt": 7,
+    "review_decision": "rejected",
+    "prior_reconciliation": "project/validation/production/sprints/PF-S01/reconciliation.md",
+    "prior_remediation_map": "project/validation/production/sprints/PF-S01/remediation-map.json"
+  },
+  "source_identity": {
+    "head": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "branch": "codex/apply-responsive-terminal-overlay",
+    "worktree": "dirty",
+    "current_contract_manifest_sha256": "131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa",
+    "observed_t11_stale_manifest_sha256": "dcb757903063fd1aef64f910ebc3f1a5c6fa01990c38bb955f1901aa644fad99",
+    "identity_note": "The current manifest bytes are read-only. The accepted-source token is coordinator state, not a contract-manifest edit."
+  },
+  "dispositions": [
+    {
+      "id": "PF-S01-T90-7-001",
+      "severity": "blocker",
+      "classification": "accepted-source-identity-drift",
+      "status": "fixed_and_verified_at_t91_provenance_layer",
+      "disposition": "fixed_by_coordinator_state_only_correction",
+      "owner": "coordinator execution-state steward",
+      "state_only_target": "PF-S01-T11.accepted_source manifest digest token",
+      "required_value": "131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa",
+      "preserve": [
+        "PF-S01-T90-7-001 finding and pre-correction digest",
+        "prior T11 acceptance history",
+        "current contract-manifest.json bytes"
+      ],
+      "forbidden": [
+        "edit project/spec/production/contract-manifest.json",
+        "rewrite T11 evidence"
+      ]
+    },
+    {
+      "id": "PF-S01-T90-7-002",
+      "severity": "blocker",
+      "classification": "accepted-handoff-linkage-drift",
+      "status": "fixed_and_verified_at_t91_provenance_layer",
+      "disposition": "fixed_by_coordinator_handoff_pointer_correction",
+      "owner": "coordinator execution-state steward",
+      "broken_pointer_count": 21,
+      "task_level_repair_count": 10,
+      "accepted_attempt_repair_count": 11,
+      "target_suffix": "HANDOFF.md",
+      "preserve": [
+        "all START.md records",
+        "all prior attempts and failed evidence",
+        "the T90 finding and pre-correction state history"
+      ],
+      "forbidden": [
+        "delete or rewrite START.md",
+        "change Rust or TypeScript",
+        "change plan.json or contract artifacts"
+      ]
+    },
+    {
+      "id": "PF-S01-T90-7-003",
+      "severity": "major",
+      "classification": "stale-accepted-handoff",
+      "status": "fixed_and_verified_at_t91_provenance_layer",
+      "disposition": "fixed_by_preserving_attempt_2_and_using_superseding_attempt_3",
+      "owner": "coordinator evidence/state steward",
+      "historical_handoff": "project/validation/production/tasks/PF-S01-T01/attempt-2/HANDOFF.md",
+      "superseding_handoff": "project/validation/production/tasks/PF-S01-T01/attempt-3/HANDOFF.md",
+      "required_state_target": "PF-S01-T01 canonical accepted handoff -> attempt-3/HANDOFF.md",
+      "preserve": [
+        "T01 attempt-2 stale text byte-for-byte",
+        "T01 attempt-3 correction record",
+        "T01 independent review record"
+      ],
+      "forbidden": [
+        "edit attempt-2 HANDOFF.md",
+        "delete attempt-2 or reclassify it as current",
+        "claim T01 correction is accepted without state readback"
+      ]
+    }
+  ],
+  "pointer_repair_set": {
+    "broken_slots": 21,
+    "task_level": [
+      ["PF-S01-T02", "project/validation/production/tasks/PF-S01-T02/attempt-2/HANDOFF.md"],
+      ["PF-S01-T03", "project/validation/production/tasks/PF-S01-T03/attempt-2/HANDOFF.md"],
+      ["PF-S01-T04", "project/validation/production/tasks/PF-S01-T04/attempt-2/HANDOFF.md"],
+      ["PF-S01-T05", "project/validation/production/tasks/PF-S01-T05/attempt-2/HANDOFF.md"],
+      ["PF-S01-T06", "project/validation/production/tasks/PF-S01-T06/attempt-2/HANDOFF.md"],
+      ["PF-S01-T07", "project/validation/production/tasks/PF-S01-T07/attempt-1/HANDOFF.md"],
+      ["PF-S01-T08", "project/validation/production/tasks/PF-S01-T08/attempt-1/HANDOFF.md"],
+      ["PF-S01-T09", "project/validation/production/tasks/PF-S01-T09/attempt-2/HANDOFF.md"],
+      ["PF-S01-T10", "project/validation/production/tasks/PF-S01-T10/attempt-1/HANDOFF.md"],
+      ["PF-S01-T11", "project/validation/production/tasks/PF-S01-T11/attempt-2/HANDOFF.md"]
+    ],
+    "accepted_attempt": [
+      ["PF-S01-T01", "project/validation/production/tasks/PF-S01-T01/attempt-2/HANDOFF.md"],
+      ["PF-S01-T02", "project/validation/production/tasks/PF-S01-T02/attempt-2/HANDOFF.md"],
+      ["PF-S01-T03", "project/validation/production/tasks/PF-S01-T03/attempt-2/HANDOFF.md"],
+      ["PF-S01-T04", "project/validation/production/tasks/PF-S01-T04/attempt-2/HANDOFF.md"],
+      ["PF-S01-T05", "project/validation/production/tasks/PF-S01-T05/attempt-2/HANDOFF.md"],
+      ["PF-S01-T06", "project/validation/production/tasks/PF-S01-T06/attempt-2/HANDOFF.md"],
+      ["PF-S01-T07", "project/validation/production/tasks/PF-S01-T07/attempt-1/HANDOFF.md"],
+      ["PF-S01-T08", "project/validation/production/tasks/PF-S01-T08/attempt-1/HANDOFF.md"],
+      ["PF-S01-T09", "project/validation/production/tasks/PF-S01-T09/attempt-2/HANDOFF.md"],
+      ["PF-S01-T10", "project/validation/production/tasks/PF-S01-T10/attempt-1/HANDOFF.md"],
+      ["PF-S01-T11", "project/validation/production/tasks/PF-S01-T11/attempt-2/HANDOFF.md"]
+    ],
+    "t01_task_level_note": "The repaired accepted-attempt T01 slot points to attempt-2/HANDOFF.md and preserves its stale text. Separately, the accepted task-level T01 pointer and coordinator attempt-3 record use the superseding attempt-3/HANDOFF.md; that added superseding record is not counted among the 21 pre-correction slots."
+  },
+  "t01_supersession": {
+    "historical_attempt_2": "project/validation/production/tasks/PF-S01-T01/attempt-2/HANDOFF.md",
+    "historical_attempt_2_preserved": true,
+    "task_level_canonical": "project/validation/production/tasks/PF-S01-T01/attempt-3/HANDOFF.md",
+    "superseding_attempt_record": "project/validation/production/tasks/PF-S01-T01/attempt-3/HANDOFF.md",
+    "superseding_attempt_state": "accepted"
+  },
+  "required_reruns_after_coordinator_correction": [
+    "python3 -m json.tool project/build-plan/production-completion/execution/STATE.json",
+    "Exact current contract-manifest SHA-256 versus PF-S01-T11 accepted_source readback",
+    "21-slot accepted task/attempt HANDOFF.md pointer and file-presence audit; zero START.md targets; T01 canonical attempt-3 assertion",
+    "T01 attempt-2 byte-preservation, attempt-3 supersession, independent-review, and state consistency readback",
+    "python3 project/spec/validate_contracts.py",
+    "(cd project/build-plan/production-completion && python3 tools/plan.py validate)",
+    "(cd project/build-plan/production-completion && python3 tools/plan.py graph-ready) [advisory only]",
+    "(cd project/build-plan/production-completion && python3 tools/plan.py verify-package)",
+    "19-entry manifest, 48-obligation, 49-vector, 49-vector-metadata join and all dispositions unmeasured",
+    "git diff --check and exact dirty-path/source identity",
+    "PF-S01-T92 independent exact-tree repetition of the corrected provenance and structural matrix"
+  ],
+  "validation_before": {
+    "contract_validator": {"exit": 0, "result": "PASS"},
+    "plan_validate": {"exit": 2, "result": "BLOCKED", "detail": "Plan helper cannot parse execution/STATE.json: Expecting ',' delimiter at line 413 column 9 (char 21995)."},
+    "plan_graph_ready": {"exit": 2, "result": "BLOCKED", "detail": "Same execution/STATE.json parse error."},
+    "plan_verify_package": {"exit": 2, "result": "BLOCKED", "detail": "Same execution/STATE.json parse error."},
+    "conformance_json_parse": {"exit": 0, "result": "PASS"},
+    "state_readback": {"exit": 1, "result": "BLOCKED", "detail": "python3 -m json.tool reports line 413 column 9."}
+  },
+  "validation_after": {
+    "state_json_tool": {"exit": 0, "result": "PASS"},
+    "t11_digest_pointer_t01_assertions": {"exit": 0, "result": "PASS", "manifest_sha256": "131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa1", "repaired_task_pointers": 10, "repaired_accepted_attempt_pointers": 11, "total_repaired_pointers": 21},
+    "contract_validator": {"exit": 0, "result": "PASS"},
+    "plan_validate": {"exit": 0, "result": "PASS", "sprints": 22, "tasks": 265, "obligations": 48, "acceptance_rows": 56, "acyclic_tasks": 265, "local_links": 17134},
+    "plan_graph_ready": {"exit": 0, "result": "PASS_ADVISORY", "candidate_tasks": ["PF-S01-T90"], "authorization": false},
+    "plan_verify_package": {"exit": 0, "result": "PASS", "files_checked": 444, "mismatches": []},
+    "manifest_conformance_join": {"exit": 0, "result": "PASS", "manifest_entries": 19, "obligations": 48, "vectors": 49, "metadata": 49, "hash_mismatches": 0, "dangling": 0, "join_difference": 0, "bad_dispositions": [], "all_vector_dispositions": "unmeasured"},
+    "conformance_json_parse": {"exit": 0, "result": "PASS"},
+    "remediation_map_json_parse": {"exit": 0, "result": "PASS"},
+    "git_diff_check": {"exit": 0, "result": "PASS"},
+    "source_identity": {"head": "784a41b3802c29a76721c55eef2e9493283396c2", "branch": "codex/apply-responsive-terminal-overlay", "worktree": "dirty", "state_sha256": "7d97fcf03c9051736e180968670cd061bc97f0b352c551a2fb17abd5c3ed7fee"}
+  },
+  "authority_limit": "Accepted only at the PF-S01-T91 provenance-remediation layer. T90 review disposition, PF-S01-T92 exact-tree revalidation, PF-S01 sprint acceptance, successor authorization, product/runtime/service/native/publication/release claims remain separate."
+}

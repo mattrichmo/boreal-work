@@ -1,0 +1,5 @@
+   Compiling boreal-domain v0.2.0 (/Users/cybertron/Code/boreal-work/crates/domain)
+   Compiling boreal-store v0.2.0 (/Users/cybertron/Code/boreal-work/crates/store)
+   Compiling boreal-application v0.2.0 (/Users/cybertron/Code/boreal-work/crates/application)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.28s
+     Running tests/m02_status_authority.rs (target/debug/deps/m02_status_authority-7299d8ce6bc412af)

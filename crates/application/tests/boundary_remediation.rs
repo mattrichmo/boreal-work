@@ -69,7 +69,7 @@ fn application_consumers_preserve_deep_pages_and_candidate_continuations() {
     assert_eq!(second, vec!["w-1000"]);
 
     let actor = ActorContext {
-        actor_id: ActorId::new("status-reader"),
+        actor_id: ActorId::new("agent-1"),
         role: ActorRole::Agent,
     };
     let page =

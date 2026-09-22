@@ -1,4 +1,14 @@
-import { mkdtemp, mkdir, readdir, copyFile, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdtemp,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -86,6 +96,7 @@ if (
 
 const TEXT_EXTENSIONS = new Set([
   ".json",
+  ".cjs",
   ".lock",
   ".mjs",
   ".md",
@@ -114,6 +125,7 @@ const V2_ROOT_FILES = new Set([
   "LICENSE",
   "MASTER_PLAN.md",
   "README.md",
+  "IMPLEMENTATION_REPORT.md",
   "create-zips.mjs",
   "install.sh",
 ]);
@@ -279,6 +291,68 @@ function groupedFileList(files) {
     .join("\n");
 }
 
+async function sha256File(filePath) {
+  const digest = createHash("sha256");
+  digest.update(await readFile(filePath));
+  return digest.digest("hex");
+}
+
+function gitMetadata(sourceRoot) {
+  const runGit = (args) => {
+    const result = spawnSync("git", ["-C", sourceRoot, ...args], {
+      encoding: "utf8",
+    });
+    if (result.status !== 0) return null;
+    return result.stdout.trim() || null;
+  };
+
+  const dirtyOutput = runGit(["status", "--porcelain", "--untracked-files=no"]);
+  return {
+    commit: runGit(["rev-parse", "HEAD"]),
+    branch: runGit(["branch", "--show-current"]),
+    dirty: dirtyOutput === null ? null : dirtyOutput !== "",
+  };
+}
+
+async function archiveManifest(spec, sourceRoot, files) {
+  const git = gitMetadata(sourceRoot);
+  const entries = [];
+
+  for (const relativePath of files) {
+    const absolutePath = path.join(sourceRoot, relativePath);
+    const fileStat = await stat(absolutePath);
+    entries.push({
+      path: relativePath,
+      bytes: fileStat.size,
+      mode: fileStat.mode & 0o777,
+      sha256: await sha256File(absolutePath),
+    });
+  }
+
+  return {
+    schema_version: "boreal.archive-manifest.v1",
+    archive_id: spec.id,
+    archive_directory: spec.archiveDirectory,
+    generated_at: generatedAt.toISOString(),
+    source_label: spec.sourceLabel,
+    source_commit: git.commit,
+    source_branch: git.branch,
+    source_dirty: git.dirty,
+    file_count: entries.length,
+    files: entries,
+    metadata_files: ["REFERENCE_INDEX.md", "ARCHIVE_MANIFEST.json"],
+    deletions: [],
+    protected_paths: [
+      ".git",
+      ".boreal",
+      "memory",
+      "target",
+      "node_modules",
+      "test-project",
+    ],
+  };
+}
+
 function indexFor(spec, files) {
   return `# ${spec.title}\n\n` +
     `This archive is a read-only reference snapshot for another agent. ` +
@@ -286,7 +360,8 @@ function indexFor(spec, files) {
     `Generated: ${generatedAt.toISOString()}\n` +
     `Source root: ${spec.sourceLabel}\n` +
     `Included files: ${files.length}\n` +
-    `Compression: ZIP/Deflate level 9\n\n` +
+    `Compression: ZIP/Deflate level 9\n` +
+    `Manifest: ARCHIVE_MANIFEST.json\n\n` +
     `## Included\n\n${spec.included}\n\n` +
     `## Excluded\n\n` +
     `- Images, fonts, binary assets, and other non-text files.\n` +
@@ -323,6 +398,13 @@ async function buildArchive(spec) {
       await mkdir(path.dirname(destination), { recursive: true });
       await copyFile(path.join(sourceRoot, relativePath), destination);
     }
+
+    const manifest = await archiveManifest(spec, sourceRoot, files);
+    await writeFile(
+      path.join(archiveRoot, "ARCHIVE_MANIFEST.json"),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf8",
+    );
 
     await writeFile(
       path.join(archiveRoot, "REFERENCE_INDEX.md"),
@@ -371,6 +453,10 @@ const specs = [
       "install.sh",
       ".github/workflows/ci.yml",
       "apps/tui/src/client.ts",
+      "apps/tui/package.json",
+      "apps/tui/tsconfig.json",
+      "apps/tui/installer/wizard-body.cjs",
+      "apps/tui/installer/wizard.cjs",
       "apps/tui/smoke/service-smoke.mjs",
       "crates/domain/src/work_model_v3.rs",
       "crates/store/src/work_model_v3.rs",

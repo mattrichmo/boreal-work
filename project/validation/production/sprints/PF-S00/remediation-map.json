@@ -1,0 +1,79 @@
+{
+  "schema": "boreal.pf-s00-t91.remediation-map.v1",
+  "status": "reconciliation-produced-ready-for-t92",
+  "task_id": "PF-S00-T91",
+  "source_review": "project/validation/production/sprints/PF-S00/findings.json",
+  "source_identity": {
+    "input": "working-tree:codex/apply-responsive-terminal-overlay@784a41b3 dirty; PF-S00-T08 accepted remediation integrated; plan package revalidated",
+    "archive_sha256": "09d72813db6b68728f567b14132454fb24fee289747cf9ca799830c9ee749d8",
+    "note": "This reconciliation preserves prior findings and does not certify the product or release."
+  },
+  "dispositions": [
+    {
+      "finding_id": "PF-S00-T90-001",
+      "severity": "critical",
+      "disposition": "open_blocker",
+      "decision": "Do not rewrite T06/T07 history or relabel coordinator self-acceptance. Require an attributable independent review of those coordination records and exact-tree revalidation.",
+      "owner": "PF-S00-T92 independent gate owner, with coordinator recording only",
+      "required_evidence": [
+        "Independent reviewer identity distinct from the coordinator",
+        "Review of T06/T07 handoffs and execution ledger attribution",
+        "Fresh plan/dispatch checks on the reconciled tree"
+      ],
+      "successor_effect": "S00 remains blocked until T92 accepts the corrected attribution evidence."
+    },
+    {
+      "finding_id": "PF-S00-T90-002",
+      "severity": "critical",
+      "disposition": "open_blocker",
+      "decision": "Retain EXT-INDEPENDENT-REVIEW as missing. Assign and record an independent T92 gate owner before T92 starts; the T90 subagent identity is preserved as review provenance but does not substitute for the missing external capability.",
+      "owner": "Coordinator to supply independent T92 gate owner; PF-S00-T92 to verify",
+      "required_evidence": [
+        "Named gate owner and independence statement",
+        "T92 reviewer field recorded before dispatch",
+        "Fresh exact-tree revalidation handoff"
+      ],
+      "successor_effect": "No S00 exit or PF-S01 unlock while the external reviewer capability is missing."
+    },
+    {
+      "finding_id": "PF-S00-T90-003",
+      "severity": "high",
+      "disposition": "fixed_at_bounded_discovery_layer",
+      "decision": "PF-S00-T08 independently restored project-independent read-only workflow list/show routes. T92 must rerun the original audit resolver through the supported application path and retain the observed result; no synthetic receipt or direct database inspection is permitted.",
+      "owner": "PF-S00-T92 independent gate owner",
+      "required_evidence": [
+        "boreal.yaml/workflow reference or an explicit documented repository absence",
+        "Original application command readback against the rebuilt exact-tree binary",
+        "A retained receipt or explicit unavailable classification"
+      ],
+      "successor_effect": "T92 must independently rerun the supported audit resolver; this bounded fix alone does not authorize successors."
+    },
+    {
+      "finding_id": "INHERITED-PACKAGE-MISMATCH",
+      "severity": "high",
+      "disposition": "fixed_by_revalidation",
+      "decision": "The coordinator updated the issued package manifest after the accepted T08 ledger/evidence additions. T92 must rerun verify-package on the exact reconciled tree; prior mismatch evidence remains historical.",
+      "owner": "PF-S00-T92 independent gate owner",
+      "required_evidence": [
+        "Fresh verify-package result with 444 files and no mismatches",
+        "No deletion of prior failed output",
+        "Exact combined source identity"
+      ],
+      "successor_effect": "T92 must confirm the current package identity before any S00 successor is authorized."
+    }
+  ],
+  "non_dispositions": [
+    "No product source correction was authorized by T91.",
+    "No finding was changed to fixed solely because a future task owns it.",
+    "No new task was added to plan.json; any graph change requires a reviewed change request and coordinator integration.",
+    "T90 review artifacts, T06/T07 attempts, and all failed or interrupted evidence remain preserved."
+  ],
+  "required_revalidation": [
+    "Validate all JSON artifacts and the plan graph.",
+    "Check T90/T91/T92 conservative write conflicts.",
+    "Verify the 48 M02 ID map remains mapped_not_accepted.",
+    "Run the package check and classify any mismatch without hiding it.",
+    "Run exact-tree source identity capture before T92.",
+    "Obtain and record an independent T92 gate owner before dispatch."
+  ]
+}

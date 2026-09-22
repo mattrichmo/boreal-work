@@ -2,7 +2,7 @@
 
 Contract: `boreal.work-transition/2`<br>
 Schema: `boreal.sqlite/2`<br>
-Fixture revision: `p0-03.v2` · frozen 2026-09-14<br>
+Fixture revision: `m02-candidate.1` · 2026-09-21; independent review pending<br>
 Decisions: D17–D23 and D27–D29; policy record PD-05–PD-11.
 
 This is contract data, not a second state machine. The application evaluates
@@ -29,7 +29,7 @@ The versioned read shape is:
 ```text
 StatusDecision {
   contract: "boreal.work-status/2", work_id, project_revision, as_of,
-  next_status_change_at, display_status, reason_codes[],
+  next_status_change_at, display_status, primary_reason, reason_codes[],
   claimable_for_actor, next_action { directive, argv[], cwd,
     runner: "exec", shell: false } | null,
   current_attempt { attempt_id, fence, state } | null,
@@ -53,8 +53,8 @@ command assembled from task prose. Apply this precedence:
 | S08 | submitted/close intent with required proof gaps | `needs_verification` / no / `provide_evidence` (typed gate gaps) |
 | S09 | proof passes, required review is open | `awaiting_review` / no / `request_review` (`review_required`) |
 | S10 | all required verification/review gates pass, no final close | `complete` / no / `finish_close` (`closeout_pending`) |
-| S11 | open default prerequisite is not closed | `queued` / no / `wait_for_prerequisite` (`prerequisite_open(<id>)`) |
-| S12 | paused policy or retry time not reached | `paused`/`retry_wait` / no / `resume_policy`/`wait_until` |
+| S11 | paused policy, then a future retry time | `paused`/`retry_wait` / no / `resume_policy`/`wait_until`; retain prerequisite reasons |
+| S12 | open default prerequisite is not closed | `queued` / no / `wait_for_prerequisite` (`prerequisite_open(<id>)`) |
 | S13 | open, eligible, no attempt/hold, prerequisites closed, automatic policy | `ready` / yes / `claim` (`eligible`) |
 | S14 | S13 but actor lacks automatic authority | `ready` / no / `request_operator_claim` (`operator_only`) |
 
@@ -77,7 +77,7 @@ revision, and event.
 | T04 | `start`: accepted → running; record immutable runtime identity | `in_progress`; `checkpoint`/approved evidence | `attempt.started` |
 | T05 | `submit`: running → verifying; bind subject/source/config identity | `needs_verification`, `awaiting_review`, or `complete` from gates | `attempt.submitted` |
 | T06 | `receipt`: verifying → verifying; append immutable structured receipt | Re-evaluate gates; failed receipt stays a gap | `receipt.recorded` or `receipt.rejected` |
-| T07 | `review`: awaiting_review → verifying | pass → `complete`; fail → `needs_verification` with repair action | `review.accepted`/`review.rejected` |
+| T07 | `review`: awaiting_review → verifying | pass → `complete`; rejected required review → `blocked` with an explicit review disposition | `review.accepted`/`review.rejected` |
 | T08 | `finish --close`: matching complete/intent/summary/profile/snapshot/fence → closed | `closed`; release reservation; recompute dependents same revision | `work.closed` |
 | T09 | `finish --close` with gaps: open attempt → open plus fenced intent | `needs_verification`/`awaiting_review`; exact gap action | `close.requested` |
 | T10 | `finish --release`: current attempt → open, terminal released attempt | `ready`, `queued`, `blocked`, `paused`, or `retry_wait` | `attempt.released` |
@@ -171,3 +171,48 @@ is `operation_unknown` until operation readback resolves it.
 CLI, API, and TUI must produce the same decision for the same canonical
 revision and clock. Repairs append correction/supersession events; they never
 erase audit rows, attempts, receipts, or summaries.
+
+## M02 candidate amendments and implementation boundary
+
+This contract does not certify availability of any public operation. S00-T07
+requires an independent reviewer; the current workspace has no such signoff.
+See `project/validation/m02/REVIEW.md` and the root implementation report.
+
+`primary_reason` is an additive read field. `reason_codes[0]` repeats it; the
+remaining codes are distinct and lexically ordered. Reordering prerequisites,
+holds, gates, or affected dependents must not change the decision. Hard holds
+do not suppress normal prerequisite, policy, or timer facts. A reviewer or
+publisher is not an execution agent. Operator-only work is `ready`, but only
+the durable operator actor is claimable. Claimed/active ownership still needs
+session/fence authorization at the mutation boundary.
+
+The fixed-hierarchy compatibility strategy is described in
+`project/validation/m02/SPRINT_STRATEGY.md`. A planning container is not
+executable. `container_planning` is a provisional queue/read label, not proof
+that descendant rollups, readiness, or sprint completion exist.
+
+### Override policy (target, not implemented)
+
+Every override envelope requires an operation ID and request digest, selected
+project, authorized durable actor, expected project revision, target ID and
+target revision, stable reason, nonempty comment, exact scope, optional expiry
+and supporting evidence references. Authorization is not established by
+`--actor-role` or a boolean `--force`. Reusing an operation ID with a different
+digest fails; an exact replay returns the original decision and audit event.
+
+| Operation | Authorized role | Canonical change | Required safeguards |
+| --- | --- | --- | --- |
+| Gate force | Operator | Append a named gate decision, visibly forced | Bind gate/work/attempt/fence/source/config/profile; never alter a receipt |
+| Dependency waiver | Operator | Append one edge-scoped satisfaction decision | Bind both endpoints and edge revision; never waive all dependencies |
+| Revoke override | Operator | Append superseding revocation | Reference original decision; retain it; recompute status |
+| Review approve/reject/return | Reviewer or authorized operator | Append independent decision | Cannot review own attempt; bind exact proof/config/profile/fence |
+| Pause/resume | Operator | Change dispatch policy | Resume restores explicit previous policy, not unconditional automatic |
+| Hold resolve | Operator | Append resolution to named hold | Nonempty reason and comment; never erase the hold |
+| Cancel/reopen | Operator | Change persisted lifecycle | Explicit dependency disposition; preserve evidence and former attempts |
+| Expiry disposition | Operator | Resolve expiry obligation | Confirm execution stopped; select retry/pause/cancel/hold; no blind reclaim |
+
+Stable target override reasons are `risk_accepted`, `external_evidence`,
+`superseded_work`, `duplicate_work`, and `migration_disposition`. They do not
+create authorization. `gate_forced`, `dependency_waived`, `override_expired`,
+and `override_revoked` must remain visible in target readback/audit. These
+identifiers are reserved until versioned persistence and public routes exist.

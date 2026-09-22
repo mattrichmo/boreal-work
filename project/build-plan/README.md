@@ -7,6 +7,13 @@ service, CLI, TUI, migration, and a release
 boundary. Those concerns need separate design, implementation, review,
 reconciliation, and revalidation passes.
 
+For the current completion wave focused on deterministic planning, v1 parity,
+audited status overrides, project isolation, and the full milestone/sprint/task
+surface, use [M02 — Deterministic Planning, Lifecycle Hardening, and v1
+Parity](M02-DETERMINISTIC-PLANNING-AND-PARITY.md). It is the executable
+checkbox plan for parallel agents; this original packet remains the broader
+M01 architecture and phase reference.
+
 This is the detailed leaf/dependency and vertical-ownership reference for the
 top-level [master milestone plan](../../MASTER_PLAN.md) and its
 [sprint files](../../milestones/M01-v2-product/README.md). The master controls

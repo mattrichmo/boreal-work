@@ -1,0 +1,4 @@
+   Compiling boreal-domain v0.2.0 (/Users/cybertron/Code/boreal-work/crates/domain)
+   Compiling boreal-store v0.2.0 (/Users/cybertron/Code/boreal-work/crates/store)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.08s
+     Running tests/m02_claim.rs (target/debug/deps/m02_claim-c741faaaeb98c929)

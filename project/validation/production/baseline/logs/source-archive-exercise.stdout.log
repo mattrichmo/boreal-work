@@ -1,0 +1,8 @@
++ node /Users/cybertron/Code/boreal-work/create-zips.mjs --output-dir /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-m02-archive-at6ffrfh/archives
+Created /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-m02-archive-at6ffrfh/archives/boreal-v2-reference-20260921T221257867Z.zip (899 source files)
+PASS: 901 ZIP files; 19 required paths; 27 TUI text files byte-identical
++ npm --prefix apps/tui test
+
+> test
+> tsc && node dist/test.js && node --test tests/*.test.mjs
+

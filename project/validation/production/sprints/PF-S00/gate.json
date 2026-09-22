@@ -1,0 +1,47 @@
+{
+  "schema": "boreal.pf-s00-t92.revalidation-gate.v1",
+  "task_id": "PF-S00-T92",
+  "attempt": 6,
+  "plan_id": "PF-production-completion-2026-09-21",
+  "plan_version": 1,
+  "gate_kind": "T92 revalidation",
+  "result": "accepted",
+  "accepted": true,
+  "source_identity": {
+    "fixed": "HEAD:784a41b3802c29a76721c55eef2e9493283396c2; dirty",
+    "workspace": "/Users/cybertron/Code/boreal-work",
+    "evidence_outputs_excluded": true
+  },
+  "gate_owner": {
+    "role": "independent gate steward",
+    "agent_id": "01a0c724-cc7c-7300-b7ee-e633ac70f3b5",
+    "distinct_from_coordinator": true,
+    "distinct_from_prior_reviewers": true
+  },
+  "fresh_checks": {
+    "workflow_discovery": "passed",
+    "workflow_unknown_rejection": "passed",
+    "commands_workflows": "passed",
+    "plan_validate": "passed",
+    "plan_verify_package": "passed",
+    "json_parse": "passed",
+    "obligations": {"mapped": 48, "unique": 48, "accepted": 0},
+    "contract_validator": "passed",
+    "fmt_check": "passed",
+    "focused_workflow_tests": {"count": 3, "passed": 3},
+    "t06_t07_attribution": "passed",
+    "source_scope": "passed"
+  },
+  "authorized_successors": {
+    "tasks": ["PF-S01-T01"],
+    "sprints": ["PF-S01"]
+  },
+  "authority_limits": [
+    "not_product_acceptance",
+    "not_service_acceptance",
+    "not_native_platform_acceptance",
+    "not_publication_acceptance",
+    "not_release_acceptance",
+    "not_broad_external_reviewer_capacity"
+  ]
+}

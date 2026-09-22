@@ -1,0 +1,18 @@
+    Checking boreal-domain v0.2.0 (/Users/cybertron/Code/boreal-work/crates/domain)
+    Checking boreal-protocol v0.2.0 (/Users/cybertron/Code/boreal-work/crates/protocol)
+error: usage of `bool::then` in `filter_map`
+  --> crates/domain/src/status_evaluator.rs:75:54
+   |
+75 |       gaps.extend(work.acceptance_profile.gates.iter().filter_map(|declared| {
+   |  ______________________________________________________^
+76 | |         (declared.required && !gate_ids.contains(&declared.id)).then(|| declared.id.clone())
+77 | |     }));
+   | |______^ help: use `filter` then `map` instead: `filter(|&declared| (declared.required && !gate_ids.contains(&declared.id))).map(|declared| declared.id.clone())`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#filter_map_bool_then
+   = note: `-D clippy::filter-map-bool-then` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::filter_map_bool_then)]`
+
+error: could not compile `boreal-domain` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `boreal-domain` (lib test) due to 1 previous error

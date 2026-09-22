@@ -1,0 +1,72 @@
+{
+  "scope": "Plan helper self-tests only; no Boreal product behavior tested and no product fixtures or receipts created",
+  "tests": 13,
+  "passed": 13,
+  "results": [
+    {
+      "name": "Valid initial plan/state",
+      "result": "passed",
+      "detail": "No product state changed; plan-only graph/cards/source-index/link validation."
+    },
+    {
+      "name": "Reject cyclic task graph",
+      "result": "passed",
+      "detail": "In-memory intentionally invalid plan rejected; no file modified."
+    },
+    {
+      "name": "Reject false task counts",
+      "result": "passed",
+      "detail": "Canonical counts checked against actual task list."
+    },
+    {
+      "name": "Reject unsupported acceptance",
+      "result": "passed",
+      "detail": "In-memory fake acceptance rejected for dependencies and evidence fields."
+    },
+    {
+      "name": "Whole-file overlap",
+      "result": "passed",
+      "detail": "Same file cannot be treated as independent function ranges."
+    },
+    {
+      "name": "Directory overlap",
+      "result": "passed",
+      "detail": "Directory scopes conservatively cover children."
+    },
+    {
+      "name": "Separate file scopes",
+      "result": "passed",
+      "detail": "Distinct file paths are not a false exact-path conflict."
+    },
+    {
+      "name": "Safe plan paths",
+      "result": "passed",
+      "detail": "No traversal/absolute output task path allowed."
+    },
+    {
+      "name": "Initial graph-ready set",
+      "result": "passed",
+      "detail": "Readiness output also warns about authority, sources, decisions, reviewers and locks."
+    },
+    {
+      "name": "Selective task packet",
+      "result": "passed",
+      "detail": "Packet includes startup, sprint, complete task card and linked baseline contexts."
+    },
+    {
+      "name": "Unknown task fails clearly",
+      "result": "passed",
+      "detail": "No invented task output."
+    },
+    {
+      "name": "Explicit render-write permission",
+      "result": "passed",
+      "detail": "Task card renderer requires --write and does not touch application code."
+    },
+    {
+      "name": "Acyclic post-review correction model",
+      "result": "passed",
+      "detail": "In-memory remediation child depends on accepted review, reconciliation depends on correction, original review does not depend on its own fixes. No product or plan files are created for the hypothetical child."
+    }
+  ]
+}

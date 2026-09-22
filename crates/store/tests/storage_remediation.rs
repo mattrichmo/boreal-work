@@ -2,7 +2,7 @@ use boreal_domain::{
     AcceptanceProfile, DispatchPolicy, PersistedLifecycle, ProjectId, ReasonCode, WorkId, WorkItem,
     WorkKind,
 };
-use boreal_store::{SqliteStore, StoreError, SCHEMA_VERSION};
+use boreal_store::{SqliteStore, StoreError, WORK_MODEL_SCHEMA_VERSION};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 
@@ -106,7 +106,8 @@ fn fresh_schema_rolls_back_all_ddl_when_initialization_fails() {
     assert!(SqliteStore::open(&path, broken).is_err());
 
     let store = SqliteStore::open(&path, SCHEMA).expect("failed schema must be recoverable");
-    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(store.schema_version().unwrap(), WORK_MODEL_SCHEMA_VERSION);
+    assert!(store.work_model_v3_enabled().unwrap());
     drop(store);
     remove_sqlite_files(&path);
 }
@@ -125,7 +126,8 @@ fn legacy_v2_schema_is_repaired_atomically_and_survives_restart() {
     seed_work(&store, "w1", "task", None);
 
     store.apply_schema(SCHEMA).unwrap();
-    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(store.schema_version().unwrap(), WORK_MODEL_SCHEMA_VERSION);
+    assert!(store.work_model_v3_enabled().unwrap());
     let item = store.work("p1", "w1").unwrap().unwrap();
     assert_eq!(item.priority, 0);
     assert!(item.hard_holds.is_empty());
@@ -137,13 +139,14 @@ fn legacy_v2_schema_is_repaired_atomically_and_survives_restart() {
     drop(store);
 
     let store = SqliteStore::open(&path, SCHEMA).unwrap();
-    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(store.schema_version().unwrap(), WORK_MODEL_SCHEMA_VERSION);
+    assert!(store.work_model_v3_enabled().unwrap());
     assert!(store.work("p1", "w1").unwrap().is_some());
     remove_sqlite_files(&path);
 }
 
 #[test]
-fn established_open_does_not_repair_until_explicit_migration() {
+fn canonical_open_repairs_legacy_v2_and_reopens_v3_contract() {
     let legacy = legacy_schema();
     let path = std::env::temp_dir().join(format!(
         "boreal-store-{}-open-no-repair.sqlite",
@@ -154,7 +157,10 @@ fn established_open_does_not_repair_until_explicit_migration() {
     store.execute_batch(&legacy).unwrap();
     assert!(store.work_holds("missing").is_err());
     drop(store);
-    assert!(SqliteStore::open(&path, SCHEMA).is_err());
+    let store = SqliteStore::open(&path, SCHEMA).expect("production open repairs legacy v2");
+    assert_eq!(store.schema_version().unwrap(), WORK_MODEL_SCHEMA_VERSION);
+    assert!(store.work_model_v3_enabled().unwrap());
+    assert!(store.work_holds("missing").unwrap().is_empty());
     remove_sqlite_files(&path);
 }
 

@@ -1,0 +1,15 @@
+
+running 10 tests
+test malformed_retry_is_diagnostic_and_not_claimable ... ok
+test exact_replay_returns_the_original_claim_even_when_a_new_hold_blocks_progress ... ok
+test canonical_time_errors_and_nonpositive_deadlines_leave_state_unchanged ... ok
+test retries_compare_numeric_milliseconds_not_lexical_strings ... ok
+test a_visible_hard_hold_cannot_be_bypassed_by_the_raw_claim_transaction ... ok
+test hold_resolution_requires_operator_and_exact_project_scope ... ok
+test stale_claim_and_foreign_subject_do_not_write_attempts ... ok
+test paused_and_operator_dispatch_follow_the_same_durable_actor_policy ... ok
+test unreadable_prerequisite_does_not_disappear_from_eligibility ... ok
+test competing_write_transactions_still_produce_one_winner ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

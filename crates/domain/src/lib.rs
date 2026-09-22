@@ -4,12 +4,22 @@
 //! or process-execution code. Adapters provide canonical rows and consume the
 //! decisions produced here.
 
-use std::{cmp::Ordering, fmt, str::FromStr};
+use std::{fmt, str::FromStr};
+
+pub mod acceptance;
+pub mod actions;
+pub mod decision_inputs;
+pub mod dependencies;
+pub mod rollups;
+pub mod time_policy;
 
 /// Version-3 work-model value objects and pure validators.  This module is
 /// additive: schema-2 rows and lifecycle APIs remain available until a store
 /// migration and capability negotiation are integrated by the owning lanes.
 pub mod work_model_v3;
+
+mod status_evaluator;
+pub use status_evaluator::evaluate_status;
 
 /// The default immutable attempt budget, measured from `claimed_at`.
 pub const DEFAULT_HARD_TIME_LIMIT_MS: u64 = 2 * 60 * 60 * 1_000;
@@ -474,7 +484,11 @@ impl Attempt {
         if self.phase.is_terminal() || at >= self.lease_deadline {
             return Err(DomainError::LeaseExpired);
         }
-        self.lease_deadline = at.checked_add(lease_ttl_ms)?;
+        let candidate = at.checked_add(lease_ttl_ms)?;
+        if candidate <= at || candidate < self.lease_deadline {
+            return Err(DomainError::InvalidLeaseRenewal);
+        }
+        self.lease_deadline = candidate;
         Ok(self.deadlines_at(at))
     }
 
@@ -487,9 +501,6 @@ impl Attempt {
     }
 
     pub fn expiry_reason(&self, as_of: TimestampMs) -> Option<ExpiryReason> {
-        if self.phase == AttemptPhase::ExpiryPending || self.phase == AttemptPhase::Expired {
-            return Some(ExpiryReason::HardBudgetElapsed);
-        }
         // Hard-budget expiry wins when both clocks have elapsed.
         if as_of >= self.max_attempt_deadline {
             Some(ExpiryReason::HardBudgetElapsed)
@@ -837,6 +848,14 @@ pub enum ReasonCode {
     NonExecutableContainer,
     LeaseElapsed,
     HardBudgetElapsed,
+    GateOpen(GateId),
+    GateFailed(GateId),
+    GateMissing(GateId),
+    GateInvalid(GateId),
+    ReviewRejected(GateId),
+    RoleDenied,
+    AttemptSubjectMismatch,
+    ContainerPlanning,
 }
 
 impl ReasonCode {
@@ -860,6 +879,14 @@ impl ReasonCode {
             Self::NonExecutableContainer => "non_executable_container".to_owned(),
             Self::LeaseElapsed => "lease_elapsed".to_owned(),
             Self::HardBudgetElapsed => "hard_budget_elapsed".to_owned(),
+            Self::GateOpen(id) => format!("gate_open({id})"),
+            Self::GateFailed(id) => format!("gate_failed({id})"),
+            Self::GateMissing(id) => format!("gate_missing({id})"),
+            Self::GateInvalid(id) => format!("gate_invalid({id})"),
+            Self::ReviewRejected(id) => format!("review_rejected({id})"),
+            Self::RoleDenied => "role_denied".to_owned(),
+            Self::AttemptSubjectMismatch => "attempt_subject_mismatch".to_owned(),
+            Self::ContainerPlanning => "container_planning".to_owned(),
         }
     }
 }
@@ -895,6 +922,9 @@ pub struct StatusDecision {
     pub as_of: TimestampMs,
     pub next_status_change_at: Option<TimestampMs>,
     pub display_status: DerivedStatus,
+    /// Chosen by precedence, never inferred from lexical reason ordering.
+    pub primary_reason: ReasonCode,
+    /// Primary reason first, then unique stable codes in lexical order.
     pub reason_codes: Vec<ReasonCode>,
     pub claimable_for_actor: bool,
     pub next_action: Option<DomainAction>,
@@ -988,249 +1018,6 @@ impl<'a> StatusContext<'a> {
             retry_not_before: None,
             affected_dependents: &[],
         }
-    }
-}
-
-pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
-    let work = context.work;
-    let attempt = context.current_attempt;
-    let mut reasons = Vec::new();
-    let mut gate_gaps = context
-        .gates
-        .iter()
-        .filter(|gate| gate.required && gate.state != GateState::Satisfied)
-        .map(|gate| gate.id.clone())
-        .collect::<Vec<_>>();
-    gate_gaps.sort();
-
-    let dependency_reasons = context
-        .prerequisites
-        .iter()
-        .filter(|prerequisite| prerequisite.lifecycle != PersistedLifecycle::Closed)
-        .map(|prerequisite| ReasonCode::PrerequisiteOpen(prerequisite.id.clone()))
-        .collect::<Vec<_>>();
-
-    let expiry_reason = attempt.and_then(|current| current.expiry_reason(context.as_of));
-    let (display_status, claimable, action, primary) =
-        if work.lifecycle == PersistedLifecycle::Closed {
-            (
-                DerivedStatus::Closed,
-                false,
-                None,
-                ReasonCode::TerminalClosed,
-            )
-        } else if work.lifecycle == PersistedLifecycle::Cancelled {
-            (
-                DerivedStatus::Cancelled,
-                false,
-                None,
-                ReasonCode::TerminalCancelled,
-            )
-        } else if expiry_reason.is_some()
-            || matches!(
-                attempt.map(|value| value.phase),
-                Some(AttemptPhase::ExpiryPending | AttemptPhase::Expired)
-            )
-        {
-            (
-                DerivedStatus::ExpiredReview,
-                false,
-                Some(DomainAction::ReviewExpiry),
-                ReasonCode::ExpiryReviewRequired,
-            )
-        } else if !work.hard_holds.is_empty() {
-            (
-                DerivedStatus::Blocked,
-                false,
-                Some(DomainAction::ResolveHold),
-                ReasonCode::HardHold(work.hard_holds[0].stable_code()),
-            )
-        } else if work.lifecycle == PersistedLifecycle::Draft {
-            (
-                DerivedStatus::Draft,
-                false,
-                Some(DomainAction::PublishWork),
-                ReasonCode::NotPublished,
-            )
-        } else if work.kind != WorkKind::Task && attempt.is_none() {
-            (
-                DerivedStatus::Blocked,
-                false,
-                None,
-                ReasonCode::NonExecutableContainer,
-            )
-        } else if let Some(current) = attempt {
-            match current.phase {
-                AttemptPhase::Claimed => (
-                    DerivedStatus::Claimed,
-                    false,
-                    Some(DomainAction::AcceptAttempt),
-                    ReasonCode::AttemptUnaccepted,
-                ),
-                AttemptPhase::Accepted | AttemptPhase::Running => (
-                    DerivedStatus::InProgress,
-                    false,
-                    Some(DomainAction::ResumeAttempt),
-                    ReasonCode::AttemptActive,
-                ),
-                AttemptPhase::Verifying => evaluate_gates(work, &gate_gaps),
-                AttemptPhase::Completed => (
-                    DerivedStatus::Complete,
-                    false,
-                    Some(DomainAction::FinishClose),
-                    ReasonCode::CloseoutPending,
-                ),
-                AttemptPhase::ExpiryPending | AttemptPhase::Expired => (
-                    DerivedStatus::ExpiredReview,
-                    false,
-                    Some(DomainAction::ReviewExpiry),
-                    ReasonCode::ExpiryReviewRequired,
-                ),
-                AttemptPhase::Failed | AttemptPhase::Released | AttemptPhase::Cancelled => {
-                    eligible_tuple(work, context.actor)
-                }
-            }
-        } else if !dependency_reasons.is_empty() {
-            (
-                DerivedStatus::Queued,
-                false,
-                Some(DomainAction::WaitForPrerequisite),
-                dependency_reasons[0].clone(),
-            )
-        } else if let Some(retry_at) = context
-            .retry_not_before
-            .filter(|retry_at| *retry_at > context.as_of)
-        {
-            (
-                DerivedStatus::RetryWait,
-                false,
-                Some(DomainAction::WaitUntil),
-                ReasonCode::RetryNotBefore(retry_at),
-            )
-        } else if work.dispatch_policy == DispatchPolicy::Paused {
-            (
-                DerivedStatus::Paused,
-                false,
-                Some(DomainAction::ResumePolicy),
-                ReasonCode::Paused,
-            )
-        } else {
-            eligible_tuple(work, context.actor)
-        };
-
-    reasons.push(primary);
-    reasons.extend(work.hard_holds.iter().cloned());
-    reasons.extend(dependency_reasons);
-    if let Some(reason) = expiry_reason {
-        reasons.push(match reason {
-            ExpiryReason::LeaseElapsed => ReasonCode::LeaseElapsed,
-            ExpiryReason::HardBudgetElapsed => ReasonCode::HardBudgetElapsed,
-        });
-    }
-    reasons.sort_by(|left, right| {
-        if left == right {
-            Ordering::Equal
-        } else {
-            left.stable_code().cmp(&right.stable_code())
-        }
-    });
-    reasons.dedup();
-
-    let next_status_change_at = attempt.and_then(|current| {
-        [current.lease_deadline, current.max_attempt_deadline]
-            .into_iter()
-            .filter(|deadline| *deadline > context.as_of)
-            .min()
-    });
-    StatusDecision {
-        work_id: work.id.clone(),
-        project_revision: context.project_revision,
-        as_of: context.as_of,
-        next_status_change_at,
-        display_status,
-        reason_codes: reasons,
-        claimable_for_actor: claimable,
-        next_action: action,
-        current_attempt: attempt.map(|current| CurrentAttempt {
-            attempt_id: current.attempt_id.clone(),
-            fence: current.fence,
-            phase: current.phase,
-        }),
-        gate_gaps,
-        affected_dependents: context.affected_dependents.to_vec(),
-    }
-}
-
-fn eligible_tuple(
-    work: &WorkItem,
-    actor: &ActorContext,
-) -> (DerivedStatus, bool, Option<DomainAction>, ReasonCode) {
-    if work.kind != WorkKind::Task {
-        return (
-            DerivedStatus::Blocked,
-            false,
-            None,
-            ReasonCode::NonExecutableContainer,
-        );
-    }
-    match work.dispatch_policy {
-        DispatchPolicy::Automatic => (
-            DerivedStatus::Ready,
-            true,
-            Some(DomainAction::Claim),
-            ReasonCode::Eligible,
-        ),
-        DispatchPolicy::OperatorOnly if actor.role == ActorRole::Operator => (
-            DerivedStatus::Ready,
-            true,
-            Some(DomainAction::Claim),
-            ReasonCode::OperatorOnly,
-        ),
-        DispatchPolicy::OperatorOnly => (
-            DerivedStatus::Ready,
-            false,
-            Some(DomainAction::RequestOperatorClaim),
-            ReasonCode::OperatorOnly,
-        ),
-        DispatchPolicy::Paused => (
-            DerivedStatus::Paused,
-            false,
-            Some(DomainAction::ResumePolicy),
-            ReasonCode::Paused,
-        ),
-    }
-}
-
-fn evaluate_gates(
-    work: &WorkItem,
-    gate_gaps: &[GateId],
-) -> (DerivedStatus, bool, Option<DomainAction>, ReasonCode) {
-    if !gate_gaps.is_empty() {
-        if work.acceptance_profile.requires_review()
-            && gate_gaps.iter().any(|id| id.as_str() == "review")
-            && gate_gaps.iter().all(|id| id.as_str() == "review")
-        {
-            (
-                DerivedStatus::AwaitingReview,
-                false,
-                Some(DomainAction::RequestReview),
-                ReasonCode::ReviewRequired,
-            )
-        } else {
-            (
-                DerivedStatus::NeedsVerification,
-                false,
-                Some(DomainAction::ProvideEvidence),
-                ReasonCode::VerificationRequired,
-            )
-        }
-    } else {
-        (
-            DerivedStatus::Complete,
-            false,
-            Some(DomainAction::FinishClose),
-            ReasonCode::CloseoutPending,
-        )
     }
 }
 
@@ -1369,6 +1156,7 @@ pub enum DomainError {
     FenceOverflow,
     StaleFence,
     LeaseExpired,
+    InvalidLeaseRenewal,
     ReviewerCannotReviewOwnAttempt,
     ReceiptSubjectMismatch,
     DerivedStatusReadOnly {
@@ -1413,6 +1201,7 @@ impl fmt::Display for DomainError {
             Self::FenceOverflow => formatter.write_str("fence overflow"),
             Self::StaleFence => formatter.write_str("stale_fence"),
             Self::LeaseExpired => formatter.write_str("lease_expired"),
+            Self::InvalidLeaseRenewal => formatter.write_str("invalid_lease_renewal"),
             Self::ReviewerCannotReviewOwnAttempt => {
                 formatter.write_str("reviewer_cannot_review_own_attempt")
             }
@@ -1807,10 +1596,7 @@ mod tests {
         transition_attempt(&mut current, AttemptOperation::ExpiryPending).unwrap();
         transition_attempt(&mut current, AttemptOperation::Expire).unwrap();
         assert_eq!(current.phase, AttemptPhase::Expired);
-        assert_eq!(
-            current.expiry_reason(TimestampMs(101)),
-            Some(ExpiryReason::HardBudgetElapsed)
-        );
+        assert_eq!(current.expiry_reason(TimestampMs(101)), None);
         assert_eq!(
             validate_fence(Fence::new(1), Fence::new(2)),
             Err(DomainError::StaleFence)

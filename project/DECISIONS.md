@@ -69,3 +69,28 @@ source/blob layout, and initial acceptance
 profile details—can be fixed by P0-03 under D13–D29, independently reviewed
 at P0-05, and changed only with a versioned decision and fixture. They are
 not permission to weaken evidence or silently broaden launch scope.
+
+## Production-completion contract adoption record (PF-S01-T11)
+
+This record integrates the independently reviewed PF-S01 contract artifacts;
+it does not pretend that implementation or release evidence already exists,
+and it does not silently supersede D01–D29. The accepted artifact boundaries
+remain subject to PF-S01-T90/T91/T92 and the later implementation gates.
+
+| Contract | Artifact | Integrated meaning | Runtime claim |
+| --- | --- | --- | --- |
+| scope/authority | `spec/production/scope-and-boundaries.md` | Rust/application/store/service authority, project-local identity, role boundaries, guided workflow, and explicit non-goals | target contract only |
+| identity/revisions | `spec/production/identity-revisions-authority.md` | project/database/restore/entity/proof/attempt/operation identities and authenticated actor context | target contract only |
+| work model | `spec/production/planning-and-cycle-contract.md` | milestone/task decomposition, cycle assignment history, container closeout, carry-over and readiness | target contract only |
+| execution/submission | `spec/production/execution-submission-contract.md` | distinct lease/hard budget, sealed submission, review/closeout, recovery and unknown outcomes | target contract only |
+| status/actions | `spec/production/status-and-actions.md` and `reason-registry.json` | status/3, integrity/availability axes, deterministic reasons and server-owned actions | target contract only |
+| acceptance/proof | `spec/production/acceptance-and-proof.md` and `profile-registry.json` | immutable profile definitions, pinned requirements, proof selection and review independence | target contract only |
+| dependencies/overrides | `spec/production/dependencies-overrides-reopen.md` | accepted-close prerequisite policy, reasoned exceptions, reopen and downstream impact | target contract only |
+| service/protocol | `spec/production/service-contract.md` and `compatibility-matrix.md` | one service boundary, typed envelopes, jobs, readback, compatibility and route/use-case mapping | target contract only |
+| security/release | `spec/production/release-support-and-budgets.md` | target platforms, measurable budgets, isolation/security, artifact trust, backup/restore and RPO/RTO | target contract only |
+| source/memory/parity | `spec/production/source-memory-parity.md` | project-scoped source and curated memory, retained v1 disposition and provenance | target contract only |
+
+The contract revision is `boreal.production-contract/1`. No client may infer
+that the target capabilities are available merely because this record exists;
+the protocol manifest marks them as target identities until implementation,
+conformance, native, and release evidence authorize runtime advertisement.

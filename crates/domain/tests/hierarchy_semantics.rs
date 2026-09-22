@@ -110,19 +110,19 @@ fn invalid_reparenting_is_rejected() {
 }
 
 #[test]
-fn open_non_task_work_is_blocked_and_non_claimable_while_task_is_claimable() {
+fn open_containers_are_planning_only_and_never_claimable() {
     let milestone = open_work("project", "milestone", WorkKind::Milestone, None);
     let sprint = open_work("project", "sprint", WorkKind::Sprint, Some("milestone"));
     let task = open_work("project", "task", WorkKind::Task, Some("sprint"));
 
     for container in [&milestone, &sprint] {
         let decision = status(container);
-        assert_eq!(decision.display_status, DerivedStatus::Blocked);
+        assert_eq!(decision.display_status, DerivedStatus::Queued);
         assert!(!decision.claimable_for_actor);
         assert_eq!(decision.next_action, None);
         assert!(decision
             .reason_codes
-            .contains(&ReasonCode::NonExecutableContainer));
+            .contains(&ReasonCode::ContainerPlanning));
     }
 
     let decision = status(&task);

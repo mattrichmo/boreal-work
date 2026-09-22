@@ -924,38 +924,40 @@ impl SqliteStore {
                 "subject_type": subject_type,
                 "subject_id": subject_id,
             }))?;
-            self.append_operation(&OperationRecord {
-                operation_id: context.operation_id.clone(),
-                project_id: context.project_id.clone(),
-                command: command.to_owned(),
-                actor_id: context.actor_id.clone(),
-                session_id: None,
-                expected_revision: context.expected_revision,
-                attempt_id: None,
-                fence: None,
-                request_digest: context.request_digest.clone(),
-                outcome: OperationOutcome::Changed,
-                result_json: payload.clone(),
-                revision: revision.0,
-                created_at: context.now.clone(),
-                completed_at: Some(context.now.clone()),
-            })?;
-            self.append_audit_event(&AuditEventRecord {
-                project_id: context.project_id.clone(),
-                revision: revision.0,
-                operation_id: context.operation_id.clone(),
-                // The v2 audit CHECK set predates work-model/3. Preserve the
-                // precise v3 command and subject in the immutable payload,
-                // while using a compatible event/subject pair here.
-                event_type: "repair.correction".to_owned(),
-                subject_type: "operation".to_owned(),
-                subject_id: context.operation_id.clone(),
-                actor_id: context.actor_id.clone(),
-                session_id: None,
-                fence: None,
-                as_of: context.now.clone(),
-                payload_json: payload,
-            })?;
+            self.append_operation_audit_in_transaction(
+                OperationRecord {
+                    operation_id: context.operation_id.clone(),
+                    project_id: context.project_id.clone(),
+                    command: command.to_owned(),
+                    actor_id: context.actor_id.clone(),
+                    session_id: None,
+                    expected_revision: context.expected_revision,
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: context.request_digest.clone(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: revision.0,
+                    created_at: context.now.clone(),
+                    completed_at: Some(context.now.clone()),
+                },
+                AuditEventRecord {
+                    project_id: context.project_id.clone(),
+                    revision: revision.0,
+                    operation_id: context.operation_id.clone(),
+                    // The v2 audit CHECK set predates work-model/3. Preserve the
+                    // precise v3 command and subject in the immutable payload,
+                    // while using a compatible event/subject pair here.
+                    event_type: "repair.correction".to_owned(),
+                    subject_type: "operation".to_owned(),
+                    subject_id: context.operation_id.clone(),
+                    actor_id: context.actor_id.clone(),
+                    session_id: None,
+                    fence: None,
+                    as_of: context.now.clone(),
+                    payload_json: payload,
+                },
+            )?;
             Ok(MutationResult {
                 operation_id: context.operation_id.clone(),
                 revision: revision.0,

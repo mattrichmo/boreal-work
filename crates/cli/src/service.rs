@@ -21,6 +21,8 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             .collect::<Vec<_>>()
             .as_slice(),
         ["init"]
+            | ["workflows", "list"]
+            | ["workflows", "show"]
             | ["status"]
             | ["prime"]
             | ["work", "show"]
@@ -83,21 +85,21 @@ pub(crate) fn request(_parsed: &ParsedCommand, _operation: &str) -> Result<CliRe
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use std::os::unix::{fs::FileTypeExt, net::UnixStream};
     use boreal_application::{project_status_from_store, AttemptLifecycleAdapter, AttemptSnapshot};
     use boreal_domain::{ActorContext, ActorRole, ReasonCode};
     use boreal_protocol::{schema, Envelope, ProtocolError as WireError, TransportOutcome};
     use boreal_service::{
         ApplicationCommandHandler, ApplicationRequest, ApplicationResponse,
         ConcurrentApplicationCommandHandler, JsonRequest, OperationPhase, RecoveryBackend,
-        RecoveryBackendError, RecoveryEntry, ServiceHost, ServiceHostConfig, TransportConfig,
-        ServiceHostHooks, TimerRegistry, TransportError, UnixSocketClient,
-        APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
+        RecoveryBackendError, RecoveryEntry, ServiceHost, ServiceHostConfig, ServiceHostHooks,
+        TimerRegistry, TransportConfig, TransportError, UnixSocketClient, APPLICATION_API_VERSION,
+        APPLICATION_SCHEMA_VERSION,
     };
     use boreal_store::{
         OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation,
         ReceiptOutcome, ReceiptRecord,
     };
+    use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
     const SERVICE_REQUEST_ID: &str = "cli-service-request";
 
@@ -156,8 +158,7 @@ mod unix {
                     break;
                 };
                 for work in &page.items {
-                    let Ok(Some(attempt)) =
-                        store.current_attempt_for_work(&project, &work.work_id)
+                    let Ok(Some(attempt)) = store.current_attempt_for_work(&project, &work.work_id)
                     else {
                         continue;
                     };
@@ -170,8 +171,7 @@ mod unix {
                     ]
                     .into_iter()
                     .flatten()
-                    .min()
-                    else {
+                    .min() else {
                         continue;
                     };
                     let delay_ms = deadline_ms.saturating_sub(super::super::now_ms_u64());
@@ -179,10 +179,7 @@ mod unix {
                         "attempt-deadline:{project}:{}:{}",
                         attempt.attempt_id, attempt.fence
                     );
-                    let _ = timers.schedule(
-                        key,
-                        Instant::now() + Duration::from_millis(delay_ms),
-                    );
+                    let _ = timers.schedule(key, Instant::now() + Duration::from_millis(delay_ms));
                 }
                 if page.items.len() < 1_000 {
                     break;
@@ -225,8 +222,7 @@ mod unix {
         .into_iter()
         .flatten()
         .filter_map(super::super::parse_stamp_ms)
-        .min()
-        else {
+        .min() else {
             return;
         };
         let delay_ms = deadline_ms.saturating_sub(super::super::now_ms_u64());
@@ -436,12 +432,15 @@ mod unix {
                 return Err(CliError::with(
                     ErrorCode::ServiceUnavailable,
                     ApplicationOutcome::Failed,
-                    format!("cannot inspect service socket {}: {error}", socket.display()),
+                    format!(
+                        "cannot inspect service socket {}: {error}",
+                        socket.display()
+                    ),
                 ));
             }
         };
         if !metadata.file_type().is_socket() {
-            return Ok(())
+            return Ok(());
         }
         match UnixStream::connect(socket) {
             Ok(_) => Err(CliError::with(
@@ -455,7 +454,9 @@ mod unix {
                     std::io::ErrorKind::ConnectionRefused
                         | std::io::ErrorKind::NotFound
                         | std::io::ErrorKind::TimedOut
-                ) => fs::remove_file(socket).map_err(|remove_error| {
+                ) =>
+            {
+                fs::remove_file(socket).map_err(|remove_error| {
                     CliError::with(
                         ErrorCode::ServiceUnavailable,
                         ApplicationOutcome::Failed,
@@ -464,7 +465,8 @@ mod unix {
                             socket.display()
                         ),
                     )
-                }),
+                })
+            }
             Err(error) => Err(CliError::with(
                 ErrorCode::ServiceUnavailable,
                 ApplicationOutcome::Failed,
@@ -684,7 +686,12 @@ mod unix {
         let path = parsed.path.iter().map(String::as_str).collect::<Vec<_>>();
         !matches!(
             path.as_slice(),
-            ["status"] | ["prime"] | ["doctor"] | ["operation", "show"]
+            ["status"]
+                | ["prime"]
+                | ["doctor"]
+                | ["operation", "show"]
+                | ["workflows", "list"]
+                | ["workflows", "show"]
         ) && !matches!(path.as_slice(), ["agent", "status"] | ["session", "show"])
             && !matches!(path.as_slice(), ["work", "list"] | ["work", "show"])
             && !matches!(path.as_slice(), ["intake", "list"] | ["intake", "show"])
@@ -765,7 +772,15 @@ mod unix {
 
     pub(super) fn request_data(parsed: &ParsedCommand, operation: &str) -> Result<Value, CliError> {
         let path = parsed.path.iter().map(String::as_str).collect::<Vec<_>>();
-        let project = if parsed.path == ["doctor".to_owned()] {
+        let project = if matches!(
+            path.as_slice(),
+            ["workflows", "list"] | ["workflows", "show"]
+        ) {
+            // Workflow assets are embedded, versioned application guidance;
+            // discovery must remain available before a project/database
+            // exists and must not inherit a caller's project context.
+            String::new()
+        } else if parsed.path == ["doctor".to_owned()] {
             parsed
                 .options
                 .project
@@ -782,6 +797,15 @@ mod unix {
             "session_id": parsed.options.session,
         });
         match path.as_slice() {
+            ["workflows", "list"] => {
+                data["command"] = json!("workflow_list");
+            }
+            ["workflows", "show"] => {
+                data["command"] = json!("workflow_show");
+                data["reference"] = json!(parsed.options.positionals.first().ok_or_else(|| {
+                    CliError::invalid("workflows show requires a workflow reference")
+                })?);
+            }
             ["init"] => {
                 data["command"] = json!("create_project");
                 data["name"] = json!(project);
@@ -801,11 +825,10 @@ mod unix {
             ["work", "show"] => {
                 let work_index = usize::from(parsed.options.project.is_none());
                 data["command"] = json!("work_show");
-                data["work_id"] = json!(parsed
-                    .options
-                    .positionals
-                    .get(work_index)
-                    .ok_or_else(|| CliError::invalid("work show requires a work identifier"))?);
+                data["work_id"] =
+                    json!(parsed.options.positionals.get(work_index).ok_or_else(|| {
+                        CliError::invalid("work show requires a work identifier")
+                    })?);
             }
             ["work", "create"] => {
                 let positional_offset = usize::from(parsed.options.project.is_none());
@@ -1296,11 +1319,7 @@ mod unix {
                 }
                 Err(error) => {
                     let wire_error = error.protocol_error.clone().unwrap_or_else(|| {
-                        WireError::new(
-                            error.code,
-                            error.message.clone(),
-                            is_retryable(error.code),
-                        )
+                        WireError::new(error.code, error.message.clone(), is_retryable(error.code))
                     });
                     make_envelope(
                         &request.operation_id,
@@ -1377,7 +1396,10 @@ mod unix {
             alias = "profile_id"
         )]
         profile: String,
-        #[serde(default = "default_profile_version", alias = "acceptance_profile_version")]
+        #[serde(
+            default = "default_profile_version",
+            alias = "acceptance_profile_version"
+        )]
         profile_version: String,
         actor_id: String,
         #[serde(default, rename = "harness_id")]
@@ -1431,6 +1453,8 @@ mod unix {
     impl ServiceCommandHandler {
         fn dispatch(&mut self, request: &ApplicationRequest, data: &Value) -> ServiceResult {
             match request.command.as_str() {
+                "workflow_list" => self.workflow_list(),
+                "workflow_show" => self.workflow_show(data),
                 "create_project" => self.create_project(data, &request.operation_id),
                 "create_work" => self.create_work(data, &request.operation_id),
                 "work_edit" => self.work_edit(data, &request.operation_id),
@@ -1484,6 +1508,44 @@ mod unix {
                     format!("service does not implement command {command:?}"),
                 )),
             }
+        }
+
+        fn workflow_list(&self) -> ServiceResult {
+            let registry = WorkflowRegistry::embedded().map_err(|error| {
+                CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    error.to_string(),
+                )
+            })?;
+            Ok((
+                ApplicationOutcome::Unchanged,
+                None,
+                Some(super::super::workflow_package_json(&registry)),
+            ))
+        }
+
+        fn workflow_show(&self, data: &Value) -> ServiceResult {
+            let registry = WorkflowRegistry::embedded().map_err(|error| {
+                CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    error.to_string(),
+                )
+            })?;
+            let reference = string(data, "reference")?;
+            let asset = registry.get(&reference).map_err(|error| {
+                CliError::with(
+                    ErrorCode::NotFound,
+                    ApplicationOutcome::Rejected,
+                    error.to_string(),
+                )
+            })?;
+            Ok((
+                ApplicationOutcome::Unchanged,
+                None,
+                Some(super::super::workflow_show_json(&registry, asset)),
+            ))
         }
 
         pub(super) fn create_project(&mut self, data: &Value, operation: &str) -> ServiceResult {
@@ -2199,7 +2261,9 @@ mod unix {
             let project = ProjectId::new(string(data, "project_id")?);
             let work_id = string(data, "work_id")?;
             let app = WorkApplication::new(&self.store);
-            let item = app.show_work(&project, &work_id).map_err(map_application_error)?;
+            let item = app
+                .show_work(&project, &work_id)
+                .map_err(map_application_error)?;
             let revision = self
                 .store
                 .project_revision(project.as_str())
@@ -2797,26 +2861,26 @@ mod unix {
                 ApplicationOutcome::Changed
             };
             let close_data = json!({
-                    "attempt": attempt_mutation_json(&submitted.value),
-                    "receipt_id": receipt.receipt_id.as_str(),
-                    "receipt_replayed": receipt_replayed,
-                    "summary_id": summary.summary_id,
-                    "summary_replayed": summary_result.replayed,
-                    "close_intent": format!("{:?}", requested.close_intent.state).to_ascii_lowercase(),
-                    "close_state": format!("{:?}", finalized.close_intent.state).to_ascii_lowercase(),
-                    "close_replayed": finalized.replayed,
-                    "gates": diagnostics.map(|value| json!({
-                        "missing": value.missing,
-                        "gates": value.gates.iter().map(|gate| json!({
-                            "gate_id": gate.gate_id,
-                            "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
-                            "required": gate.required,
-                            "state": format!("{:?}", gate.state).to_ascii_lowercase(),
-                            "receipt_id": gate.receipt_id,
-                            "reason": gate.reason,
-                        })).collect::<Vec<_>>(),
-                    })),
-                });
+                "attempt": attempt_mutation_json(&submitted.value),
+                "receipt_id": receipt.receipt_id.as_str(),
+                "receipt_replayed": receipt_replayed,
+                "summary_id": summary.summary_id,
+                "summary_replayed": summary_result.replayed,
+                "close_intent": format!("{:?}", requested.close_intent.state).to_ascii_lowercase(),
+                "close_state": format!("{:?}", finalized.close_intent.state).to_ascii_lowercase(),
+                "close_replayed": finalized.replayed,
+                "gates": diagnostics.map(|value| json!({
+                    "missing": value.missing,
+                    "gates": value.gates.iter().map(|gate| json!({
+                        "gate_id": gate.gate_id,
+                        "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
+                        "required": gate.required,
+                        "state": format!("{:?}", gate.state).to_ascii_lowercase(),
+                        "receipt_id": gate.receipt_id,
+                        "reason": gate.reason,
+                    })).collect::<Vec<_>>(),
+                })),
+            });
             super::super::append_finish_parent_operation(
                 &self.store,
                 operation,
@@ -2830,11 +2894,7 @@ mod unix {
                 finalized.revision,
                 &close_data,
             )?;
-            Ok((
-                outcome,
-                Some(finalized.revision),
-                Some(close_data),
-            ))
+            Ok((outcome, Some(finalized.revision), Some(close_data)))
         }
 
         /// A `boreal_witnessed` payload is a readback reference, never an
@@ -3047,9 +3107,7 @@ mod unix {
             detail_ref: None,
             error,
         };
-        if serde_json::to_vec(&envelope)
-            .is_ok_and(|bytes| bytes.len() > MAX_JSON_BYTES)
-        {
+        if serde_json::to_vec(&envelope).is_ok_and(|bytes| bytes.len() > MAX_JSON_BYTES) {
             let size = serde_json::to_vec(&envelope)
                 .map(|bytes| bytes.len() as u64)
                 .unwrap_or_default();
@@ -3501,7 +3559,11 @@ mod tests {
     }
 
     fn seed_store(path: &Path) -> SqliteStore {
-        let store = SqliteStore::open(path, SCHEMA).expect("temporary schema opens");
+        seed_store_with_schema(path, SCHEMA)
+    }
+
+    fn seed_store_with_schema(path: &Path, schema: &str) -> SqliteStore {
+        let store = SqliteStore::open(path, schema).expect("temporary schema opens");
         let project = ProjectId::new("service-project");
         let app = WorkApplication::new(&store);
         app.init_project(
@@ -3741,8 +3803,8 @@ mod tests {
                 ..CliOptions::default()
             },
         };
-        let show_data = request_data(&show, "op_work_show_fixture")
-            .expect("work show request builds");
+        let show_data =
+            request_data(&show, "op_work_show_fixture").expect("work show request builds");
         assert_eq!(show_data["command"], "work_show");
         assert_eq!(show_data["project_id"], "project-1");
         assert_eq!(show_data["work_id"], "task-a");
@@ -3790,13 +3852,20 @@ mod tests {
     #[test]
     fn unavailable_v3_service_routes_are_rejected_without_schema_mutation() {
         let db = temp_path("intake-discriminant");
-        let mut handler = make_handler(seed_store(&db));
+        let schema_v2_fixture = format!("{SCHEMA}\n-- explicit service schema-2 fixture");
+        let mut handler = make_handler(seed_store_with_schema(&db, &schema_v2_fixture));
         let before_revision = handler
             .store
             .project_revision("service-project")
             .expect("project revision reads")
             .0;
-        assert_eq!(handler.store.schema_version().expect("schema version reads"), 2);
+        assert_eq!(
+            handler
+                .store
+                .schema_version()
+                .expect("schema version reads"),
+            2
+        );
         assert!(!handler
             .store
             .work_model_v3_enabled()
@@ -3827,7 +3896,13 @@ mod tests {
                 Some(ErrorCode::UnknownCommandNamespace)
             );
         }
-        assert_eq!(handler.store.schema_version().expect("schema version reads"), 2);
+        assert_eq!(
+            handler
+                .store
+                .schema_version()
+                .expect("schema version reads"),
+            2
+        );
         assert!(!handler
             .store
             .work_model_v3_enabled()
@@ -4271,12 +4346,12 @@ mod tests {
             &mut handler,
             "op-invalid-priority",
             json!({
-                    "command": "work_edit",
-                    "project_id": "service-project",
-                    "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
-                    "priority": 256,
-                }),
+                "command": "work_edit",
+                "project_id": "service-project",
+                "work_id": "service-work",
+                "actor_id": DEFAULT_ACTOR,
+                "priority": 256,
+            }),
         );
         assert_eq!(
             priority_error.error.as_ref().map(|error| error.code),
@@ -4287,14 +4362,14 @@ mod tests {
             &mut handler,
             "op-checked-create-revision",
             json!({
-                    "command": "create_work",
-                    "project_id": "service-project",
-                    "work_id": "revision-work",
-                    "kind": "task",
-                    "title": "Revision guarded work",
-                    "actor_id": DEFAULT_ACTOR,
-                    "expected_revision": 2,
-                }),
+                "command": "create_work",
+                "project_id": "service-project",
+                "work_id": "revision-work",
+                "kind": "task",
+                "title": "Revision guarded work",
+                "actor_id": DEFAULT_ACTOR,
+                "expected_revision": 2,
+            }),
         );
         assert!(revision_result.error.is_none());
         assert_eq!(revision_result.outcome, ApplicationOutcome::Changed);
@@ -4318,7 +4393,10 @@ mod tests {
         assert!(encoded.len() <= MAX_JSON_BYTES);
         assert!(envelope.data.is_none());
         assert_eq!(
-            envelope.detail_ref.as_ref().and_then(|reference| reference.uri.as_deref()),
+            envelope
+                .detail_ref
+                .as_ref()
+                .and_then(|reference| reference.uri.as_deref()),
             Some("operation:op-oversized-envelope")
         );
     }
@@ -4994,6 +5072,16 @@ mod tests {
         let db = temp_path("start-resume.sqlite");
         let store = seed_store(&db);
         let mut handler = make_handler(store);
+        handler
+            .store
+            .ensure_actor(
+                "other-actor",
+                "agent",
+                "cred-other-actor",
+                "Other actor",
+                "unix-ms:1",
+            )
+            .expect("alternate actor registers");
         handler
             .start(
                 &json!({

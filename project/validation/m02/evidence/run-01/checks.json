@@ -1,0 +1,263 @@
+{
+  "schema": "boreal.m02.candidate-checks/1",
+  "as_of": "2026-09-21T18:29:49.530298+00:00",
+  "host": "Linux-6.18.44-x86_64-with-glibc2.41",
+  "checks": [
+    {
+      "name": "diff-whitespace",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "scope": "source hygiene only",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "diff-whitespace.md"
+    },
+    {
+      "name": "contracts",
+      "command": [
+        "python3",
+        "project/spec/validate_contracts.py"
+      ],
+      "scope": "structural existing contract/SQLite fixtures; not full M02",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "contracts.md"
+    },
+    {
+      "name": "rust-format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "scope": "Rust formatting; requires installed rustfmt",
+      "status": "blocked_tool_unavailable",
+      "exit_code": 127,
+      "evidence_file": "rust-format.md"
+    },
+    {
+      "name": "rust-domain",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "boreal-domain",
+        "--test",
+        "m02_status"
+      ],
+      "scope": "authored M02 evaluator tests",
+      "status": "blocked_tool_unavailable",
+      "exit_code": 127,
+      "evidence_file": "rust-domain.md"
+    },
+    {
+      "name": "rust-store",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "boreal-store",
+        "--test",
+        "m02_claim"
+      ],
+      "scope": "authored canonical claim/race tests",
+      "status": "blocked_tool_unavailable",
+      "exit_code": 127,
+      "evidence_file": "rust-store.md"
+    },
+    {
+      "name": "rust-application",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "boreal-application",
+        "--test",
+        "m02_status_authority"
+      ],
+      "scope": "authored durable actor/status tests",
+      "status": "blocked_tool_unavailable",
+      "exit_code": 127,
+      "evidence_file": "rust-application.md"
+    },
+    {
+      "name": "rust-protocol",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "boreal-protocol",
+        "--test",
+        "m02_status_wire"
+      ],
+      "scope": "authored additive DTO tests",
+      "status": "blocked_tool_unavailable",
+      "exit_code": 127,
+      "evidence_file": "rust-protocol.md"
+    },
+    {
+      "name": "rust-workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "scope": "full locked workspace tests",
+      "status": "blocked_tool_unavailable",
+      "exit_code": 127,
+      "evidence_file": "rust-workspace.md"
+    },
+    {
+      "name": "rust-cli-build",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "boreal-cli"
+      ],
+      "scope": "CLI build, not release packaging",
+      "status": "blocked_tool_unavailable",
+      "exit_code": 127,
+      "evidence_file": "rust-cli-build.md"
+    },
+    {
+      "name": "tui-typecheck",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/tui",
+        "run",
+        "typecheck"
+      ],
+      "scope": "TypeScript compiler",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "tui-typecheck.md"
+    },
+    {
+      "name": "tui-tests",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/tui",
+        "test"
+      ],
+      "scope": "core suite + Node unit/presentation fixtures",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "tui-tests.md"
+    },
+    {
+      "name": "installer-identity",
+      "command": [
+        "node",
+        "scripts/build-installer.mjs",
+        "--check"
+      ],
+      "scope": "generated wizard and embedded installer byte identity",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "installer-identity.md"
+    },
+    {
+      "name": "shell-syntax",
+      "command": [
+        "sh",
+        "-n",
+        "install.sh"
+      ],
+      "scope": "shell parser only",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "shell-syntax.md"
+    },
+    {
+      "name": "zip-js-syntax",
+      "command": [
+        "node",
+        "--check",
+        "create-zips.mjs"
+      ],
+      "scope": "JavaScript parser only",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "zip-js-syntax.md"
+    },
+    {
+      "name": "wizard-js-syntax",
+      "command": [
+        "node",
+        "--check",
+        "apps/tui/installer/wizard.cjs"
+      ],
+      "scope": "JavaScript parser only",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "wizard-js-syntax.md"
+    },
+    {
+      "name": "wizard-body-js-syntax",
+      "command": [
+        "node",
+        "--check",
+        "apps/tui/installer/wizard-body.cjs"
+      ],
+      "scope": "JavaScript parser only",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "wizard-body-js-syntax.md"
+    },
+    {
+      "name": "premium",
+      "command": [
+        "python3",
+        "scripts/validation/premium/validate_premium.py",
+        "-v"
+      ],
+      "scope": "real PTYs and local fake release/controller fixtures, NOT Rust E2E",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "premium.md"
+    },
+    {
+      "name": "responsive",
+      "command": [
+        "python3",
+        "scripts/validation/premium/validate_responsive.py",
+        "-v"
+      ],
+      "scope": "real PTYs and fake service fixtures, NOT Rust E2E",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "responsive.md"
+    },
+    {
+      "name": "source-archive",
+      "command": [
+        "python3",
+        "scripts/validation/m02/source_archive_test.py",
+        "--exercise"
+      ],
+      "scope": "real root ZIP generator + isolated TUI rebuild; NOT release binary",
+      "status": "passed",
+      "exit_code": 0,
+      "evidence_file": "source-archive.md"
+    }
+  ],
+  "all_executable_checks_passed": false,
+  "m02_acceptance": "not_certified",
+  "release_decision": "do not ship",
+  "independent_review": "not performed",
+  "warning": "This runner does not certify sprint gates, migration parity, genuine service-backed lifecycle or supported release platforms."
+}

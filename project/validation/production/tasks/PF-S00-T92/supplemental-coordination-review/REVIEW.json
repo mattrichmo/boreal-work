@@ -1,0 +1,108 @@
+{
+  "schema": "boreal.pf-s00-t92.supplemental-coordination-review.v1",
+  "result": "NOT_ACCEPTED",
+  "decision_layer": "coordination_evidence_only",
+  "task_id": "PF-S00-T92",
+  "review_scope": {
+    "targets": [
+      {
+        "task_id": "PF-S00-T06",
+        "attempt": 2,
+        "paths": [
+          "project/validation/production/tasks/PF-S00-T06/attempt-2/COMMANDS.md",
+          "project/validation/production/tasks/PF-S00-T06/attempt-2/EVIDENCE.md",
+          "project/validation/production/tasks/PF-S00-T06/attempt-2/HANDOFF.md"
+        ]
+      },
+      {
+        "task_id": "PF-S00-T07",
+        "attempt": 3,
+        "paths": [
+          "project/validation/production/tasks/PF-S00-T07/attempt-3/COMMANDS.md",
+          "project/validation/production/tasks/PF-S00-T07/attempt-3/EVIDENCE.md",
+          "project/validation/production/tasks/PF-S00-T07/attempt-3/HANDOFF.md"
+        ]
+      }
+    ],
+    "metadata": [
+      "project/build-plan/production-completion/execution/STATE.json",
+      "project/validation/production/dispatch/README.md",
+      "project/validation/production/dispatch/AGENT_DISPATCH.md",
+      "project/validation/production/dispatch/CHANGE_REQUEST.md",
+      "project/validation/production/evidence-contract.md",
+      "project/validation/production/sprints/PF-S00/review.md",
+      "project/validation/production/sprints/PF-S00/findings.json",
+      "project/validation/production/sprints/PF-S00/reconciliation.md",
+      "project/validation/production/sprints/PF-S00/remediation-map.json"
+    ]
+  },
+  "source_identity_observed": {
+    "repository": "/Users/cybertron/Code/boreal-work",
+    "branch": "codex/apply-responsive-terminal-overlay",
+    "head": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "working_tree": "dirty",
+    "aggregate_digest": null,
+    "note": "This supplemental directory is new evidence; no clean combined-tree or release identity is inferred."
+  },
+  "checks": {
+    "json_syntax": "passed",
+    "plan_validate": "passed",
+    "t06_t92_conservative_conflicts": "no_overlap",
+    "t07_t92_conservative_conflicts": "no_overlap",
+    "markdown_static_checks": "passed",
+    "git_diff_check": "passed",
+    "product_service_native_publication_release_checks": "not_run_by_scope"
+  },
+  "bounded_criteria": {
+    "t06_artifact_and_stated_static_evidence": "satisfied_at_artifact_layer",
+    "t07_artifact_and_stated_static_evidence": "satisfied_at_artifact_layer",
+    "evidence_layer_honesty": "satisfied",
+    "independent_acceptance_attribution": "not_satisfied",
+    "complete_coordination_acceptance": "not_accepted"
+  },
+  "blockers": [
+    {
+      "id": "PF-S00-T90-001",
+      "status": "open_blocker",
+      "summary": "T06 and T07 are recorded with coordinator as both agent and reviewer.",
+      "source": "project/validation/production/sprints/PF-S00/findings.json"
+    },
+    {
+      "id": "PF-S00-T90-002",
+      "status": "open_blocker",
+      "summary": "An independent T92 gate owner is not recorded; EXT-INDEPENDENT-REVIEW remains missing.",
+      "source": "project/validation/production/sprints/PF-S00/remediation-map.json"
+    }
+  ],
+  "required_independent_attribution_record": {
+    "must_include": [
+      "named stable reviewer/gate-owner identity distinct from coordinator and T06/T07 implementation principal",
+      "explicit independence statement and coordination-layer authority boundary",
+      "T06 attempt 2 and T07 attempt 3 exact scope and paths",
+      "assigned and observed source identity with dirty/clean state and aggregate/archive digest where available",
+      "read-only preservation of historical agent=coordinator and reviewer=coordinator ledger fields",
+      "fresh exact-tree static checks with command, cwd, exit code, and result",
+      "machine-readable explicit non-acceptance or authorized independent decision",
+      "handoff naming next safe action and denying product/release authority"
+    ],
+    "must_not": [
+      "rewrite prior attempts",
+      "silently replace ledger attribution",
+      "treat T90 identity alone as the T92 gate owner",
+      "claim product, service, native, publication, release, sprint-exit, or successor acceptance"
+    ]
+  },
+  "authority_limits": [
+    "not_product_acceptance",
+    "not_service_acceptance",
+    "not_release_acceptance",
+    "not_sprint_exit_acceptance",
+    "not_successor_authorization"
+  ],
+  "evidence_paths": [
+    "project/validation/production/tasks/PF-S00-T92/supplemental-coordination-review/START.md",
+    "project/validation/production/tasks/PF-S00-T92/supplemental-coordination-review/COMMANDS.md",
+    "project/validation/production/tasks/PF-S00-T92/supplemental-coordination-review/EVIDENCE.md",
+    "project/validation/production/tasks/PF-S00-T92/supplemental-coordination-review/HANDOFF.md"
+  ]
+}

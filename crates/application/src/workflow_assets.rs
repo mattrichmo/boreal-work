@@ -22,18 +22,34 @@ const EMBEDDED_ASSETS: &[&str] = &[
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowInput {
+    pub name: String,
+    pub input_type: String,
+    pub source: String,
+    pub validation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowCriterion {
+    pub id: String,
+    pub criterion_type: String,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowAsset {
     pub reference: String,
     pub kind: String,
     pub title: String,
     pub allowed_commands: Vec<String>,
-    pub typed_inputs: Vec<String>,
-    pub finish_criteria: Vec<String>,
+    pub typed_inputs: Vec<WorkflowInput>,
+    pub finish_criteria: Vec<WorkflowCriterion>,
     pub next_refs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowRegistry {
+    schema_version: String,
     package_id: String,
     package_version: String,
     asset_identity: String,
@@ -103,7 +119,7 @@ impl WorkflowRegistry {
         let object = value.as_object().ok_or_else(|| {
             WorkflowAssetError::InvalidField("workflow package must be an object".to_owned())
         })?;
-        require_string(object, "schema_version")?;
+        let schema_version = require_string(object, "schema_version")?;
         let package_id = require_string(object, "package_id")?;
         let package_version = require_string(object, "package_version")?;
         let asset_identity = require_string(object, "asset_identity")?;
@@ -148,6 +164,7 @@ impl WorkflowRegistry {
             }
         }
         let registry = Self {
+            schema_version,
             package_id,
             package_version,
             asset_identity,
@@ -159,6 +176,10 @@ impl WorkflowRegistry {
 
     pub fn package_id(&self) -> &str {
         &self.package_id
+    }
+
+    pub fn schema_version(&self) -> &str {
+        &self.schema_version
     }
 
     pub fn package_version(&self) -> &str {
@@ -235,11 +256,12 @@ fn parse_asset(value: &Value) -> Result<WorkflowAsset, WorkflowAssetError> {
                     "workflow {reference} input must be an object"
                 ))
             })?;
-            let name = require_string(input, "name")?;
-            require_string(input, "type")?;
-            require_string(input, "source")?;
-            require_string(input, "validation")?;
-            Ok(name)
+            Ok(WorkflowInput {
+                name: require_string(input, "name")?,
+                input_type: require_string(input, "type")?,
+                source: require_string(input, "source")?,
+                validation: require_string(input, "validation")?,
+            })
         })
         .collect::<Result<Vec<_>, WorkflowAssetError>>()?;
     let finish_criteria = object
@@ -254,13 +276,20 @@ fn parse_asset(value: &Value) -> Result<WorkflowAsset, WorkflowAssetError> {
                 ))
             })?;
             let id = require_string(criterion, "id")?;
-            require_string(criterion, "type")?;
-            if criterion.get("required").and_then(Value::as_bool).is_none() {
-                return Err(WorkflowAssetError::InvalidField(format!(
-                    "workflow {reference} criterion {id} must declare required"
-                )));
-            }
-            Ok(id)
+            let criterion_type = require_string(criterion, "type")?;
+            let required = criterion
+                .get("required")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    WorkflowAssetError::InvalidField(format!(
+                        "workflow {reference} criterion {id} must declare required"
+                    ))
+                })?;
+            Ok(WorkflowCriterion {
+                id,
+                criterion_type,
+                required,
+            })
         })
         .collect::<Result<Vec<_>, WorkflowAssetError>>()?;
     let next_refs = string_array(object, "next_refs")?;
@@ -318,7 +347,10 @@ mod tests {
         assert_eq!(registry.package_version(), "1.0.0");
         assert_eq!(registry.assets().len(), 10);
         let claim = registry.get("boreal.workflow.claim.v1").unwrap();
-        assert!(claim.typed_inputs.iter().any(|input| input == "time_limit"));
+        assert!(claim
+            .typed_inputs
+            .iter()
+            .any(|input| input.name == "time_limit"));
         assert!(!claim.finish_criteria.is_empty());
     }
 

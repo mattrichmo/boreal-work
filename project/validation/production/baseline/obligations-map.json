@@ -1,0 +1,666 @@
+{
+  "schema": "boreal.pf-s00-t07.obligations-map.v1",
+  "status": "worker-produced-unaccepted",
+  "plan_id": "PF-production-completion-2026-09-21",
+  "plan_version": 1,
+  "source_identity": {
+    "archive_sha256": "09d72813db6b68728f567b14132454fb24fee289747cf9ca799830c9ee749d8c",
+    "current_head": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "current_tree_dirty": true,
+    "note": "Generated from plan.json; mapping is not acceptance."
+  },
+  "counts": {
+    "original_m02_obligations": 48,
+    "mapped": 48,
+    "accepted": 0
+  },
+  "obligations": {
+    "S00-T01": {
+      "title": "Build the v1-to-v2 parity matrix",
+      "proposed_coverage": [
+        "PF-S00-T04",
+        "PF-S00-T05",
+        "PF-S01-T10",
+        "PF-S12-T01",
+        "PF-S12-T10",
+        "PF-S13-T09",
+        "PF-S20-T05"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S00-T02": {
+      "title": "Freeze status taxonomy and reason codes",
+      "proposed_coverage": [
+        "PF-S01-T05",
+        "PF-S03-T02",
+        "PF-S03-T03",
+        "PF-S03-T06",
+        "PF-S16-T03"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S00-T03": {
+      "title": "Define legal transitions and audited override policy",
+      "proposed_coverage": [
+        "PF-S01-T02",
+        "PF-S01-T04",
+        "PF-S01-T07",
+        "PF-S08-T11"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S00-T04": {
+      "title": "Reconcile acceptance profiles and gate vocabulary",
+      "proposed_coverage": [
+        "PF-S01-T06",
+        "PF-S02-T04",
+        "PF-S03-T04",
+        "PF-S07-T01",
+        "PF-S07-T05"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S00-T05": {
+      "title": "Decide and document the sprint/cycle target",
+      "proposed_coverage": [
+        "PF-S01-T03",
+        "PF-S09-T02",
+        "PF-S09-T03",
+        "PF-S09-T06",
+        "PF-S12-T04"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S00-T06": {
+      "title": "Create the conformance fixture matrix",
+      "proposed_coverage": [
+        "PF-S01-T11",
+        "PF-S03-T08",
+        "PF-S05-T08",
+        "PF-S16-T01"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S00-T07": {
+      "title": "Independent contract review and revalidation",
+      "proposed_coverage": [
+        "PF-S01-T90",
+        "PF-S01-T91",
+        "PF-S01-T92"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S01-T01": {
+      "title": "Complete the pure evaluator",
+      "proposed_coverage": [
+        "PF-S03-T01",
+        "PF-S03-T02",
+        "PF-S03-T06",
+        "PF-S03-T09",
+        "PF-S05-T05"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S01-T02": {
+      "title": "Correct paused, queued, blocked, and retry precedence",
+      "proposed_coverage": [
+        "PF-S03-T02",
+        "PF-S03-T03",
+        "PF-S16-T03"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S01-T03": {
+      "title": "Thread actor role and policy into status",
+      "proposed_coverage": [
+        "PF-S01-T02",
+        "PF-S04-T03",
+        "PF-S04-T04",
+        "PF-S04-T05",
+        "PF-S05-T05"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S01-T04": {
+      "title": "Integrate schedule and timer reasons",
+      "proposed_coverage": [
+        "PF-S01-T04",
+        "PF-S03-T03",
+        "PF-S06-T05",
+        "PF-S09-T05"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S01-T05": {
+      "title": "Replace container blocked state with rollup projection",
+      "proposed_coverage": [
+        "PF-S03-T07",
+        "PF-S09-T07",
+        "PF-S10-T03",
+        "PF-S10-T06"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S01-T06": {
+      "title": "Add evaluator conformance and property tests",
+      "proposed_coverage": [
+        "PF-S03-T08",
+        "PF-S05-T05",
+        "PF-S10-T08",
+        "PF-S16-T03"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S01-T07": {
+      "title": "Review, reconcile, and revalidate status",
+      "proposed_coverage": [
+        "PF-S03-T90",
+        "PF-S03-T91",
+        "PF-S03-T92",
+        "PF-S10-T90",
+        "PF-S10-T91",
+        "PF-S10-T92"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S02-T01": {
+      "title": "Enforce claim eligibility inside the write transaction",
+      "proposed_coverage": [
+        "PF-S02-T07",
+        "PF-S05-T02",
+        "PF-S06-T01",
+        "PF-S06-T09",
+        "PF-S16-T04"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S02-T02": {
+      "title": "Enforce status before finish, close, release, and reopen",
+      "proposed_coverage": [
+        "PF-S05-T02",
+        "PF-S06-T06",
+        "PF-S07-T06",
+        "PF-S08-T03",
+        "PF-S08-T06",
+        "PF-S08-T07",
+        "PF-S08-T11"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S02-T03": {
+      "title": "Harden typed dependency mutations",
+      "proposed_coverage": [
+        "PF-S01-T07",
+        "PF-S03-T05",
+        "PF-S09-T04",
+        "PF-S16-T04"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S02-T04": {
+      "title": "Implement audited gate force and dependency waiver",
+      "proposed_coverage": [
+        "PF-S02-T05",
+        "PF-S03-T06",
+        "PF-S08-T04",
+        "PF-S08-T08",
+        "PF-S13-T06"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S02-T05": {
+      "title": "Implement review decisions and failed-history retention",
+      "proposed_coverage": [
+        "PF-S02-T05",
+        "PF-S03-T04",
+        "PF-S08-T01",
+        "PF-S08-T02",
+        "PF-S08-T09"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S02-T06": {
+      "title": "Add mutation race and unknown-outcome tests",
+      "proposed_coverage": [
+        "PF-S05-T03",
+        "PF-S06-T09",
+        "PF-S08-T10",
+        "PF-S16-T04",
+        "PF-S16-T05",
+        "PF-S17-T02"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S02-T07": {
+      "title": "Review, reconcile, and revalidate enforcement",
+      "proposed_coverage": [
+        "PF-S06-T90",
+        "PF-S06-T91",
+        "PF-S06-T92",
+        "PF-S08-T90",
+        "PF-S08-T91",
+        "PF-S08-T92"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S03-T01": {
+      "title": "Complete project-local hierarchy creation and editing",
+      "proposed_coverage": [
+        "PF-S09-T01",
+        "PF-S09-T02",
+        "PF-S09-T05",
+        "PF-S09-T08",
+        "PF-S13-T03"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S03-T02": {
+      "title": "Add per-work acceptance profile and gate selection",
+      "proposed_coverage": [
+        "PF-S01-T06",
+        "PF-S02-T04",
+        "PF-S07-T01",
+        "PF-S09-T05",
+        "PF-S13-T03"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S03-T03": {
+      "title": "Complete receipt, gate, review, and closeout wiring",
+      "proposed_coverage": [
+        "PF-S07-T02",
+        "PF-S07-T03",
+        "PF-S07-T04",
+        "PF-S07-T05",
+        "PF-S07-T06",
+        "PF-S07-T07",
+        "PF-S08-T03"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S03-T04": {
+      "title": "Integrate cycle-backed sprint persistence",
+      "proposed_coverage": [
+        "PF-S01-T03",
+        "PF-S09-T02",
+        "PF-S09-T03",
+        "PF-S09-T06",
+        "PF-S12-T04"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S03-T05": {
+      "title": "Implement deterministic milestone and sprint rollups",
+      "proposed_coverage": [
+        "PF-S03-T07",
+        "PF-S10-T01",
+        "PF-S10-T03",
+        "PF-S10-T07",
+        "PF-S10-T08"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S03-T06": {
+      "title": "Add planning validation and launch readiness",
+      "proposed_coverage": [
+        "PF-S09-T05",
+        "PF-S10-T04",
+        "PF-S10-T09",
+        "PF-S13-T03"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S03-T07": {
+      "title": "Review, reconcile, and revalidate planning",
+      "proposed_coverage": [
+        "PF-S09-T90",
+        "PF-S09-T91",
+        "PF-S09-T92",
+        "PF-S10-T90",
+        "PF-S10-T91",
+        "PF-S10-T92"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S04-T01": {
+      "title": "Restore versioned workflow discovery",
+      "proposed_coverage": [
+        "PF-S14-T01",
+        "PF-S14-T08",
+        "PF-S13-T01"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S04-T02": {
+      "title": "Implement sprint create, launch, current, status, board, report, close",
+      "proposed_coverage": [
+        "PF-S09-T08",
+        "PF-S10-T09",
+        "PF-S13-T03",
+        "PF-S13-T09"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S04-T03": {
+      "title": "Implement work list/show/next/ready/parallel/review-candidates",
+      "proposed_coverage": [
+        "PF-S10-T02",
+        "PF-S10-T05",
+        "PF-S13-T04",
+        "PF-S13-T09"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S04-T04": {
+      "title": "Expose review, force, waiver, pause, resume, and hold operations",
+      "proposed_coverage": [
+        "PF-S08-T09",
+        "PF-S13-T06",
+        "PF-S15-T07"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S04-T05": {
+      "title": "Restore guided agent plan/claim/finish parity",
+      "proposed_coverage": [
+        "PF-S14-T02",
+        "PF-S14-T03",
+        "PF-S14-T04",
+        "PF-S14-T05",
+        "PF-S14-T06",
+        "PF-S14-T07",
+        "PF-S16-T08"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S04-T06": {
+      "title": "Update the terminal UI to the same contract",
+      "proposed_coverage": [
+        "PF-S15-T01",
+        "PF-S15-T02",
+        "PF-S15-T03",
+        "PF-S15-T04",
+        "PF-S15-T05",
+        "PF-S15-T06",
+        "PF-S15-T07",
+        "PF-S15-T08",
+        "PF-S15-T09",
+        "PF-S15-T10"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S04-T07": {
+      "title": "Review, reconcile, and revalidate public parity",
+      "proposed_coverage": [
+        "PF-S13-T90",
+        "PF-S13-T91",
+        "PF-S13-T92",
+        "PF-S14-T90",
+        "PF-S14-T91",
+        "PF-S14-T92",
+        "PF-S15-T90",
+        "PF-S15-T91",
+        "PF-S15-T92",
+        "PF-S16-T09"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S05-T01": {
+      "title": "Harden project-local identity and database selection",
+      "proposed_coverage": [
+        "PF-S04-T01",
+        "PF-S04-T02",
+        "PF-S04-T06",
+        "PF-S04-T07",
+        "PF-S04-T08",
+        "PF-S15-T02",
+        "PF-S16-T06"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S05-T02": {
+      "title": "Make dashboards corruption-tolerant and diagnostic",
+      "proposed_coverage": [
+        "PF-S02-T08",
+        "PF-S10-T06",
+        "PF-S12-T08",
+        "PF-S15-T07",
+        "PF-S16-T07"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S05-T03": {
+      "title": "Implement v1 import and parity preservation",
+      "proposed_coverage": [
+        "PF-S00-T05",
+        "PF-S12-T01",
+        "PF-S12-T02",
+        "PF-S12-T03",
+        "PF-S12-T04",
+        "PF-S12-T05",
+        "PF-S12-T10"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S05-T04": {
+      "title": "Run the real service-backed lifecycle fixture",
+      "proposed_coverage": [
+        "PF-S05-T08",
+        "PF-S16-T01",
+        "PF-S16-T02",
+        "PF-S16-T03",
+        "PF-S16-T05",
+        "PF-S16-T08"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S05-T05": {
+      "title": "Run concurrency and failure-boundary validation",
+      "proposed_coverage": [
+        "PF-S06-T09",
+        "PF-S08-T10",
+        "PF-S16-T04",
+        "PF-S17-T01",
+        "PF-S17-T02",
+        "PF-S17-T03",
+        "PF-S17-T05"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S05-T06": {
+      "title": "Update parity, operator, and user documentation",
+      "proposed_coverage": [
+        "PF-S19-T01",
+        "PF-S19-T02",
+        "PF-S19-T03",
+        "PF-S19-T04",
+        "PF-S19-T05",
+        "PF-S19-T06",
+        "PF-S19-T07"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S05-T07": {
+      "title": "Review, reconcile, and revalidate real-project behavior",
+      "proposed_coverage": [
+        "PF-S12-T90",
+        "PF-S12-T91",
+        "PF-S12-T92",
+        "PF-S16-T90",
+        "PF-S16-T91",
+        "PF-S16-T92",
+        "PF-S17-T90",
+        "PF-S17-T91",
+        "PF-S17-T92",
+        "PF-S19-T92"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S06-T01": {
+      "title": "Run full Rust and TypeScript gates",
+      "proposed_coverage": [
+        "PF-S17-T08",
+        "PF-S20-T02"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S06-T02": {
+      "title": "Rebuild release artifacts and installer payloads",
+      "proposed_coverage": [
+        "PF-S18-T01",
+        "PF-S18-T02",
+        "PF-S18-T03",
+        "PF-S18-T06",
+        "PF-S18-T09",
+        "PF-S20-T03"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S06-T03": {
+      "title": "Install and smoke-test a disposable prefix",
+      "proposed_coverage": [
+        "PF-S18-T07",
+        "PF-S20-T04",
+        "PF-S21-T04"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S06-T04": {
+      "title": "Run supported-platform release smoke tests",
+      "proposed_coverage": [
+        "PF-S18-T08",
+        "PF-S20-T04",
+        "PF-S21-T04"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S06-T05": {
+      "title": "Final independent audit and cutover decision",
+      "proposed_coverage": [
+        "PF-S20-T05",
+        "PF-S20-T06",
+        "PF-S20-T07",
+        "PF-S20-T08",
+        "PF-S20-T90",
+        "PF-S20-T91",
+        "PF-S20-T92"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    },
+    "S06-T06": {
+      "title": "Publish release and update future-install instructions",
+      "proposed_coverage": [
+        "PF-S21-T01",
+        "PF-S21-T02",
+        "PF-S21-T03",
+        "PF-S21-T04",
+        "PF-S21-T05",
+        "PF-S21-T06",
+        "PF-S21-T92"
+      ],
+      "historical_state": "unaccepted_historical_obligation",
+      "current_state": "mapped_not_accepted",
+      "acceptance_owner": "PF-S01 contract adoption and later independent revalidation"
+    }
+  },
+  "global_limits": [
+    "The mapping preserves all original IDs and titles without rewriting their historical status.",
+    "Coverage links identify future work only; they do not certify implementation or validation.",
+    "PF-S01 adoption and independent PF-S01-T92 revalidation remain required before this map can authorize downstream work."
+  ]
+}
+

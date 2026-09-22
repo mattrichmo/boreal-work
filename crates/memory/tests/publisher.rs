@@ -507,7 +507,13 @@ fn files_prepared_with_tampered_staged_bytes_requires_reconciliation() {
 
     fs::write(path.join("notes/entry-1.md"), b"tampered staged bytes\n").unwrap();
     let staged_tamper = Command::new("git")
-        .args(["-C", path.to_str().unwrap(), "add", "--", "notes/entry-1.md"])
+        .args([
+            "-C",
+            path.to_str().unwrap(),
+            "add",
+            "--",
+            "notes/entry-1.md",
+        ])
         .output()
         .unwrap();
     assert!(

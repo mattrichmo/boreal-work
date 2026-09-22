@@ -601,6 +601,259 @@ BEGIN
   SELECT RAISE(ABORT, 'container_disposition_v3_append_only');
 END;
 
+-- Production identity, recovery and external-effect seams are installed by
+-- this ordered v2-to-v3 schema step. They are not permitted to appear first
+-- during an arbitrary lifecycle mutation.
+CREATE TABLE IF NOT EXISTS boreal_database_identity (
+  identity_id INTEGER PRIMARY KEY CHECK (identity_id = 1),
+  database_instance_id TEXT NOT NULL CHECK (trim(database_instance_id) <> ''),
+  restore_epoch INTEGER NOT NULL CHECK (restore_epoch > 0),
+  created_at TEXT NOT NULL CHECK (trim(created_at) <> ''),
+  updated_at TEXT NOT NULL CHECK (trim(updated_at) <> '')
+);
+CREATE TABLE IF NOT EXISTS boreal_project_identity (
+  project_id TEXT PRIMARY KEY REFERENCES project(project_id),
+  database_instance_id TEXT NOT NULL CHECK (trim(database_instance_id) <> ''),
+  restore_epoch INTEGER NOT NULL CHECK (restore_epoch > 0),
+  canonical_root TEXT NOT NULL CHECK (trim(canonical_root) <> ''),
+  canonical_worktree TEXT NOT NULL CHECK (trim(canonical_worktree) <> ''),
+  binding_digest TEXT NOT NULL CHECK (trim(binding_digest) <> ''),
+  bound_at TEXT NOT NULL CHECK (trim(bound_at) <> ''),
+  updated_at TEXT NOT NULL CHECK (trim(updated_at) <> '')
+);
+CREATE TABLE IF NOT EXISTS boreal_entity_revision (
+  project_id TEXT NOT NULL,
+  work_id TEXT NOT NULL,
+  entity_revision INTEGER NOT NULL CHECK (entity_revision >= 0),
+  proof_revision INTEGER NOT NULL CHECK (proof_revision >= 0),
+  updated_at TEXT NOT NULL CHECK (trim(updated_at) <> ''),
+  PRIMARY KEY (project_id, work_id),
+  FOREIGN KEY (project_id, work_id) REFERENCES work_item(project_id, work_id)
+);
+CREATE TABLE IF NOT EXISTS boreal_attempt_fence_identity (
+  project_id TEXT NOT NULL,
+  work_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL REFERENCES attempt(attempt_id),
+  fence INTEGER NOT NULL CHECK (fence > 0),
+  database_instance_id TEXT NOT NULL CHECK (trim(database_instance_id) <> ''),
+  restore_epoch INTEGER NOT NULL CHECK (restore_epoch > 0),
+  revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1)),
+  recorded_at TEXT NOT NULL CHECK (trim(recorded_at) <> ''),
+  PRIMARY KEY (project_id, attempt_id, fence),
+  UNIQUE (project_id, work_id, fence),
+  FOREIGN KEY (project_id, work_id) REFERENCES work_item(project_id, work_id),
+  FOREIGN KEY (work_id, fence) REFERENCES attempt(work_id, fence)
+);
+CREATE TABLE IF NOT EXISTS boreal_operation_identity (
+  operation_id TEXT PRIMARY KEY REFERENCES operation(operation_id),
+  project_id TEXT NOT NULL REFERENCES project(project_id),
+  database_instance_id TEXT NOT NULL CHECK (trim(database_instance_id) <> ''),
+  restore_epoch INTEGER NOT NULL CHECK (restore_epoch > 0),
+  state TEXT NOT NULL CHECK (state IN ('current', 'invalidated')),
+  invalidated_at TEXT,
+  invalidation_code TEXT,
+  CHECK ((state = 'current') = (invalidated_at IS NULL AND invalidation_code IS NULL)),
+  CHECK (state = 'invalidated' OR invalidated_at IS NULL)
+);
+CREATE TABLE IF NOT EXISTS boreal_revision_migration (
+  project_id TEXT NOT NULL,
+  work_id TEXT NOT NULL,
+  legacy_snapshot_revision INTEGER NOT NULL CHECK (legacy_snapshot_revision >= 0),
+  entity_revision INTEGER NOT NULL CHECK (entity_revision >= 0),
+  proof_revision INTEGER NOT NULL CHECK (proof_revision >= 0),
+  disposition TEXT NOT NULL CHECK (trim(disposition) <> ''),
+  provenance_json TEXT NOT NULL CHECK (trim(provenance_json) <> ''),
+  migrated_at TEXT NOT NULL CHECK (trim(migrated_at) <> ''),
+  PRIMARY KEY (project_id, work_id),
+  FOREIGN KEY (project_id, work_id) REFERENCES work_item(project_id, work_id)
+);
+CREATE INDEX IF NOT EXISTS boreal_attempt_fence_subject
+  ON boreal_attempt_fence_identity(project_id, work_id, attempt_id, fence);
+CREATE INDEX IF NOT EXISTS boreal_operation_identity_scope
+  ON boreal_operation_identity(project_id, restore_epoch, state);
+
+CREATE TABLE IF NOT EXISTS boreal_recovery_obligation (
+  obligation_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES project(project_id),
+  work_id TEXT NOT NULL REFERENCES work_item(work_id),
+  attempt_id TEXT REFERENCES attempt(attempt_id),
+  fence INTEGER CHECK (fence IS NULL OR fence > 0),
+  reason TEXT NOT NULL CHECK (reason IN
+    ('expired','stop_unknown','resource_unknown','failed','cancel_requested')),
+  state TEXT NOT NULL CHECK (state IN ('unresolved','resolved','superseded')),
+  resource_state TEXT NOT NULL CHECK
+    (resource_state IN ('active','release_pending','unknown','released')),
+  owner_actor_id TEXT,
+  next_action TEXT NOT NULL CHECK (trim(next_action) <> ''),
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_by TEXT,
+  resolution_id TEXT,
+  CHECK (state = 'unresolved' OR
+         (resolved_at IS NOT NULL AND resolved_by IS NOT NULL AND resolution_id IS NOT NULL)),
+  CHECK (attempt_id IS NOT NULL OR fence IS NULL)
+);
+CREATE INDEX IF NOT EXISTS boreal_recovery_unresolved
+  ON boreal_recovery_obligation(project_id, obligation_id)
+  WHERE state = 'unresolved';
+CREATE TABLE IF NOT EXISTS boreal_recovery_decision (
+  decision_id TEXT PRIMARY KEY,
+  obligation_id TEXT NOT NULL REFERENCES boreal_recovery_obligation(obligation_id),
+  project_id TEXT NOT NULL REFERENCES project(project_id),
+  actor_id TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK (trim(outcome) <> ''),
+  reason TEXT NOT NULL CHECK (trim(reason) <> ''),
+  resource_state TEXT NOT NULL CHECK
+    (resource_state IN ('active','release_pending','unknown','released')),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS boreal_recovery_decision_subject
+  ON boreal_recovery_decision(project_id, obligation_id, created_at, decision_id);
+CREATE TABLE IF NOT EXISTS boreal_resource_reservation (
+  reservation_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES project(project_id),
+  work_id TEXT NOT NULL REFERENCES work_item(work_id),
+  attempt_id TEXT NOT NULL REFERENCES attempt(attempt_id),
+  fence INTEGER NOT NULL CHECK (fence > 0),
+  resource_key TEXT NOT NULL CHECK (trim(resource_key) <> ''),
+  resource_kind TEXT NOT NULL CHECK (trim(resource_kind) <> ''),
+  state TEXT NOT NULL CHECK
+    (state IN ('active','release_pending','unknown','released')),
+  owner_actor_id TEXT NOT NULL CHECK (trim(owner_actor_id) <> ''),
+  created_at TEXT NOT NULL,
+  release_requested_at TEXT,
+  released_at TEXT,
+  release_ack_id TEXT,
+  CHECK (state = 'active' OR release_requested_at IS NOT NULL),
+  CHECK (state <> 'released' OR (released_at IS NOT NULL AND release_ack_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS boreal_resource_live_key
+  ON boreal_resource_reservation(project_id, resource_key)
+  WHERE state IN ('active','release_pending','unknown');
+CREATE INDEX IF NOT EXISTS boreal_resource_attempt
+  ON boreal_resource_reservation(project_id, attempt_id, fence);
+CREATE TABLE IF NOT EXISTS boreal_resource_release_event (
+  event_id TEXT PRIMARY KEY,
+  reservation_id TEXT NOT NULL REFERENCES boreal_resource_reservation(reservation_id),
+  project_id TEXT NOT NULL REFERENCES project(project_id),
+  state TEXT NOT NULL CHECK (state IN ('requested','acknowledged')),
+  actor_id TEXT NOT NULL,
+  evidence_ref TEXT NOT NULL CHECK (trim(evidence_ref) <> ''),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS boreal_resource_release_subject
+  ON boreal_resource_release_event(project_id, reservation_id, created_at, event_id);
+CREATE TRIGGER IF NOT EXISTS boreal_recovery_decision_append_only_update
+BEFORE UPDATE ON boreal_recovery_decision
+BEGIN
+  SELECT RAISE(ABORT, 'recovery_decision_append_only');
+END;
+CREATE TRIGGER IF NOT EXISTS boreal_recovery_decision_append_only_delete
+BEFORE DELETE ON boreal_recovery_decision
+BEGIN
+  SELECT RAISE(ABORT, 'recovery_decision_append_only');
+END;
+CREATE UNIQUE INDEX IF NOT EXISTS attempt_current_work_owner
+  ON attempt(work_id) WHERE current = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS attempt_current_session_owner
+  ON attempt(session_id) WHERE current = 1 AND session_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS boreal_external_job (
+  job_id TEXT PRIMARY KEY,
+  operation_id TEXT NOT NULL UNIQUE,
+  project_id TEXT NOT NULL REFERENCES project(project_id),
+  subject_type TEXT NOT NULL CHECK (trim(subject_type) <> ''),
+  subject_id TEXT NOT NULL CHECK (trim(subject_id) <> ''),
+  kind TEXT NOT NULL CHECK (trim(kind) <> ''),
+  request_digest TEXT NOT NULL CHECK (trim(request_digest) <> ''),
+  stage TEXT NOT NULL CHECK (stage IN
+    ('registered','admitted','running','side_effect_started',
+     'side_effect_finished','readback_required','committed','rejected',
+     'failed','cancel_requested','reconciled')),
+  side_effect_ref TEXT,
+  source_identity TEXT,
+  config_identity TEXT,
+  actor_id TEXT NOT NULL CHECK (trim(actor_id) <> ''),
+  session_id TEXT,
+  started_at TEXT,
+  deadline TEXT,
+  result_digest TEXT,
+  reconciliation_state TEXT NOT NULL CHECK (trim(reconciliation_state) <> ''),
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS boreal_external_job_project_stage
+  ON boreal_external_job(project_id, stage, job_id);
+CREATE INDEX IF NOT EXISTS boreal_external_job_readback
+  ON boreal_external_job(project_id, operation_id)
+  WHERE stage IN ('side_effect_started','side_effect_finished','readback_required');
+
+-- Immutable acceptance requirements are a production migration object, not a
+-- lazy observation projection. Gate rows may be removed or quarantined while
+-- this declaration set remains authoritative for the work proof revision.
+CREATE TABLE IF NOT EXISTS boreal_pinned_requirement (
+  project_id TEXT NOT NULL,
+  work_id TEXT NOT NULL,
+  proof_revision INTEGER NOT NULL CHECK (proof_revision > 0),
+  subject_kind TEXT NOT NULL CHECK (subject_kind IN ('task','container')),
+  profile_id TEXT NOT NULL CHECK (trim(profile_id) <> ''),
+  profile_version INTEGER NOT NULL CHECK (profile_version > 0),
+  profile_digest TEXT NOT NULL CHECK (trim(profile_digest) <> ''),
+  provenance_json TEXT NOT NULL CHECK (trim(provenance_json) <> ''),
+  declarations_json TEXT NOT NULL CHECK (trim(declarations_json) <> ''),
+  resolved_digest TEXT NOT NULL CHECK (trim(resolved_digest) <> ''),
+  pinned_at TEXT NOT NULL CHECK (trim(pinned_at) <> ''),
+  PRIMARY KEY (project_id, work_id, proof_revision),
+  UNIQUE (project_id, work_id, proof_revision, resolved_digest),
+  FOREIGN KEY (project_id, work_id)
+    REFERENCES work_item(project_id, work_id)
+);
+
+CREATE TABLE IF NOT EXISTS boreal_pinned_requirement_gate (
+  project_id TEXT NOT NULL,
+  work_id TEXT NOT NULL,
+  proof_revision INTEGER NOT NULL CHECK (proof_revision > 0),
+  requirement_id TEXT NOT NULL CHECK (trim(requirement_id) <> ''),
+  gate_id TEXT NOT NULL CHECK (trim(gate_id) <> ''),
+  kind TEXT NOT NULL CHECK (trim(kind) <> ''),
+  required INTEGER NOT NULL CHECK (required IN (0, 1)),
+  subject_kind TEXT NOT NULL CHECK (subject_kind IN ('task','container')),
+  profile_id TEXT NOT NULL CHECK (trim(profile_id) <> ''),
+  profile_version INTEGER NOT NULL CHECK (profile_version > 0),
+  profile_digest TEXT NOT NULL CHECK (trim(profile_digest) <> ''),
+  provenance_json TEXT NOT NULL CHECK (trim(provenance_json) <> ''),
+  declaration_json TEXT NOT NULL CHECK (trim(declaration_json) <> ''),
+  PRIMARY KEY (project_id, work_id, proof_revision, requirement_id),
+  UNIQUE (project_id, work_id, proof_revision, gate_id, kind),
+  FOREIGN KEY (project_id, work_id, proof_revision)
+    REFERENCES boreal_pinned_requirement(project_id, work_id, proof_revision)
+);
+
+CREATE INDEX IF NOT EXISTS boreal_pinned_requirement_project
+  ON boreal_pinned_requirement(project_id, work_id, proof_revision);
+
+CREATE TRIGGER IF NOT EXISTS boreal_pinned_requirement_immutable_update
+BEFORE UPDATE ON boreal_pinned_requirement
+BEGIN
+  SELECT RAISE(ABORT, 'pinned_requirement_immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS boreal_pinned_requirement_immutable_delete
+BEFORE DELETE ON boreal_pinned_requirement
+BEGIN
+  SELECT RAISE(ABORT, 'pinned_requirement_immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS boreal_pinned_requirement_gate_immutable_update
+BEFORE UPDATE ON boreal_pinned_requirement_gate
+BEGIN
+  SELECT RAISE(ABORT, 'pinned_requirement_gate_immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS boreal_pinned_requirement_gate_immutable_delete
+BEFORE DELETE ON boreal_pinned_requirement_gate
+BEGIN
+  SELECT RAISE(ABORT, 'pinned_requirement_gate_immutable');
+END;
+
 -- Set only after the additive objects and their constraints are complete.
 PRAGMA user_version = 3;
 COMMIT;

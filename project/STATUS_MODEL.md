@@ -1,3 +1,9 @@
+> M02 candidate clarification (2026-09-21): historical v1 claims below are
+> retained from the supplied packet, not reverified against a v1 archive.
+> The current Rust evaluator exists. The executable candidate contract and
+> primary-first reason ordering are in `spec/transition-table.md`.
+> Independent review and all M02 sprint acceptance gates remain open.
+
 # Deterministic work status, deadlines, and advancement
 
 Status: approved v2 policy for P0 transition fixtures; exact schema and
@@ -6,6 +12,24 @@ distinguishes observed legacy behavior from v2 changes. Read with
 [AGENT_LIFECYCLE.md](AGENT_LIFECYCLE.md),
 [STATE_AND_CONCURRENCY.md](STATE_AND_CONCURRENCY.md), and
 [CLI_COMMANDS.md](CLI_COMMANDS.md).
+
+## PF-S01 production contract overlay
+
+The independently reviewed PF-S01 contract set is now integrated as the
+target contract for the next implementation wave. The authoritative target
+status/action rules are in
+[`spec/production/status-and-actions.md`](spec/production/status-and-actions.md)
+and [`spec/production/reason-registry.json`](spec/production/reason-registry.json):
+status/3 is additive, `integrity` and `availability` remain separate from
+product status, `queued` means normal prerequisite waiting, and `blocked`
+means an explicit intervention or integrity obligation. The service owns
+allowed/denied actions; clients do not infer them from labels.
+
+This overlay does not claim that the current Rust/store/protocol implementation
+already persists every target field or enforces every transition. Runtime
+advertisement remains gated by the production contract manifest, conformance
+oracle, implementation tasks, and PF-S01/PF-S02+ review/revalidation. The
+historical v1 description below remains provenance, not runtime authority.
 
 ## What the current implementation actually does
 

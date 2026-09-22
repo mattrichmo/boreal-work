@@ -1,0 +1,399 @@
+
+running 39 tests
+test evidence::tests::acceptance_uses_deterministic_gate_order_and_retains_failures ... ok
+test evidence::tests::bounded_runner_retains_timeout_as_failed_and_rejects_oversized_output ... ok
+test evidence::tests::bounded_runner_rejects_undeclared_or_inconsistent_execution ... ok
+test evidence::tests::bounded_runner_freezes_declared_command_and_provenance ... ok
+test evidence::tests::close_readiness_requires_intent_and_summary_and_is_sorted ... ok
+test evidence::tests::receipt_matching_is_structured_and_prose_free ... ok
+test evidence::tests::receipt_mismatches_have_stable_safe_codes_and_messages ... ok
+test evidence::tests::reviewed_gate_row_cannot_replace_an_independent_review_decision ... ok
+test evidence::tests::reviewed_profile_requires_authorized_independent_review ... ok
+test evidence::tests::unsafe_commands_fail_closed_without_echoing_payload ... ok
+test guidance::tests::guidance_is_trusted_and_status_specific ... ok
+test guidance::tests::unfamiliar_harness_must_honor_required_action_boundary ... ok
+test guidance::tests::validation_rejects_untrusted_or_incomplete_action_shapes ... ok
+test intake::tests::capture_update_and_revisit_status_are_revision_bound ... ok
+test intake::tests::disposition_requires_reason_for_defer_or_replace ... ok
+test intake::tests::promotion_binds_current_content_and_disposition_is_append_only ... ok
+test knowledge::tests::rejects_empty_operation_and_project_ids ... ok
+test operation_identity::tests::sha256_matches_the_empty_vector ... ok
+test knowledge::tests::current_migration_format_is_detected_without_heuristic_loss ... ok
+test operation_identity::tests::canonical_digest_sorts_objects_and_preserves_punctuation ... ok
+test planning_v3::tests::cycle_activation_is_legal_once_and_assignments_remain_separate ... ok
+test planning_v3::tests::dependency_changes_reject_cycles_and_policy_rejects_duplicate_holds ... ok
+test runtime::tests::default_deadlines_keep_two_hour_budget_immutable ... ok
+test planning_v3::tests::work_edit_rejects_stale_revision_and_invalid_parent ... ok
+test runtime::tests::expiry_requires_deadline_but_allows_fenced_stop ... ok
+test runtime::tests::hard_deadline_wins_over_lease_and_blocks_heartbeat ... ok
+test planning_v3::tests::cycle_slot_uses_project_revision_and_resolves_template ... ok
+test runtime::tests::stale_fence_and_illegal_phase_are_rejected_before_adapter_call ... ok
+test status::tests::attempt_phases_map_to_claimed_and_in_progress ... ok
+test status::tests::counts_cover_all_rows_when_page_is_bounded_and_timer_is_next ... ok
+test status::tests::expired_attempt_and_gate_diagnostics_are_retained ... ok
+test status::tests::queued_and_blocked_remain_distinct ... ok
+test status::tests::reviewed_gates_become_awaiting_review_and_open_gate_is_diagnostic ... ok
+test planning_v3::tests::recurrence_uses_real_tzif_for_gap_and_fold ... ok
+test workflow_assets::tests::missing_required_criterion_field_is_rejected ... ok
+test workflow_assets::tests::unknown_next_reference_fails_closed ... ok
+test workflow_assets::tests::embedded_package_is_versioned_and_resolves_all_assets ... ok
+test runtime::tests::application_dispatches_typed_command_and_preserves_operation_replay ... ok
+test tests::application_routes_init_create_list_and_claim ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+running 2 tests
+test application_operation_readback_enforces_project_scope_for_execution_only_rows ... ok
+test application_consumers_preserve_deep_pages_and_candidate_continuations ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s
+
+
+running 4 tests
+test migration_apply_is_staged_only_and_loss_is_not_silenced ... ok
+test source_capture_is_operation_aware_and_explicit_about_store_registration ... ok
+test source_capture_can_commit_and_replay_sqlite_registration ... ok
+test memory_draft_review_publish_and_search_preserve_provenance ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.86s
+
+
+running 2 tests
+test stored_actor_role_overrides_untrusted_status_context_role ... ok
+test store_backed_pause_preserves_dependency_and_timer_reasons ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+
+running 2 tests
+test versioned_status_request_is_served_by_application_backed_route ... ok
+test p2_guided_flow_claims_three_harnesses_and_fences_recovery ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+
+running 1 test
+test planning_mutations_are_revision_checked_audited_and_replayable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+running 6 tests
+test closeout_requires_typed_current_summary ... ok
+test old_attempt_proof_does_not_satisfy_a_new_attempt ... ok
+test untrusted_pass_is_retained_as_rejected_and_cannot_satisfy_current_proof ... ok
+test imported_witness_label_is_rejected_but_failed_evidence_is_retained ... ok
+test imported_receipts_require_current_subject_and_context ... ok
+test public_receipt_facade_conflicts_when_an_operation_payload_changes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+
+running 3 tests
+test application_claim_surfaces_session_ownership_errors ... ok
+test application_ends_idle_session_and_replays_without_abandoning_work ... ok
+test application_registers_replays_and_claims_with_a_durable_session ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+running 4 tests
+test acceptance_gates_are_namespaced_per_work ... ok
+test checked_work_creation_uses_snapshot_revision_in_application_boundary ... ok
+test sqlite_adapter_persists_fenced_lifecycle_and_replays ... ok
+test accepted_receipts_drive_durable_proof_gated_closeout ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+
+running 3 tests
+test application_projection_is_revisioned_and_preserves_gate_reason ... ok
+test pagination_does_not_change_rollup_counts ... ok
+test persisted_store_rows_feed_revisioned_status_projection ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+
+running 2 tests
+test session_end_and_operator_recovery_are_explicit_and_scope_checked ... ok
+test application_v3_migration_and_hierarchy_mutations_are_revision_bound ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+
+running 67 tests
+test dashboard::tests::project_resolution_prefers_explicit_then_bound_metadata ... ok
+test command_registry::tests::version_rejects_a_nested_discovery_path ... ok
+test dashboard::tests::project_resolution_rejects_stale_metadata_and_singleton_fallback ... ok
+test command_registry::tests::namespace_help_returns_available_and_unavailable_children ... ok
+test command_registry::tests::source_routes_are_direct_only_and_memory_remains_a_gap ... ok
+test command_registry::tests::deep_help_path_is_resolved_by_registry_when_parser_passes_it_through ... ok
+test dashboard::tests::socket_guard_refuses_to_remove_a_non_socket_endpoint ... ok
+test dashboard::tests::tui_locator_prefers_an_explicit_javascript_entrypoint ... ok
+test service::tests::cli_creation_routes_build_authoritative_service_dtos ... ok
+test service::tests::evidence_add_routes_only_with_receipt_and_sends_bounded_structured_payload ... ok
+test dashboard::tests::store_project_listing_is_exact_and_stably_sorted ... ok
+test service::tests::finish_close_routes_a_bounded_receipt_close_payload ... ok
+test service::tests::finish_release_routes_to_the_existing_fenced_release_command ... ok
+test service::tests::create_work_acceptance_profile_version_is_preserved_and_validated ... ok
+test service::tests::create_project_expected_revision_is_rejected_before_side_effects ... ok
+test service::tests::bounded_service_creates_project_and_work_over_the_real_socket_route ... ok
+test service::tests::planning_service_request_data_preserves_project_and_dependency_context ... ok
+test service::tests::bounded_service_request_returns_a_versioned_status_envelope ... ok
+test dashboard::tests::tui_exit_status_is_propagated ... ok
+test service::tests::production_timer_updates_on_renew_and_clears_terminal_attempts ... ok
+test service::tests::production_composition_elects_one_owner_for_same_database_across_sockets ... ok
+test service::tests::fresh_service_start_recovers_after_its_claim_child_commits ... ok
+test service::tests::fresh_service_start_has_typed_children_and_coherent_outer_replay ... ok
+test service::tests::claim_then_cli_start_without_attempt_or_fence_resumes_owned_attempt ... ok
+test service::tests::service_claim_registers_and_binds_the_session_first ... ok
+test service::tests::service_boundary_rejects_wrapped_priority_and_accepts_checked_creation ... ok
+test service::tests::service_envelope_replaces_oversized_inline_data_with_operation_reference ... ok
+test service::tests::service_create_work_rejects_unknown_kind_and_missing_parent ... ok
+test service::tests::production_host_attaches_deadline_timers_and_control_hooks ... ok
+test service::tests::service_claim_uses_its_clock_and_duration_inputs ... ok
+test service::tests::service_create_routes_preserve_typed_fields_and_replay ... ok
+test service::tests::service_supports_project_and_work_creation_cli_routes ... ok
+test service::tests::running_and_verifying_start_resume_requires_full_identity_and_fence ... ok
+test service::tests::service_status_uses_the_complete_canonical_status_dto ... ok
+test service::tests::production_composition_keeps_status_responsive_during_slow_evidence ... ok
+test service::tests::unavailable_v3_service_routes_are_rejected_without_schema_mutation ... ok
+test service::tests::service_work_show_returns_the_same_exact_projection_as_direct_reads ... ok
+test tests::bounded_results_reserve_space_for_the_outer_envelope ... ok
+test service::tests::service_finish_close_persists_receipt_and_retains_gate_diagnostics ... ok
+test service::tests::operation_readback_includes_the_durable_receipt_payload ... ok
+test service::tests::service_evidence_run_retains_failure_and_replays_the_receipt ... ok
+test tests::every_application_outcome_has_a_consistent_error_and_exit_contract ... ok
+test tests::evidence_execution_state_readback_uses_protocol_terminal_names ... ok
+test tests::explicitly_selected_socket_rejects_direct_only_source_routes ... ok
+test tests::direct_claim_validates_work_before_registering_a_session ... ok
+test service::tests::service_start_without_work_selects_a_claimable_task ... ok
+test tests::cli_smoke_start_and_release_use_the_sqlite_adapter ... ok
+test tests::operation_ids_are_fresh_unless_explicitly_retried ... ok
+test tests::operation_ids_ignore_transport_and_receipt_paths_and_bound_long_shapes ... ok
+test tests::parser_allows_dashboard_project_discovery_and_explicit_context ... ok
+test tests::parser_and_request_context_cover_dependency_and_planning_flags ... ok
+test tests::parser_rejects_ambiguous_lease_aliases_and_bad_duration ... ok
+test tests::parser_supports_guided_agent_grammar ... ok
+test tests::parser_supports_release_machine_update_alias ... ok
+test tests::parser_supports_service_dispatch_bounds ... ok
+test tests::protocol_exit_mapping_is_stable ... ok
+test tests::receipt_sidecar_failure_is_reported_without_erasing_durable_state ... ok
+test tests::rejected_close_error_names_preserved_gate_obligations ... ok
+test tests::revision_alias_preserves_the_expected_revision_precondition ... ok
+test tests::v3_routes_are_unavailable_without_opening_or_mutating_a_v2_database ... ok
+test service::tests::witnessed_finish_rejects_missing_or_mismatched_durable_receipts ... ok
+test tests::no_goal_next_emits_one_required_contract_valid_action ... ok
+test tests::direct_status_uses_derived_hierarchy_and_readiness ... ok
+test service::tests::witnessed_run_finish_reads_back_receipt_and_reaches_closeout_diagnostics ... ok
+test tests::no_goal_start_selects_and_starts_a_claimable_task ... ok
+test tests::dependency_add_is_idempotent_and_cycle_failures_are_typed ... ok
+test tests::finish_close_records_receipt_and_retains_open_gate_diagnostics ... ok
+
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.23s
+
+
+running 9 tests
+test help_lists_available_and_unavailable_work_children ... ok
+test deep_commands_resolves_a_concrete_unavailable_route ... ok
+test commands_reports_source_routes_as_direct_only ... ok
+test unknown_discovery_path_is_a_typed_not_found_error ... ok
+test deep_help_resolves_a_concrete_available_route ... ok
+test commands_catalogue_v3_routes_as_unavailable_future_capabilities ... ok
+test commands_expose_revision_checked_planning_mutations ... ok
+test commands_report_dependency_reads_as_service_capable ... ok
+test version_reports_the_linked_sqlite_runtime_identity ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+
+
+running 1 test
+test one_command_dashboard_supervises_private_service_and_tui ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+
+running 5 tests
+test completed_evidence_operation_replays_without_relaunching_or_reading_policy ... ok
+test executor_uses_allowlisted_environment_and_records_measured_fingerprint ... ok
+test standard_boreal_layout_runs_declared_command_from_workspace_root ... ok
+test timeout_kills_descendants_in_the_declared_process_group ... ok
+test failpoint_after_admission_recovers_as_unknown_on_service_restart ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.29s
+
+
+running 3 tests
+test evidence_run_rejects_a_declared_observable_that_was_not_measured ... ok
+test evidence_run_caps_capture_before_an_unbounded_file_can_grow ... ok
+test evidence_run_retains_streams_and_hashes_exact_combined_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+
+
+running 2 tests
+test public_cli_replays_identical_work_create_as_unchanged ... ok
+test public_cli_builds_and_reads_a_typed_work_hierarchy ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+
+
+running 1 test
+test source_routes_capture_register_read_list_and_verify ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+
+running 2 tests
+test operation_show_reports_missing_operation_through_public_error_envelope ... ok
+test operation_show_reads_completed_create_operation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+
+running 4 tests
+test socket_busy_and_unknown_outcomes_have_documented_exits ... ok
+test no_ready_is_unchanged_json_and_exits_zero ... ok
+test direct_claim_conflict_emits_error_and_nonzero_exit ... ok
+test rejected_close_preserves_revision_and_gate_obligations_with_exit_seven ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+
+running 2 tests
+test init_scaffolds_skills_and_is_safe_to_repeat ... ok
+test setup_dry_run_does_not_write_and_both_installs_two_harness_roots ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+
+running 1 test
+test doctor_reports_schema_runtime_and_bounded_status_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.07s
+
+
+running 4 tests
+test direct_mutation_is_rejected_while_the_service_owns_the_database ... ok
+test service_run_recovers_a_stale_socket_after_sigkill_without_breaking_live_service ... ok
+test service_run_handles_sigterm_and_removes_socket ... ok
+test recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protocol_error ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+
+running 15 tests
+test tests::dependency_validation_rejects_cycles_and_only_closed_satisfies ... ok
+test tests::explicit_hard_deadline_overrides_two_hour_default ... ok
+test tests::complete_is_not_closed_and_requires_close_intent ... ok
+test tests::cancellation_and_reopen_are_explicit_lifecycle_transitions ... ok
+test tests::claimed_differs_from_in_progress_until_acceptance_and_start ... ok
+test tests::hierarchy_is_project_local_and_kind_safe ... ok
+test tests::deadline_equality_is_expired_and_backward_clock_does_not_resurrect_fence ... ok
+test tests::illegal_direct_derived_status_write_is_typed ... ok
+test tests::review_free_profile_closes_with_valid_proof_and_intent ... ok
+test tests::review_gate_is_conditional_and_self_review_is_rejected ... ok
+test tests::stale_fence_rejects_receipts_and_mutations ... ok
+test tests::rollup_counts_are_exact_and_independent_of_row_limits ... ok
+test tests::typed_ids_have_stable_parse_and_format ... ok
+test tests::default_hard_deadline_is_two_hours_and_lease_is_renewable_separately ... ok
+test tests::queued_and_blocked_preserve_both_reasons ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 4 tests
+test milestone_sprint_task_hierarchy_is_valid ... ok
+test invalid_reparenting_is_rejected ... ok
+test root_milestone_and_root_task_are_valid_but_root_sprint_is_rejected ... ok
+test open_containers_are_planning_only_and_never_claimable ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 15 tests
+test active_attempt_precedes_dispatch_and_dependencies_but_not_a_hold ... ok
+test actor_roles_change_claimability_not_display_readiness ... ok
+test attempt_for_another_work_is_blocked_without_mutating_inputs ... ok
+test complete_and_cancelled_never_satisfy_close_only_edges ... ok
+test derived_status_is_not_a_writable_lifecycle ... ok
+test expiry_has_one_primary_reason_and_retains_both_elapsed_clocks ... ok
+test failed_review_blocks_and_failed_technical_gate_still_needs_proof ... ok
+test closed_and_cancelled_win_over_all_nonterminal_inputs ... ok
+test hold_precedes_pause_retry_and_dependency ... ok
+test historical_failure_release_and_cancel_do_not_skip_idle_predicates ... ok
+test idle_retry_precedes_dependency_and_ends_at_exact_boundary ... ok
+test missing_or_duplicate_declared_gates_are_integrity_errors ... ok
+test paused_precedes_retry_and_dependency_without_hiding_reasons ... ok
+test reviewed_profile_uses_gate_kind_with_work_scoped_ids ... ok
+test permutations_and_duplicate_facts_do_not_change_the_decision ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 9 tests
+test container_closeout_requires_current_dispositions_and_own_summary ... ok
+test cycles_assign_tasks_without_reparenting_and_enforce_one_live_slot ... ok
+test decomposition_separates_containers_from_direct_tasks ... ok
+test dependencies_are_direct_task_only_and_acyclic ... ok
+test intake_revisit_is_date_driven_and_promotions_bind_revision_and_digest ... ok
+test schedule_distinguishes_availability_due_and_terminal_badges ... ok
+test generated_intake_lifecycle_sequences_match_reference_model ... ok
+test weekly_recurrence_has_stable_local_slots_and_explicit_resolution_facts ... ok
+test generated_dependency_sequences_match_reference_dag ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.06s
+
+
+running 8 tests
+test tests::publication_identity_is_stable_and_review_is_explicit ... ok
+test tests::manifest_and_markdown_are_canonical ... ok
+test tests::drafts_need_citations_and_are_not_published_by_rendering ... ok
+test tests::malformed_publication_lock_is_not_proven_stale ... ok
+test tests::bounded_subprocess_runner_returns_timeout_without_waiting_for_child ... ok
+test tests::successful_parent_exit_does_not_wait_on_descendant_readers ... ok
+test tests::git_runner_overrides_injected_configuration_environment ... ok
+test tests::timeout_terminates_descendants_before_reader_join ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+
+running 22 tests
+test files_prepared_with_tampered_staged_bytes_requires_reconciliation ... ok
+test doctor_identifies_manifest_tampering_without_repairing_canonical_files ... ok
+test expected_base_rejects_conflicting_concurrent_publishers ... ok
+test doctor_identifies_tampered_note_and_rebuild_is_idempotent ... ok
+test fresh_clone_reimports_and_detects_tampering ... ok
+test memory_root_rejects_traversal_and_manifest_paths_are_checked ... ok
+test import_and_doctor_reject_a_symlinked_manifest ... ok
+test markdown_manifest_and_identity_are_byte_stable ... ok
+test managed_git_hooks_and_global_configuration_cannot_run_during_publication ... ok
+test publication_preserves_uncommitted_human_edits_to_managed_notes ... ok
+test concurrent_same_operation_publication_has_one_commit_identity ... ok
+test interrupted_merged_publication_is_recovered_and_committed_once ... ok
+test publisher_rejects_unaccepted_drafts_and_publishes_only_accepted_citations ... ok
+test publication_retry_removes_only_abandoned_publisher_temps ... ok
+test staged_human_edit_requires_reconciliation_and_is_not_overwritten ... ok
+test concurrent_distinct_publications_serialize_without_lost_entries ... FAILED
+test retention_only_bounds_the_derived_index_and_preserves_published_memory ... ok
+test retrieval_is_scoped_deterministic_and_cited ... ok
+test replay_rejects_a_committed_manifest_with_a_tampered_note ... ok
+test publication_appends_updates_and_retries_old_operations_without_loss ... ok
+test dead_publication_lock_is_recovered_but_unknown_lock_is_preserved ... ok
+test staged_publication_recovers_after_restart_without_changing_provenance ... ok
+
+failures:
+
+---- concurrent_distinct_publications_serialize_without_lost_entries stdout ----
+
+thread 'concurrent_distinct_publications_serialize_without_lost_entries' panicked at crates/memory/tests/publisher.rs:701:5:
+results: [Ok(PublicationReceipt { state: Published, identity: PublicationIdentity { project_id: "project-1", entry_id: "entry-0", content_digest: "sha256:c3e7e70ee642c03d3ea9015a866920a86ffc737881068c9a86cd5d85640968da", operation_id: "operation-0", manifest_identity: "sha256:f4c1260eda0b0e512c0664c55f95c6b467cbbf6dddd9d35889220d518b46df63" }, git_revision: "eb7509ec56765a51c27fc0e25ac1eebeed70fba6", duplicate: false }), Err(Conflict("another publication owns the memory root lock; retry after it exits")), Ok(PublicationReceipt { state: Published, identity: PublicationIdentity { project_id: "project-1", entry_id: "entry-2", content_digest: "sha256:69b67ecd5a16313ac5d9f12e4e55b86356c45a6ef522b6598ef6347b2ebce28a", operation_id: "operation-2", manifest_identity: "sha256:32f51c40644c1203024ce07d6733f2967cba67b0b5753096ceafc7430b0800bc" }, git_revision: "ee92610ba8293e1066127b0c27ba1666f1ac33b7", duplicate: false }), Err(Conflict("another publication owns the memory root lock; retry after it exits")), Ok(PublicationReceipt { state: Published, identity: PublicationIdentity { project_id: "project-1", entry_id: "entry-4", content_digest: "sha256:e71b561d5114eed53cc0db4d08fe2ea73197a0376e29ef92c05c3b36794e0822", operation_id: "operation-4", manifest_identity: "sha256:1b863744493e1a331a58587c65766e0fe939912b5682f2c6466b113104f37f1f" }, git_revision: "d99eb54491af016ab423c4dd3f84572725fed19f", duplicate: false }), Ok(PublicationReceipt { state: Published, identity: PublicationIdentity { project_id: "project-1", entry_id: "entry-5", content_digest: "sha256:f665a585cf649dfd75a3bede1508cdd3efc160f72c8a72962360acd4040d0ff6", operation_id: "operation-5", manifest_identity: "sha256:2d76ad260cfedac3c28268a44bbeefbdec8b4388aa00eec5506b476bc551b293" }, git_revision: "945f3122104607b2291bdcfc04f2e65b4211b79e", duplicate: false })]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    concurrent_distinct_publications_serialize_without_lost_entries
+
+test result: FAILED. 21 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.89s
+

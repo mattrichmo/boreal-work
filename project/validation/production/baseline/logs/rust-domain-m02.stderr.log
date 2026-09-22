@@ -1,0 +1,3 @@
+   Compiling boreal-domain v0.2.0 (/Users/cybertron/Code/boreal-work/crates/domain)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.19s
+     Running tests/m02_status.rs (target/debug/deps/m02_status-f75f43809f2440ab)

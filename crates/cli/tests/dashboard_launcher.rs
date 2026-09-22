@@ -10,6 +10,7 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -195,18 +196,199 @@ fn one_command_dashboard_supervises_private_service_and_tui() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[test]
+fn dashboard_requires_initialization_in_an_uninitialized_directory() {
+    let root = temporary_root();
+    fs::create_dir_all(&root).unwrap();
+
+    let result = Command::new(binary())
+        .current_dir(&root)
+        .args(["dashboard", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(message.contains("run `bwrk init`"), "{message}");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn dashboard_keeps_two_project_roots_with_overlapping_ids_local() {
+    let first = temporary_root().join("first");
+    let second = temporary_root().join("second");
+    fs::create_dir_all(first.join(".boreal")).unwrap();
+    fs::create_dir_all(second.join(".boreal")).unwrap();
+
+    for root in [&first, &second] {
+        let initialized = Command::new(binary())
+            .current_dir(root)
+            .args(["init", "shared-project", "--actor", "bootstrap", "--json"])
+            .output()
+            .unwrap();
+        assert!(initialized.status.success(), "init failed: {initialized:?}");
+
+        let dashboard = Command::new(binary())
+            .current_dir(root)
+            .args(["dashboard", "--actor", "bootstrap", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            dashboard.status.success(),
+            "dashboard failed: {dashboard:?}"
+        );
+        let envelope: Value = serde_json::from_slice(&dashboard.stdout).unwrap();
+        assert_eq!(envelope["transport"], "ok");
+        assert_eq!(envelope["data"]["project_id"], "shared-project");
+    }
+
+    fs::remove_dir_all(first).unwrap();
+    fs::remove_dir_all(second).unwrap();
+}
+
+#[test]
+fn dashboard_rejects_metadata_copied_from_another_project_root() {
+    let source = temporary_root().join("source");
+    let copied = temporary_root().join("copied");
+    fs::create_dir_all(source.join(".boreal")).unwrap();
+    fs::create_dir_all(&copied).unwrap();
+    fs::write(
+        source.join(".boreal/project.json"),
+        serde_json::json!({
+            "project_id": "project-a",
+            "project_root": source,
+            "database": source.join(".boreal/boreal.sqlite"),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::create_dir_all(copied.join(".boreal")).unwrap();
+    fs::copy(
+        source.join(".boreal/project.json"),
+        copied.join(".boreal/project.json"),
+    )
+    .unwrap();
+
+    let result = Command::new(binary())
+        .current_dir(&copied)
+        .args(["dashboard", "--json"])
+        .output()
+        .unwrap();
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!result.status.success());
+    assert!(
+        message.contains("not bound to the current project"),
+        "{message}"
+    );
+    fs::remove_dir_all(source.parent().unwrap()).unwrap();
+    fs::remove_dir_all(copied.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn dashboard_rejects_plausible_metadata_with_a_mismatched_stored_workspace_binding() {
+    let source = temporary_root().join("source");
+    let copied = temporary_root().join("copied");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(copied.join(".boreal")).unwrap();
+
+    let initialized = Command::new(binary())
+        .current_dir(&source)
+        .args(["init", "identity-project", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(initialized.status.success(), "init failed: {initialized:?}");
+
+    let source_database = source.join(".boreal/boreal.sqlite");
+    let copied_database = copied.join(".boreal/boreal.sqlite");
+    fs::copy(&source_database, &copied_database).unwrap();
+    let copied_root = fs::canonicalize(&copied).unwrap();
+    fs::write(
+        copied.join(".boreal/project.json"),
+        serde_json::json!({
+            "project_id": "identity-project",
+            "project_root": copied_root,
+            "database": ".boreal/boreal.sqlite",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let result = Command::new(binary())
+        .current_dir(&copied)
+        .args(["dashboard", "--json"])
+        .output()
+        .unwrap();
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!result.status.success(), "dashboard unexpectedly succeeded");
+    assert!(message.contains("different workspace"), "{message}");
+
+    fs::remove_dir_all(source.parent().unwrap()).unwrap();
+    fs::remove_dir_all(copied.parent().unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn dashboard_rejects_a_database_symlink_escape_after_resolution() {
+    let root = temporary_root();
+    let outside = temporary_root().with_extension("outside");
+    fs::create_dir_all(root.join(".boreal")).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let outside_database = outside.join("boreal.sqlite");
+    fs::write(&outside_database, b"not a database").unwrap();
+    std::os::unix::fs::symlink(&outside_database, root.join(".boreal/linked.sqlite")).unwrap();
+    fs::write(
+        root.join(".boreal/project.json"),
+        serde_json::json!({
+            "project_id": "project-a",
+            "project_root": root,
+            "database": root.join(".boreal/linked.sqlite"),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let result = Command::new(binary())
+        .current_dir(&root)
+        .args(["dashboard", "--json"])
+        .output()
+        .unwrap();
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!result.status.success());
+    assert!(message.contains("outside this project"), "{message}");
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(&outside).unwrap();
+}
+
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_bwrk")
 }
 
 fn temporary_root() -> PathBuf {
+    static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "boreal-dashboard-integration-{}-{nonce}",
-        std::process::id()
+        "boreal-dashboard-integration-{}-{nonce}-{counter}",
+        std::process::id(),
     ))
 }
 

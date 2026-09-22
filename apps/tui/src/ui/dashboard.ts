@@ -174,8 +174,11 @@ export function detailLines(item: StatusItem | undefined, view: MountedView, tab
         add("");
         if (!compact) { add("NEXT ACTION", "heading");
             add(item.next_action ? label(item.next_action) : "No next action supplied.", "accent"); }
-        if (item.reason_codes.length)
-            add(item.reason_codes.map(label).join(" · "), "warn");
+        if (item.primary_reason)
+            add(`Primary: ${label(item.primary_reason)}`, "warn");
+        const secondaryReasons = item.primary_reason ? item.reason_codes.slice(1) : item.reason_codes;
+        if (secondaryReasons.length)
+            add(secondaryReasons.map(label).join(" · "), "warn");
         if (item.diagnostic) {
             add("");
             add("RECORD INTEGRITY", "heading");

@@ -136,6 +136,8 @@ export interface StatusItem {
   /** `status` is retained for the original groundwork; service DTOs may use `display_status`. */
   status: WorkStatus;
   reason_codes: string[];
+  /** Authoritative primary reason, not a client-side sort or policy choice. */
+  primary_reason?: string;
   claimable: boolean;
   next_action: string | null;
   next_status_change_at?: string | null;
@@ -686,6 +688,10 @@ function normalizeStatusItem(value: unknown): StatusItem {
   if (!Array.isArray(reasonCodes) || !reasonCodes.every((code) => typeof code === "string")) {
     throw new ProtocolEnvelopeError("status item reason_codes must be strings");
   }
+  const primaryReason = value.primary_reason;
+  if (primaryReason !== undefined && (typeof primaryReason !== "string" || reasonCodes[0] !== primaryReason)) {
+    throw new ProtocolEnvelopeError("status item primary_reason must match the first reason code");
+  }
   const claimableValue = value.claimable ?? value.claimable_for_actor ?? false;
   if (typeof claimableValue !== "boolean") throw new ProtocolEnvelopeError("status item claimable must be boolean");
   const gates = value.gates;
@@ -787,6 +793,7 @@ function normalizeStatusItem(value: unknown): StatusItem {
     status: statusValue,
     display_status: statusValue,
     reason_codes: reasonCodes,
+    primary_reason: primaryReason as string | undefined,
     claimable: claimableValue,
     claimable_for_actor: claimableValue,
     next_action: typeof value.next_action === "string" ? value.next_action : null,
@@ -1206,9 +1213,13 @@ export function buildMonitoringModel(envelope: Envelope<RevisionedStatusResponse
     throw new ProtocolEnvelopeError("monitoring response has no revisioned data");
   }
   if (!Array.isArray(validated.data.items)) throw new ProtocolEnvelopeError("monitoring items must be an array");
-  const items = validated.data.items.map(normalizeStatusItem);
   const diagnostics = normalizeDiagnostics(validated.data.diagnostics);
-  const diagnosticItems: StatusItem[] = diagnostics.map((diagnostic) => ({
+  const items = validated.data.items.map(normalizeStatusItem).map((item) => {
+    const diagnostic = diagnostics.find((entry) => entry.work_id === item.work_id);
+    return diagnostic ? { ...item, diagnostic } : item;
+  });
+  const knownIds = new Set(items.map((item) => item.work_id));
+  const diagnosticItems: StatusItem[] = diagnostics.filter((diagnostic) => !knownIds.has(diagnostic.work_id)).map((diagnostic) => ({
     work_id: diagnostic.work_id,
     status: "corrupt",
     display_status: "corrupt",

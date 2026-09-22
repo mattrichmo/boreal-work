@@ -18,7 +18,7 @@ use boreal_service::{
     JsonRequest,
 };
 use boreal_service::{BoundedWriter, OperationPhase, WriteFn};
-use boreal_store::SqliteStore;
+use boreal_store::{recovery::RecoveryResolutionInput, SqliteStore};
 use serde_json::{json, Value};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -202,6 +202,7 @@ fn p2_guided_flow_claims_three_harnesses_and_fences_recovery() {
         "actor-blue",
         "actor-green",
         "actor-replacement",
+        "status-reader",
     ] {
         store
             .ensure_actor(
@@ -341,6 +342,21 @@ fn p2_guided_flow_claims_three_harnesses_and_fences_recovery() {
         boreal_domain::AttemptPhase::Expired
     );
 
+    // The store retains the expiry obligation after fencing the old attempt;
+    // replacement becomes eligible only after an explicit recovery decision.
+    store
+        .resolve_recovery_obligation(&RecoveryResolutionInput {
+            project_id: project.as_str().to_owned(),
+            obligation_id: "op_expire_blue:recovery:expired".to_owned(),
+            resolution_id: "resolve_expire_blue".to_owned(),
+            actor_id: "actor-blue".to_owned(),
+            outcome: "runtime_stopped".to_owned(),
+            reason: "the expired harness was observed stopped".to_owned(),
+            resource_state: "released".to_owned(),
+            at: TestClock::new(1_021).stamp(),
+        })
+        .expect("expiry recovery is explicitly resolved before replacement");
+
     let replacement = claim(
         &app,
         &project,
@@ -453,6 +469,15 @@ fn versioned_status_request_is_served_by_application_backed_route() {
         "op_route_init",
     )
     .expect("route project initialization succeeds");
+    store
+        .ensure_actor(
+            "status-reader",
+            "agent",
+            "cred-status-reader",
+            "Status reader",
+            &clock.stamp(),
+        )
+        .expect("status reader registration succeeds");
     app.create_work_as(
         &work(&project, "w-route"),
         "route-actor",

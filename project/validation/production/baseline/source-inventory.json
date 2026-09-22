@@ -1,0 +1,3179 @@
+{
+  "archive": {
+    "manifest": {
+      "archive_directory": "boreal-v2",
+      "archive_id": "boreal-v2",
+      "deletions": [],
+      "file_count": 432,
+      "generated_at": "2026-09-21T19:53:05.840Z",
+      "metadata_files": [
+        "REFERENCE_INDEX.md",
+        "ARCHIVE_MANIFEST.json"
+      ],
+      "protected_paths": [
+        ".git",
+        ".boreal",
+        "memory",
+        "target",
+        "node_modules",
+        "test-project"
+      ],
+      "schema_version": "boreal.archive-manifest.v1",
+      "source_branch": "codex/apply-responsive-terminal-overlay",
+      "source_commit": "bed6e7b24372b2e44e791f1265d273fdeb448b9a",
+      "source_dirty": true,
+      "source_label": "repository root (the refactored Rust/TUI v2 implementation)"
+    },
+    "manifest_member": "boreal-v2/ARCHIVE_MANIFEST.json",
+    "manifest_sha256": "7093808eafc1d59dac6d6b66e72b59d1a8134a03f800f3436335dc99020e5e26",
+    "path": "/Users/cybertron/Code/boreal-work/scratch/reference-zips/boreal-v2-reference-20260921T195305840Z.zip",
+    "sha256": "09d72813db6b68728f567b14132454fb24fee289747cf9ca799830c9ee749d8c",
+    "validation": {
+      "crc_bad_member": null,
+      "file_members": 434,
+      "manifest_hash_mismatches": [],
+      "missing_manifest_members": [],
+      "unique_members": 546,
+      "unmanifested_file_members": [
+        "ARCHIVE_MANIFEST.json",
+        "REFERENCE_INDEX.md"
+      ],
+      "unsafe_members": [],
+      "zip_members": 546
+    }
+  },
+  "archive_manifest_files": [
+    {
+      "bytes": 474,
+      "mode": 420,
+      "path": ".gitattributes",
+      "sha256": "142f7879b18f672b2498455757a3881b65cae85e03a52b39c112700c95857d0b"
+    },
+    {
+      "bytes": 2429,
+      "mode": 420,
+      "path": ".github/workflows/ci.yml",
+      "sha256": "1144eba8d1a75e700c891a5b469b9a51112bf1509d56ebcc833449443c1b0182"
+    },
+    {
+      "bytes": 4332,
+      "mode": 420,
+      "path": ".github/workflows/release.yml",
+      "sha256": "e282d98e9a20c7c3a96d1d755f002bbb1c5427c39d589a67f3fffd2e0a889651"
+    },
+    {
+      "bytes": 543,
+      "mode": 420,
+      "path": ".gitignore",
+      "sha256": "c27149c4c2a02238f49bdbc7bdabd98e2913c4e8a28cb2ae071ff8f3bb46e4b5"
+    },
+    {
+      "bytes": 7226,
+      "mode": 420,
+      "path": "AGENT_HANDOFF.md",
+      "sha256": "45e2442f3b2cf0565c6b3a43e4f431516320fd35e45c606943e95fae823aaba6"
+    },
+    {
+      "bytes": 1957,
+      "mode": 420,
+      "path": "AGENTS.md",
+      "sha256": "2d39fe3fc1e57119537f0d969e26b990584be7d2fc5ce932236e2b385541bcb3"
+    },
+    {
+      "bytes": 27527,
+      "mode": 420,
+      "path": "apps/tui/installer/wizard-body.cjs",
+      "sha256": "dccf02ca04569318929f9b17815b5e7b309589f1107809565fe0df815959f7fa"
+    },
+    {
+      "bytes": 49564,
+      "mode": 420,
+      "path": "apps/tui/installer/wizard.cjs",
+      "sha256": "838398c27aa663b965621da8dbb943f69ef547fc80e9a3bf3b71350eee7b797d"
+    },
+    {
+      "bytes": 561,
+      "mode": 420,
+      "path": "apps/tui/package.json",
+      "sha256": "1c2c90da7d5fdc98c8648193c825678a3e465f18fb4a461f721f8050fb5300f1"
+    },
+    {
+      "bytes": 6831,
+      "mode": 420,
+      "path": "apps/tui/README.md",
+      "sha256": "8c74e951f043b62052f2612b88b4cfe281cd9f6655d70d168a3584c8c8a0f68c"
+    },
+    {
+      "bytes": 7021,
+      "mode": 420,
+      "path": "apps/tui/smoke/service-smoke.mjs",
+      "sha256": "c0e3205ad4edb49e5c56d1392abf59f49b7d8b9aafa62620a909cd90bb6f381c"
+    },
+    {
+      "bytes": 79567,
+      "mode": 420,
+      "path": "apps/tui/src/client.ts",
+      "sha256": "68c626c72f938f38623578c3e2e3d5b1c2a2f410890da64ef7ff53e38ece27ed"
+    },
+    {
+      "bytes": 8289,
+      "mode": 420,
+      "path": "apps/tui/src/entrypoint.ts",
+      "sha256": "b339062fc0d8be42c3a7ec5e7656974090079ac4989d5fd5b91d86e7a8eeeb0f"
+    },
+    {
+      "bytes": 32254,
+      "mode": 420,
+      "path": "apps/tui/src/full-screen.ts",
+      "sha256": "f953a0b9a8f9efe02bb05c86e55ecb362b668a4497b656069599e4e3e2a7ebf0"
+    },
+    {
+      "bytes": 13330,
+      "mode": 420,
+      "path": "apps/tui/src/line-shell.ts",
+      "sha256": "98fdbeefb9a7aec79ba4e6511c4dcafbc63b4cead24d9d431d88934de57db1c4"
+    },
+    {
+      "bytes": 2458,
+      "mode": 420,
+      "path": "apps/tui/src/node-shims.d.ts",
+      "sha256": "96e3d729d8dd0dee43d0bd9837c5fb0982c80d4b6cc8553642438ba93737ef09"
+    },
+    {
+      "bytes": 8296,
+      "mode": 420,
+      "path": "apps/tui/src/node-transport.ts",
+      "sha256": "c696c2f927b4a5ba23285bb9482f20a1ab873592be2cf72566be81bb0565909b"
+    },
+    {
+      "bytes": 13565,
+      "mode": 420,
+      "path": "apps/tui/src/terminal.ts",
+      "sha256": "71f32b6a949f7b0d1646be26e4fe55486c58c8e95bf08e600457a66e4a2a4ffb"
+    },
+    {
+      "bytes": 68853,
+      "mode": 420,
+      "path": "apps/tui/src/test.ts",
+      "sha256": "e9fb00ef5692b0b84bcfa64df0e26038f97f03dcd9717917c5a907e83faee184"
+    },
+    {
+      "bytes": 4302,
+      "mode": 420,
+      "path": "apps/tui/src/ui/cells.ts",
+      "sha256": "8111072b64eb747e555146320e05f87d4ada8b95ca638aadba6774fab037563b"
+    },
+    {
+      "bytes": 26805,
+      "mode": 420,
+      "path": "apps/tui/src/ui/dashboard.ts",
+      "sha256": "c907e2e5c57ec2cc4a5b3e4842775230a5e2095bad54384a61d6a65cccd2b3fe"
+    },
+    {
+      "bytes": 2505,
+      "mode": 420,
+      "path": "apps/tui/src/ui/input.ts",
+      "sha256": "f0fe7cb5b540efeed5fd1d6d76cc469612f7a04aeb388d6a951f91c0524e1678"
+    },
+    {
+      "bytes": 5419,
+      "mode": 420,
+      "path": "apps/tui/src/ui/keys.ts",
+      "sha256": "68f60d2f24acf4b339c4ce84cc252e5f3b7feacb5fcb28683fdea551a339ff07"
+    },
+    {
+      "bytes": 3497,
+      "mode": 420,
+      "path": "apps/tui/src/ui/layout.ts",
+      "sha256": "2492abfc8783a6fbf9cf199082181dff61e668e3ea1b2a3330a025cd6b5b17c2"
+    },
+    {
+      "bytes": 8106,
+      "mode": 420,
+      "path": "apps/tui/src/ui/model.ts",
+      "sha256": "3d6fd154fe99e6361f95c38486a556a34871762531c69e55b37d4b3a0130f01f"
+    },
+    {
+      "bytes": 5170,
+      "mode": 420,
+      "path": "apps/tui/src/ui/screen.ts",
+      "sha256": "8034ed4689c98c09ddaf0128f3bffc995ad7c25bdbbd783054483decacbef810"
+    },
+    {
+      "bytes": 3214,
+      "mode": 420,
+      "path": "apps/tui/src/ui/terminal-size.ts",
+      "sha256": "b303a58205eaaf77cbfc639f1d78b5ee03325d95d71acee32b083d51a55fe81c"
+    },
+    {
+      "bytes": 6683,
+      "mode": 420,
+      "path": "apps/tui/tests/fixtures.mjs",
+      "sha256": "028116d5cd1a8760088bbadacb9890d2926d2503bf948e20d4534cb5b4c901ca"
+    },
+    {
+      "bytes": 2978,
+      "mode": 420,
+      "path": "apps/tui/tests/m02-contract.test.mjs",
+      "sha256": "88ecb415061cb4ecb5521c20b4b17e60c613f4cee113f08604181bba44ac0931"
+    },
+    {
+      "bytes": 17129,
+      "mode": 420,
+      "path": "apps/tui/tests/premium.test.mjs",
+      "sha256": "188a8e48d0fb047e0db3663d0a85729063ca925999c32fd3e1662ff0d7c408c5"
+    },
+    {
+      "bytes": 420,
+      "mode": 420,
+      "path": "apps/tui/tests/pty-harness.mjs",
+      "sha256": "f37374f9516baa398e3c3f0273cb460f128fb857f123a559d5baf688e2482c98"
+    },
+    {
+      "bytes": 15394,
+      "mode": 420,
+      "path": "apps/tui/tests/responsive.test.mjs",
+      "sha256": "214f778d916661032c62c86fa80e84afcd1339aa09a46480c2089a6426ed2bfa"
+    },
+    {
+      "bytes": 236,
+      "mode": 420,
+      "path": "apps/tui/tsconfig.json",
+      "sha256": "69a5a0fec60949ad8c39cd24726159e143d6a128bc1d581afcfc666c2efbb339"
+    },
+    {
+      "bytes": 3553,
+      "mode": 420,
+      "path": "Cargo.lock",
+      "sha256": "778a9da8ca277723a6652de0c5283fecbf73b7bf99aebedf7822e5deb064204b"
+    },
+    {
+      "bytes": 309,
+      "mode": 420,
+      "path": "Cargo.toml",
+      "sha256": "8ffcbaba22ec6b4378c18f53c2d9e2ff8a714ba46fc20d1b795e9986fcbba2a6"
+    },
+    {
+      "bytes": 406,
+      "mode": 420,
+      "path": "crates/application/Cargo.toml",
+      "sha256": "ba2673e711cf254c6f448cfe09f735fd2ff33e91766fddcf27eace9304797507"
+    },
+    {
+      "bytes": 44790,
+      "mode": 420,
+      "path": "crates/application/src/evidence_store.rs",
+      "sha256": "28bfddb8925e14e7fcc3e6db98a0cfe86891aaf14e5765c46a4e1092f33f72e4"
+    },
+    {
+      "bytes": 63060,
+      "mode": 420,
+      "path": "crates/application/src/evidence.rs",
+      "sha256": "855a672f1eafe9354524c20c80620a681367bf80c1281e20a59dd49884c40590"
+    },
+    {
+      "bytes": 10974,
+      "mode": 420,
+      "path": "crates/application/src/guidance.rs",
+      "sha256": "84c15313887f610e7b5a88c8e6c01cf6d4dc4977731dd8adf29776245b110a3e"
+    },
+    {
+      "bytes": 43610,
+      "mode": 420,
+      "path": "crates/application/src/hierarchy.rs",
+      "sha256": "10958530b2228edd78ab87b49be699fe37e9c6c80cff9f6b14720f8d00de86be"
+    },
+    {
+      "bytes": 19798,
+      "mode": 420,
+      "path": "crates/application/src/intake.rs",
+      "sha256": "fdd9d3e1c91bb6d3c069681b429c1311689d19feeca6c040728d7268cc6f9ca5"
+    },
+    {
+      "bytes": 34308,
+      "mode": 420,
+      "path": "crates/application/src/knowledge.rs",
+      "sha256": "c277aec754f38fb0896712f4d171dbb85313847c067eb6800795fbb4926e9c39"
+    },
+    {
+      "bytes": 28500,
+      "mode": 420,
+      "path": "crates/application/src/lib.rs",
+      "sha256": "35c412fdc9e320489ec98a0fc71fdba421e2643b8056373dc544f16d9f34ec01"
+    },
+    {
+      "bytes": 6205,
+      "mode": 420,
+      "path": "crates/application/src/operation_identity.rs",
+      "sha256": "793564334df21b753e4b3566a14478fa6d4444158e0b993f75536fe4cfe8c464"
+    },
+    {
+      "bytes": 37801,
+      "mode": 420,
+      "path": "crates/application/src/planning_v3.rs",
+      "sha256": "c59b776166a39ae9d83f951e054f2419a9b359a2074c36206835d1a0c354ce4e"
+    },
+    {
+      "bytes": 33031,
+      "mode": 420,
+      "path": "crates/application/src/runtime.rs",
+      "sha256": "0fe0aa504fbe93b750a80e8639efaefba130cf9054c04ebf4f35e6dd2ddf7c60"
+    },
+    {
+      "bytes": 6955,
+      "mode": 420,
+      "path": "crates/application/src/session.rs",
+      "sha256": "a25d0b68ae951b42a80dd702b5592bd7e7e23ca1c5eac2929ad14e1a7cfd61e9"
+    },
+    {
+      "bytes": 6840,
+      "mode": 420,
+      "path": "crates/application/src/sqlite_adapter.rs",
+      "sha256": "913a6053a366e218d3b2be08d12198edd65d67b0c0b6382da93fd7ae4aaf1314"
+    },
+    {
+      "bytes": 22560,
+      "mode": 420,
+      "path": "crates/application/src/status.rs",
+      "sha256": "f7b277b0cc221d58c6fbef39a3113f83128574ad0b89fada5add5df10ca43f8e"
+    },
+    {
+      "bytes": 13072,
+      "mode": 420,
+      "path": "crates/application/src/workflow_assets.rs",
+      "sha256": "e3f79a0ef72846a1ad6561cadee4e87677537653360a0b74757a87900a435838"
+    },
+    {
+      "bytes": 4301,
+      "mode": 420,
+      "path": "crates/application/STORE_V3_HANDOFF.md",
+      "sha256": "761a807e7d1c8ed0c81c6f992c398c15899781ab6f1553baf7707d9a50bce71f"
+    },
+    {
+      "bytes": 4428,
+      "mode": 420,
+      "path": "crates/application/tests/boundary_remediation.rs",
+      "sha256": "dc351e4a825959d6c814910e6a353da7e219a4c12136bf031a37f2669b2b6fca"
+    },
+    {
+      "bytes": 9779,
+      "mode": 420,
+      "path": "crates/application/tests/knowledge.rs",
+      "sha256": "90d00126e9a2df84fde52922f66df0c74129e98820746c46e58bf26a8b244b0e"
+    },
+    {
+      "bytes": 4089,
+      "mode": 420,
+      "path": "crates/application/tests/m02_status_authority.rs",
+      "sha256": "dbb2ae4839a131fba4fd3877b476bc619b5fef705c77d8b0dc4213c027e42a71"
+    },
+    {
+      "bytes": 14872,
+      "mode": 420,
+      "path": "crates/application/tests/p2_guided_flow.rs",
+      "sha256": "632237444a930bd9be4853468880e601eeaf08c023cd8e8df99660fde72cd353"
+    },
+    {
+      "bytes": 4276,
+      "mode": 420,
+      "path": "crates/application/tests/planning_mutations.rs",
+      "sha256": "d035599205256d10673cb1976d7e2cf32ee0088f1ad3c4a70b98116243cd01dc"
+    },
+    {
+      "bytes": 13427,
+      "mode": 420,
+      "path": "crates/application/tests/proof_boundary.rs",
+      "sha256": "3b64237b6978f93f4496f2524ee716a2996ab40cb338c944aea8c971e2ef79cc"
+    },
+    {
+      "bytes": 5223,
+      "mode": 420,
+      "path": "crates/application/tests/session_registration.rs",
+      "sha256": "162ffc5c77fabcfa23c2fd9348e374c909fcd46e62c3368e36d8a8b3e71a7882"
+    },
+    {
+      "bytes": 15022,
+      "mode": 420,
+      "path": "crates/application/tests/sqlite_lifecycle.rs",
+      "sha256": "f43cbb6754643a53269e0fa4b8d7330094f1c95290322e4894d9fa7ce7626acf"
+    },
+    {
+      "bytes": 7479,
+      "mode": 420,
+      "path": "crates/application/tests/status_projection.rs",
+      "sha256": "ede3041964b747aa0172c08cbbe0631c5b8b94fbf80a054475dd84c9c651766a"
+    },
+    {
+      "bytes": 10794,
+      "mode": 420,
+      "path": "crates/application/tests/work_model_v3.rs",
+      "sha256": "b6c297f7194b0d5babfa1d00977242100c5b41fd53850eeb960cce613609b9e0"
+    },
+    {
+      "bytes": 692,
+      "mode": 420,
+      "path": "crates/cli/Cargo.toml",
+      "sha256": "753842c3e58a197880c386ff587ac2edd1bd08f2a57b23a14e9e34f9a58cc9fc"
+    },
+    {
+      "bytes": 34440,
+      "mode": 420,
+      "path": "crates/cli/src/command_registry.rs",
+      "sha256": "9e49764f66aebe72dc54690e30884f640260cbb168e554679a5d66479cd9693a"
+    },
+    {
+      "bytes": 39146,
+      "mode": 420,
+      "path": "crates/cli/src/dashboard.rs",
+      "sha256": "c6a7c7e89723916cdad3f0524901d9ae0c75a9fe1782ff2b473d228b8d4b4db3"
+    },
+    {
+      "bytes": 261816,
+      "mode": 420,
+      "path": "crates/cli/src/main.rs",
+      "sha256": "1cadfb35c2073e8f1bf2c6044b878bd5d289510afac80c8a9130439e66022829"
+    },
+    {
+      "bytes": 231121,
+      "mode": 420,
+      "path": "crates/cli/src/service.rs",
+      "sha256": "0e91f462908bf9d6e50c24e80f70002cb9a0cd67b91915e7e59d66cb1b907897"
+    },
+    {
+      "bytes": 32000,
+      "mode": 420,
+      "path": "crates/cli/src/setup.rs",
+      "sha256": "6ff3782bc9f9183450b169ee2b713db8c54c26a8e4f66471c94f54aec8a15afe"
+    },
+    {
+      "bytes": 3018,
+      "mode": 420,
+      "path": "crates/cli/src/update.rs",
+      "sha256": "0a3c680ed8dabaab392d4f9e4fb536662cd6300b37a8ed69259541abd5663da2"
+    },
+    {
+      "bytes": 4657,
+      "mode": 420,
+      "path": "crates/cli/tests/command_registry.rs",
+      "sha256": "8627afd676ab74beca59df61c8ceda6ad2643c4002d503f8861275b067beb435"
+    },
+    {
+      "bytes": 10960,
+      "mode": 420,
+      "path": "crates/cli/tests/dashboard_launcher.rs",
+      "sha256": "871901a803f587013ca16f3f555f1071b01a5d3399ca5fa3eddf7a62863ad57b"
+    },
+    {
+      "bytes": 18041,
+      "mode": 420,
+      "path": "crates/cli/tests/evidence_executor_regressions.rs",
+      "sha256": "f0e135812ff07afa0321bca705b30effa6c4481ca6b44c29bd666c6fcfea3e44"
+    },
+    {
+      "bytes": 12981,
+      "mode": 420,
+      "path": "crates/cli/tests/evidence_runner_hardening.rs",
+      "sha256": "aee3d5ba7497529ec0b4591ccbdd0a90f8980c459cd82911277d722f4658c197"
+    },
+    {
+      "bytes": 6762,
+      "mode": 420,
+      "path": "crates/cli/tests/hierarchy_public.rs",
+      "sha256": "abd5001a96fac101c9588113d1cf40c2f20554f16f5695fa440668647dfa3642"
+    },
+    {
+      "bytes": 3532,
+      "mode": 420,
+      "path": "crates/cli/tests/knowledge_routes.rs",
+      "sha256": "4a33d7be3ca2f245553a1acc5bd07659e4b3a3dea0648d07e028b42712e7b611"
+    },
+    {
+      "bytes": 6106,
+      "mode": 420,
+      "path": "crates/cli/tests/operation_readback_contract.rs",
+      "sha256": "050f9fb8bc2f130b02820bb655c1fb014235a7efc8db2bc9d1a1f00786b0eae5"
+    },
+    {
+      "bytes": 12510,
+      "mode": 420,
+      "path": "crates/cli/tests/outcome_exit.rs",
+      "sha256": "1d901f37536a83de18b482703d9d535138e004526b67487e80de27a273c947db"
+    },
+    {
+      "bytes": 2607,
+      "mode": 420,
+      "path": "crates/cli/tests/project_setup.rs",
+      "sha256": "2604e7d0a7feb08cf49ab9c7e0055ed81fc8f8cbf764b49bb60b4e71d97e783e"
+    },
+    {
+      "bytes": 3152,
+      "mode": 420,
+      "path": "crates/cli/tests/release_acceptance.rs",
+      "sha256": "bf397fe971b088f2db5a9267a19c21ab912b2dc171a8e340d9691e24ab45f25f"
+    },
+    {
+      "bytes": 12462,
+      "mode": 420,
+      "path": "crates/cli/tests/service_signal_recovery.rs",
+      "sha256": "91d3c8aa1c0f83b93c376ca816fb4221682aa90f6a7d5f5f0578a9df65f48996"
+    },
+    {
+      "bytes": 135,
+      "mode": 420,
+      "path": "crates/domain/Cargo.toml",
+      "sha256": "4bdaebc1abea2e09d8ac146606b804a9c4a8b8ab9ab651f6c1c9af9476c45a2f"
+    },
+    {
+      "bytes": 49306,
+      "mode": 420,
+      "path": "crates/domain/src/lib.rs",
+      "sha256": "e1ac55358a52de43c820c82bcffd8c0783cd60d44429626db25919df22e7cc1c"
+    },
+    {
+      "bytes": 12636,
+      "mode": 420,
+      "path": "crates/domain/src/status_evaluator.rs",
+      "sha256": "6b0aca698af8d7ddf1ec1b4b4099a6b1a0b6adc43a0c68481b2606ca14aa43ca"
+    },
+    {
+      "bytes": 39361,
+      "mode": 420,
+      "path": "crates/domain/src/work_model_v3.rs",
+      "sha256": "89f8c34ad3ad965badad82867683f32e88ae9a9ee34cfdcedf4c93c06ab8b7fc"
+    },
+    {
+      "bytes": 4354,
+      "mode": 420,
+      "path": "crates/domain/tests/hierarchy_semantics.rs",
+      "sha256": "138b9c788d8848eef1ae32733dc819a81f2f51fe38a6e7401a49e8cc835517ec"
+    },
+    {
+      "bytes": 14345,
+      "mode": 420,
+      "path": "crates/domain/tests/m02_status.rs",
+      "sha256": "643258faffc8a1efa0bde14e53a107e35a56cb6c70162f03e260265207bf5a7b"
+    },
+    {
+      "bytes": 14372,
+      "mode": 420,
+      "path": "crates/domain/tests/work_model_v3.rs",
+      "sha256": "b20d9a4f68799dd442857e66aea73bd24933dd686b247482ab59757a455c5726"
+    },
+    {
+      "bytes": 135,
+      "mode": 420,
+      "path": "crates/memory/Cargo.toml",
+      "sha256": "be10f57344636ae42f073f34d6a0a0bf064901931b79ffe114a863876a71175c"
+    },
+    {
+      "bytes": 122016,
+      "mode": 420,
+      "path": "crates/memory/src/lib.rs",
+      "sha256": "f0a149a7c0cb93154df2c40134d5472aa437eef3ede06d11854ee9b48d1bf13b"
+    },
+    {
+      "bytes": 37754,
+      "mode": 420,
+      "path": "crates/memory/tests/publisher.rs",
+      "sha256": "6d963314bfc4165c49a94a7740f6927fe7dd92337cbdfafaa3b704ff766e5bcb"
+    },
+    {
+      "bytes": 289,
+      "mode": 420,
+      "path": "crates/migration/Cargo.toml",
+      "sha256": "197bc5cd0cd5b5354e381fc6fc686df7e5923930172363c76276fa146a6ffc57"
+    },
+    {
+      "bytes": 81623,
+      "mode": 420,
+      "path": "crates/migration/src/lib.rs",
+      "sha256": "ba934b832c913a776f63728750d408c6d9a41acc1b1c978dd1be5a215e9b9fbc"
+    },
+    {
+      "bytes": 38956,
+      "mode": 420,
+      "path": "crates/migration/src/work_model_v3.rs",
+      "sha256": "6384242dc7c4d2d98f721110b8869158fd37c0f1efcce7605ebc4741dea40ee5"
+    },
+    {
+      "bytes": 18214,
+      "mode": 420,
+      "path": "crates/migration/tests/format.rs",
+      "sha256": "4c921d70e5468d5792a50bd573c3894d030c88724f3c657430fd74c0b255eb1d"
+    },
+    {
+      "bytes": 10029,
+      "mode": 420,
+      "path": "crates/migration/tests/work_model_v3.rs",
+      "sha256": "e23bda272cfe41ee3fa500bc874aa63605f3fa10aa67791f8158951c35ef6025"
+    },
+    {
+      "bytes": 2672,
+      "mode": 420,
+      "path": "crates/protocol/Cargo.lock",
+      "sha256": "47ee8416b97b3c5702bf4f0127dfc77b1ea0d8f62b57451bf1f2ced631aec621"
+    },
+    {
+      "bytes": 228,
+      "mode": 420,
+      "path": "crates/protocol/Cargo.toml",
+      "sha256": "63df6af07a078147471881815b1a426f79c5b3aa02cc0d45a038333634dfa9a4"
+    },
+    {
+      "bytes": 22686,
+      "mode": 420,
+      "path": "crates/protocol/src/lib.rs",
+      "sha256": "de84d18af0408b6b36af95c9734fc744c32a4fe84c989a933a196c0a478afeb7"
+    },
+    {
+      "bytes": 12711,
+      "mode": 420,
+      "path": "crates/protocol/src/models.rs",
+      "sha256": "bff24d6d3ffdf60441926289e038edf72d8523932b5684810cb4bc3cbf61a2f3"
+    },
+    {
+      "bytes": 7526,
+      "mode": 420,
+      "path": "crates/protocol/tests/fixtures.rs",
+      "sha256": "24fbcc6fec794dd6ef770990b80869133c42c371b6bb4a2abf8fb9cb1b808256"
+    },
+    {
+      "bytes": 1010,
+      "mode": 420,
+      "path": "crates/protocol/tests/m02_status_wire.rs",
+      "sha256": "ba1c0f9cf3950461e7694085ca94cbdc33894711a580ce72a7d39898b9f77ecf"
+    },
+    {
+      "bytes": 158,
+      "mode": 420,
+      "path": "crates/service/Cargo.lock",
+      "sha256": "2ff1dffaa8f4d34f2d4f3b17761aaea23346b8c6d94d125a00c645ce5ccb9514"
+    },
+    {
+      "bytes": 192,
+      "mode": 420,
+      "path": "crates/service/Cargo.toml",
+      "sha256": "ce6235ac020696034a1fd386598d6fae0dbe4350d6e4f4019e1adaae6609fba5"
+    },
+    {
+      "bytes": 13382,
+      "mode": 420,
+      "path": "crates/service/src/application_route.rs",
+      "sha256": "d99f724b7cab32ac6fbc768a5af15064db2af8e22a42c5d26a4197bbfe9acf50"
+    },
+    {
+      "bytes": 3123,
+      "mode": 420,
+      "path": "crates/service/src/busy.rs",
+      "sha256": "952f123a4ff177db7c93671c38cd2af6e83c27f25a312d9b8280df8adddfdfbd"
+    },
+    {
+      "bytes": 6727,
+      "mode": 420,
+      "path": "crates/service/src/control.rs",
+      "sha256": "fb4ba2256c01ec7f55a7e8ea09ffa8016840b6cf4b9fea9f92627f7225962696"
+    },
+    {
+      "bytes": 10127,
+      "mode": 420,
+      "path": "crates/service/src/election.rs",
+      "sha256": "923fc572a91d24b68644c7baf7e9052cfe06ef767f4dbd67d145b40d6c5a7b10"
+    },
+    {
+      "bytes": 81801,
+      "mode": 420,
+      "path": "crates/service/src/host.rs",
+      "sha256": "dc69ffc6ef5c3c6194c8c808a9cb37610de29869962d057762f54c705cfced04"
+    },
+    {
+      "bytes": 2616,
+      "mode": 420,
+      "path": "crates/service/src/lib.rs",
+      "sha256": "301bc821c7e4747ec05b1f1f9e8e4a1f381e9bba1cd95e71fc32859acbcc894d"
+    },
+    {
+      "bytes": 2319,
+      "mode": 420,
+      "path": "crates/service/src/metrics.rs",
+      "sha256": "78798b8dbb1ee5856ea6b1ef2f7d31d39ada55055172ed3e544f95ad1af2b886"
+    },
+    {
+      "bytes": 8466,
+      "mode": 420,
+      "path": "crates/service/src/notifications.rs",
+      "sha256": "ba0a22e21bb7469abf4e806361222032964fc7cd6a0b534a1dc89ae63ecfcba0"
+    },
+    {
+      "bytes": 8918,
+      "mode": 420,
+      "path": "crates/service/src/priority_queue.rs",
+      "sha256": "61564d8940116c9c90dba2d231b386aa6d750ea02b20c964143e61250521102f"
+    },
+    {
+      "bytes": 9132,
+      "mode": 420,
+      "path": "crates/service/src/queue.rs",
+      "sha256": "055159dd9b6c4f4e1ad602d6719145189d4e41a758d1b38e92a733a1135e07a1"
+    },
+    {
+      "bytes": 6130,
+      "mode": 420,
+      "path": "crates/service/src/read_pool.rs",
+      "sha256": "b5941811e8aeb05951cd8d10bc9671a8fd3694dddf6f88bc3cfb2152c1865e41"
+    },
+    {
+      "bytes": 22419,
+      "mode": 420,
+      "path": "crates/service/src/recovery.rs",
+      "sha256": "1b8224751ea6dc9fb9d15d75da966ef255bd38cc797924e7a859ac4b0a746aa1"
+    },
+    {
+      "bytes": 11560,
+      "mode": 420,
+      "path": "crates/service/src/runtime.rs",
+      "sha256": "7338118bd52d315040c0e8a89b90da4328711116b22b3a033c4d546ad33a8095"
+    },
+    {
+      "bytes": 1943,
+      "mode": 420,
+      "path": "crates/service/src/tasks.rs",
+      "sha256": "72cd4947ea08d36caa5a4a7e7f89aa2908f121e1a8d01e43822496c6d433d2d6"
+    },
+    {
+      "bytes": 3719,
+      "mode": 420,
+      "path": "crates/service/src/timer.rs",
+      "sha256": "c63eecd606b628d18818f4b3c2473e4ca64475dc096c6a89971fc8b0418f03bf"
+    },
+    {
+      "bytes": 50399,
+      "mode": 420,
+      "path": "crates/service/src/transport.rs",
+      "sha256": "f5cbc930d9c51efabfbcced0e6c1eabfef50ea8a26704eefad059efee6e78003"
+    },
+    {
+      "bytes": 2689,
+      "mode": 420,
+      "path": "crates/service/tests/transport_smoke.rs",
+      "sha256": "b2eced6338b81a8a2cf57223450cc660ef1912a571f942b26ee7337d7c8ca242"
+    },
+    {
+      "bytes": 217,
+      "mode": 420,
+      "path": "crates/source/Cargo.toml",
+      "sha256": "2e0b231b04559760ed8bddae8d4e119aa1a00b9e2ecd1e052101136f21d87e53"
+    },
+    {
+      "bytes": 76620,
+      "mode": 420,
+      "path": "crates/source/src/lib.rs",
+      "sha256": "46eaffb8713bdabcb41f029a95feb5f44b9d1846b54a455868702b742d1889c7"
+    },
+    {
+      "bytes": 10383,
+      "mode": 420,
+      "path": "crates/source/tests/source_engine.rs",
+      "sha256": "465ccd4bbfa844bde581ac37bbea4682dae80639fe2ea2e77f79772908850c36"
+    },
+    {
+      "bytes": 16375,
+      "mode": 420,
+      "path": "crates/source/tests/source_index.rs",
+      "sha256": "0268e96c63f3462fb4f9d10d5c61e007a89b1e071f8a4d68138ce4557706c920"
+    },
+    {
+      "bytes": 179,
+      "mode": 420,
+      "path": "crates/store/Cargo.toml",
+      "sha256": "4fee76f335c93c61011a4d25187f50778eabd423df0114ea06b402da4d8a62e3"
+    },
+    {
+      "bytes": 12776,
+      "mode": 420,
+      "path": "crates/store/src/knowledge.rs",
+      "sha256": "a69e2618ad33ee7c2963cf3d958bdae3ac67adffe4f921c33a98049cbed027a1"
+    },
+    {
+      "bytes": 324881,
+      "mode": 420,
+      "path": "crates/store/src/lib.rs",
+      "sha256": "4110cba684bfb5401d6e7af4cf45a4190aebe6d39b25e77155a88b6a35f3a59b"
+    },
+    {
+      "bytes": 10109,
+      "mode": 420,
+      "path": "crates/store/src/status_evaluation.rs",
+      "sha256": "472fa14deae85b34ff5c0d213370bbabc9002380e04835693c2476cd003a871d"
+    },
+    {
+      "bytes": 40099,
+      "mode": 420,
+      "path": "crates/store/src/work_model_v3.rs",
+      "sha256": "9614cb4f5993ed9946164c7622e88bd30567af58fdbc3ffe0a1da03a577036b4"
+    },
+    {
+      "bytes": 12458,
+      "mode": 420,
+      "path": "crates/store/tests/m02_claim.rs",
+      "sha256": "7f68d5729fea4a58f1cd1cc5bcd0dda064d30c3ff2d57d9fa05c00621d1e4ae1"
+    },
+    {
+      "bytes": 5900,
+      "mode": 420,
+      "path": "crates/store/tests/release_acceptance.rs",
+      "sha256": "e24e764cb7629190d8774933a267b2e2fece95c7259f41c77409f102018e52d0"
+    },
+    {
+      "bytes": 4340,
+      "mode": 420,
+      "path": "crates/store/tests/runtime_backup.rs",
+      "sha256": "39f4c799c277ae1793e04f8c553fc0cebe0f3e16df80a45ea8e63794b113f2b5"
+    },
+    {
+      "bytes": 32437,
+      "mode": 420,
+      "path": "crates/store/tests/schema_v3.rs",
+      "sha256": "9b10ff63d7985c4e8360815cfb2ed30aa36dd8d09dba73ddeb657f70f166e956"
+    },
+    {
+      "bytes": 6488,
+      "mode": 420,
+      "path": "crates/store/tests/session_registration.rs",
+      "sha256": "6d89b641b33e71492db466841ec36c49f713fe3227a1822d5f3ae329a50e5213"
+    },
+    {
+      "bytes": 3723,
+      "mode": 420,
+      "path": "crates/store/tests/status_benchmark.rs",
+      "sha256": "57670ccf2b23b74174d6345857e7245dbb5f248ae09ce7e98a41a7a7b3547467"
+    },
+    {
+      "bytes": 5205,
+      "mode": 420,
+      "path": "crates/store/tests/status_snapshot.rs",
+      "sha256": "e1a795aeb957449b5fa69fb0f13e46bba50f451afb6b91c4aac731bbf0d5ea6c"
+    },
+    {
+      "bytes": 18302,
+      "mode": 420,
+      "path": "crates/store/tests/storage_remediation.rs",
+      "sha256": "cc8727cc45a52102c03f332a53527c462ec88213aeabbdd41561a71d31d19d37"
+    },
+    {
+      "bytes": 44067,
+      "mode": 420,
+      "path": "crates/store/tests/store_contracts.rs",
+      "sha256": "cc8788a7b045f8aafe4cad4252feb921783d1985b961b32c01a97f2cc1d246a2"
+    },
+    {
+      "bytes": 14079,
+      "mode": 420,
+      "path": "create-zips.mjs",
+      "sha256": "fdb78833f0d82c94b65946dc2dd51c6d147cc775ab396a7767b307af76fd8b21"
+    },
+    {
+      "bytes": 360,
+      "mode": 420,
+      "path": "docs/ARCHITECTURE.md",
+      "sha256": "fb7040b7e861db86758c0bebf931493efe6a07679a3c056b854e511a5cb1cb80"
+    },
+    {
+      "bytes": 2678,
+      "mode": 420,
+      "path": "docs/ARCHIVE-OVERLAYS.md",
+      "sha256": "2b833aeaf895d60e1f001a4e4ba028d0643adbd96f9bdd3b4c285ff5ccff69bd"
+    },
+    {
+      "bytes": 1453,
+      "mode": 420,
+      "path": "docs/BUILD.md",
+      "sha256": "55aee4cd853b14b2c94ae3807d21e0e773efc4fa36f58b2e68ce20bf35603277"
+    },
+    {
+      "bytes": 1941,
+      "mode": 420,
+      "path": "docs/EVIDENCE_EXECUTOR_TEST_GAPS.md",
+      "sha256": "b2718e2e2120c0e60d481ed664b59744c2e64dd7521935982cd4801c6f455761"
+    },
+    {
+      "bytes": 1627,
+      "mode": 420,
+      "path": "docs/EVIDENCE_RUNNER.md",
+      "sha256": "a4f8be20ab43d289f9e812c459403456ed0e6ec7d2c9cf1b749fe3e388bd6eaa"
+    },
+    {
+      "bytes": 3846,
+      "mode": 420,
+      "path": "docs/INSTALL.md",
+      "sha256": "5062239f3088dd19ae1ac7c6dcf36c09121d432aef94f4702e8cc9b5b78e5747"
+    },
+    {
+      "bytes": 4301,
+      "mode": 420,
+      "path": "docs/KNOWLEDGE_INTEGRATION.md",
+      "sha256": "56eff3a3dc6c903280403856f239f60f472ffecccafb621b3162091ee8ffd6f6"
+    },
+    {
+      "bytes": 7086,
+      "mode": 420,
+      "path": "docs/MIGRATION.md",
+      "sha256": "e124d04afccd8a1ffde4c85f52f01396d5d4df7d846946fecc2b880e55c79bd8"
+    },
+    {
+      "bytes": 4968,
+      "mode": 420,
+      "path": "docs/PACKAGING.md",
+      "sha256": "e4254a6f994f31cb0ec79192f5a29c9553c1801c23cf80fe567e5b73ec738075"
+    },
+    {
+      "bytes": 6001,
+      "mode": 420,
+      "path": "docs/RELEASE_PERFORMANCE.md",
+      "sha256": "88d367becc9b75f4a73e28c908b847c5c69ed3a5a2131ebe6503a1f64a3f4f8e"
+    },
+    {
+      "bytes": 1961,
+      "mode": 420,
+      "path": "docs/RELEASE.md",
+      "sha256": "dd0c5e23e611beb70a30015451baff59cf39e06b44c7433225dc6191922965f1"
+    },
+    {
+      "bytes": 2711,
+      "mode": 420,
+      "path": "docs/SECURITY.md",
+      "sha256": "1f90e145037b826db0e87c9491a29ade50ebfd8e6737a985269fb591ab13c39f"
+    },
+    {
+      "bytes": 868,
+      "mode": 420,
+      "path": "docs/SERVICE_SMOKE.md",
+      "sha256": "3597fa2f4f4af2e78a4021c0b8a0c900a0e144b4f135cfc60ee8f27dce35fc54"
+    },
+    {
+      "bytes": 3929,
+      "mode": 420,
+      "path": "docs/WORKFLOWS.md",
+      "sha256": "77c9ce19632bde1b59588bb4b07f80a35d6d6a613eccf3d947b796cdf5993ba9"
+    },
+    {
+      "bytes": 38147,
+      "mode": 420,
+      "path": "IMPLEMENTATION_REPORT.md",
+      "sha256": "e37e53570737e46686060d8f5c483d6ff34ed137d76b85e2f7ca735e54280aa7"
+    },
+    {
+      "bytes": 69022,
+      "mode": 493,
+      "path": "install.sh",
+      "sha256": "b09589c63d231c36a545e46bd8ebad10e1e8d8bb6d4d61d632165adbaf667583"
+    },
+    {
+      "bytes": 4568,
+      "mode": 420,
+      "path": "LICENSE",
+      "sha256": "25c4e2092d74c163673818df53604d89c529f404b55f6c9e8db850191bf436e5"
+    },
+    {
+      "bytes": 9300,
+      "mode": 420,
+      "path": "MASTER_PLAN.md",
+      "sha256": "69ef87d6bfce408357633a16029b65a86c4e1c6b55b4dcd01fd447de4324921e"
+    },
+    {
+      "bytes": 1541,
+      "mode": 420,
+      "path": "milestones/M01-v2-product/README.md",
+      "sha256": "a1a70fa5c2e13c11c26d4e77388d446d2dac54054cea030141282f8a6b442a48"
+    },
+    {
+      "bytes": 7415,
+      "mode": 420,
+      "path": "milestones/M01-v2-product/sprints/S00-contracts/SPRINT.md",
+      "sha256": "ac8d868f1d608a1cf2934150aa1eef5146c76fde6cca5d3b4d9f721e6a50c8c6"
+    },
+    {
+      "bytes": 4832,
+      "mode": 420,
+      "path": "milestones/M01-v2-product/sprints/S01-domain-store/SPRINT.md",
+      "sha256": "d0b3fde619593e6cdc8cb0fa4747ef2af77d8d9d20a043097745bc3bc72e6570"
+    },
+    {
+      "bytes": 7152,
+      "mode": 420,
+      "path": "milestones/M01-v2-product/sprints/S02-runtime-cli/SPRINT.md",
+      "sha256": "20a4dc8b0c21acb244bbf879bd0f72b9fbe337e2666125ae6a3d45a36d2ddfc6"
+    },
+    {
+      "bytes": 4371,
+      "mode": 420,
+      "path": "milestones/M01-v2-product/sprints/S03-source-memory/SPRINT.md",
+      "sha256": "88b6f86c42ef05f36e2f9bc82df27ff691c1f840efb3d4bb47398b82052e7e7d"
+    },
+    {
+      "bytes": 3660,
+      "mode": 420,
+      "path": "milestones/M01-v2-product/sprints/S04-tui/SPRINT.md",
+      "sha256": "0fea1767b0c3c5e37eacbfc4b145421121ef9ee94e18f9a75e135af7a58685ca"
+    },
+    {
+      "bytes": 4093,
+      "mode": 420,
+      "path": "milestones/M01-v2-product/sprints/S05-integration/SPRINT.md",
+      "sha256": "6c789effbb8f83263fb14a2207acfb23552f9d4a6f4d38a939ea5915a1f42dbb"
+    },
+    {
+      "bytes": 5337,
+      "mode": 420,
+      "path": "milestones/M01-v2-product/sprints/S06-release/SPRINT.md",
+      "sha256": "777e37ddbca08eb44ef970797ae03e3f090979ef4a922c303b381fd618b88acc"
+    },
+    {
+      "bytes": 1336,
+      "mode": 420,
+      "path": "packaging/homebrew/boreal.rb.template",
+      "sha256": "da54916baf787db8d50897fdf24c7e0a97c2cce13d232a836c012e4ba62bebf4"
+    },
+    {
+      "bytes": 1159,
+      "mode": 420,
+      "path": "packaging/homebrew/README.md",
+      "sha256": "3b85ff0e56f2742c16dfb8bd95db6d7db5804037fec16bda1be125d7878bb34b"
+    },
+    {
+      "bytes": 14936,
+      "mode": 420,
+      "path": "project/AGENT_GUIDANCE.md",
+      "sha256": "8b8e90a3ba8fb4482b40957ac9ec8aa6e7b8642ec62b2fbf3586c266b3b80456"
+    },
+    {
+      "bytes": 8405,
+      "mode": 420,
+      "path": "project/AGENT_LIFECYCLE.md",
+      "sha256": "5bc921025b3f4e85efbde9b4f58dc459275be9ec7d126d7c6030fd0c628933a9"
+    },
+    {
+      "bytes": 5969,
+      "mode": 420,
+      "path": "project/ARCHITECTURE.md",
+      "sha256": "a28dfc1294d51d493f27268fe1616e06638e4e8fa6862daed8f3abea6ff4679b"
+    },
+    {
+      "bytes": 2788,
+      "mode": 420,
+      "path": "project/AUDIT_BASELINE.md",
+      "sha256": "1cd339445300ce145c863229278e3257403d35def58c26e7395f3196a3d6072a"
+    },
+    {
+      "bytes": 2259,
+      "mode": 420,
+      "path": "project/build-plan/AGENT_HANDOFF_TEMPLATE.md",
+      "sha256": "dfc8df46fd8522ea703e8531537c870d43198a85515900522d32f5352f20a43a"
+    },
+    {
+      "bytes": 3574,
+      "mode": 420,
+      "path": "project/build-plan/AUDIT_TRACEABILITY.md",
+      "sha256": "b3a5130273c9ef68ca3e04c75b20b303d9130301d4a77761d6fdadc810c1d388"
+    },
+    {
+      "bytes": 3914,
+      "mode": 420,
+      "path": "project/build-plan/baseline/P2-03-SERVICE-RECOVERY-HARDENING.md",
+      "sha256": "384433b067aa3fcfa778a63d20800b39324c24c21a5d03c9f815f96b69265208"
+    },
+    {
+      "bytes": 1646,
+      "mode": 420,
+      "path": "project/build-plan/baseline/P5_CONCURRENCY_PROBE.md",
+      "sha256": "0512a72af20bced25d94b62e48171203e150245c989daa8c06e1959d986afeb6"
+    },
+    {
+      "bytes": 3342,
+      "mode": 420,
+      "path": "project/build-plan/baseline/P5-02-FAULT-CLOCK-REORDER.md",
+      "sha256": "c45e9facab7f5be18e17cd83c29af01cfcbd550c17ce3c0a9972adc5099714f9"
+    },
+    {
+      "bytes": 2845,
+      "mode": 420,
+      "path": "project/build-plan/baseline/README.md",
+      "sha256": "2f6bf2d568cd128c96e3bea19eadb7790c967145ff4ee7dbaf737341db9c4766"
+    },
+    {
+      "bytes": 17214,
+      "mode": 420,
+      "path": "project/build-plan/baseline/REPRO_MATRIX.md",
+      "sha256": "4f316e737b354324b9d2d3fe2bbda2d7617df89739f9fce9906b82e1aa2632a1"
+    },
+    {
+      "bytes": 2702,
+      "mode": 420,
+      "path": "project/build-plan/DEFERRED_VERTICALS.md",
+      "sha256": "4f55be27958cc1a8cbe0ba147e10690bbdfd228d84eb47d38816b7c44c8b6713"
+    },
+    {
+      "bytes": 3272,
+      "mode": 420,
+      "path": "project/build-plan/FIRST_WAVE.md",
+      "sha256": "39460a7f366cbf700d48f5b807b7a422006fde4e008663251ecac6001004acd5"
+    },
+    {
+      "bytes": 50450,
+      "mode": 420,
+      "path": "project/build-plan/M02-DETERMINISTIC-PLANNING-AND-PARITY.md",
+      "sha256": "e6412601755181b87077dee16150811523fe4cc02496e3fd3d4fd7209c7e05be"
+    },
+    {
+      "bytes": 5273,
+      "mode": 420,
+      "path": "project/build-plan/P0-05-REVIEW.md",
+      "sha256": "51e97b83743b483c78940ff13d8b612bf1546ef2e49025b3a935d7233ee5df87"
+    },
+    {
+      "bytes": 4115,
+      "mode": 420,
+      "path": "project/build-plan/P0-06-RECONCILIATION.md",
+      "sha256": "f854afc68e9e9269994f3cc374914fb529786a0d2acf31e86b40f3667f7f6fc1"
+    },
+    {
+      "bytes": 4796,
+      "mode": 420,
+      "path": "project/build-plan/P0-07-REVALIDATION.md",
+      "sha256": "63bd85e7b420e249dcfb1254e1d015484c2c34ca3086ca9fa347e333ae01a93a"
+    },
+    {
+      "bytes": 1517,
+      "mode": 420,
+      "path": "project/build-plan/P1-07-REVIEW.md",
+      "sha256": "1fd09de3f4e6f508000755bcbcf2ca8c708037c8254c86a9b9c505fdaedb4f44"
+    },
+    {
+      "bytes": 750,
+      "mode": 420,
+      "path": "project/build-plan/P1-08-RECONCILIATION.md",
+      "sha256": "0548bf26801874ce887401089e1d182fba222d7d419d1d0360c08585558dfbd9"
+    },
+    {
+      "bytes": 1385,
+      "mode": 420,
+      "path": "project/build-plan/P1-09-REVALIDATION.md",
+      "sha256": "924e567f38cf796bc9998de309289df45161f4756fc58b97f73d325ce62a172c"
+    },
+    {
+      "bytes": 2268,
+      "mode": 420,
+      "path": "project/build-plan/P2-07-REVIEW.md",
+      "sha256": "267b218de54abdd9f6140402abd203c1bdb3154b52ef38f367bc4a738b673ea7"
+    },
+    {
+      "bytes": 3091,
+      "mode": 420,
+      "path": "project/build-plan/P2-08-RECONCILIATION.md",
+      "sha256": "6fb8785b928c61e4712eca0a39506d06339483c79d966aec534e0b07e116eaa4"
+    },
+    {
+      "bytes": 4894,
+      "mode": 420,
+      "path": "project/build-plan/P2-09-REVALIDATION.md",
+      "sha256": "6055bfb921a696f70d1c292d9ad1083fe198e3256b2fc86168429114d6e14d99"
+    },
+    {
+      "bytes": 3398,
+      "mode": 420,
+      "path": "project/build-plan/P3-07-REVIEW.md",
+      "sha256": "b1e71fa51233c649d43abf1c1e0911e2d45d58fa00261b5a751cf348cee6278f"
+    },
+    {
+      "bytes": 3082,
+      "mode": 420,
+      "path": "project/build-plan/P3-08-RECONCILIATION.md",
+      "sha256": "5aa2bac4465c36b2db6dd51391330e6ad0fbae0e0ffc58ceacb76e564fe9c55f"
+    },
+    {
+      "bytes": 2607,
+      "mode": 420,
+      "path": "project/build-plan/P3-09-REVALIDATION.md",
+      "sha256": "c515933e9aef0f1c14e87dc22290ed7a5fa71bcc88c36a2e6fd5e81a04dad62c"
+    },
+    {
+      "bytes": 4393,
+      "mode": 420,
+      "path": "project/build-plan/P3-09-REVIEW.md",
+      "sha256": "dd4031057037cf69225b6d3536d90be7c4b87b4c27cffbf3721f35dee74daf83"
+    },
+    {
+      "bytes": 3032,
+      "mode": 420,
+      "path": "project/build-plan/P4-09-DASHBOARD-ADDENDUM-2026-09-16.md",
+      "sha256": "9b817027f00ae1db442c410031b1d5dccbe31c3762906634761f57ca165e5002"
+    },
+    {
+      "bytes": 9533,
+      "mode": 420,
+      "path": "project/build-plan/P4-09-REVIEW.md",
+      "sha256": "21921c21e6c85420e5b87ff4945b6b2ee54fa81a6e55c5a8c0f589c091e22d40"
+    },
+    {
+      "bytes": 9713,
+      "mode": 420,
+      "path": "project/build-plan/README.md",
+      "sha256": "20d13c3116209168dcd74c3335acfeb7c87ee105fce06767ec2ca833467af69b"
+    },
+    {
+      "bytes": 3581,
+      "mode": 420,
+      "path": "project/build-plan/REVIEW_GATES.md",
+      "sha256": "273eb835390114032b79ebbe296767d16ad8a68ce4db40991ff2083e8679a3a3"
+    },
+    {
+      "bytes": 15049,
+      "mode": 420,
+      "path": "project/build-plan/TASK_INDEX.md",
+      "sha256": "634c7e0da9cc8e21ab6648dc7bf888fd434f0e6d5b36b3b1ebff5c65a3437f58"
+    },
+    {
+      "bytes": 6166,
+      "mode": 420,
+      "path": "project/build-plan/verticals/00-contracts-baseline.md",
+      "sha256": "0b04b3aae0925ea089a07554ea26d9f85f7d78259e6476938446eb104c340d80"
+    },
+    {
+      "bytes": 13483,
+      "mode": 420,
+      "path": "project/build-plan/verticals/01-domain-storage.md",
+      "sha256": "ca1e5ac7d390028f6984acb824fbeb2dd87884fffc7da65da365e09c4a229d1f"
+    },
+    {
+      "bytes": 17812,
+      "mode": 420,
+      "path": "project/build-plan/verticals/02-attempt-runtime.md",
+      "sha256": "4bb9c0eede97ab8aa25aa54d6905b4e065d3c055bc82c9a6df33985f4b963e86"
+    },
+    {
+      "bytes": 15338,
+      "mode": 420,
+      "path": "project/build-plan/verticals/03-source-engine.md",
+      "sha256": "38d631422128ae321910b50c5c2872b5ac1b5f919e088e404d7453b692ed6a2e"
+    },
+    {
+      "bytes": 17387,
+      "mode": 420,
+      "path": "project/build-plan/verticals/04-memory-bank.md",
+      "sha256": "0af21bd6539feff420c8500e21cbd0ac1287c5305a2230f846e4107343a7e94e"
+    },
+    {
+      "bytes": 18419,
+      "mode": 420,
+      "path": "project/build-plan/verticals/05-protocol-cli-service.md",
+      "sha256": "59c834e02a13392445a875ccbe825a1c6e57d030608cc2fc15abd189647ff67a"
+    },
+    {
+      "bytes": 18760,
+      "mode": 420,
+      "path": "project/build-plan/verticals/06-tui.md",
+      "sha256": "5287fb158460c1bc2e70dbf43994c20e0cb84f576351de90d6eef6c962470066"
+    },
+    {
+      "bytes": 3405,
+      "mode": 420,
+      "path": "project/build-plan/verticals/07-migration.md",
+      "sha256": "26afea022cf669789f1b186a8d72da827a0b82141346d75f4a883bd53837bffc"
+    },
+    {
+      "bytes": 4562,
+      "mode": 420,
+      "path": "project/build-plan/verticals/08-quality-observability.md",
+      "sha256": "238f7bad616096da24204d11cbd44afa07fa2892e55bc678f31c3e6ff9c8bbb9"
+    },
+    {
+      "bytes": 3446,
+      "mode": 420,
+      "path": "project/build-plan/verticals/09-packaging-cutover.md",
+      "sha256": "767680e323afb4388f0439370f4e9dcdef26c71717637519a65a5df4842f9c3b"
+    },
+    {
+      "bytes": 2755,
+      "mode": 420,
+      "path": "project/build-plan/verticals/10-security-boundaries.md",
+      "sha256": "510b75796c6e85642c3ecec702b038dbe0a495bc914616717f8439c8a956ff5b"
+    },
+    {
+      "bytes": 6343,
+      "mode": 420,
+      "path": "project/build-plan/verticals/11-agent-guidance.md",
+      "sha256": "95ded6409898da15fcfdda0a77086152ce012cdd45f922ceecde27a20762fd32"
+    },
+    {
+      "bytes": 5011,
+      "mode": 420,
+      "path": "project/build-plan/verticals/12-canonical-workflows.md",
+      "sha256": "bba8ca16a328dc42a22b1f0f516c4df51e8d4b876595abd11eb73b8a336d59df"
+    },
+    {
+      "bytes": 20629,
+      "mode": 420,
+      "path": "project/CLI_COMMANDS.md",
+      "sha256": "d65591d2e271d30efd385fada58fd59f39e24ab3cd116cf4ce74c6e44001d8a8"
+    },
+    {
+      "bytes": 10301,
+      "mode": 420,
+      "path": "project/DECISIONS.md",
+      "sha256": "6587014e5acbafa3dc1caefb2a455a9868111a810f361805f6931c2cd38b36cb"
+    },
+    {
+      "bytes": 6937,
+      "mode": 420,
+      "path": "project/DELIVERY_PLAN.md",
+      "sha256": "a78e29befee46fcccf91ed6a5fe4c31e2c763f2208cd2079abc5b90300a60677"
+    },
+    {
+      "bytes": 7654,
+      "mode": 420,
+      "path": "project/INTERFACES.md",
+      "sha256": "db9d5da087cd89e1dcc954810d3eed3f76c52ccd35932355ee8a14baa5a7cbe4"
+    },
+    {
+      "bytes": 895,
+      "mode": 420,
+      "path": "project/legacy-map/README.md",
+      "sha256": "0141ff70ac72075d8341fce73f33743ed63e8d9d379d7b30ce3e06a0a050edd1"
+    },
+    {
+      "bytes": 35147,
+      "mode": 420,
+      "path": "project/legacy-map/RECORD_MAPPING.md",
+      "sha256": "ac9d497f2901e9b67d60dbaae9ca23a64fd2417e6ea89b45ebc6bf852bd795ed"
+    },
+    {
+      "bytes": 5453,
+      "mode": 420,
+      "path": "project/MEMORY_BANK.md",
+      "sha256": "5ffc775e4e9fa845563d9b6759b90a7b53a41d2711f39923c6934fa9d6c83dad"
+    },
+    {
+      "bytes": 4601,
+      "mode": 420,
+      "path": "project/NEXT_AGENT_TASKS.md",
+      "sha256": "3d891c245bc27d145a3eb9afd98a451e447717d4677d59fc31f0d68dcbf4a4ae"
+    },
+    {
+      "bytes": 4836,
+      "mode": 420,
+      "path": "project/PRODUCT.md",
+      "sha256": "38bf2db5da436975374f2dcde033f920e0e89ec68b09645bc13d5d06334fe0b2"
+    },
+    {
+      "bytes": 4433,
+      "mode": 420,
+      "path": "project/README.md",
+      "sha256": "7fc02720ca31bb31d9102cf6cdcb36a529f6588e64ebae41b7b4b31d0a829b73"
+    },
+    {
+      "bytes": 3772,
+      "mode": 420,
+      "path": "project/SOURCE_ENGINE.md",
+      "sha256": "774e52797de345c7398debbd67fd75850cc676626f77cba76cc81d03e151937a"
+    },
+    {
+      "bytes": 2104,
+      "mode": 420,
+      "path": "project/spec/acceptance-profiles.json",
+      "sha256": "7651befe38f6afd7180463cbce9cfab2fab2ebab390c1c7c2e4ce31af804be4e"
+    },
+    {
+      "bytes": 31498,
+      "mode": 420,
+      "path": "project/spec/cli-contract.json",
+      "sha256": "8e85f5cd1a4f1ec10ee1a8045d83585d1b23f6cf5c79e2ae26fad8fa6111acb2"
+    },
+    {
+      "bytes": 1678,
+      "mode": 420,
+      "path": "project/spec/clock-and-attempt.json",
+      "sha256": "65baf4f18512129c72c3239c91c3ffe95d2999fd63cea7227b4f9ad62997e80f"
+    },
+    {
+      "bytes": 6301,
+      "mode": 420,
+      "path": "project/spec/conformance.json",
+      "sha256": "2c3bf4693c5f208abe08b2fe9eafa7f8915c32b23651662d4250129d202e71d1"
+    },
+    {
+      "bytes": 1139,
+      "mode": 420,
+      "path": "project/spec/dependency.json",
+      "sha256": "42d774c5e0e4a49043d9ce890c18bc53411c06d5152435cd90b13cbcf8164026"
+    },
+    {
+      "bytes": 340,
+      "mode": 420,
+      "path": "project/spec/gates/checkpoint.json",
+      "sha256": "104ccd1dd0db27945972444fa663ed243337c39653147ac79d061b636f9722ef"
+    },
+    {
+      "bytes": 328,
+      "mode": 420,
+      "path": "project/spec/gates/summary.json",
+      "sha256": "5e3415e56bce2d29918bcf68dc1c905bea1e3b6ecd67163e12cae9860410e48d"
+    },
+    {
+      "bytes": 348,
+      "mode": 420,
+      "path": "project/spec/gates/verification.json",
+      "sha256": "96f97f020b70428d33ce149dff004c7e91f1075785a8da280c22c3c0f10edb72"
+    },
+    {
+      "bytes": 1824,
+      "mode": 420,
+      "path": "project/spec/guidance/active_attempt.json",
+      "sha256": "06941825fa65e93aceaa941237295c88ffc1f0948a213aacfba1dc7fc8cfc99c"
+    },
+    {
+      "bytes": 1971,
+      "mode": 420,
+      "path": "project/spec/guidance/blocked.json",
+      "sha256": "ceebba67fa3ce11fb99506fde3a6d57590bb605242f92ae6f963c60de49e9e9c"
+    },
+    {
+      "bytes": 5557,
+      "mode": 420,
+      "path": "project/spec/guidance/directive-registry.json",
+      "sha256": "b35eb92b2c43cd389026a15c025f25e196b588bd4d32ff5dcb4c25ef860b0858"
+    },
+    {
+      "bytes": 1901,
+      "mode": 420,
+      "path": "project/spec/guidance/expired_review.json",
+      "sha256": "e32e2a8b4fa1e39d62dd4708df2d908352c51839d89db4d86a34894c4c4acf1a"
+    },
+    {
+      "bytes": 1963,
+      "mode": 420,
+      "path": "project/spec/guidance/finish_ready.json",
+      "sha256": "4bd606aeb1b62c7e074ac49b62aea9ca40c3226fce0f8168b4a2a8a5284de5a5"
+    },
+    {
+      "bytes": 2458,
+      "mode": 420,
+      "path": "project/spec/guidance/gap-registry.json",
+      "sha256": "77d3072a6e52bd4272469ff9806f0fd8aaa6de2c4ebd8f51f4ac547813061d3b"
+    },
+    {
+      "bytes": 1069,
+      "mode": 420,
+      "path": "project/spec/guidance/idle.json",
+      "sha256": "0f4505543754c5907ebe3b530dde9ddba2494375652b3ead3df550d5c38bbe20"
+    },
+    {
+      "bytes": 1718,
+      "mode": 420,
+      "path": "project/spec/guidance/no_goal.json",
+      "sha256": "cfe05e0e3a2a065e26fcf7d6d06ee1fc9a6b1e983d36561a1a2219cd6b0d03df"
+    },
+    {
+      "bytes": 1937,
+      "mode": 420,
+      "path": "project/spec/guidance/open_gate.json",
+      "sha256": "677545d9eb67d0e860a7d9ca58224d22f3fd38ff338b737b835926779b2eea35"
+    },
+    {
+      "bytes": 1882,
+      "mode": 420,
+      "path": "project/spec/guidance/operator_only.json",
+      "sha256": "64dd18d5a50f3b043d1df5bed9c58a8e6ffc2616497b91228aa24c584db1472b"
+    },
+    {
+      "bytes": 1770,
+      "mode": 420,
+      "path": "project/spec/guidance/paused.json",
+      "sha256": "98bcfe3d6398da1a8a02d9f5643cce121c6929744f66a0ccde93c79b37d8724a"
+    },
+    {
+      "bytes": 1817,
+      "mode": 420,
+      "path": "project/spec/guidance/queued.json",
+      "sha256": "adacb6761aee834a14cdbf7aa8fa4aa0408f6b9b5dcf9299978d1f9184ba7d45"
+    },
+    {
+      "bytes": 1659,
+      "mode": 420,
+      "path": "project/spec/guidance/ready.json",
+      "sha256": "e0ab9884fe14eb7a54335f03e2364517eebb636608d5d8de1fe7097af3c6fdea"
+    },
+    {
+      "bytes": 3673,
+      "mode": 420,
+      "path": "project/spec/guidance/safe-argv.json",
+      "sha256": "8527954b00e2d9fd09cdcca4acfcc03aab503ec1f6c0401c1bd826ac824313a0"
+    },
+    {
+      "bytes": 1669,
+      "mode": 420,
+      "path": "project/spec/manifest.json",
+      "sha256": "88a2037fea5d5460b08378bc15da82afd89fc9d3f8e891c4ad69b4cb4fa2dcff"
+    },
+    {
+      "bytes": 1350,
+      "mode": 420,
+      "path": "project/spec/memory-manifest.json",
+      "sha256": "11f4113f7469bf0b79512beef153222e2a1402e3f230550cd3baefaa9d6b6a92"
+    },
+    {
+      "bytes": 7593,
+      "mode": 420,
+      "path": "project/spec/POLICY_DRAFT.md",
+      "sha256": "997e88172d7bc0753f623eb5c88f3492150a43435ca4dfab82437451840691dc"
+    },
+    {
+      "bytes": 1289,
+      "mode": 420,
+      "path": "project/spec/protocol/compatibility.md",
+      "sha256": "398c7d4cd81bd7e0c09d12982377294b4fc821926763764012671c76f372e1e1"
+    },
+    {
+      "bytes": 707,
+      "mode": 420,
+      "path": "project/spec/protocol/envelope-busy.json",
+      "sha256": "ac2101a7fa6efa6ecb2ec01376d7f5057b7de6972e669508ebf45a48f124aca1"
+    },
+    {
+      "bytes": 614,
+      "mode": 420,
+      "path": "project/spec/protocol/envelope-conflict.json",
+      "sha256": "8d408a3cb9e093b5dccea6fd48101d43365e63826a562785157002c201049940"
+    },
+    {
+      "bytes": 592,
+      "mode": 420,
+      "path": "project/spec/protocol/envelope-empty.json",
+      "sha256": "612420cdcc6b9cbbb1c40134cf92e333ca76220a11c9cb2a43f46917481df502"
+    },
+    {
+      "bytes": 968,
+      "mode": 420,
+      "path": "project/spec/protocol/envelope-invalid.json",
+      "sha256": "b9f7ebd5012920a068b1b15cf296c6b89ec6b2d109ccd87bc3a3f62ce851cccb"
+    },
+    {
+      "bytes": 669,
+      "mode": 420,
+      "path": "project/spec/protocol/envelope-service-unavailable.json",
+      "sha256": "39ab0b2dfe74a396b7859593ffd9ad65ce451c6c885276b6d3d9c474d29c61d8"
+    },
+    {
+      "bytes": 833,
+      "mode": 420,
+      "path": "project/spec/protocol/envelope-stale.json",
+      "sha256": "45c136c56d417f91e509f402fc5ff38f9a84e8e0ae8c29d1c6b3c601fd924a2b"
+    },
+    {
+      "bytes": 802,
+      "mode": 420,
+      "path": "project/spec/protocol/envelope-success.json",
+      "sha256": "aeed8aaf816a3e005a4fd21547a438d46d9c0ffab22abf21f1f457524367c226"
+    },
+    {
+      "bytes": 719,
+      "mode": 420,
+      "path": "project/spec/protocol/envelope-unknown-outcome.json",
+      "sha256": "8b4be5e80e9c2027531a031043c906c2480f5ca9e50d068b6006f661c0534bc8"
+    },
+    {
+      "bytes": 12954,
+      "mode": 420,
+      "path": "project/spec/protocol/error-registry.json",
+      "sha256": "f4691c118b37522d4857cc9ebd74bfa937ebcb1123538f7008d896bc97c34aef"
+    },
+    {
+      "bytes": 670,
+      "mode": 420,
+      "path": "project/spec/protocol/gate-diagnostics.json",
+      "sha256": "857ffc61534f54f712915a3c3800a72495dcacd86e9c92ac1bf2b0599894053b"
+    },
+    {
+      "bytes": 2724,
+      "mode": 420,
+      "path": "project/spec/protocol/guide-dto.json",
+      "sha256": "bb230421421c845a91ba18aba72a16022123534867a144b7ef95cf795ab206b8"
+    },
+    {
+      "bytes": 359,
+      "mode": 420,
+      "path": "project/spec/protocol/list-dto.json",
+      "sha256": "a694216159a92b25d6173d10af246b203e5eacb17aa0b6076c34b556e1a6514c"
+    },
+    {
+      "bytes": 1512,
+      "mode": 420,
+      "path": "project/spec/protocol/next-dto.json",
+      "sha256": "9bcf6d8b2b35a2f8c4c756e9cf9ed70421e89d470d84766aace160a9101b005a"
+    },
+    {
+      "bytes": 3055,
+      "mode": 420,
+      "path": "project/spec/protocol/protocol-manifest.json",
+      "sha256": "f486ebbccd6b7c93275f19e7fe4e6d34adbbbf2cab5b8261a938f90e1a90e042"
+    },
+    {
+      "bytes": 1141,
+      "mode": 420,
+      "path": "project/spec/protocol/receipt-failure.json",
+      "sha256": "f026508bdebbb38934a50717be6eeb06a2011dbac7afb59df7efca2e39d42591"
+    },
+    {
+      "bytes": 1080,
+      "mode": 420,
+      "path": "project/spec/protocol/receipt-success.json",
+      "sha256": "a8aa39214e419b7c5532949cf4eb2ea3a6ff184ec79654dcce837a3ba2b5cc98"
+    },
+    {
+      "bytes": 548,
+      "mode": 420,
+      "path": "project/spec/protocol/status-dto.json",
+      "sha256": "64b78cdd18268a2d559694fdd5675633eb0a5a509573d5ae713c07e0736e499d"
+    },
+    {
+      "bytes": 2801,
+      "mode": 420,
+      "path": "project/spec/README.md",
+      "sha256": "6b8b29de7622a95e4c9a5c7673665b8a4390fc06e7a91210d23d0a58d3471370"
+    },
+    {
+      "bytes": 19298,
+      "mode": 420,
+      "path": "project/spec/schema-v2.sql",
+      "sha256": "ae5febe8a491404f7cc4103164b82369b24fb19977239a00860978b30ca545e1"
+    },
+    {
+      "bytes": 21795,
+      "mode": 420,
+      "path": "project/spec/schema-v3.sql",
+      "sha256": "c8c47ab7202a0db3e9ae73196827c04ab116b4ddaa19d4cd8760fcb395051d74"
+    },
+    {
+      "bytes": 818,
+      "mode": 420,
+      "path": "project/spec/source-version/example.json",
+      "sha256": "84c46ce6edf5847d8e7d912404e8806cf301c5cbcb1a84a031c1e84b085363db"
+    },
+    {
+      "bytes": 16291,
+      "mode": 420,
+      "path": "project/spec/transition-table.md",
+      "sha256": "4a22bceb49b8d40d96a872f2ae3aed8b79a81d5636339c609914a05b3a2a9d38"
+    },
+    {
+      "bytes": 16142,
+      "mode": 420,
+      "path": "project/spec/validate_contracts.py",
+      "sha256": "3f1a629726ab6be2e08e45123111a878539e3c47cfc1b44fb5fdc6910de1b9de"
+    },
+    {
+      "bytes": 39981,
+      "mode": 420,
+      "path": "project/spec/WORK_MODEL_SCENARIOS.md",
+      "sha256": "82a4125d34a25563f098626b62482c370cf917f38a0fffd588b455c3856ebebd"
+    },
+    {
+      "bytes": 71457,
+      "mode": 420,
+      "path": "project/spec/WORK_MODEL_V2.md",
+      "sha256": "f9c080e78599cec4304c5e3d8b0b4f7aa5a71900c7dbc9fcb643eadf13d1280b"
+    },
+    {
+      "bytes": 1913,
+      "mode": 420,
+      "path": "project/spec/workflows/audit.json",
+      "sha256": "5240a04c5e13de25d740317e7a8b9d472d469ceac0d2b46e3e80c85882d78fd2"
+    },
+    {
+      "bytes": 2531,
+      "mode": 420,
+      "path": "project/spec/workflows/claim.json",
+      "sha256": "be392282ebb1d260f6946860d893bc47f93e42b78d5367776d716125c34544e6"
+    },
+    {
+      "bytes": 2413,
+      "mode": 420,
+      "path": "project/spec/workflows/context.json",
+      "sha256": "6d6f77b7c53de3114e7d78fc930df35a178f9ef8bacf4600ac054915c5d4ff86"
+    },
+    {
+      "bytes": 2738,
+      "mode": 420,
+      "path": "project/spec/workflows/finish.json",
+      "sha256": "b15539ae60650d1b45c388204ab31a56dadf77218d95571a287e013064158c0c"
+    },
+    {
+      "bytes": 2298,
+      "mode": 420,
+      "path": "project/spec/workflows/handoff.json",
+      "sha256": "1350858fd26b8a269b83e39d05050b0090b2d486917c1678f84e27ff74c7939b"
+    },
+    {
+      "bytes": 1654,
+      "mode": 420,
+      "path": "project/spec/workflows/health.json",
+      "sha256": "88df9155e0999b175eb8631a2942b4ed3399f4ec56d3522199cf6e11c971928b"
+    },
+    {
+      "bytes": 598,
+      "mode": 420,
+      "path": "project/spec/workflows/manifest.json",
+      "sha256": "3ca72896de4f9fda975b9201386b0322b2facc147ab194d0b24416f02033bc63"
+    },
+    {
+      "bytes": 2544,
+      "mode": 420,
+      "path": "project/spec/workflows/memory.json",
+      "sha256": "56c271ffdb66e4e4d2a7b0f39e3451857b8e43de981673e310e2d843b5294383"
+    },
+    {
+      "bytes": 1346,
+      "mode": 420,
+      "path": "project/spec/workflows/package.json",
+      "sha256": "02a64fd260dfcbbd0172001a858173a7cf8031d94a214437234f2bc31c4979b3"
+    },
+    {
+      "bytes": 2810,
+      "mode": 420,
+      "path": "project/spec/workflows/plan.json",
+      "sha256": "39e8249646b210c696ab42868bd713c215e798712d1bec95b115fa8780a11327"
+    },
+    {
+      "bytes": 1646,
+      "mode": 420,
+      "path": "project/spec/workflows/review.json",
+      "sha256": "5687f95aba5464790031a9e99778efa062d89d9291e1f36ba3b3abb699235523"
+    },
+    {
+      "bytes": 1633,
+      "mode": 420,
+      "path": "project/spec/workflows/route.json",
+      "sha256": "07ec5fd898d7a7b7e1a5cfbd282aa7a1b6fb02a8a9767655ca113f9da5a28c2b"
+    },
+    {
+      "bytes": 203,
+      "mode": 420,
+      "path": "project/spec/workflows/test_validator.py",
+      "sha256": "870e95085863c1772fedcaea14e76ace2af3a444c5a9a61ed063dc8012ca97f0"
+    },
+    {
+      "bytes": 23533,
+      "mode": 420,
+      "path": "project/spec/workflows/validator.py",
+      "sha256": "3c421459f28ddd8d706a123c44e5f793670c7f7c973e7e4ab29a1f0057b3c441"
+    },
+    {
+      "bytes": 4919,
+      "mode": 420,
+      "path": "project/STATE_AND_CONCURRENCY.md",
+      "sha256": "e5173bb3dd187d27756ab797a8f5bf9c561e98ff08b5801d956d2924878c1a65"
+    },
+    {
+      "bytes": 21910,
+      "mode": 420,
+      "path": "project/STATUS_MODEL.md",
+      "sha256": "85fd3cb03d8bac892b286df66d70e259ef0b4b6c306d20c0803d8abbb8487c02"
+    },
+    {
+      "bytes": 25066,
+      "mode": 420,
+      "path": "project/validation/m02/COMMAND_INVENTORY.json",
+      "sha256": "57dfa9d8591c5f43906175b71e3077363d7ea3b611ecac311145af0c92946281"
+    },
+    {
+      "bytes": 1572,
+      "mode": 420,
+      "path": "project/validation/m02/ENVIRONMENT.md",
+      "sha256": "4eb39b661c91e9732e42fbb57961f66faf007eea5f93159a3320407587830baa"
+    },
+    {
+      "bytes": 3270,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/baseline-tui.md",
+      "sha256": "55389ecbc3ed644fe0e997ad800f2617c712c6f729bb6711b97442f6c3ed5d2a"
+    },
+    {
+      "bytes": 273,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/contracts-candidate.md",
+      "sha256": "01a507d93eaab1d468bfb8d042ea872fff59ed94c0399a53b148aee802a38d71"
+    },
+    {
+      "bytes": 382,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/contracts-reconciled.md",
+      "sha256": "72e795cbe866575e446779a4ddfd5e68ab73a4734d0f4f836fdd537629740353"
+    },
+    {
+      "bytes": 21376,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/final-source-extraction.md",
+      "sha256": "881036c6c9bd002ca2976be194b9aabce3e5f507fa77b00fc87cc19ebf6579fc"
+    },
+    {
+      "bytes": 238,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/installer-recovery-check.md",
+      "sha256": "930b1634581ec432d4d44646128a6eb33ea4efc0dbf1c12c7cf2e54db33d7f46"
+    },
+    {
+      "bytes": 20115,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/m02-tui-first.md",
+      "sha256": "b676663be7834fd8513fcafd5b276a19ba16e9c399d5ee1ada10193e0fa99530"
+    },
+    {
+      "bytes": 20338,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/m02-tui-reconciled.md",
+      "sha256": "a92794bc411aeb2938a239eceeb150baf9b5aeb98cbcdcef37227828fb985da0"
+    },
+    {
+      "bytes": 19330,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/recovered-tui.md",
+      "sha256": "756d00a9226a3254b8a3bd0084c5baf91443fe66b32b3ddab5e4374a2745bd68"
+    },
+    {
+      "bytes": 6401,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/checks.json",
+      "sha256": "7fe3e905e8c44d0fa8f483762553d8c500db050ae06bf2a28c2b758b0b5076ca"
+    },
+    {
+      "bytes": 360,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/contracts.md",
+      "sha256": "26827d1f3714ba3bac02a8bc74ad8a36baf0ed87e1e81d07ab01875cdd5092dc"
+    },
+    {
+      "bytes": 118,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/diff-whitespace.md",
+      "sha256": "63c28151a89d67b5542d48173c0ec98b33eb136d80f219229dca19a7d9193ef9"
+    },
+    {
+      "bytes": 217,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/installer-identity.md",
+      "sha256": "04c7f6357391205721ce2f633e1d522737fcca43486865c926e17ff4c56dd286"
+    },
+    {
+      "bytes": 2881,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/premium.md",
+      "sha256": "ca123c27063d2ab988b0cc0489bbbf767e3cfc02bbb0621b4089e235b2793a95"
+    },
+    {
+      "bytes": 2379,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/responsive.md",
+      "sha256": "3110712b6fc26deaa9bcd9be8e5f0acae648b80262c8e3e6d90233013b7ff3ae"
+    },
+    {
+      "bytes": 253,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/rust-application.md",
+      "sha256": "ab327a46ad493bcc23aebdbfacf52015a913ca66ecda1792a26f7fb4e6233db2"
+    },
+    {
+      "bytes": 213,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/rust-cli-build.md",
+      "sha256": "1c04d07eab13e4991a8b752a1e8e9b166f0f8f2fb7558f7bd2f0a8399eaf01bb"
+    },
+    {
+      "bytes": 226,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/rust-domain.md",
+      "sha256": "75c1bf55e327c10a3c54aed9831aad0b0084f302e62e141f6ef3f6b8a125b5d0"
+    },
+    {
+      "bytes": 213,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/rust-format.md",
+      "sha256": "ac6641d931b0524bc25b4f3a9991029d6ed59095d450ccd496422b51308784ef"
+    },
+    {
+      "bytes": 234,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/rust-protocol.md",
+      "sha256": "f2ee7b707a821c84b4448ded6bf7bd02c78804478921316df67c9376c3c9b4e8"
+    },
+    {
+      "bytes": 230,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/rust-store.md",
+      "sha256": "1913acf214b081808c0d4a114e6a339de3c7f9c2391c9089c05acae6fba63377"
+    },
+    {
+      "bytes": 205,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/rust-workspace.md",
+      "sha256": "1547eead60389ae1a0b4792c548bafbeb21364af4cebf913ea453ec3a97d6ee6"
+    },
+    {
+      "bytes": 113,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/shell-syntax.md",
+      "sha256": "b32bde86c96d1cbcb85e061ca5e462cac25e6cab2436e0da64946cc60736b551"
+    },
+    {
+      "bytes": 21215,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/source-archive.md",
+      "sha256": "7a3f084a0a048df353627823a3df4d0662b769509bac1c9bacce38f5bc4b92f6"
+    },
+    {
+      "bytes": 20311,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/tui-tests.md",
+      "sha256": "b6fbcafe0d35c0d763149aea105a71d58a0f7a5b10e4ef07434487153a33a02f"
+    },
+    {
+      "bytes": 164,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/tui-typecheck.md",
+      "sha256": "cb5b7e7014ccc990709bcbbb7411a92b5e6fb844c179332316e868556098c519"
+    },
+    {
+      "bytes": 158,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/wizard-body-js-syntax.md",
+      "sha256": "676cb65fb1434d9fa1ae62fe30de43d308116e00a3986c3cdaa9c780990ae5db"
+    },
+    {
+      "bytes": 148,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/wizard-js-syntax.md",
+      "sha256": "414268804051ec13fafcfbd861985f4444e8084158cabe91aba0c0a738694192"
+    },
+    {
+      "bytes": 131,
+      "mode": 420,
+      "path": "project/validation/m02/evidence/run-01/zip-js-syntax.md",
+      "sha256": "ed3f953c4b51fcd8e34499ec8ad65d7a80dabf45b4b94ca00d33fb70329e11da"
+    },
+    {
+      "bytes": 10358,
+      "mode": 420,
+      "path": "project/validation/m02/FIXTURE_MATRIX.json",
+      "sha256": "a2387b163f09cc4cc59b21a562bfd279b44837fe9a4b11c449d8f01a3a550064"
+    },
+    {
+      "bytes": 4633,
+      "mode": 420,
+      "path": "project/validation/m02/HANDOFF.md",
+      "sha256": "ac7683fec339ece1d6c9031a7553fe4d1842ad26beb7e16553cd1e0190e79d89"
+    },
+    {
+      "bytes": 3111,
+      "mode": 420,
+      "path": "project/validation/m02/PARITY.md",
+      "sha256": "92d78897efa8d354082ec6e5b5dd5313c4b4f7871e7688af627e05b4180f6cad"
+    },
+    {
+      "bytes": 55060,
+      "mode": 420,
+      "path": "project/validation/m02/REQUEST.md",
+      "sha256": "e521caa222c4f59ae732eb057419910824f3f00b66fb3bc32818d0b52d616795"
+    },
+    {
+      "bytes": 9659,
+      "mode": 420,
+      "path": "project/validation/m02/REVIEW.md",
+      "sha256": "c69c1ce9da5171eb0327423689ddfed6ab77d995969588241b9d03cf9e792471"
+    },
+    {
+      "bytes": 3185,
+      "mode": 420,
+      "path": "project/validation/m02/SOURCE_FINGERPRINT.json",
+      "sha256": "280e7f41b319ef21d472bde93afb7c62f399810cdc99640d32e951f14d3f5703"
+    },
+    {
+      "bytes": 2591,
+      "mode": 420,
+      "path": "project/validation/m02/SPRINT_STRATEGY.md",
+      "sha256": "f911117960b0a8074ad58f106a8cb60f83271aed53c5ad008ef963df1ca7379a"
+    },
+    {
+      "bytes": 26435,
+      "mode": 420,
+      "path": "project/validation/m02/TASKS.json",
+      "sha256": "4bda8820a045a9714644ea714f05b4b12f17dd53519729d8a435458f00e450ed"
+    },
+    {
+      "bytes": 20818,
+      "mode": 420,
+      "path": "project/WORKFLOW_PARITY.md",
+      "sha256": "26b83506fc2a98cdc58e642f237f5f6270deeb67608cf2995e01e1d23f7a35d2"
+    },
+    {
+      "bytes": 6873,
+      "mode": 420,
+      "path": "README.md",
+      "sha256": "f2a6515eecdc0319660c130f6a819c62d6534b8c9b64f2f57e376bbc03e85a65"
+    },
+    {
+      "bytes": 25145,
+      "mode": 420,
+      "path": "scripts/apply_overlay.py",
+      "sha256": "99888ddee11f7a91bd6103688cf3c5329ee203625b13ccabe381fd52dc741e1d"
+    },
+    {
+      "bytes": 2088,
+      "mode": 493,
+      "path": "scripts/build-installer.mjs",
+      "sha256": "bf7dd503d6de0695c159e27096fa7a15b6261cf5ea9d5aed5fe25448a32e51fd"
+    },
+    {
+      "bytes": 10159,
+      "mode": 493,
+      "path": "scripts/dashboard-smoke.sh",
+      "sha256": "b8b4410744d1851eedde8509427283923caf396ca17e4660d08a05350826afa7"
+    },
+    {
+      "bytes": 3670,
+      "mode": 493,
+      "path": "scripts/guided-closeout-smoke.sh",
+      "sha256": "c5284af9cc84934af9562a080224d6f0ae229f82b2194086cba9b86ec0cea648"
+    },
+    {
+      "bytes": 4384,
+      "mode": 493,
+      "path": "scripts/prepare-test-project.sh",
+      "sha256": "a0daeb0bd0bcb69bb53348bd63f8156c18b4b21347b1c1660bd604e5fa791ebf"
+    },
+    {
+      "bytes": 12902,
+      "mode": 493,
+      "path": "scripts/release/build_release.py",
+      "sha256": "74babe9f0fe8c473b57e9b6453e6c3b5f8d1233cdd1bf306ddafabae9cc24194"
+    },
+    {
+      "bytes": 38,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/Cargo.toml",
+      "sha256": "8e63e00cb12f3c6eb02ce74e5c9f7e5943f122a7e50182c2947b621c5d1c6d62"
+    },
+    {
+      "bytes": 120,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/guidance/directive-registry.json",
+      "sha256": "e7a01adff5ea35a5356ef4daa890f289f5e74618439274de0f0b240c5c82a2a9"
+    },
+    {
+      "bytes": 102,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/guidance/safe-argv.json",
+      "sha256": "9e8b819d6192079a716f1c7804cb788b27169ffc51f89d9177e0b0b47fc630d1"
+    },
+    {
+      "bytes": 295,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/manifest.json",
+      "sha256": "437bcef55d5dca3e82b42881be2400f821311bcb709fd2df3aedf918c9630b06"
+    },
+    {
+      "bytes": 85,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/memory-manifest.json",
+      "sha256": "a1e3617966b6abb7c71b8543fef3632841eac0662ee9e42e8e8f45aee5147f2b"
+    },
+    {
+      "bytes": 75,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/protocol/compatibility.md",
+      "sha256": "5ae3ca09ac2eaafa5bd7749079a7956ebcf948466f044d9f15abb57e141289a1"
+    },
+    {
+      "bytes": 129,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/protocol/protocol-manifest.json",
+      "sha256": "695fd639bdf36e4b2926e18b51422a4dfcad100b998724be5c8ce7505784496c"
+    },
+    {
+      "bytes": 99,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/schema-v2.sql",
+      "sha256": "6ccb6eb02375d354fdef393befa97e911ed945629bdddf13911f70ecc8d1bb43"
+    },
+    {
+      "bytes": 122,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/workflows/manifest.json",
+      "sha256": "ffcebf700ec46fdd7f95d7fa827558170dad73d97351d9bb252d76f52902b6ce"
+    },
+    {
+      "bytes": 222,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/workflows/package.json",
+      "sha256": "c10842a6e47ccec1d0ff75cc393fe9f7f961c1d1999ed27f117922d08cb60441"
+    },
+    {
+      "bytes": 230,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/project/spec/workflows/route.json",
+      "sha256": "86d12bfdd5aa0cd1863b0612a8bc084eeeed2595e7a3f58836f17ede8343acfa"
+    },
+    {
+      "bytes": 319,
+      "mode": 420,
+      "path": "scripts/release/fixtures/snapshot/skills/manifest.json",
+      "sha256": "ce93e0343f4650b9c63bbf8b45dcf01065a733068a66e35a700fabc230edb02b"
+    },
+    {
+      "bytes": 2088,
+      "mode": 493,
+      "path": "scripts/release/package-smoke.sh",
+      "sha256": "fc2b263814a8fb6603e6498f83320cd7ae71330dbb8f66c83e983c2f4d89154a"
+    },
+    {
+      "bytes": 17910,
+      "mode": 493,
+      "path": "scripts/release/release_identity.py",
+      "sha256": "7a7e1b33b3862ad46d5ca846272474f980e1b552a29bc90dd979297debef654c"
+    },
+    {
+      "bytes": 2700,
+      "mode": 493,
+      "path": "scripts/release/render_homebrew_formula.py",
+      "sha256": "ccf9e543205b726ae9bf580fd6466b64d5b14c824f521df81440634bda8b2a5c"
+    },
+    {
+      "bytes": 5178,
+      "mode": 493,
+      "path": "scripts/release/test_release_identity.py",
+      "sha256": "630c47ee5ae627370f3c7e28c489c8f438cc125c6af8de2c5f16f6c95b60e2f8"
+    },
+    {
+      "bytes": 3802,
+      "mode": 493,
+      "path": "scripts/service-smoke.sh",
+      "sha256": "c29d85b9747ee4128fcd081e96582739f56406f06cf4c6586a4fed1206a72873"
+    },
+    {
+      "bytes": 1932,
+      "mode": 493,
+      "path": "scripts/standalone-check.sh",
+      "sha256": "847e4c32c3c0a6a9b9dfcf515f96c06c43f9317338e2bdd21bc90f6f47f39be3"
+    },
+    {
+      "bytes": 1872,
+      "mode": 493,
+      "path": "scripts/tui-service-smoke.sh",
+      "sha256": "c3079035320d11c7cc17e735bdf0374ef345c4d56147f35ca75c138a12566bed"
+    },
+    {
+      "bytes": 9,
+      "mode": 420,
+      "path": "scripts/validation/concurrency/.gitignore",
+      "sha256": "306fd52e74fca6746e12acc750f232de15e71da917756a1270d74c91f5eb7368"
+    },
+    {
+      "bytes": 3314,
+      "mode": 420,
+      "path": "scripts/validation/concurrency/Cargo.lock",
+      "sha256": "8e74c2af139c4fba6558d69954a5f3b728bd100024c8ea98aafb78534609bf7b"
+    },
+    {
+      "bytes": 291,
+      "mode": 420,
+      "path": "scripts/validation/concurrency/Cargo.toml",
+      "sha256": "479de900170236845aacf92ed7d131e184755fe37080587a1575b5a4712feca8"
+    },
+    {
+      "bytes": 16543,
+      "mode": 420,
+      "path": "scripts/validation/concurrency/production_host.py",
+      "sha256": "4bbc2c59ba61938fe0c418b06c5f149f21006598b65812c902eb29b2136cbb8b"
+    },
+    {
+      "bytes": 2833,
+      "mode": 420,
+      "path": "scripts/validation/concurrency/README.md",
+      "sha256": "0a77eea31b9bd92cdc5676c9e1706161f72842d0e1d4de6a3e3956245a200e3f"
+    },
+    {
+      "bytes": 5538,
+      "mode": 420,
+      "path": "scripts/validation/concurrency/run_matrix.py",
+      "sha256": "0978cc327aaff0472bcff1c432b450653f66f04aea1ab0f827cf46e85235bf8d"
+    },
+    {
+      "bytes": 18971,
+      "mode": 420,
+      "path": "scripts/validation/concurrency/src/main.rs",
+      "sha256": "a31b62e70a392bb59b5d4a736e603d182b5b31956907e24f7f9e326a3269c489"
+    },
+    {
+      "bytes": 2792,
+      "mode": 420,
+      "path": "scripts/validation/creation/README.md",
+      "sha256": "ffd826d84cd46bf3dfbb4c917ae3db9c38b4dd263842f22aab9c1122d5cc2cd4"
+    },
+    {
+      "bytes": 43572,
+      "mode": 420,
+      "path": "scripts/validation/creation/run_suite.py",
+      "sha256": "bbbc739bce7829ce0ba71f516c1714dc6e8343bfd1a9516716c1ad026bd27f63"
+    },
+    {
+      "bytes": 9002,
+      "mode": 420,
+      "path": "scripts/validation/creation/scenario_matrix.json",
+      "sha256": "8fd5d12b776d0f20a6d700693ca091b2e38d9f3282547e3d731811cb4cedf265"
+    },
+    {
+      "bytes": 263,
+      "mode": 420,
+      "path": "scripts/validation/fault/notification-fixture/Cargo.lock",
+      "sha256": "8fe208ac17b464028a8fdee5a9d2d5bc1d0d6ab475368afa1f9e5ea4d4e1dc28"
+    },
+    {
+      "bytes": 183,
+      "mode": 420,
+      "path": "scripts/validation/fault/notification-fixture/Cargo.toml",
+      "sha256": "d5b7206e1418c4d4906fa7467e411c6f24800b6d4b40930f00e1e55bf571fe20"
+    },
+    {
+      "bytes": 1106,
+      "mode": 420,
+      "path": "scripts/validation/fault/notification-fixture/src/main.rs",
+      "sha256": "04ab64ebf4f5db3ca51f6124f510d464c3bfd2303873e304fd4586276f7e5088"
+    },
+    {
+      "bytes": 1347,
+      "mode": 420,
+      "path": "scripts/validation/fault/README.md",
+      "sha256": "aae506f8001c4175d5fa9ba91cfa0e60632a138707a3634fdc4b25c0f7f99bf2"
+    },
+    {
+      "bytes": 11788,
+      "mode": 493,
+      "path": "scripts/validation/fault/run_matrix.py",
+      "sha256": "0ec3e814ca389d1ccee45e010fdf0193a85c8941fc9dc5eba40dfb607227d57a"
+    },
+    {
+      "bytes": 10029,
+      "mode": 420,
+      "path": "scripts/validation/fault/socket_boundaries.py",
+      "sha256": "725ae93de0362155dbe56a1f7c122ceac988b7b69b17f0828f824b7a8935114f"
+    },
+    {
+      "bytes": 20600,
+      "mode": 420,
+      "path": "scripts/validation/forensic_audit.py",
+      "sha256": "7a44e8d77521bd2af8e12807112a31652aaba149fa3447905a70863213f8a10a"
+    },
+    {
+      "bytes": 5123,
+      "mode": 420,
+      "path": "scripts/validation/m02/run_candidate.py",
+      "sha256": "9632b3a1484fb5c99d3a186729876c18b5a494b24c7863eb13abdb9963e52af3"
+    },
+    {
+      "bytes": 5164,
+      "mode": 420,
+      "path": "scripts/validation/m02/source_archive_test.py",
+      "sha256": "f898c53fe8b0a7e607a35c0c95c2170bc90b01fb019d67aecc1f46fc02175937"
+    },
+    {
+      "bytes": 415,
+      "mode": 420,
+      "path": "scripts/validation/mutation/README.md",
+      "sha256": "d6b2dfe1ed40ffadbaca7c81d2f6c5636f73f303dd2c68a872eb20b3317ce6e1"
+    },
+    {
+      "bytes": 6357,
+      "mode": 420,
+      "path": "scripts/validation/mutation/run_matrix.py",
+      "sha256": "69723c95ef6aa67030c5d8d1908b36e51b6ea7e633aacc9c34167e1fed040d48"
+    },
+    {
+      "bytes": 2691,
+      "mode": 493,
+      "path": "scripts/validation/premium/render_preview_pngs.py",
+      "sha256": "0d8f9ab6fa9120f084a84b2c274852a9e5971b9fcf378121191eabfaf11bec1c"
+    },
+    {
+      "bytes": 3893,
+      "mode": 493,
+      "path": "scripts/validation/premium/render_previews.mjs",
+      "sha256": "1d21099cc5331e0de9365887747480c3504a9b7f428827d332c27dedccb7bc9d"
+    },
+    {
+      "bytes": 13668,
+      "mode": 493,
+      "path": "scripts/validation/premium/validate_premium.py",
+      "sha256": "195cf80aeeed469ad55268183def5b97f698c82e9e69d6070f2d70d6707e8b47"
+    },
+    {
+      "bytes": 10449,
+      "mode": 493,
+      "path": "scripts/validation/premium/validate_responsive.py",
+      "sha256": "ff8f4ff715c3f55d9c215bb71220a6d1773f6e621020332a1c45b671791c1788"
+    },
+    {
+      "bytes": 11291,
+      "mode": 420,
+      "path": "scripts/validation/process/claim_race.py",
+      "sha256": "89515d93306e287d21282260d5c7bac4447860facd5d3fcb1ba16c2ac96095df"
+    },
+    {
+      "bytes": 36614,
+      "mode": 420,
+      "path": "scripts/validation/process/forensic_service.py",
+      "sha256": "37c9c61a1c1dc8669d6ca1b032c1ea02ebdb4704d15bcbe646b9f9e7b280f4b8"
+    },
+    {
+      "bytes": 800,
+      "mode": 420,
+      "path": "scripts/validation/process/README.md",
+      "sha256": "51bde97093eedd8eebc7711a247c5c230531d888d3a6e8d247bc10e8e868e5e5"
+    },
+    {
+      "bytes": 9461,
+      "mode": 493,
+      "path": "scripts/validation/release_performance.py",
+      "sha256": "05231f3dacc2517e522fb2659d36dc4fa95cd2470530f5afebab60597d3b2223"
+    },
+    {
+      "bytes": 20433,
+      "mode": 420,
+      "path": "scripts/validation/run_full_suite.py",
+      "sha256": "f582882c598662b49d4734c0248bcfc2b331a5c881b0357b7bcd633120b713e3"
+    },
+    {
+      "bytes": 16146,
+      "mode": 493,
+      "path": "scripts/validation/security/probe.sh",
+      "sha256": "f16b697dc6c11f4c901026e718f7f403a6736e931b1caa21ff02ab541f940894"
+    },
+    {
+      "bytes": 19740,
+      "mode": 420,
+      "path": "scripts/validation/security/v12_envelope.py",
+      "sha256": "55ea8cfa383200148069b6bab319f70e5fa84448e8e709bc29555db15f630105"
+    },
+    {
+      "bytes": 7036,
+      "mode": 420,
+      "path": "scripts/validation/skill_package.py",
+      "sha256": "cc1c3402aa709892626a3082699a24702649f00b14d1cf62267b679914fc16db"
+    },
+    {
+      "bytes": 445,
+      "mode": 420,
+      "path": "scripts/validation/soak/README.md",
+      "sha256": "868d85c81bdc119eabe8a80e12dc2a8df92a19c1cdcd4bf813fbc3bba2607f91"
+    },
+    {
+      "bytes": 4603,
+      "mode": 420,
+      "path": "scripts/validation/soak/run.py",
+      "sha256": "8c9a5b8a60a8dfeb4359fb2a001d80cafbc19cb1ed36a80aa6fb9dbb3378c26c"
+    },
+    {
+      "bytes": 5038,
+      "mode": 420,
+      "path": "scripts/validation/spec_conformance.py",
+      "sha256": "fccabff6f6c25de3296bf03af4649d16a3b44a52de91006efe5b40b008fb4025"
+    },
+    {
+      "bytes": 15676,
+      "mode": 420,
+      "path": "scripts/validation/status/production_client.py",
+      "sha256": "492f87c6cfbd82c2f0a5ab4d8997c5a46d58d39b103fdeab4661c5ab9f723511"
+    },
+    {
+      "bytes": 1232,
+      "mode": 420,
+      "path": "scripts/validation/status/README.md",
+      "sha256": "da05d32a3099aa09afd2ec59ea5907c2598f9fb5a9e9bcdc3fda872237642db3"
+    },
+    {
+      "bytes": 2562,
+      "mode": 420,
+      "path": "scripts/validation/status/run_benchmark.py",
+      "sha256": "988b67f474f4436a21d1e1377c9196e938f8eb16d4c11c6ba6f0d731d76c4b8f"
+    },
+    {
+      "bytes": 6796,
+      "mode": 420,
+      "path": "scripts/validation/test_apply_overlay.py",
+      "sha256": "5001361d2a59d56b1f2683c65e1159a3f1908e1e78b74653f8aa6e1733c66c15"
+    },
+    {
+      "bytes": 1872,
+      "mode": 420,
+      "path": "scripts/validation/test_forensic_audit.py",
+      "sha256": "0edc6bb7d7af4a61b0dbeb14ec6771248f615d5eb3898383d6f0251d5eb36104"
+    },
+    {
+      "bytes": 4153,
+      "mode": 420,
+      "path": "scripts/validation/test_run_full_suite.py",
+      "sha256": "69361b270939e74e90d81f94d3c437128539b3a7602a2987e68a8e42a4979361"
+    },
+    {
+      "bytes": 30203,
+      "mode": 420,
+      "path": "scripts/validation/tui/forensic_closeout.mjs",
+      "sha256": "74002ea797149b3aa2cb665337cdd4d683534d4f1b8e37dba8f2a4baf2769c34"
+    },
+    {
+      "bytes": 8916,
+      "mode": 420,
+      "path": "scripts/validation/tui/forensic-closeout.latest.json",
+      "sha256": "6e7636f2d86f10e76895de80bce9f302551d3521abe82b308c196a3f1d018c94"
+    },
+    {
+      "bytes": 449,
+      "mode": 420,
+      "path": "scripts/validation/tui/forensic-closeout.latest.md",
+      "sha256": "5e9140313c758f88bc368c605315aa6cdd6bb5bfc4565a3dbaf41c913301e20a"
+    },
+    {
+      "bytes": 5759,
+      "mode": 420,
+      "path": "scripts/validation/tui/pty_smoke.py",
+      "sha256": "cd71c617a28791bf5959c57a89ba4955e2bc0eb71a943e3e19709d018d4e61b9"
+    },
+    {
+      "bytes": 1596,
+      "mode": 420,
+      "path": "scripts/validation/tui/README.md",
+      "sha256": "eb32c6b6fda13bb35e74297250734497995e4965a814bcaf175f13229d2be719"
+    },
+    {
+      "bytes": 202,
+      "mode": 420,
+      "path": "skills/boreal-audit/agents/openai.yaml",
+      "sha256": "667f01a28ef3b391604fe9376ac51072f4b8583724aeb7285d4dc4532647534a"
+    },
+    {
+      "bytes": 270,
+      "mode": 420,
+      "path": "skills/boreal-audit/boreal.yaml",
+      "sha256": "e01917c39337c0e372f7e2fe04a4f93768ced653a96a8cca864e73ec4f011717"
+    },
+    {
+      "bytes": 1166,
+      "mode": 420,
+      "path": "skills/boreal-audit/SKILL.md",
+      "sha256": "3fe7da68bb9c659072f738b04c910dc2d83467cac039ba0818a247fc5d490c08"
+    },
+    {
+      "bytes": 202,
+      "mode": 420,
+      "path": "skills/boreal-claim/agents/openai.yaml",
+      "sha256": "5a187773722a87ad4a70237b860ae751235e425ecde6fb522762e8615a1e20da"
+    },
+    {
+      "bytes": 270,
+      "mode": 420,
+      "path": "skills/boreal-claim/boreal.yaml",
+      "sha256": "ade89f9f1b01044ace4798fef2aded23c53d803b5c8f2c81e6842a4ab6abf45c"
+    },
+    {
+      "bytes": 1095,
+      "mode": 420,
+      "path": "skills/boreal-claim/SKILL.md",
+      "sha256": "1f84302e9b7f8e8ee64ff701e8a572e7a0422351b0ee5742133257cc2bb25dda"
+    },
+    {
+      "bytes": 201,
+      "mode": 420,
+      "path": "skills/boreal-context/agents/openai.yaml",
+      "sha256": "ca907881857bca4e695a322b34575f8880ef7f8a295ed0a327c65102ebdad8df"
+    },
+    {
+      "bytes": 276,
+      "mode": 420,
+      "path": "skills/boreal-context/boreal.yaml",
+      "sha256": "cabcdf5f0b8a79caea2ab7a61e6958ed87491f501cc9d922620c206f1e110efb"
+    },
+    {
+      "bytes": 1099,
+      "mode": 420,
+      "path": "skills/boreal-context/SKILL.md",
+      "sha256": "39c705e517c1fe4a1f493eaff1410808017295a7bdc4de981e44104dc21b7ade"
+    },
+    {
+      "bytes": 201,
+      "mode": 420,
+      "path": "skills/boreal-finish/agents/openai.yaml",
+      "sha256": "fbada16e66ec9621325119caa95527289365af72bbf259848b1b4932d3cc6075"
+    },
+    {
+      "bytes": 273,
+      "mode": 420,
+      "path": "skills/boreal-finish/boreal.yaml",
+      "sha256": "4555c9ed96f9c64e3bdb810da023676ea680fe972b94f0a7e674cfe5df4b42c8"
+    },
+    {
+      "bytes": 1139,
+      "mode": 420,
+      "path": "skills/boreal-finish/SKILL.md",
+      "sha256": "50238e0fca24ba61a8b85718661796fcf364f542428528ebac04ac8353fb9365"
+    },
+    {
+      "bytes": 204,
+      "mode": 420,
+      "path": "skills/boreal-handoff/agents/openai.yaml",
+      "sha256": "3928826fbec1814eec2bdcc6ef9655c0ba5d510a4f6ee0aa8ecf0a04e2efa92f"
+    },
+    {
+      "bytes": 276,
+      "mode": 420,
+      "path": "skills/boreal-handoff/boreal.yaml",
+      "sha256": "9d5ee95d52b85665f85b0006a7d109fb26dcf80338c202276f347093263322a3"
+    },
+    {
+      "bytes": 1145,
+      "mode": 420,
+      "path": "skills/boreal-handoff/SKILL.md",
+      "sha256": "5a2389cb8dcad293d177ab34f5f7bc607ce5a32bb74518882a1d004aec783741"
+    },
+    {
+      "bytes": 216,
+      "mode": 420,
+      "path": "skills/boreal-health/agents/openai.yaml",
+      "sha256": "240a09677bfd515cfd584741a1f8058640a9f671638b45e5d49b6a88a4b0b86d"
+    },
+    {
+      "bytes": 273,
+      "mode": 420,
+      "path": "skills/boreal-health/boreal.yaml",
+      "sha256": "92ccbe0e54be33e4df5632f2e844928c9514591a4782f66203ba767a15fe17d0"
+    },
+    {
+      "bytes": 1172,
+      "mode": 420,
+      "path": "skills/boreal-health/SKILL.md",
+      "sha256": "f55fb4e496bd9e22ec4451aece7df5de18f3ac909a173e3142c07ad15237719c"
+    },
+    {
+      "bytes": 212,
+      "mode": 420,
+      "path": "skills/boreal-memory/agents/openai.yaml",
+      "sha256": "331be675f15a431c22d729d07f8be3737416eaacdcfddc5f5aee52f437d85ad4"
+    },
+    {
+      "bytes": 273,
+      "mode": 420,
+      "path": "skills/boreal-memory/boreal.yaml",
+      "sha256": "7bcf2a9404c0d481023afdbeb0ac13ee8957709985bdc62198a5f9acb6fdd438"
+    },
+    {
+      "bytes": 1223,
+      "mode": 420,
+      "path": "skills/boreal-memory/SKILL.md",
+      "sha256": "1c096235a9388a17f11cc8caf47e7f81d39c5bb219bebac1c3c5f142583953e9"
+    },
+    {
+      "bytes": 188,
+      "mode": 420,
+      "path": "skills/boreal-plan/agents/openai.yaml",
+      "sha256": "555f8a1c20834358967dd671be0470e1880f61d2050ac3e2bd9fcac588b0c28c"
+    },
+    {
+      "bytes": 267,
+      "mode": 420,
+      "path": "skills/boreal-plan/boreal.yaml",
+      "sha256": "4fc38d928501f81b84f0c7a79f298144fe6547a191a0b2dd6f15a0247d655d85"
+    },
+    {
+      "bytes": 1189,
+      "mode": 420,
+      "path": "skills/boreal-plan/SKILL.md",
+      "sha256": "a69e25bef71bb2a041c81d84bc8f7f142faf5ee3e2cdfd3c11f61ebd45ecfe02"
+    },
+    {
+      "bytes": 225,
+      "mode": 420,
+      "path": "skills/boreal-review/agents/openai.yaml",
+      "sha256": "2b05a6a354ebc2e2dc2cc2dfbb8596630386b7c529ba7a034e8e14d65cb9a860"
+    },
+    {
+      "bytes": 273,
+      "mode": 420,
+      "path": "skills/boreal-review/boreal.yaml",
+      "sha256": "a192aad863f5f37ef42dffd95e71d4aa689a1ad919fca8a2883fea8a892a448f"
+    },
+    {
+      "bytes": 1072,
+      "mode": 420,
+      "path": "skills/boreal-review/SKILL.md",
+      "sha256": "403e3c83fa1c13b663b5424130d8af93ca3290621a702b9ad40a2c9e0687e65b"
+    },
+    {
+      "bytes": 196,
+      "mode": 420,
+      "path": "skills/boreal-route/agents/openai.yaml",
+      "sha256": "90590e6492d3d22e60c6c503d059d89de802f6e389149ae7c12c43849bbf9dc3"
+    },
+    {
+      "bytes": 270,
+      "mode": 420,
+      "path": "skills/boreal-route/boreal.yaml",
+      "sha256": "7e0b48e6aba9e27d4193d50ddfaa2b27d07bb15382b1add15e9d643bd991630e"
+    },
+    {
+      "bytes": 1248,
+      "mode": 420,
+      "path": "skills/boreal-route/SKILL.md",
+      "sha256": "918d28031260569393525fd56f23ba01d6e10ccc5c0a2d03f7d2ee0de15b9d28"
+    },
+    {
+      "bytes": 1312,
+      "mode": 420,
+      "path": "skills/manifest.json",
+      "sha256": "78d0d0ec0fbea8ebd7e77c6e7b18b499d0b375dac2c895321077a307e64d5d49"
+    }
+  ],
+  "captured_at_utc": "2026-09-21T21:40:51Z",
+  "schema": "boreal.production.source-inventory/1",
+  "task_id": "PF-S00-T01",
+  "working_tree": {
+    "branch": "codex/apply-responsive-terminal-overlay",
+    "dirty": true,
+    "head": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "path": "/Users/cybertron/Code/boreal-work",
+    "captured_before_task_outputs": true,
+    "snapshot_file_count": 912,
+    "snapshot_sha256": "7051bb14d9bdb283235b65e45e78bea9b485318998847173e79dbfc409ed7ea8",
+    "status_entries": [
+      " M MASTER_PLAN.md",
+      " M apps/tui/src/client.ts",
+      " M apps/tui/src/ui/dashboard.ts",
+      " M crates/application/src/lib.rs",
+      " M crates/application/src/status.rs",
+      " M crates/application/tests/boundary_remediation.rs",
+      " M crates/application/tests/p2_guided_flow.rs",
+      " M crates/application/tests/work_model_v3.rs",
+      " M crates/cli/src/main.rs",
+      " M crates/cli/src/service.rs",
+      " M crates/cli/src/update.rs",
+      " M crates/cli/tests/command_registry.rs",
+      " M crates/cli/tests/project_setup.rs",
+      " M crates/cli/tests/service_signal_recovery.rs",
+      " M crates/domain/src/lib.rs",
+      " M crates/domain/tests/hierarchy_semantics.rs",
+      " M crates/memory/tests/publisher.rs",
+      " M crates/protocol/src/models.rs",
+      " M crates/store/src/lib.rs",
+      " M crates/store/tests/store_contracts.rs",
+      " M create-zips.mjs",
+      " M project/STATUS_MODEL.md",
+      " M project/WORKFLOW_PARITY.md",
+      " M project/build-plan/README.md",
+      " M project/spec/acceptance-profiles.json",
+      " M project/spec/protocol/compatibility.md",
+      " M project/spec/transition-table.md",
+      "?? IMPLEMENTATION_REPORT.md",
+      "?? REFERENCE_INDEX.md",
+      "?? apps/tui/tests/m02-contract.test.mjs",
+      "?? crates/application/tests/m02_status_authority.rs",
+      "?? crates/domain/src/status_evaluator.rs",
+      "?? crates/domain/tests/m02_status.rs",
+      "?? crates/protocol/tests/m02_status_wire.rs",
+      "?? crates/store/src/status_evaluation.rs",
+      "?? crates/store/tests/m02_claim.rs",
+      "?? docs/ARCHIVE-OVERLAYS.md",
+      "?? memory/",
+      "?? project/build-plan/M02-DETERMINISTIC-PLANNING-AND-PARITY.md",
+      "?? project/build-plan/production-completion/BACKLOG_AND_NON_GOALS.md",
+      "?? project/build-plan/production-completion/DEPENDENCY_GRAPH.md",
+      "?? project/build-plan/production-completion/FINAL_ARCHITECTURE.md",
+      "?? project/build-plan/production-completion/FINAL_FORM_ACCEPTANCE_CHECKLIST.md",
+      "?? project/build-plan/production-completion/FULL_PLAN.md",
+      "?? project/build-plan/production-completion/MASTER_PLAN.md",
+      "?? project/build-plan/production-completion/PLAN_PACKAGE_MANIFEST.json",
+      "?? project/build-plan/production-completion/PLAN_VALIDATION.md",
+      "?? project/build-plan/production-completion/README.md",
+      "?? project/build-plan/production-completion/RELEASE_SCOPE.md",
+      "?? project/build-plan/production-completion/TASK_INDEX.md",
+      "?? project/build-plan/production-completion/WAVE_GUIDE.md",
+      "?? project/build-plan/production-completion/execution/AGENT_START.md",
+      "?? project/build-plan/production-completion/execution/COORDINATOR_RUNBOOK.md",
+      "?? project/build-plan/production-completion/execution/EXTERNAL_INPUTS.md",
+      "?? project/build-plan/production-completion/execution/PARALLEL_DISPATCH.md",
+      "?? project/build-plan/production-completion/execution/SHARED_FILES.md",
+      "?? project/build-plan/production-completion/execution/STATE.json",
+      "?? project/build-plan/production-completion/execution/STATE_MODEL.md",
+      "?? project/build-plan/production-completion/plan.json",
+      "?? project/build-plan/production-completion/reference/BASELINE_SOURCE_INDEX.json",
+      "?? project/build-plan/production-completion/reference/CONTRACT_INDEX.md",
+      "?? project/build-plan/production-completion/reference/DECISION_REGISTER.md",
+      "?? project/build-plan/production-completion/reference/FINDINGS.md",
+      "?? project/build-plan/production-completion/reference/M02_CROSSWALK.md",
+      "?? project/build-plan/production-completion/reference/SOURCE_CATALOG.md",
+      "?? project/build-plan/production-completion/reference/context/R-AGENTS.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-EVIDENCE-STORE.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-EVIDENCE.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-GUIDANCE.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-HIERARCHY.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-KNOWLEDGE.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-LIB.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-OP.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-PLANNING.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-RUNTIME.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-SESSION.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-STATUS.md",
+      "?? project/build-plan/production-completion/reference/context/R-APP-WORKFLOWS.md",
+      "?? project/build-plan/production-completion/reference/context/R-ARCH.md",
+      "?? project/build-plan/production-completion/reference/context/R-ARCHIVE-TEST.md",
+      "?? project/build-plan/production-completion/reference/context/R-ARCHIVER.md",
+      "?? project/build-plan/production-completion/reference/context/R-BACKUP-TEST.md",
+      "?? project/build-plan/production-completion/reference/context/R-BOOTSTRAP.md",
+      "?? project/build-plan/production-completion/reference/context/R-BUILD.md",
+      "?? project/build-plan/production-completion/reference/context/R-CI.md",
+      "?? project/build-plan/production-completion/reference/context/R-CLAIM.md",
+      "?? project/build-plan/production-completion/reference/context/R-CLI-MAIN.md",
+      "?? project/build-plan/production-completion/reference/context/R-CLI-SERVICE.md",
+      "?? project/build-plan/production-completion/reference/context/R-CLI.md",
+      "?? project/build-plan/production-completion/reference/context/R-CLOSE.md",
+      "?? project/build-plan/production-completion/reference/context/R-COMMAND-REGISTRY.md",
+      "?? project/build-plan/production-completion/reference/context/R-CONCURRENCY-HARNESS.md",
+      "?? project/build-plan/production-completion/reference/context/R-CONCURRENCY.md",
+      "?? project/build-plan/production-completion/reference/context/R-DECISIONS.md",
+      "?? project/build-plan/production-completion/reference/context/R-DEFERRALS.md",
+      "?? project/build-plan/production-completion/reference/context/R-DOMAIN-TEST.md",
+      "?? project/build-plan/production-completion/reference/context/R-DOMAIN-V3.md",
+      "?? project/build-plan/production-completion/reference/context/R-DOMAIN.md",
+      "?? project/build-plan/production-completion/reference/context/R-ERRORS.md",
+      "?? project/build-plan/production-completion/reference/context/R-EVALUATOR.md",
+      "?? project/build-plan/production-completion/reference/context/R-EVIDENCE-DOC.md",
+      "?? project/build-plan/production-completion/reference/context/R-EVIDENCE-GAPS.md",
+      "?? project/build-plan/production-completion/reference/context/R-EVIDENCE.md",
+      "?? project/build-plan/production-completion/reference/context/R-EXPIRY-GAP.md",
+      "?? project/build-plan/production-completion/reference/context/R-FAULT-HARNESS.md",
+      "?? project/build-plan/production-completion/reference/context/R-FULL-SUITE.md",
+      "?? project/build-plan/production-completion/reference/context/R-GATES.md",
+      "?? project/build-plan/production-completion/reference/context/R-GUIDANCE-REGISTRY.md",
+      "?? project/build-plan/production-completion/reference/context/R-GUIDANCE-VERTICAL.md",
+      "?? project/build-plan/production-completion/reference/context/R-GUIDANCE.md",
+      "?? project/build-plan/production-completion/reference/context/R-INSTALL.md",
+      "?? project/build-plan/production-completion/reference/context/R-INSTALLER.md",
+      "?? project/build-plan/production-completion/reference/context/R-INTERFACES.md",
+      "?? project/build-plan/production-completion/reference/context/R-LEGACYMAP.md",
+      "?? project/build-plan/production-completion/reference/context/R-LIFECYCLE.md",
+      "?? project/build-plan/production-completion/reference/context/R-M02.md",
+      "?? project/build-plan/production-completion/reference/context/R-MASTER.md",
+      "?? project/build-plan/production-completion/reference/context/R-MEMORY-CODE.md",
+      "?? project/build-plan/production-completion/reference/context/R-MEMORY-DOC.md",
+      "?? project/build-plan/production-completion/reference/context/R-MIGRATION-CODE.md",
+      "?? project/build-plan/production-completion/reference/context/R-MIGRATION-V3.md",
+      "?? project/build-plan/production-completion/reference/context/R-MIGRATIONDOC.md",
+      "?? project/build-plan/production-completion/reference/context/R-MUTATION.md",
+      "?? project/build-plan/production-completion/reference/context/R-PACKAGING.md",
+      "?? project/build-plan/production-completion/reference/context/R-PARITY.md",
+      "?? project/build-plan/production-completion/reference/context/R-PERF.md",
+      "?? project/build-plan/production-completion/reference/context/R-PRODUCT.md",
+      "?? project/build-plan/production-completion/reference/context/R-PROFILE-GAP.md",
+      "?? project/build-plan/production-completion/reference/context/R-PROFILES.md",
+      "?? project/build-plan/production-completion/reference/context/R-PROJECT-PATH.md",
+      "?? project/build-plan/production-completion/reference/context/R-PROTOCOL-CODE.md",
+      "?? project/build-plan/production-completion/reference/context/R-PROTOCOL-TEST.md",
+      "?? project/build-plan/production-completion/reference/context/R-PROTOCOL.md",
+      "?? project/build-plan/production-completion/reference/context/R-RECEIPT-SELECT.md",
+      "?? project/build-plan/production-completion/reference/context/R-RELEASE-BUILDER.md",
+      "?? project/build-plan/production-completion/reference/context/R-RELEASE-CI.md",
+      "?? project/build-plan/production-completion/reference/context/R-RELEASE-DOC.md",
+      "?? project/build-plan/production-completion/reference/context/R-RELEASE-ID.md",
+      "?? project/build-plan/production-completion/reference/context/R-REPORT.md",
+      "?? project/build-plan/production-completion/reference/context/R-REVIEW-GAP.md",
+      "?? project/build-plan/production-completion/reference/context/R-REVIEW.md",
+      "?? project/build-plan/production-completion/reference/context/R-SCENARIOS.md",
+      "?? project/build-plan/production-completion/reference/context/R-SCHEMA-TEST.md",
+      "?? project/build-plan/production-completion/reference/context/R-SCHEMA2.md",
+      "?? project/build-plan/production-completion/reference/context/R-SCHEMA3.md",
+      "?? project/build-plan/production-completion/reference/context/R-SECURITYDOC.md",
+      "?? project/build-plan/production-completion/reference/context/R-SERVICE-ELECTION.md",
+      "?? project/build-plan/production-completion/reference/context/R-SERVICE-HOST.md",
+      "?? project/build-plan/production-completion/reference/context/R-SERVICE-NOTIFY.md",
+      "?? project/build-plan/production-completion/reference/context/R-SERVICE-QUEUE.md",
+      "?? project/build-plan/production-completion/reference/context/R-SERVICE-RECOVERY.md",
+      "?? project/build-plan/production-completion/reference/context/R-SERVICE-TRANSPORT.md",
+      "?? project/build-plan/production-completion/reference/context/R-SKILL-MANIFEST.md",
+      "?? project/build-plan/production-completion/reference/context/R-SNAPSHOT-GAP.md",
+      "?? project/build-plan/production-completion/reference/context/R-SOAK.md",
+      "?? project/build-plan/production-completion/reference/context/R-SOURCE-CODE.md",
+      "?? project/build-plan/production-completion/reference/context/R-SOURCE-DOC.md",
+      "?? project/build-plan/production-completion/reference/context/R-STATUS-BENCH.md",
+      "?? project/build-plan/production-completion/reference/context/R-STATUS.md",
+      "?? project/build-plan/production-completion/reference/context/R-STORE-IDENTITY.md",
+      "?? project/build-plan/production-completion/reference/context/R-STORE-STATUS.md",
+      "?? project/build-plan/production-completion/reference/context/R-STORE-TEST.md",
+      "?? project/build-plan/production-completion/reference/context/R-STORE-V3.md",
+      "?? project/build-plan/production-completion/reference/context/R-STRATEGY.md",
+      "?? project/build-plan/production-completion/reference/context/R-TRANSITIONS.md",
+      "?? project/build-plan/production-completion/reference/context/R-TUI-CLIENT.md",
+      "?? project/build-plan/production-completion/reference/context/R-TUI-CONTROLLER.md",
+      "?? project/build-plan/production-completion/reference/context/R-TUI-DASHBOARD.md",
+      "?? project/build-plan/production-completion/reference/context/R-TUI-INPUT.md",
+      "?? project/build-plan/production-completion/reference/context/R-TUI-LAYOUT.md",
+      "?? project/build-plan/production-completion/reference/context/R-TUI-PACKAGE.md",
+      "?? project/build-plan/production-completion/reference/context/R-TUI-SMOKE.md",
+      "?? project/build-plan/production-completion/reference/context/R-TUI-TEST.md",
+      "?? project/build-plan/production-completion/reference/context/R-TUI-TRANSPORT.md",
+      "?? project/build-plan/production-completion/reference/context/R-UPDATE.md",
+      "?? project/build-plan/production-completion/reference/context/R-VALIDATOR.md",
+      "?? project/build-plan/production-completion/reference/context/R-WORKFLOWS.md",
+      "?? project/build-plan/production-completion/reference/context/R-WORKMODEL.md",
+      "?? project/build-plan/production-completion/reference/originals/BASELINE_IMPLEMENTATION_REPORT.md",
+      "?? project/build-plan/production-completion/reference/originals/BASELINE_M02_PLAN.md",
+      "?? project/build-plan/production-completion/reference/originals/ORIGINAL_M02_REQUEST.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T10.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T11.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S01/tasks/PF-S01-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S02/tasks/PF-S02-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S03/tasks/PF-S03-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S04/tasks/PF-S04-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S05/tasks/PF-S05-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T10.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S06/tasks/PF-S06-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S07/tasks/PF-S07-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T10.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T11.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S08/tasks/PF-S08-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S09/tasks/PF-S09-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S10/tasks/PF-S10-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S11/tasks/PF-S11-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T10.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S12/tasks/PF-S12-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T10.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S13/tasks/PF-S13-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S14/tasks/PF-S14-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T10.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T11.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S15/tasks/PF-S15-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S16/tasks/PF-S16-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S17/tasks/PF-S17-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T09.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T10.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S18/tasks/PF-S18-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S19/tasks/PF-S19-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T07.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T08.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S20/tasks/PF-S20-T92.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/SPRINT.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/tasks/PF-S21-T01.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/tasks/PF-S21-T02.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/tasks/PF-S21-T03.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/tasks/PF-S21-T04.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/tasks/PF-S21-T05.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/tasks/PF-S21-T06.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/tasks/PF-S21-T90.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/tasks/PF-S21-T91.md",
+      "?? project/build-plan/production-completion/sprints/PF-S21/tasks/PF-S21-T92.md",
+      "?? project/build-plan/production-completion/templates/AGENT_DISPATCH.md",
+      "?? project/build-plan/production-completion/templates/CHANGE_REQUEST.md",
+      "?? project/build-plan/production-completion/templates/DECISION_RECORD.md",
+      "?? project/build-plan/production-completion/templates/EVIDENCE_RECORD.md",
+      "?? project/build-plan/production-completion/templates/FINDING.md",
+      "?? project/build-plan/production-completion/templates/SPRINT_GATE.md",
+      "?? project/build-plan/production-completion/templates/TASK_HANDOFF.md",
+      "?? project/build-plan/production-completion/tools/export_full.py",
+      "?? project/build-plan/production-completion/tools/plan.py",
+      "?? project/build-plan/production-completion/tools/render_cards.py",
+      "?? project/build-plan/production-completion/tools/render_common.py",
+      "?? project/build-plan/production-completion/validation/ACCEPTANCE_MATRIX.md",
+      "?? project/build-plan/production-completion/validation/EVIDENCE_POLICY.md",
+      "?? project/build-plan/production-completion/validation/PLAN_HELPER_SELF_TESTS.json",
+      "?? project/build-plan/production-completion/validation/PLAN_STRUCTURE_RESULTS.json",
+      "?? project/build-plan/production-completion/validation/VALIDATION_PLAYBOOK.md",
+      "?? project/validation/m02/COMMAND_INVENTORY.json",
+      "?? project/validation/m02/ENVIRONMENT.md",
+      "?? project/validation/m02/FIXTURE_MATRIX.json",
+      "?? project/validation/m02/HANDOFF.md",
+      "?? project/validation/m02/PARITY.md",
+      "?? project/validation/m02/REQUEST.md",
+      "?? project/validation/m02/REVIEW.md",
+      "?? project/validation/m02/SOURCE_FINGERPRINT.json",
+      "?? project/validation/m02/SPRINT_STRATEGY.md",
+      "?? project/validation/m02/TASKS.json",
+      "?? project/validation/m02/evidence/baseline-tui.md",
+      "?? project/validation/m02/evidence/contracts-candidate.md",
+      "?? project/validation/m02/evidence/contracts-reconciled.md",
+      "?? project/validation/m02/evidence/final-source-extraction.md",
+      "?? project/validation/m02/evidence/installer-recovery-check.md",
+      "?? project/validation/m02/evidence/m02-tui-first.md",
+      "?? project/validation/m02/evidence/m02-tui-reconciled.md",
+      "?? project/validation/m02/evidence/recovered-tui.md",
+      "?? project/validation/m02/evidence/run-01/checks.json",
+      "?? project/validation/m02/evidence/run-01/contracts.md",
+      "?? project/validation/m02/evidence/run-01/diff-whitespace.md",
+      "?? project/validation/m02/evidence/run-01/installer-identity.md",
+      "?? project/validation/m02/evidence/run-01/premium.md",
+      "?? project/validation/m02/evidence/run-01/responsive.md",
+      "?? project/validation/m02/evidence/run-01/rust-application.md",
+      "?? project/validation/m02/evidence/run-01/rust-cli-build.md",
+      "?? project/validation/m02/evidence/run-01/rust-domain.md",
+      "?? project/validation/m02/evidence/run-01/rust-format.md",
+      "?? project/validation/m02/evidence/run-01/rust-protocol.md",
+      "?? project/validation/m02/evidence/run-01/rust-store.md",
+      "?? project/validation/m02/evidence/run-01/rust-workspace.md",
+      "?? project/validation/m02/evidence/run-01/shell-syntax.md",
+      "?? project/validation/m02/evidence/run-01/source-archive.md",
+      "?? project/validation/m02/evidence/run-01/tui-tests.md",
+      "?? project/validation/m02/evidence/run-01/tui-typecheck.md",
+      "?? project/validation/m02/evidence/run-01/wizard-body-js-syntax.md",
+      "?? project/validation/m02/evidence/run-01/wizard-js-syntax.md",
+      "?? project/validation/m02/evidence/run-01/zip-js-syntax.md",
+      "?? scripts/apply_overlay.py",
+      "?? scripts/validation/m02/run_candidate.py",
+      "?? scripts/validation/m02/source_archive_test.py",
+      "?? scripts/validation/test_apply_overlay.py"
+    ],
+    "status_entry_count": 525
+  }
+}

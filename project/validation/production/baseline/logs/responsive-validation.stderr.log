@@ -1,0 +1,206 @@
+test_custom_tty_wizard_reflows_even_when_stdout_is_a_file (__main__.ResponsivePtyTests.test_custom_tty_wizard_reflows_even_when_stdout_is_a_file) ... FAIL
+test_dashboard_is_operable_in_editor_panels_and_narrow_splits (__main__.ResponsivePtyTests.test_dashboard_is_operable_in_editor_panels_and_narrow_splits) ... 
+  test_dashboard_is_operable_in_editor_panels_and_narrow_splits (__main__.ResponsivePtyTests.test_dashboard_is_operable_in_editor_panels_and_narrow_splits) (size=(190, 12)) ... FAIL
+  test_dashboard_is_operable_in_editor_panels_and_narrow_splits (__main__.ResponsivePtyTests.test_dashboard_is_operable_in_editor_panels_and_narrow_splits) (size=(160, 16)) ... FAIL
+  test_dashboard_is_operable_in_editor_panels_and_narrow_splits (__main__.ResponsivePtyTests.test_dashboard_is_operable_in_editor_panels_and_narrow_splits) (size=(24, 6)) ... FAIL
+test_dashboard_resizes_while_inspector_is_focused (__main__.ResponsivePtyTests.test_dashboard_resizes_while_inspector_is_focused) ... ok
+test_embedded_rust_invocation_at_190_by_12_is_interactive (__main__.ResponsivePtyTests.test_embedded_rust_invocation_at_190_by_12_is_interactive) ... FAIL
+test_long_review_pages_without_premature_submission (__main__.ResponsivePtyTests.test_long_review_pages_without_premature_submission) ... FAIL
+test_machine_installer_at_40_by_8_honours_components (__main__.ResponsivePtyTests.test_machine_installer_at_40_by_8_honours_components) ... FAIL
+test_poll_recovers_with_sigwinch_delivery_intentionally_disabled (__main__.ResponsivePtyTests.test_poll_recovers_with_sigwinch_delivery_intentionally_disabled) ... FAIL
+test_project_wizard_completes_at_24_by_6 (__main__.ResponsivePtyTests.test_project_wizard_completes_at_24_by_6) ... FAIL
+test_public_terminal_probes_release_owned_file_descriptors (__main__.ResponsivePtyTests.test_public_terminal_probes_release_owned_file_descriptors) ... skipped 'Linux descriptor accounting'
+test_resize_burst_and_cancel_restore_input_mode (__main__.ResponsivePtyTests.test_resize_burst_and_cancel_restore_input_mode) ... FAIL
+test_resize_does_not_discard_prefix_caret_or_help (__main__.ResponsivePtyTests.test_resize_does_not_discard_prefix_caret_or_help) ... FAIL
+test_startup_zero_dimensions_recover_when_pty_becomes_available (__main__.ResponsivePtyTests.test_startup_zero_dimensions_recover_when_pty_becomes_available) ... FAIL
+test_transient_zero_resize_does_not_erase_last_valid_layout (__main__.ResponsivePtyTests.test_transient_zero_resize_does_not_erase_last_valid_layout) ... FAIL
+
+======================================================================
+FAIL: test_custom_tty_wizard_reflows_even_when_stdout_is_a_file (__main__.ResponsivePtyTests.test_custom_tty_wizard_reflows_even_when_stdout_is_a_file)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 80, in test_custom_tty_wizard_reflows_even_when_stdout_is_a_file
+    s, result = self.project(40,8)
+                ~~~~~~~~~~~~^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 50, in project
+    return PtySession([*command, 'project', json.dumps(args or self.args())], result, w, h), result
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_dashboard_is_operable_in_editor_panels_and_narrow_splits (__main__.ResponsivePtyTests.test_dashboard_is_operable_in_editor_panels_and_narrow_splits) (size=(190, 12))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 66, in test_dashboard_is_operable_in_editor_panels_and_narrow_splits
+    s.send(b'\r/terminal\r'); s.send(b'\r'); self.assertIn('INSPECTOR', visible(s))
+                                             ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'INSPECTOR' not found in ' SEARCH WORK                                                                                                                                                                                  \n termi▏                                                                                                                                                                                       \n                                                                                                                                                                                              \n Search titles, IDs, parents and owners on this loaded page.                                                                                                                                  \n                                                                                                                                                                                              \n                                                                                                                                                                                              \n                                                                                                                                                                                              \n                                                                                                                                                                                              \n                                                                                                                                                                                              \n                                                                                                                                                                                              \n                                                                                                                                                                                              \n Enter apply · ←→ edit · Ctrl-U clear · Esc cancel                                                                                                                                            '
+
+======================================================================
+FAIL: test_dashboard_is_operable_in_editor_panels_and_narrow_splits (__main__.ResponsivePtyTests.test_dashboard_is_operable_in_editor_panels_and_narrow_splits) (size=(160, 16))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 65, in test_dashboard_is_operable_in_editor_panels_and_narrow_splits
+    s.send(b'v\x1b[F'); self.assertIn('Tasks', visible(s))
+                        ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'Tasks' not found in ' BOREAL / WORK  / Boreal Work                                                                                                                              LIVE \n All work  ·  READY 4  ACTIVE 4  BLOCKED 2                                                                                                         16/16 loaded \nWORK QUEUE (1/16)                                                  STATE          ID            PRI   INSPECTOR / Overview                                  1/22\n> Refine the work queue and inspector                              Ready          tui-104       220   Refine the work queue and inspector                       \n  Harden interactive terminal lifecycle                            In progress    tui-101       250   tui-104                                                   \n  Ship the multi-screen installer                                  In progress    install-08    240   Ready · task                                              \n  Resolve operation readback contract                              Blocked        svc-042       235   Next: Claim                                               \n  Verify receipt and closeout behavior                             Verification   proof-19      210   Priority  220                                             \n  Validate command routing parity                                  Ready          cli-017       200   Parent    sprint-06                                       \n  Boreal Work 0.2 release readiness                                In progress    release-02    255   DESCRIPTION                                               \n  Operator experience / hardening                                  In progress    sprint-06     230   Build a focused operator workspace: scan work at a glance,\n  Review expired operator leases                                   Review needed  ops-031       190   inspect ownership and proof, and act without losing       \n  Document installation and recovery                               Ready          docs-026      150   context. Preserve the authoritative service contracts.    \n  Close the pagination contract gap                                Blocked        svc-039       180   DEPENDENCIES                                              \nReady. Select work to inspect its next available action.                                                                                           ! full status\n↑↓ move  Tab pane  Enter inspect  v views  / search  p commands  d density  z focus  ? help  q quit                                                             '
+
+======================================================================
+FAIL: test_dashboard_is_operable_in_editor_panels_and_narrow_splits (__main__.ResponsivePtyTests.test_dashboard_is_operable_in_editor_panels_and_narrow_splits) (size=(24, 6))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 65, in test_dashboard_is_operable_in_editor_panels_and_narrow_splits
+    s.send(b'v\x1b[F'); self.assertIn('Tasks', visible(s))
+                        ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'Tasks' not found in ' BW / All work     LIVE \nWORK QUEUE          1/16\n> Refine the wo… Ready  \n  Harden intera… Active \n  Ship the mult… Active \n↑↓ Enter v / ? q        '
+
+======================================================================
+FAIL: test_embedded_rust_invocation_at_190_by_12_is_interactive (__main__.ResponsivePtyTests.test_embedded_rust_invocation_at_190_by_12_is_interactive)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 94, in test_embedded_rust_invocation_at_190_by_12_is_interactive
+    s, result = self.project(190,12,embedded=True)
+                ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 50, in project
+    return PtySession([*command, 'project', json.dumps(args or self.args())], result, w, h), result
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_long_review_pages_without_premature_submission (__main__.ResponsivePtyTests.test_long_review_pages_without_premature_submission)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 122, in test_long_review_pages_without_premature_submission
+    s, result = self.project(32,8,args=args)
+                ~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 50, in project
+    return PtySession([*command, 'project', json.dumps(args or self.args())], result, w, h), result
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_machine_installer_at_40_by_8_honours_components (__main__.ResponsivePtyTests.test_machine_installer_at_40_by_8_honours_components)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 112, in test_machine_installer_at_40_by_8_honours_components
+    s = PtySession(['sh',str(INSTALLER),'--interactive','--archive',str(archive),'--prefix',str(prefix)], columns=40, rows=8)
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_poll_recovers_with_sigwinch_delivery_intentionally_disabled (__main__.ResponsivePtyTests.test_poll_recovers_with_sigwinch_delivery_intentionally_disabled)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 161, in test_poll_recovers_with_sigwinch_delivery_intentionally_disabled
+    s = PtySession([NODE,'-e',wrapper,'project',json.dumps(self.args())], result,40,8)
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_project_wizard_completes_at_24_by_6 (__main__.ResponsivePtyTests.test_project_wizard_completes_at_24_by_6)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 102, in test_project_wizard_completes_at_24_by_6
+    s, result = self.project(24,6)
+                ~~~~~~~~~~~~^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 50, in project
+    return PtySession([*command, 'project', json.dumps(args or self.args())], result, w, h), result
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_resize_burst_and_cancel_restore_input_mode (__main__.ResponsivePtyTests.test_resize_burst_and_cancel_restore_input_mode)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 169, in test_resize_burst_and_cancel_restore_input_mode
+    s,result=self.project(190,12)
+             ~~~~~~~~~~~~^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 50, in project
+    return PtySession([*command, 'project', json.dumps(args or self.args())], result, w, h), result
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_resize_does_not_discard_prefix_caret_or_help (__main__.ResponsivePtyTests.test_resize_does_not_discard_prefix_caret_or_help)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 148, in test_resize_does_not_discard_prefix_caret_or_help
+    s = PtySession([NODE,str(WIZARD),'machine',str(self.root/'prefix'),'','0','','main','1','1','0','0'],result,190,12)
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_startup_zero_dimensions_recover_when_pty_becomes_available (__main__.ResponsivePtyTests.test_startup_zero_dimensions_recover_when_pty_becomes_available)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 131, in test_startup_zero_dimensions_recover_when_pty_becomes_available
+    s, result = self.project(0,0)
+                ~~~~~~~~~~~~^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 50, in project
+    return PtySession([*command, 'project', json.dumps(args or self.args())], result, w, h), result
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+======================================================================
+FAIL: test_transient_zero_resize_does_not_erase_last_valid_layout (__main__.ResponsivePtyTests.test_transient_zero_resize_does_not_erase_last_valid_layout)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 139, in test_transient_zero_resize_does_not_erase_last_valid_layout
+    s, result = self.project(190,16)
+                ~~~~~~~~~~~~^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_responsive.py", line 50, in project
+    return PtySession([*command, 'project', json.dumps(args or self.args())], result, w, h), result
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 84, in __init__
+    self.read_until(b'\x1b[1;1H',timeout=5)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/Code/boreal-work/scripts/validation/premium/validate_premium.py", line 104, in read_until
+    raise AssertionError(f'PTY never rendered {value!r}: {bytes(self.output[-1000:])!r}')
+AssertionError: PTY never rendered b'\x1b[1;1H': b"Boreal setup: EPERM: operation not permitted, open '/dev/tty'\r\n"
+
+----------------------------------------------------------------------
+Ran 13 tests in 55.871s
+
+FAILED (failures=13, skipped=1)

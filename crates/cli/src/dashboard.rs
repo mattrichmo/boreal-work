@@ -5,6 +5,7 @@
 //! foreground command so operators do not have to manage either process.
 
 use super::*;
+use boreal_store::identity::IdentityStore;
 use serde::Deserialize;
 use std::{
     io::IsTerminal,
@@ -66,7 +67,7 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
         )
     })?;
     let context = resolve_dashboard_context(parsed, &current_dir)?;
-    let database = existing_database_path(&context.database)?;
+    let database = existing_database_path(&context, parsed)?;
     let store = SqliteStore::open(&database, SCHEMA).map_err(map_store_error)?;
     let project_ids = store.list_project_ids().map_err(map_store_error)?;
     let project = resolve_project_id(
@@ -75,6 +76,7 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
         &project_ids,
         &database,
     )?;
+    validate_dashboard_identity(&store, &context, &project, &current_dir, &database)?;
 
     if parsed.options.json {
         let mut resolved = parsed.clone();
@@ -110,7 +112,11 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
     }
 }
 
-fn existing_database_path(path: &Path) -> Result<PathBuf, CliError> {
+fn existing_database_path(
+    context: &DashboardContext,
+    parsed: &ParsedCommand,
+) -> Result<PathBuf, CliError> {
+    let path = &context.database;
     if !path.is_file() {
         return Err(CliError::with(
             ErrorCode::NotFound,
@@ -121,13 +127,26 @@ fn existing_database_path(path: &Path) -> Result<PathBuf, CliError> {
             ),
         ));
     }
-    fs::canonicalize(path).map_err(|error| {
+    let database = fs::canonicalize(path).map_err(|error| {
         CliError::with(
             ErrorCode::ServiceUnavailable,
             ApplicationOutcome::Failed,
             format!("cannot resolve database {}: {error}", path.display()),
         )
-    })
+    })?;
+
+    if parsed.options.db == DEFAULT_DATABASE {
+        if let Some(project_root) = context.project_root.as_deref() {
+            if !database.starts_with(project_root) {
+                return Err(CliError::invalid(format!(
+                    "project metadata database resolves outside this project to {}; run `bwrk init` to repair this project context",
+                    database.display()
+                )));
+            }
+        }
+    }
+
+    Ok(database)
 }
 
 fn resolve_dashboard_context(
@@ -218,6 +237,11 @@ fn resolve_dashboard_context(
                         metadata_database.display()
                     )));
                 }
+            }
+            if parsed.options.db != DEFAULT_DATABASE && parsed.options.project.is_none() {
+                return Err(CliError::invalid(
+                    "an explicit --db requires an explicit --project; do not use ambient project metadata to select a project",
+                ));
             }
             (Some(metadata), Some(project_root))
         }
@@ -322,6 +346,69 @@ fn require_known_project(
             ),
         ))
     }
+}
+
+fn validate_dashboard_identity(
+    store: &SqliteStore,
+    context: &DashboardContext,
+    project: &str,
+    current_dir: &Path,
+    database: &Path,
+) -> Result<(), CliError> {
+    let identity = IdentityStore::new(store);
+    let identity_context = identity.context(project).map_err(|error| {
+        let code = match &error {
+            boreal_store::identity::IdentityError::ProjectNotFound { .. } => ErrorCode::NotFound,
+            boreal_store::identity::IdentityError::Store(_) => ErrorCode::ServiceUnavailable,
+            boreal_store::identity::IdentityError::Invalid { .. } => ErrorCode::InvalidArgument,
+            _ => ErrorCode::OperationConflict,
+        };
+        CliError::with(
+            code,
+            ApplicationOutcome::Rejected,
+            format!(
+                "project {project:?} in database {} has no valid stored database/workspace identity; run `bwrk init` in this project to repair it: {error}",
+                database.display()
+            ),
+        )
+    })?;
+    let binding = identity.workspace_binding(project).map_err(|error| {
+        CliError::with(
+            ErrorCode::OperationConflict,
+            ApplicationOutcome::Rejected,
+            format!(
+                "project {project:?} in database {} has an unreadable stored workspace identity; run `bwrk init` in this project to repair it: {error}",
+                database.display()
+            ),
+        )
+    })?;
+
+    let expected_root = if let Some(project_root) = context.project_root.as_deref() {
+        project_root.to_owned()
+    } else {
+        fs::canonicalize(current_dir).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("cannot resolve the dashboard workspace: {error}"),
+            )
+        })?
+    };
+    let expected_root = expected_root.to_string_lossy();
+    if binding.canonical_root() != expected_root
+        || !Path::new(binding.canonical_worktree()).starts_with(Path::new(&*expected_root))
+    {
+        return Err(CliError::with(
+            ErrorCode::OperationConflict,
+            ApplicationOutcome::Rejected,
+            format!(
+                "project {project:?} is bound to a different workspace than this dashboard; run `bwrk init` in this project to repair it (stored identity {}, database {})",
+                binding.canonical_root(),
+                identity_context.database_instance_id,
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

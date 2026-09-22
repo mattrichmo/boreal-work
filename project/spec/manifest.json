@@ -1,12 +1,19 @@
 {
   "fixture_version": "p0-03.v2",
-  "contract_revision": "2026-09-15.p0-03.1",
+  "contract_revision": "2026-09-22.pf-s01.1",
   "api_version": "2",
   "schema_version": "boreal.sqlite/2",
   "protocol_version": "boreal.protocol.envelope.v1",
   "guidance_version": "boreal.agent_guidance.v1",
   "workflow_version": "boreal.workflow_asset.v1",
   "memory_manifest_version": "boreal.memory_manifest.v1",
+  "production_contract": "boreal.production-contract/1",
+  "status_contract_version": "boreal.work-status/3",
+  "work_model_version": "boreal.work-model/3",
+  "cycle_model_version": "boreal.cycle/1",
+  "acceptance_contract_version": "boreal.acceptance/2",
+  "service_contract_version": "boreal.service/2",
+  "support_release_contract_version": "boreal.support-release/1",
   "decision_refs": ["D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D22", "D23", "D24", "D25", "D27", "D28", "D29"],
   "authoritative_docs": [
     "../STATUS_MODEL.md",
@@ -14,7 +21,22 @@
     "../CLI_COMMANDS.md",
     "../AGENT_GUIDANCE.md",
     "../AGENT_LIFECYCLE.md",
-    "../STATE_AND_CONCURRENCY.md"
+    "../STATE_AND_CONCURRENCY.md",
+    "production/scope-and-boundaries.md",
+    "production/identity-revisions-authority.md",
+    "production/planning-and-cycle-contract.md",
+    "production/execution-submission-contract.md",
+    "production/status-and-actions.md",
+    "production/acceptance-and-proof.md",
+    "production/dependencies-overrides-reopen.md",
+    "production/service-contract.md",
+    "production/compatibility-matrix.md",
+    "production/release-support-and-budgets.md",
+    "production/source-memory-parity.md",
+    "production/profile-registry.json",
+    "production/reason-registry.json",
+    "production/conformance-matrix.json",
+    "production/contract-manifest.json"
   ],
   "required_paths": [
     "transition-table.md",
@@ -25,7 +47,11 @@
     "guidance/gap-registry.json",
     "workflows",
     "memory-manifest.json",
-    "source-version"
+    "source-version",
+    "production/contract-manifest.json",
+    "production/conformance-matrix.json",
+    "production/profile-registry.json",
+    "production/reason-registry.json"
   ],
   "fixture_sets": {
     "transition": ["transition-table.md", "clock-and-attempt.json", "dependency.json", "acceptance-profiles.json", "conformance.json"],
@@ -33,7 +59,8 @@
     "guidance": ["guidance/"],
     "cli": ["cli-contract.json"],
     "workflow": ["workflows/"],
-    "provenance": ["source-version/example.json", "memory-manifest.json"]
+    "provenance": ["source-version/example.json", "memory-manifest.json"],
+    "production": ["production/contract-manifest.json", "production/conformance-matrix.json", "production/profile-registry.json", "production/reason-registry.json"]
   },
   "validation": {
     "command": "python3 project/spec/validate_contracts.py",

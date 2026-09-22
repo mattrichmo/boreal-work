@@ -2,11 +2,12 @@ use boreal_domain::{
     AttemptPhase, GateState, PersistedLifecycle, ProjectId, WorkId, WorkItem, WorkKind,
 };
 use boreal_store::{
-    AttemptMutationKind, AttemptMutationRequest, AuditEventRecord, CloseIntentRequest,
-    ConstraintKind, EvidenceExecutionAdmissionRequest, GateStateUpdateRequest, OperationOutcome,
-    OperationRecord, ReceiptAcceptanceExpectation, ReceiptAttestation, ReceiptInsertRequest,
-    ReceiptOutcome, ReceiptSubmissionKind, ReviewDecision, ReviewInsertRequest, SnapshotRevision,
-    SqliteStore, StoreError, SCHEMA_VERSION,
+    recovery::RecoveryResolutionInput, AttemptMutationKind, AttemptMutationRequest,
+    AuditEventRecord, CloseIntentRequest, ConstraintKind, EvidenceExecutionAdmissionRequest,
+    GateStateUpdateRequest, OperationOutcome, OperationRecord, ReceiptAcceptanceExpectation,
+    ReceiptAttestation, ReceiptInsertRequest, ReceiptOutcome, ReceiptSubmissionKind,
+    ReviewDecision, ReviewInsertRequest, SnapshotRevision, SqliteStore, StoreError,
+    WORK_MODEL_SCHEMA_VERSION,
 };
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -237,7 +238,7 @@ fn fresh_schema_enables_foreign_keys_and_wal_for_file_databases() {
         std::env::temp_dir().join(format!("boreal-store-{}-fresh.sqlite", std::process::id()));
     remove_sqlite_files(&path);
     let store = SqliteStore::open(&path, SCHEMA).expect("file schema opens");
-    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(store.schema_version().unwrap(), WORK_MODEL_SCHEMA_VERSION);
     assert!(store.foreign_keys_enabled().unwrap());
     assert_eq!(store.journal_mode().unwrap(), "wal");
     drop(store);
@@ -253,10 +254,10 @@ fn schema_version_is_idempotent_on_reopen() {
     remove_sqlite_files(&path);
     {
         let store = SqliteStore::open(&path, SCHEMA).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(store.schema_version().unwrap(), WORK_MODEL_SCHEMA_VERSION);
     }
     let store = SqliteStore::open(&path, "SELECT 1;").unwrap();
-    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(store.schema_version().unwrap(), WORK_MODEL_SCHEMA_VERSION);
     drop(store);
     remove_sqlite_files(&path);
 }
@@ -476,7 +477,7 @@ fn revision_operation_and_audit_primitives_round_trip() {
 #[test]
 fn atomic_claim_has_one_winner_and_replays_by_operation_id() {
     let store = store();
-    store.create_project("p1", "2026-01-01T00:00:00Z").unwrap();
+    store.create_project("p1", "unix-ms:0").unwrap();
     store
         .ensure_actor("agent-1", "agent", "cred-agent", "Agent", "t0")
         .unwrap();
@@ -496,7 +497,7 @@ fn atomic_claim_has_one_winner_and_replays_by_operation_id() {
         hard_holds: Vec::new(),
         acceptance_profile: boreal_domain::AcceptanceProfile::focused(),
     };
-    store.create_work(&work, "2026-01-01T00:00:00Z").unwrap();
+    store.create_work(&work, "unix-ms:0").unwrap();
 
     let winner = store
         .claim_work(
@@ -509,9 +510,9 @@ fn atomic_claim_has_one_winner_and_replays_by_operation_id() {
             "op1",
             "sha256:req",
             Some(0),
-            "2026-01-01T00:00:00Z",
-            "2026-01-01T00:30:00Z",
-            "2026-01-01T02:00:00Z",
+            "unix-ms:0",
+            "unix-ms:1800000",
+            "unix-ms:7200000",
         )
         .unwrap();
     assert_eq!(winner.fence, 1);
@@ -529,9 +530,9 @@ fn atomic_claim_has_one_winner_and_replays_by_operation_id() {
             "op1",
             "sha256:req",
             Some(0),
-            "2026-01-01T00:00:00Z",
-            "2026-01-01T00:30:00Z",
-            "2026-01-01T02:00:00Z",
+            "unix-ms:0",
+            "unix-ms:1800000",
+            "unix-ms:7200000",
         )
         .unwrap();
     assert!(replay.replayed);
@@ -547,9 +548,9 @@ fn atomic_claim_has_one_winner_and_replays_by_operation_id() {
         "op2",
         "sha256:req2",
         Some(1),
-        "2026-01-01T00:00:01Z",
-        "2026-01-01T00:30:01Z",
-        "2026-01-01T02:00:01Z",
+        "unix-ms:1000",
+        "unix-ms:1801000",
+        "unix-ms:7201000",
     );
     assert!(matches!(loser, Err(StoreError::Conflict(_))));
     assert_eq!(store.project_revision("p1").unwrap().0, 1);
@@ -740,6 +741,12 @@ fn fail_is_a_terminal_fenced_mutation_and_keeps_the_attempt_in_history() {
         store.current_attempt("p1", "a1"),
         Err(StoreError::NotFound { .. })
     ));
+    let failures = store
+        .list_unresolved_recovery_obligations("p1", None, 10)
+        .expect("failed attempt recovery is durable");
+    assert!(failures.iter().any(|obligation| {
+        obligation.attempt_id.as_deref() == Some("a1") && obligation.reason == "failed"
+    }));
 }
 
 #[test]
@@ -877,8 +884,43 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
         .unwrap()
         .is_none());
 
-    // A replacement claim is possible only after the expired attempt becomes
-    // historical, and it receives the next monotonic fence.
+    // A replacement claim is not admitted while expiry recovery is unresolved.
+    let blocked_replacement = store.claim_work(
+        "p1",
+        "w1",
+        "agent-1",
+        "luna",
+        Some("s1"),
+        "a2-blocked",
+        "op-claim-blocked",
+        "sha256:claim-blocked",
+        Some(1),
+        "unix-ms:3",
+        "unix-ms:4",
+        "unix-ms:5",
+    );
+    assert!(matches!(
+        blocked_replacement,
+        Err(StoreError::Conflict(message)) if message.starts_with("recovery_required:")
+    ));
+    assert!(store
+        .claimable_work_candidates("p1", "unix-ms:3", 10, None)
+        .expect("candidate read")
+        .is_empty());
+    store
+        .resolve_recovery_obligation(&RecoveryResolutionInput {
+            project_id: "p1".into(),
+            obligation_id: "op-expire:recovery:expired".into(),
+            resolution_id: "resolution-expire".into(),
+            actor_id: "agent-1".into(),
+            outcome: "runtime_stopped".into(),
+            reason: "the expired runtime was observed stopped".into(),
+            resource_state: "released".into(),
+            at: "unix-ms:2".into(),
+        })
+        .expect("expiry recovery is explicitly resolved");
+
+    // A replacement claim then receives the next monotonic fence.
     let replacement = store
         .claim_work(
             "p1",
@@ -890,9 +932,9 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
             "op-claim-2",
             "sha256:claim-2",
             Some(1),
-            "t3",
-            "t4",
-            "t5",
+            "unix-ms:3",
+            "unix-ms:4",
+            "unix-ms:5",
         )
         .unwrap();
     assert_eq!(replacement.fence, 2);
@@ -902,7 +944,7 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
         "w1",
         2,
         "op-cancel",
-        "t3",
+        "unix-ms:3",
         AttemptPhase::Claimed,
         AttemptMutationKind::Cancel {
             stop_confirmed: true,
@@ -918,6 +960,12 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
         .current_attempt_for_work("p1", "w1")
         .unwrap()
         .is_none());
+    let cancellations = store
+        .list_unresolved_recovery_obligations("p1", None, 10)
+        .expect("cancel recovery is durable");
+    assert!(cancellations.iter().any(|obligation| {
+        obligation.attempt_id.as_deref() == Some("a2") && obligation.reason == "cancel_requested"
+    }));
 }
 
 #[test]

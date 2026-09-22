@@ -445,6 +445,31 @@ pub struct PublicationRecovery {
     pub detail: String,
 }
 
+/// A publication readback is intentionally separate from a successful Git
+/// receipt.  Files prepared or staged before a process interruption remain
+/// unresolved until the recovery journal and committed bytes can prove the
+/// requested operation.  Callers must not treat those states as published
+/// memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublicationReadback {
+    NoPublication,
+    ReadbackRequired(PublicationRecovery),
+    Reconciled(PublicationRecovery),
+}
+
+impl PublicationReadback {
+    pub fn is_resolved(&self) -> bool {
+        matches!(self, Self::Reconciled(_))
+    }
+
+    pub fn recovery(&self) -> Option<&PublicationRecovery> {
+        match self {
+            Self::NoPublication => None,
+            Self::ReadbackRequired(recovery) | Self::Reconciled(recovery) => Some(recovery),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublishError {
     DraftNotAccepted,
@@ -513,6 +538,35 @@ impl Publisher {
     /// rewrites user files.
     pub fn recovery_status(&self) -> Result<PublicationRecovery, PublishError> {
         read_publication_journal(&self.root)
+    }
+
+    /// Read back the durable publication journal for one operation. A
+    /// committed state is reported as reconciled only after the journal
+    /// reader has verified the manifest/note bytes and Git revision. All
+    /// interrupted or damaged states remain unresolved.
+    pub fn publication_readback(
+        &self,
+        operation_id: &str,
+    ) -> Result<PublicationReadback, PublishError> {
+        validate_segment(operation_id)?;
+        let recovery = self.recovery_status()?;
+        if let Some(recorded_operation) = recovery.operation_id.as_deref() {
+            if recorded_operation != operation_id {
+                return Err(PublishError::Conflict(format!(
+                    "publication readback operation mismatch: expected {}, found {}",
+                    operation_id, recorded_operation
+                )));
+            }
+        }
+        Ok(match recovery.state {
+            PublicationRecoveryState::Clean => PublicationReadback::NoPublication,
+            PublicationRecoveryState::Committed => PublicationReadback::Reconciled(recovery),
+            PublicationRecoveryState::FilesPrepared
+            | PublicationRecoveryState::Staged
+            | PublicationRecoveryState::ReconciliationRequired => {
+                PublicationReadback::ReadbackRequired(recovery)
+            }
+        })
     }
 
     pub fn publish(
@@ -3349,6 +3403,20 @@ mod tests {
         let two = publication_identity(&draft, "op_1").unwrap();
         assert_eq!(one, two);
         assert_eq!(draft.state, DraftState::Accepted);
+    }
+
+    #[test]
+    fn clean_publication_readback_is_not_success() {
+        let path = std::env::temp_dir().join(format!(
+            "boreal-memory-readback-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+        let readback = publisher.publication_readback("op_1").unwrap();
+        assert_eq!(readback, PublicationReadback::NoPublication);
+        assert!(!readback.is_resolved());
+        let _ = fs::remove_dir_all(path);
     }
 
     #[test]

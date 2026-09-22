@@ -1,0 +1,112 @@
+{
+  "schema": "boreal.pf-s00-t90.review-findings.v1",
+  "status": "worker-produced-unaccepted",
+  "task_id": "PF-S00-T90",
+  "attempt": 2,
+  "reviewer": {
+    "role": "independent validation subagent",
+    "agent_id": "01a0c62c-f386-7950-936c-a28218342509"
+  },
+  "source_identity": {
+    "assigned": "working-tree-aggregate:b8b1aeb028553c6594bc0a9d5a674c7df3fb2b8c6dfe25a4d84014d13ef4fb55; HEAD:784a41b3; dirty",
+    "observed_head": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "branch": "codex/apply-responsive-terminal-overlay",
+    "working_tree": "dirty"
+  },
+  "scope": [
+    "preserve all 48 original M02 IDs as unaccepted",
+    "verify owner or blocker routing for baseline findings and missing inputs",
+    "verify evidence-layer honesty",
+    "verify proposal decisions remain unadopted",
+    "verify dispatch and review-chain controls"
+  ],
+  "checks": {
+    "m02_ids_expected": 48,
+    "m02_ids_mapped": 48,
+    "m02_ids_accepted": 0,
+    "m02_current_state": "mapped_not_accepted",
+    "m02_historical_state": "unaccepted_historical_obligation",
+    "baseline_findings_total": 27,
+    "baseline_findings_with_owner": 27,
+    "required_external_inputs": 6,
+    "external_inputs_with_status_and_downstream_gate": 6,
+    "t03_pass": 16,
+    "t03_fail": 7,
+    "plan_validate_exit": 0,
+    "plan_verify_package_exit": 1
+  },
+  "findings": [
+    {
+      "id": "PF-S00-T90-001",
+      "severity": "critical",
+      "classification": "dispatch-control-gap",
+      "status": "unresolved",
+      "source": [
+        "project/build-plan/production-completion/execution/STATE.json",
+        "project/validation/production/dispatch/README.md",
+        "project/validation/production/dispatch/AGENT_DISPATCH.md",
+        "project/validation/production/tasks/PF-S00-T06/attempt-2/HANDOFF.md",
+        "project/validation/production/tasks/PF-S00-T07/attempt-3/HANDOFF.md"
+      ],
+      "summary": "PF-S00-T06 and PF-S00-T07 are recorded with coordinator as both implementation agent and reviewer, contrary to the independent-review dispatch rule.",
+      "impact": "The coordination controls have not themselves been independently accepted; S00 exit evidence cannot treat those self-acceptances as independent review.",
+      "owner": "PF-S00-T91 reconciliation with coordinator; PF-S00-T92 exact-tree revalidation",
+      "required_follow_up": [
+        "Record an attributable independent review or retain an explicit non-acceptance for T06/T07 outputs.",
+        "Rerun affected dispatch/evidence checks on the reconciled combined tree.",
+        "Do not edit prior attempts or silently replace the coordinator self-acceptance history."
+      ],
+      "evidence_layer": "file-based dispatch/state review",
+      "disposition": "unresolved"
+    },
+    {
+      "id": "PF-S00-T90-002",
+      "severity": "critical",
+      "classification": "review-capability-and-attribution-blocker",
+      "status": "unresolved",
+      "source": [
+        "project/validation/production/baseline/external-inputs.md",
+        "project/build-plan/production-completion/execution/STATE.json",
+        "project/validation/production/baseline/entry-packet.md"
+      ],
+      "summary": "EXT-INDEPENDENT-REVIEW remains recorded as missing; T90 has no ledger reviewer field and T92 has no assigned gate owner.",
+      "impact": "This attempt is attributable by its assigned worker identity, but it does not establish the independent T92 gate or any external reviewer/service/platform/release capability.",
+      "owner": "Coordinator to assign T92 independent gate owner; PF-S00-T92 to revalidate",
+      "required_follow_up": [
+        "Assign and record a reviewer/gate owner independent of the implementation/coordinator principal.",
+        "Preserve the missing-capability blocker until the required attributable review capacity exists.",
+        "Run T92 only after T91 reconciliation and exact source identity capture."
+      ],
+      "evidence_layer": "file-based external-input and execution-ledger review",
+      "disposition": "unresolved"
+    },
+    {
+      "id": "PF-S00-T90-003",
+      "severity": "high",
+      "classification": "audit-tooling-blocker",
+      "status": "blocked",
+      "source": [
+        "boreal.yaml (missing at repository root)",
+        ".boreal/boreal.sqlite",
+        "project/validation/production/tasks/PF-S00-T90/attempt-2/COMMANDS.md"
+      ],
+      "summary": "The required boreal.workflow.audit.v1 resolver was unavailable because the local database owner was busy; the configured workflow could not be inspected through the read-only application path.",
+      "impact": "The review is limited to file-based artifacts and plan checks; no live audit receipt or service state is claimed.",
+      "owner": "Coordinator/service owner before PF-S00-T92 or a separately authorized audit rerun",
+      "required_follow_up": [
+        "Release or safely resolve the existing database owner without force-breaking a live lock.",
+        "Resolve the workflow reference through the supported application command and retain its receipt.",
+        "Do not substitute direct database inspection or a synthetic service result."
+      ],
+      "evidence_layer": "audit command availability only",
+      "disposition": "blocked"
+    }
+  ],
+  "non_findings": [
+    "All 48 original M02 IDs remain mapped and unaccepted.",
+    "All 27 baseline findings have non-empty owner routing; all six external inputs have status and downstream gate/disposition.",
+    "Static, fixture, unit, store, application-boundary, and package results are not presented as genuine service/native/release proof.",
+    "Production-completion adoption remains not_adopted and the listed D22/D27/cycle/protocol changes remain proposals."
+  ],
+  "disposition": "blocked_pending_pf-s00-t91_reconciliation_and_pf-s00-t92_revalidation"
+}

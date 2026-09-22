@@ -40,7 +40,12 @@ fn scope(store: &SqliteStore, project_id: &ProjectId) -> PlanningScope {
 
 #[test]
 fn application_v3_migration_and_hierarchy_mutations_are_revision_bound() {
-    let store = SqliteStore::open_in_memory(SCHEMA_V2).unwrap();
+    // Keep this application migration fixture on the explicit schema-2 path.
+    // The canonical production opener upgrades an exact production schema to
+    // the current work-model contract before returning, which would skip the
+    // additive migration this test is intended to exercise.
+    let schema_v2_fixture = format!("{SCHEMA_V2}\n-- explicit application schema-2 fixture");
+    let store = SqliteStore::open_in_memory(&schema_v2_fixture).unwrap();
     let app = WorkApplication::new(&store);
     let project = ProjectId::new("p1");
     app.init_project(
@@ -306,9 +311,9 @@ fn session_end_and_operator_recovery_are_explicit_and_scope_checked() {
         "op-claim",
         "sha256:session-claim",
         Some(revision),
-        "2026-01-01T00:00:04Z",
-        "2026-01-01T00:01:40Z",
-        "2026-01-01T00:03:20Z",
+        "unix-ms:1000",
+        "unix-ms:1100",
+        "unix-ms:1200",
     )
     .unwrap();
 

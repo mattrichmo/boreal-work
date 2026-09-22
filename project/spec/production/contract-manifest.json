@@ -1,0 +1,58 @@
+{
+  "contract": "boreal.production-contract/1",
+  "status": "integrated-target-contract-pending-sprint-gates",
+  "protocol_runtime": "boreal.protocol/2",
+  "source_identity": {
+    "revision": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "worktree": "dirty",
+    "note": "Source identity is recorded for integration provenance; dirty means this is not a release identity."
+  },
+  "accepted_task_artifacts": {
+    "PF-S01-T01": "project/spec/production/scope-and-boundaries.md",
+    "PF-S01-T02": "project/spec/production/identity-revisions-authority.md",
+    "PF-S01-T03": "project/spec/production/planning-and-cycle-contract.md",
+    "PF-S01-T04": "project/spec/production/execution-submission-contract.md",
+    "PF-S01-T05": ["project/spec/production/status-and-actions.md", "project/spec/production/reason-registry.json"],
+    "PF-S01-T06": ["project/spec/production/acceptance-and-proof.md", "project/spec/production/profile-registry.json"],
+    "PF-S01-T07": "project/spec/production/dependencies-overrides-reopen.md",
+    "PF-S01-T08": ["project/spec/production/service-contract.md", "project/spec/production/compatibility-matrix.md"],
+    "PF-S01-T09": "project/spec/production/release-support-and-budgets.md",
+    "PF-S01-T10": "project/spec/production/source-memory-parity.md",
+    "PF-S01-T11": ["project/spec/production/conformance-matrix.json", "project/spec/production/contract-manifest.json"]
+  },
+  "artifact_sha256": {
+    "project/spec/production/scope-and-boundaries.md": "e8fa4fdb4bb03348353996bbe040c89b6005aff75306f49e0ffc855e3875cfcd",
+    "project/spec/production/identity-revisions-authority.md": "e18956613421ee98086e0aee9bfa2cf8f3b8768d7d95df4c50502516cf4da52f",
+    "project/spec/production/planning-and-cycle-contract.md": "e5b329912e54b6d85aff272ba0b0d2756310689beae543013de7fd165f89a656",
+    "project/spec/production/execution-submission-contract.md": "539088128f18bc6fef8bbd855ca6a140c4d02ba33bffc799179b128c2a8393a4",
+    "project/spec/production/status-and-actions.md": "b2b41ffd640811118e2c8f0ac0ba9c60d79cc46ccc73135cdcf609ae384b3a94",
+    "project/spec/production/reason-registry.json": "fb47a166efc1bcef7b94300e638ff67bf45b24dc1767dcd4475301525946ce70",
+    "project/spec/production/acceptance-and-proof.md": "da4c7796a801c185f33f0f309d82bc1a1a0f3aaa8ee6b3d546f49f7674714245",
+    "project/spec/production/profile-registry.json": "a66aac9597ce7bd724bfa8d7f1f04c6a2e86c46101da0dd3df536519c14027c7",
+    "project/spec/production/dependencies-overrides-reopen.md": "3543fb5f1c3af51304826c66e02a3eb10dd0c1972cc35e77585c1b43a5a0a151",
+    "project/spec/production/service-contract.md": "2eda4da55262f0f068487d0a16becf8d1bc648bdef7d2da4fc3508e9ea30a3a3",
+    "project/spec/production/compatibility-matrix.md": "ac2ec35bdd4632e5eb70fc844c19fc74543c79f53cf8d14ee6b61a264c21a2b7",
+    "project/spec/production/release-support-and-budgets.md": "3d9d9ee4064f479e9d1d80c55adaf565ff990e2cbb5d0556afa078b3e6b0fbc6",
+    "project/spec/production/source-memory-parity.md": "045fc61515aaf304ca9da924e5c78f622c12a9c4280cafeddd94af6f193f684e",
+    "project/spec/production/conformance-matrix.json": "a45a41acc89e603c1267b20f310fc36ec2b78e2e8db6c7003cb78dd97cc1fe68"
+  },
+  "integration_sha256": {
+    "project/DECISIONS.md": "1a42a8b901c9423394e10c15cea879609b79cb9035dccefc64b58543329fa066",
+    "project/STATUS_MODEL.md": "688595dc7d305a19e018ba727df4c850bc6a6d441e53cd4e537f02d9dc77a914",
+    "project/spec/manifest.json": "071c59771894b0bcac8d41dd6769168241ff0a727f94426b6e1c662223b1cc7e",
+    "project/spec/protocol/protocol-manifest.json": "56d96eddaa3316fff9181f8c637e0c7bc0fd83699783d5c176bac210e21a0f45",
+    "project/spec/protocol/error-registry.json": "bde19fb977839e7336c2a7367bbf35480734c290ceecdb74dda4566fec3c4c77"
+  },
+  "target_capabilities": [
+    "boreal.work-status/3",
+    "boreal.work-model/3",
+    "boreal.cycle/1",
+    "boreal.acceptance/2",
+    "boreal.service/2",
+    "boreal.external-job/1",
+    "boreal.support-release/1"
+  ],
+  "advertisement_rule": "Do not advertise target capabilities or authorize target-only writes until the conformance matrix, protocol/error integration, implementation/migration tasks, real-service evidence, and PF-S01-T92 are accepted.",
+  "required_gates": ["PF-S01-T90", "PF-S01-T91", "PF-S01-T92"],
+  "historical_claim_policy": "Retained fixture or report results are provenance only; exact dirty source, native, service, installation, and release evidence is required for later claims."
+}

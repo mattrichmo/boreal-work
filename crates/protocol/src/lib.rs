@@ -184,6 +184,12 @@ impl ProtocolError {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     InvalidArgument,
+    IntegrityQuarantined,
+    SourceSizeLimit,
+    ReceiptSizeLimit,
+    CleanupPending,
+    CredentialRevoked,
+    UnsupportedTarget,
     InvalidParent,
     DerivedStatusReadOnly,
     UnknownCommandNamespace,
@@ -254,6 +260,12 @@ impl ErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidArgument => "invalid_argument",
+            Self::IntegrityQuarantined => "integrity_quarantined",
+            Self::SourceSizeLimit => "source_size_limit",
+            Self::ReceiptSizeLimit => "receipt_size_limit",
+            Self::CleanupPending => "cleanup_pending",
+            Self::CredentialRevoked => "credential_revoked",
+            Self::UnsupportedTarget => "unsupported_target",
             Self::InvalidParent => "invalid_parent",
             Self::DerivedStatusReadOnly => "derived_status_read_only",
             Self::UnknownCommandNamespace => "unknown_command_namespace",

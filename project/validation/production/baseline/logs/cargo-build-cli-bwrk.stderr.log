@@ -1,0 +1,6 @@
+   Compiling boreal-domain v0.2.0 (/Users/cybertron/Code/boreal-work/crates/domain)
+   Compiling boreal-protocol v0.2.0 (/Users/cybertron/Code/boreal-work/crates/protocol)
+   Compiling boreal-store v0.2.0 (/Users/cybertron/Code/boreal-work/crates/store)
+   Compiling boreal-application v0.2.0 (/Users/cybertron/Code/boreal-work/crates/application)
+   Compiling boreal-cli v0.2.0 (/Users/cybertron/Code/boreal-work/crates/cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.10s

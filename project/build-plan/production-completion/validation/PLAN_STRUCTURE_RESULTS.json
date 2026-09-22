@@ -1,0 +1,19 @@
+{
+  "result": "passed",
+  "scope": "planning structure only; no product tests or release acceptance",
+  "counts": {
+    "sprints": 22,
+    "tasks": 264,
+    "scoped_work_tasks": 198,
+    "explicit_gate_tasks": 66,
+    "original_m02_obligations": 48,
+    "source_references": 113,
+    "acceptance_rows": 56
+  },
+  "tasks_in_acyclic_graph": 264,
+  "local_markdown_links_checked": 17079,
+  "baseline_excerpts_verified": 113,
+  "baseline_files_verified": 434,
+  "initial_or_current_accepted_tasks": 0,
+  "errors": []
+}

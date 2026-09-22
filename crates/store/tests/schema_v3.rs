@@ -32,8 +32,17 @@ fn remove_sqlite_files(path: &Path) {
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
 
+fn open_v2_fixture(path: impl AsRef<Path>) -> SqliteStore {
+    let store = SqliteStore::open_for_migration(path).expect("migration fixture opens");
+    store
+        .execute_batch(SCHEMA_V2)
+        .expect("raw schema-v2 fixture applies");
+    assert_eq!(store.schema_version().unwrap(), 2);
+    store
+}
+
 fn store_v3() -> SqliteStore {
-    let store = SqliteStore::open_in_memory(SCHEMA_V2).expect("schema-v2 opens");
+    let store = open_v2_fixture(":memory:");
     store
         .execute_batch(SCHEMA_V3)
         .expect("schema-v3 additive migration applies");
@@ -46,7 +55,7 @@ fn runtime_applies_and_reopens_v3_while_accepting_schema2_openers() {
     let path = temp_path("reopen");
     remove_sqlite_files(&path);
     {
-        let store = SqliteStore::open(&path, SCHEMA_V2).expect("schema-v2 opens");
+        let store = open_v2_fixture(&path);
         assert_eq!(store.schema_version().unwrap(), 2);
         store
             .apply_schema(SCHEMA_V3)
@@ -68,7 +77,7 @@ fn runtime_applies_and_reopens_v3_while_accepting_schema2_openers() {
 fn failed_v3_migration_rolls_back_without_a_partial_v3_schema() {
     let path = temp_path("rollback");
     remove_sqlite_files(&path);
-    let store = SqliteStore::open(&path, SCHEMA_V2).expect("schema-v2 opens");
+    let store = open_v2_fixture(&path);
     let broken = SCHEMA_V3.replace(
         "CREATE TABLE cycle_v3",
         "THIS IS INVALID SQL;\nCREATE TABLE cycle_v3",
@@ -315,7 +324,9 @@ fn online_backup_preserves_the_v3_extension_and_schema2_rows() {
     remove_sqlite_files(&source_path);
     remove_sqlite_files(&backup_path);
     {
-        let source = SqliteStore::open_with_work_model_v3(&source_path, SCHEMA_V2, SCHEMA_V3)
+        let source = open_v2_fixture(&source_path);
+        source
+            .apply_schema(SCHEMA_V3)
             .expect("v2 base plus v3 extension opens");
         seed_base(&source);
         seed_nodes(&source);

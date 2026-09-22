@@ -1,0 +1,143 @@
+{
+  "schema": "boreal.pf-s00-t92.supplemental-coordination-review.v2",
+  "decision": "ACCEPTED_AT_COORDINATION_LAYER",
+  "decision_layer": "coordination_evidence_only",
+  "task_id": "PF-S00-T92",
+  "reviewer": {
+    "identity": "codex-independent-reviewer",
+    "role": "independent coordination-layer reviewer",
+    "independence_statement": "Distinct from the coordinator and from the PF-S00-T06/PF-S00-T07 implementation principal; this reviewer did not author or alter the reviewed task records."
+  },
+  "source_identity": {
+    "repository": "/Users/cybertron/Code/boreal-work",
+    "branch": "codex/apply-responsive-terminal-overlay",
+    "head": "784a41b3802c29a76721c55eef2e9493283396c2",
+    "working_tree": "dirty",
+    "review_input_digest_sha256": "0d73a477e2d008cc07929baf75ee0d3659431fd003cdc231effa9d8b9c6c0614",
+    "digest_scope": "Ordered SHA-256 manifest of the current ledger, plan/task criteria, T06/T07 artifacts, dispatch/evidence controls, T90/T91 records, baseline obligation map, and prior supplemental review files, captured before this directory was written."
+  },
+  "scope": {
+    "targets": [
+      {
+        "task_id": "PF-S00-T06",
+        "attempt": 2,
+        "current_state": "ready_for_review",
+        "accepted_artifact_paths": [
+          "project/validation/production/tasks/PF-S00-T06/attempt-2/COMMANDS.md",
+          "project/validation/production/tasks/PF-S00-T06/attempt-2/EVIDENCE.md",
+          "project/validation/production/tasks/PF-S00-T06/attempt-2/HANDOFF.md"
+        ]
+      },
+      {
+        "task_id": "PF-S00-T07",
+        "attempt": 3,
+        "current_state": "ready_for_review",
+        "accepted_artifact_paths": [
+          "project/validation/production/tasks/PF-S00-T07/attempt-3/COMMANDS.md",
+          "project/validation/production/tasks/PF-S00-T07/attempt-3/EVIDENCE.md",
+          "project/validation/production/tasks/PF-S00-T07/attempt-3/HANDOFF.md"
+        ]
+      }
+    ],
+    "reviewed_paths": [
+      "project/build-plan/production-completion/execution/STATE.json",
+      "project/build-plan/production-completion/plan.json",
+      "project/build-plan/production-completion/sprints/PF-S00/SPRINT.md",
+      "project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T06.md",
+      "project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T07.md",
+      "project/build-plan/production-completion/sprints/PF-S00/tasks/PF-S00-T92.md",
+      "project/validation/production/tasks/PF-S00-T06/attempt-1/START.md",
+      "project/validation/production/tasks/PF-S00-T06/attempt-2/COMMANDS.md",
+      "project/validation/production/tasks/PF-S00-T06/attempt-2/EVIDENCE.md",
+      "project/validation/production/tasks/PF-S00-T06/attempt-2/HANDOFF.md",
+      "project/validation/production/tasks/PF-S00-T07/attempt-3/START.md",
+      "project/validation/production/tasks/PF-S00-T07/attempt-3/COMMANDS.md",
+      "project/validation/production/tasks/PF-S00-T07/attempt-3/EVIDENCE.md",
+      "project/validation/production/tasks/PF-S00-T07/attempt-3/HANDOFF.md",
+      "project/validation/production/dispatch/README.md",
+      "project/validation/production/dispatch/AGENT_DISPATCH.md",
+      "project/validation/production/dispatch/CHANGE_REQUEST.md",
+      "project/validation/production/evidence-contract.md",
+      "project/validation/production/baseline/entry-packet.md",
+      "project/validation/production/baseline/obligations-map.json",
+      "project/validation/production/sprints/PF-S00/review.md",
+      "project/validation/production/sprints/PF-S00/findings.json",
+      "project/validation/production/sprints/PF-S00/reconciliation.md",
+      "project/validation/production/sprints/PF-S00/remediation-map.json",
+      "project/validation/production/tasks/PF-S00-T92/supplemental-coordination-review/REVIEW.json"
+    ],
+    "historical_context": "The prior NOT_ACCEPTED supplemental review was read as historical context; its files were not edited."
+  },
+  "ledger_readback": {
+    "PF-S00-T06": {
+      "state": "ready_for_review",
+      "agent": "coordinator",
+      "reviewer": null,
+      "accepted_source": null,
+      "handoff": "project/validation/production/tasks/PF-S00-T06/attempt-2/HANDOFF.md",
+      "evidence_paths_present": true,
+      "acceptance_history_preserved": {
+        "state": "accepted",
+        "agent": "coordinator",
+        "reviewer": "coordinator",
+        "disposition": "superseded_for_independent_review; historical coordinator record preserved"
+      }
+    },
+    "PF-S00-T07": {
+      "state": "ready_for_review",
+      "agent": "coordinator",
+      "reviewer": null,
+      "accepted_source": null,
+      "handoff": "project/validation/production/tasks/PF-S00-T07/attempt-3/HANDOFF.md",
+      "evidence_paths_present": true,
+      "acceptance_history_preserved": {
+        "state": "accepted",
+        "agent": "coordinator",
+        "reviewer": "coordinator",
+        "disposition": "superseded_for_independent_review; historical coordinator record preserved"
+      }
+    }
+  },
+  "bounded_criteria": {
+    "PF-S00-T06": {
+      "result": "evidenced_at_coordination_layer",
+      "basis": [
+        "Current handoff, evidence, and command artifacts exist at the ledger-referenced paths.",
+        "Dispatch, shared-file integration, failed-attempt preservation, and independent-review controls are stated in the reviewed controls and handoff.",
+        "The artifact records bounded JSON, plan, conflict, and whitespace checks and does not claim product, service, native, or release behavior."
+      ]
+    },
+    "PF-S00-T07": {
+      "result": "evidenced_at_coordination_layer",
+      "basis": [
+        "Current handoff, evidence, and command artifacts exist at the ledger-referenced paths.",
+        "The obligation map contains 48 entries, all mapped_not_accepted with accepted count zero.",
+        "The packet preserves findings, dirty/archive limitations, proposal boundaries, and the T90/T91/T92 review chain without claiming adoption or product acceptance."
+      ]
+    },
+    "ledger_honesty": "satisfied",
+    "historical_self_acceptance_preservation": "satisfied",
+    "independent_reviewer_attribution_for_this_review": "satisfied",
+    "product_or_sprint_acceptance": "not_decided_by_this_record"
+  },
+  "fresh_checks": {
+    "json_syntax": "passed",
+    "plan_validate": "passed",
+    "t06_t92_conservative_conflicts": "passed; no worker, shared-integration, or worker-vs-shared overlap",
+    "t07_t92_conservative_conflicts": "passed; no worker, shared-integration, or worker-vs-shared overlap",
+    "markdown_trailing_whitespace": "passed",
+    "markdown_fenced_code_balance": "passed",
+    "git_diff_check": "passed",
+    "ledger_and_obligation_assertions": "passed"
+  },
+  "reacceptance_rule": "The current T06 and T07 records may be re-accepted by the coordinator only by recording reviewer=codex-independent-reviewer (or an explicitly attributable successor independent identity) and a current accepted_source, while retaining the existing acceptance_history entries unchanged. This review itself does not mutate or close those records.",
+  "authority_limits": [
+    "not_product_acceptance",
+    "not_service_acceptance",
+    "not_sprint_exit_acceptance",
+    "not_successor_authorization",
+    "not_native_platform_acceptance",
+    "not_publication_acceptance",
+    "not_release_acceptance"
+  ]
+}

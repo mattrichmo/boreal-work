@@ -1,0 +1,608 @@
+{
+  "schema": "boreal.m02.task-disposition/1",
+  "source_revision": "7731b05",
+  "candidate_revision": "e33d65f",
+  "completed_task_ids": [],
+  "independent_review": "not performed",
+  "release_decision": "do not ship",
+  "gate_rule": "candidate does not mean accepted; later source edits are unaccepted remediation, not sprint advancement",
+  "approved_deferrals": [],
+  "tasks": [
+    {
+      "task_id": "S00-T01",
+      "title": "Build the v1-to-v2 parity matrix",
+      "plan_owner": "L0 contract; may run in parallel with S00-T02\u2013T05.",
+      "plan_dependencies": "none.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Registry inventory and dispositions exist, but the actual v1 runtime/archive was not supplied. Historical legacy-map references are not independently reverified.",
+      "evidence": [
+        "PARITY.md",
+        "COMMAND_INVENTORY.json"
+      ]
+    },
+    {
+      "task_id": "S00-T02",
+      "title": "Freeze status taxonomy and reason codes",
+      "plan_owner": "L0 contract with L1 domain review; parallel with S00-T01.",
+      "plan_dependencies": "none.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Precedence/primary-reason contract updated; full predicates, next actions, complete reason vocabulary and positive/negative schedule fixtures still require review.",
+      "evidence": [
+        "../../spec/transition-table.md",
+        "../../STATUS_MODEL.md"
+      ]
+    },
+    {
+      "task_id": "S00-T03",
+      "title": "Define legal transitions and audited override policy",
+      "plan_owner": "L0 contract; parallel with S00-T01\u2013T02.",
+      "plan_dependencies": "none.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Typed override/transition policy recorded, not complete executable legal/illegal coverage or independently frozen authority.",
+      "evidence": [
+        "../../spec/transition-table.md"
+      ]
+    },
+    {
+      "task_id": "S00-T04",
+      "title": "Reconcile acceptance profiles and gate vocabulary",
+      "plan_owner": "L0 contract with L3 application and L1 domain review.",
+      "plan_dependencies": "none.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "summary vocabulary and numeric version reconciled; full per-work profile persistence, public adapters and required-gate integrity are not complete.",
+      "evidence": [
+        "../../spec/acceptance-profiles.json",
+        "evidence/contracts-candidate.md",
+        "evidence/contracts-reconciled.md"
+      ]
+    },
+    {
+      "task_id": "S00-T05",
+      "title": "Decide and document the sprint/cycle target",
+      "plan_owner": "coordinator with L0 contract and L3 application.",
+      "plan_dependencies": "none.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Bounded hierarchy decision candidate names persistence/compatibility/migration/rollback; no independent approval, complete rollups or public cycle adapter.",
+      "evidence": [
+        "SPRINT_STRATEGY.md"
+      ]
+    },
+    {
+      "task_id": "S00-T06",
+      "title": "Create the conformance fixture matrix",
+      "plan_owner": "L7 validation with L0 contract; can run after S00-T02\u2013T04.",
+      "plan_dependencies": "S00-T02, S00-T03, S00-T04.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Fixture inventory has explicit missing cases. Full positive and negative conformance for every normative status/transition is not present.",
+      "evidence": [
+        "FIXTURE_MATRIX.json"
+      ]
+    },
+    {
+      "task_id": "S00-T07",
+      "title": "Independent contract review and revalidation",
+      "plan_owner": "L7 validator; no implementation edits.",
+      "plan_dependencies": "S00-T01 through S00-T06.",
+      "state": "blocked",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No independent validator or reviewer was available. Critical findings remain unresolved. Author review is not independent contract acceptance.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S01-T01",
+      "title": "Complete the pure evaluator",
+      "plan_owner": "L1 domain; parallel with S01-T03\u2013T04 after S00-T07.",
+      "plan_dependencies": "S00-T02, S00-T03.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Pure evaluator rewrite and 15 new domain tests authored but not compiled/run. Gate declarations, full schedule inputs and safe next-action coverage remain incomplete.",
+      "evidence": [
+        "../../../crates/domain/src/status_evaluator.rs",
+        "../../../crates/domain/tests/m02_status.rs"
+      ]
+    },
+    {
+      "task_id": "S01-T02",
+      "title": "Correct paused, queued, blocked, and retry precedence",
+      "plan_owner": "L1 domain; may proceed after S01-T01 contract shape.",
+      "plan_dependencies": "S01-T01.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Paused/retry/dependency/hold precedence rewritten with combined-condition tests; real direct/service/CLI/TUI parity at one revision is not run.",
+      "evidence": [
+        "../../../crates/domain/tests/m02_status.rs",
+        "evidence/run-01/rust-domain.md"
+      ]
+    },
+    {
+      "task_id": "S01-T03",
+      "title": "Thread actor role and policy into status",
+      "plan_owner": "L3 application plus L4 protocol; parallel with S01-T01.",
+      "plan_dependencies": "S00-T02.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Store-backed reads/claims look up durable actor role. Complete authenticated actor/session/project/dispatch propagation is not certified; Rust tests unavailable.",
+      "evidence": [
+        "../../../crates/store/src/status_evaluation.rs",
+        "../../../crates/application/tests/m02_status_authority.rs"
+      ]
+    },
+    {
+      "task_id": "S01-T04",
+      "title": "Integrate schedule and timer reasons",
+      "plan_owner": "L1 domain with L3 application; parallel with S01-T02.",
+      "plan_dependencies": "S00-T02.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Retry/lease/hard-budget timing centralized and numeric claim clocks checked. Not-before, product due/overdue and durable post-expiry disposition are not wired.",
+      "evidence": [
+        "../../../crates/domain/src/status_evaluator.rs",
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S01-T05",
+      "title": "Replace container blocked state with rollup projection",
+      "plan_owner": "L1 domain plus L3 application; parallel with S01-T03.",
+      "plan_dependencies": "S00-T05, S01-T01.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Containers receive provisional nonclaimable queued/container_planning only. No child/sprint/gate/overdue/closeout rollup implementation; not a completed planning projection.",
+      "evidence": [
+        "../../../crates/domain/tests/hierarchy_semantics.rs",
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S01-T06",
+      "title": "Add evaluator conformance and property tests",
+      "plan_owner": "L7 validation; parallel with S01-T05 once DTO shape is stable.",
+      "plan_dependencies": "S01-T01, S01-T02, S01-T03, S01-T04.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Permutation, terminal, history and closed-only tests authored; not run. Full property/conformance oracle and all domain inputs remain incomplete.",
+      "evidence": [
+        "../../../crates/domain/tests/m02_status.rs",
+        "evidence/run-01/rust-domain.md"
+      ]
+    },
+    {
+      "task_id": "S01-T07",
+      "title": "Review, reconcile, and revalidate status",
+      "plan_owner": "L7 validator.",
+      "plan_dependencies": "S01-T01 through S01-T06.",
+      "state": "blocked",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No independent status reviewer; S01-T01 through T06 not accepted.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S02-T01",
+      "title": "Enforce claim eligibility inside the write transaction",
+      "plan_owner": "L2 store with L3 application review.",
+      "plan_dependencies": "S00-T07, S01-T01, S01-T03.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Claim now evaluates canonical snapshot and durable role under BEGIN IMMEDIATE. Raw-claim tests are unrun; missing stored gate declarations, denied operation outcomes and every public surface still need acceptance.",
+      "evidence": [
+        "../../../crates/store/tests/m02_claim.rs",
+        "evidence/run-01/rust-store.md"
+      ]
+    },
+    {
+      "task_id": "S02-T02",
+      "title": "Enforce status before finish, close, release, and reopen",
+      "plan_owner": "L3 application with L2 store transaction support.",
+      "plan_dependencies": "S01-T01, S01-T04.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Finish/close/release/reopen still require shared evaluator enforcement, owner/role/revision/fence/gate/review/close-intent checks and durable expiry disposition.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S02-T03",
+      "title": "Harden typed dependency mutations",
+      "plan_owner": "L2 store plus L1 domain.",
+      "plan_dependencies": "S00-T02, S00-T05, S01-T01.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Existing dependency/schema guards retained, not completed typed-endpoint/terminal/waiver policies or new compatibility-strategy fixtures.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S02-T04",
+      "title": "Implement audited gate force and dependency waiver",
+      "plan_owner": "L3 application with L1 policy and L2 persistence.",
+      "plan_dependencies": "S00-T03, S00-T04, S01-T01.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Existing hold resolution made operator/project scoped with tighter replay identity. Named gate force and edge-specific waiver records/authorization/expiry/evidence/readback are NOT implemented.",
+      "evidence": [
+        "../../../crates/store/src/lib.rs",
+        "../../../crates/store/tests/m02_claim.rs"
+      ]
+    },
+    {
+      "task_id": "S02-T05",
+      "title": "Implement review decisions and failed-history retention",
+      "plan_owner": "L3 application plus L4 public route.",
+      "plan_dependencies": "S00-T03, S00-T04, S02-T02.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No new public review open/show/approve/reject/return operations or complete source/config/policy/fence-bound review workflow.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S02-T06",
+      "title": "Add mutation race and unknown-outcome tests",
+      "plan_owner": "L7 validation; parallel with S02-T04\u2013T05 after interfaces stabilize.",
+      "plan_dependencies": "S02-T01, S02-T02, S02-T03.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "One raw SQLite concurrent-claim test plus replay/stale/role/hold regressions authored but unrun. Full hold/dependency/review/override races and crash/unknown-outcome matrix not implemented.",
+      "evidence": [
+        "../../../crates/store/tests/m02_claim.rs"
+      ]
+    },
+    {
+      "task_id": "S02-T07",
+      "title": "Review, reconcile, and revalidate enforcement",
+      "plan_owner": "L7 validator.",
+      "plan_dependencies": "S02-T01 through S02-T06 and S01-T07.",
+      "state": "blocked",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Enforcement and status gates not accepted; no independent validator.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S03-T01",
+      "title": "Complete project-local hierarchy creation and editing",
+      "plan_owner": "L3 application with L2 store and L4 CLI.",
+      "plan_dependencies": "S00-T05, S01-T05, S02-T03.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Create/edit/archive/reopen hierarchy use cases and complete sample-tree acceptance not implemented beyond baseline.",
+      "evidence": [
+        "SPRINT_STRATEGY.md"
+      ]
+    },
+    {
+      "task_id": "S03-T02",
+      "title": "Add per-work acceptance profile and gate selection",
+      "plan_owner": "L3 application plus L1 domain and L4 interface.",
+      "plan_dependencies": "S00-T04, S02-T02.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Per-work profile/version/custom gate selection and independent persisted declarations need implementation. Existing definition_json is not complete authoritative gate configuration.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S03-T03",
+      "title": "Complete receipt, gate, review, and closeout wiring",
+      "plan_owner": "L3 application with L1 domain.",
+      "plan_dependencies": "S00-T04, S02-T02, S02-T05.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Namespaced review-status classification is corrected in a domain candidate only. Genuine receipt/review/close-intent paths for every configured profile remain unvalidated/incomplete.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S03-T04",
+      "title": "Integrate cycle-backed sprint persistence",
+      "plan_owner": "L2 store with L3 planning adapter.",
+      "plan_dependencies": "S00-T05, S02-T03.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No complete cycle lifecycle/assignment/carry-over/compatibility migration adapter. Bounded hierarchy decision is not a waiver of this gate.",
+      "evidence": [
+        "SPRINT_STRATEGY.md"
+      ]
+    },
+    {
+      "task_id": "S03-T05",
+      "title": "Implement deterministic milestone and sprint rollups",
+      "plan_owner": "L1 domain plus L3 application.",
+      "plan_dependencies": "S01-T05, S03-T01, S03-T04.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No exact descendant rollups, critical blockers, percentage/readiness or corrupt-child/reassignment/pagination conformance.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S03-T06",
+      "title": "Add planning validation and launch readiness",
+      "plan_owner": "L3 application with L0 policy and L4 CLI.",
+      "plan_dependencies": "S03-T01 through S03-T05.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No complete planning validation and trusted sprint activation/readiness route.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S03-T07",
+      "title": "Review, reconcile, and revalidate planning",
+      "plan_owner": "L7 validator.",
+      "plan_dependencies": "S03-T01 through S03-T06 and S02-T07.",
+      "state": "blocked",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Planning, fresh/upgrade/cross-project fixtures and S02 review gate remain open.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S04-T01",
+      "title": "Restore versioned workflow discovery",
+      "plan_owner": "L5 workflow/guidance with L4 CLI.",
+      "plan_dependencies": "S00-T01, S03-T06.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Versioned workflow list/show discovery and all current command-reference validation are not restored.",
+      "evidence": [
+        "PARITY.md"
+      ]
+    },
+    {
+      "task_id": "S04-T02",
+      "title": "Implement sprint create, launch, current, status, board, report, close",
+      "plan_owner": "L4 CLI/service with L3 application.",
+      "plan_dependencies": "S03-T04, S03-T05, S03-T06.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No new complete sprint create/launch/current/status/board/report/close route family; planning prerequisites open.",
+      "evidence": [
+        "PARITY.md"
+      ]
+    },
+    {
+      "task_id": "S04-T03",
+      "title": "Implement work list/show/next/ready/parallel/review-candidates",
+      "plan_owner": "L4 CLI/service with L3 projection support.",
+      "plan_dependencies": "S01-T05, S02-T01, S03-T05.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Existing status encoder gains primary_reason, but complete work list/show/next/ready/parallel/review-candidate queue parity is not implemented.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S04-T04",
+      "title": "Expose review, force, waiver, pause, resume, and hold operations",
+      "plan_owner": "L4 CLI/service; application operations owned by L3.",
+      "plan_dependencies": "S02-T04, S02-T05, S03-T03.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No public typed force/waiver/review/pause/resume/hold route family with full audited authority and readback.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S04-T05",
+      "title": "Restore guided agent plan/claim/finish parity",
+      "plan_owner": "L5 workflow/guidance with L4 CLI.",
+      "plan_dependencies": "S04-T01, S04-T03, S04-T04.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Full guided plan/claim/checkpoint/evidence/review/finish/release/handoff loop remains incomplete, and discovery/public operations are still prerequisites.",
+      "evidence": [
+        "PARITY.md"
+      ]
+    },
+    {
+      "task_id": "S04-T06",
+      "title": "Update the terminal UI to the same contract",
+      "plan_owner": "L6 TUI; may start UI scaffolding after S04-T02 DTOs stabilize.",
+      "plan_dependencies": "S04-T02, S04-T03, S04-T04.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "TUI primary reasons, integrity diagnostics and no-duplicate diagnostic rows tested; existing responsive surface preserved. No complete rollups/cycle/operator UI or genuine Rust-service acceptance.",
+      "evidence": [
+        "../../../apps/tui/tests/m02-contract.test.mjs",
+        "evidence/run-01/tui-tests.md",
+        "evidence/run-01/premium.md",
+        "evidence/run-01/responsive.md"
+      ]
+    },
+    {
+      "task_id": "S04-T07",
+      "title": "Review, reconcile, and revalidate public parity",
+      "plan_owner": "L7 validator.",
+      "plan_dependencies": "S04-T01 through S04-T06 and S03-T07.",
+      "state": "blocked",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Public parity and independent review are not complete; passing presentation fixtures cannot satisfy this gate.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S05-T01",
+      "title": "Harden project-local identity and database selection",
+      "plan_owner": "L3 application with L4 CLI/service.",
+      "plan_dependencies": "S04-T02, S04-T06.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Baseline project discovery preserved; required full two-project CLI/service/TUI/memory isolation validation was not performed.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S05-T02",
+      "title": "Make dashboards corruption-tolerant and diagnostic",
+      "plan_owner": "L3 application plus L6 TUI.",
+      "plan_dependencies": "S01-T05, S04-T06.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Malformed clocks, invalid direct parents and orphan prerequisite diagnostics added; affected TUI rows disabled. Invalid gate/attempt prefetch, transitive ancestors and exact diagnostic pagination remain incomplete.",
+      "evidence": [
+        "../../../crates/store/src/status_evaluation.rs",
+        "../../../apps/tui/src/client.ts",
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S05-T03",
+      "title": "Implement v1 import and parity preservation",
+      "plan_owner": "migration steward; parallel with S05-T04 after schema stable.",
+      "plan_dependencies": "S00-T01, S03-T04, S03-T03.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No complete v1 dry-run/export/import disposition implementation; actual v1 archive and complete cycle/profile/review mapping still required.",
+      "evidence": [
+        "PARITY.md"
+      ]
+    },
+    {
+      "task_id": "S05-T04",
+      "title": "Run the real service-backed lifecycle fixture",
+      "plan_owner": "L7 validation with a separate service operator.",
+      "plan_dependencies": "S04-T07, S05-T01, S05-T02.",
+      "state": "blocked",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No rebuilt Rust binary/toolchain, independent service operator or complete public lifecycle. No genuine-service receipt/E2E run was performed.",
+      "evidence": [
+        "evidence/run-01/rust-cli-build.md"
+      ]
+    },
+    {
+      "task_id": "S05-T05",
+      "title": "Run concurrency and failure-boundary validation",
+      "plan_owner": "L7 validation; parallel with S05-T03\u2013T04 where fixtures allow.",
+      "plan_dependencies": "S02-T06, S04-T07.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Full multi-agent/failure/service-restart/reader-during-write fixture and queue-wait/transaction-hold measurement not run.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S05-T06",
+      "title": "Update parity, operator, and user documentation",
+      "plan_owner": "L0 contract plus L5 workflow.",
+      "plan_dependencies": "S04-T07, S05-T01, S05-T03.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Candidate contracts, parity, limits and remaining-task documentation supplied; not final user/operator documentation for a finished product.",
+      "evidence": [
+        "TASKS.json",
+        "REVIEW.md",
+        "../../spec/transition-table.md"
+      ]
+    },
+    {
+      "task_id": "S05-T07",
+      "title": "Review, reconcile, and revalidate real-project behavior",
+      "plan_owner": "L7 validator.",
+      "plan_dependencies": "S05-T01 through S05-T06.",
+      "state": "blocked",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Isolation, migration, genuine service and concurrent gates are not accepted; independent review absent.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S06-T01",
+      "title": "Run full Rust and TypeScript gates",
+      "plan_owner": "L7 validation.",
+      "plan_dependencies": "S05-T07.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Available source/TypeScript/presentation/installer checks pass; seven Cargo invocations could not start. S05 prerequisite not passed; no Rust formatting/workspace/build certification.",
+      "evidence": [
+        "evidence/run-01/checks.json"
+      ]
+    },
+    {
+      "task_id": "S06-T02",
+      "title": "Rebuild release artifacts and installer payloads",
+      "plan_owner": "L8 release.",
+      "plan_dependencies": "S06-T01.",
+      "state": "candidate",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Source ZIP now retains recovered CJS wizard and full text TUI tree. No rebuilt Rust binary, production release archive or tested M02 installer payload.",
+      "evidence": [
+        "../../../scripts/validation/m02/source_archive_test.py",
+        "evidence/run-01/source-archive.md"
+      ]
+    },
+    {
+      "task_id": "S06-T03",
+      "title": "Install and smoke-test a disposable prefix",
+      "plan_owner": "L8 release plus L7 validator.",
+      "plan_dependencies": "S06-T02.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Local fake-release installer fixture passes, but no actual newly rebuilt binary was installed/smoke-tested in a disposable prefix.",
+      "evidence": [
+        "evidence/run-01/premium.md"
+      ]
+    },
+    {
+      "task_id": "S06-T04",
+      "title": "Run supported-platform release smoke tests",
+      "plan_owner": "L8 release with platform validators.",
+      "plan_dependencies": "S06-T02.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No actual macOS/BSD-tar/signing/ABI release validation; Linux presentation tests are not supported-target release smoke tests.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S06-T05",
+      "title": "Final independent audit and cutover decision",
+      "plan_owner": "L7 independent auditor; no implementation edits.",
+      "plan_dependencies": "S06-T01 through S06-T04.",
+      "state": "blocked",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "Independent final auditor absent and critical gates open. Coordinator decision is do not ship, not an independent cutover approval.",
+      "evidence": [
+        "REVIEW.md"
+      ]
+    },
+    {
+      "task_id": "S06-T06",
+      "title": "Publish release and update future-install instructions",
+      "plan_owner": "coordinator plus L8 release.",
+      "plan_dependencies": "S06-T05 approves `ship` or `ship with approved deferrals`.",
+      "state": "not_started",
+      "accepted_complete": false,
+      "remaining_work_and_reason": "No ship approval, release branch/tag/artifact publishing or installer-source cutover. Commits are local only; no upgrade command is claimed.",
+      "evidence": [
+        "../../../IMPLEMENTATION_REPORT.md"
+      ]
+    }
+  ]
+}

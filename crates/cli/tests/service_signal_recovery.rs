@@ -123,7 +123,10 @@ fn direct_mutation_is_rejected_while_the_service_owns_the_database() {
         .expect("direct mutation launches");
     let _ = stop_service(service, &socket, SIGTERM);
 
-    assert!(!direct.status.success(), "direct mutation bypassed ownership");
+    assert!(
+        !direct.status.success(),
+        "direct mutation bypassed ownership"
+    );
     let envelope = json(&direct);
     assert_eq!(envelope["error"]["code"], "service_busy");
     assert_eq!(envelope["outcome"], "busy");

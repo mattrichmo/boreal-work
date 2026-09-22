@@ -1,3 +1,8 @@
+> M02 inventory, ownership and evidence limitations: see
+> `validation/m02/PARITY.md` and `validation/m02/COMMAND_INVENTORY.json`.
+> Historical source references below were supplied with the snapshot; the
+> legacy runtime is not included and has not been silently reconstructed.
+
 # Workflow parity: legacy Boreal to v2
 
 Status: bounded v2 planning note, 2026-09-14. This is a behavioral parity

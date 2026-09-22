@@ -33,7 +33,11 @@ fn init_scaffolds_skills_and_is_safe_to_repeat() {
         .args(["init", "--yes"])
         .output()
         .expect("init starts");
-    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
     assert!(root.join(".boreal/project.json").is_file());
     assert!(root.join(".boreal/boreal.sqlite").is_file());
     assert!(root.join("memory/index.md").is_file());
@@ -44,8 +48,13 @@ fn init_scaffolds_skills_and_is_safe_to_repeat() {
         .args(["init", "--yes", "--json"])
         .output()
         .expect("repeat init starts");
-    assert!(second.status.success(), "{}", String::from_utf8_lossy(&second.stderr));
-    let envelope: serde_json::Value = serde_json::from_slice(&second.stdout).expect("json envelope");
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("json envelope");
     assert_eq!(envelope["outcome"], "unchanged");
     assert_eq!(envelope["data"]["result"]["changed"], false);
 
@@ -62,7 +71,11 @@ fn setup_dry_run_does_not_write_and_both_installs_two_harness_roots() {
         .args(["init", "--dry-run"])
         .output()
         .expect("dry-run starts");
-    assert!(dry_run.status.success(), "{}", String::from_utf8_lossy(&dry_run.stderr));
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
     assert!(!root.join(".boreal").exists());
 
     let both = Command::new(binary)
@@ -70,7 +83,11 @@ fn setup_dry_run_does_not_write_and_both_installs_two_harness_roots() {
         .args(["setup", "--agents", "codex,claude", "--yes", "--json"])
         .output()
         .expect("both-agent setup starts");
-    assert!(both.status.success(), "{}", String::from_utf8_lossy(&both.stderr));
+    assert!(
+        both.status.success(),
+        "{}",
+        String::from_utf8_lossy(&both.stderr)
+    );
     assert!(root.join(".agents/skills/boreal-route/SKILL.md").is_file());
     assert!(root.join(".claude/skills/boreal-route/SKILL.md").is_file());
 

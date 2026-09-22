@@ -13,7 +13,9 @@ use std::{env, path::PathBuf, process::Command};
 
 pub(super) fn run(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
     let executable = env::current_exe().map_err(|error| {
-        update_error(format!("could not locate the running bwrk executable: {error}"))
+        update_error(format!(
+            "could not locate the running bwrk executable: {error}"
+        ))
     })?;
     let executable = executable.canonicalize().unwrap_or(executable);
     let prefix = executable
@@ -62,9 +64,8 @@ pub(super) fn run(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
             .options
             .json
             .then(|| json!({"command": "update", "version": version, "prefix": prefix})),
-        human: (!parsed.options.json).then(|| {
-            format!("Boreal updated successfully ({version}).\n")
-        }),
+        human: (!parsed.options.json)
+            .then(|| format!("Boreal updated successfully ({version}).\n")),
         ..CliResult::default()
     })
 }

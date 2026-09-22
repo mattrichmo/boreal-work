@@ -70,17 +70,12 @@ fn commands_report_dependency_reads_as_service_capable() {
 fn commands_catalogue_v3_routes_as_unavailable_future_capabilities() {
     let (success, envelope) = invoke(&["commands", "intake", "--json"]);
     assert!(success);
-    let unavailable = envelope["data"]["unavailable_routes"]
-        .as_array()
-        .unwrap();
+    let unavailable = envelope["data"]["unavailable_routes"].as_array().unwrap();
     assert!(unavailable
         .iter()
         .any(|route| route["path"] == "intake capture"
             && route["code"] == "work_model_v3_not_enabled"));
-    assert!(envelope["data"]["available"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(envelope["data"]["available"].as_array().unwrap().is_empty());
 }
 
 #[test]
