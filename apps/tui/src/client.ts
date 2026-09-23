@@ -157,6 +157,11 @@ export interface ServerActionSet {
   denied: ServerDeniedAction[];
 }
 
+export interface StatusActionContext {
+  state: string;
+  missing_facts?: string[];
+}
+
 export interface StatusItem {
   work_id: string;
   project_id?: string;
@@ -187,6 +192,8 @@ export interface StatusItem {
   diagnostic?: StatusDiagnostic;
   /** Present on current service responses; absent is the legacy compatibility path. */
   actions?: ServerActionSet;
+  /** Explicitly describes why the legacy row has no server action set. */
+  action_context?: StatusActionContext;
 }
 
 export interface StatusDiagnostic {
@@ -710,13 +717,29 @@ function normalizeStatusItem(value: unknown): StatusItem {
   if (!isObject(value) || typeof value.work_id !== "string") {
     throw new ProtocolEnvelopeError("status item must contain work_id");
   }
-  const rawStatus = value.status ?? value.display_status;
+  // Prefer the richer status/3 display value when a compatibility response
+  // also carries the status/2 field. Older responses generally provide only
+  // `status`, so this remains backward-compatible.
+  const rawStatus = value.display_status ?? value.status;
   if (typeof rawStatus !== "string") throw new ProtocolEnvelopeError("status item must contain status");
-  const statusValue = normalizeStateSpelling(rawStatus);
   const reasonCodes = value.reason_codes ?? [];
   if (!Array.isArray(reasonCodes) || !reasonCodes.every((code) => typeof code === "string")) {
     throw new ProtocolEnvelopeError("status item reason_codes must be strings");
   }
+  const normalizedReasons = reasonCodes.map((code) => normalizeStateSpelling(code));
+  // status/2 represents expired_review as blocked. Preserve the structured
+  // reason as the compatibility discriminator so older payloads still render
+  // the recovery state instead of an ordinary hold.
+  const statusValue = normalizeStateSpelling(rawStatus) === "blocked"
+    && normalizedReasons.some((code) => [
+      "expiry_review_required",
+      "hard_budget_elapsed",
+      "lease_elapsed",
+      "attempt_expired",
+      "attempt_expiry_pending",
+    ].includes(code))
+    ? "expired_review"
+    : normalizeStateSpelling(rawStatus);
   const primaryReason = value.primary_reason;
   if (primaryReason !== undefined && (typeof primaryReason !== "string" || reasonCodes[0] !== primaryReason)) {
     throw new ProtocolEnvelopeError("status item primary_reason must match the first reason code");
@@ -858,7 +881,7 @@ function normalizeStatusItem(value: unknown): StatusItem {
     };
   };
   const normalizeActions = (raw: unknown): ServerActionSet | undefined => {
-    if (raw === undefined) return undefined;
+    if (raw === undefined || raw === null) return undefined;
     if (!isObject(raw) || !Array.isArray(raw.allowed) || !Array.isArray(raw.denied)) {
       throw new ProtocolEnvelopeError("status actions must contain allowed and denied arrays");
     }
@@ -884,6 +907,27 @@ function normalizeStatusItem(value: unknown): StatusItem {
       denied,
     };
   };
+  const actions = normalizeActions(value.actions);
+  const actionContext = value.action_context;
+  if (actionContext !== undefined && actionContext !== null
+    && (!isObject(actionContext) || typeof actionContext.state !== "string"
+      || (actionContext.missing_facts !== undefined
+        && (!Array.isArray(actionContext.missing_facts)
+          || !actionContext.missing_facts.every((fact) => typeof fact === "string"))))) {
+    throw new ProtocolEnvelopeError("status action context has invalid fields");
+  }
+  if (actions) {
+    const descriptors = [
+      ...actions.allowed,
+      ...actions.denied.map((entry) => entry.descriptor),
+    ];
+    for (const descriptor of descriptors) {
+      if (descriptor.target.work_id !== value.work_id
+        || (typeof value.project_id === "string" && descriptor.target.project_id !== value.project_id)) {
+        throw new ProtocolEnvelopeError("status action descriptor target does not match work row");
+      }
+    }
+  }
   const dependencyValue = isObject(value.dependency) ? value.dependency.prerequisites : value.dependencies;
   const dependencies = normalizeDependencies(dependencyValue);
   const nextStatusChange = value.next_status_change_at;
@@ -916,7 +960,11 @@ function normalizeStatusItem(value: unknown): StatusItem {
     lifecycle: typeof value.lifecycle === "string" ? normalizeStateSpelling(value.lifecycle) : undefined,
     receipt: value.receipt,
     receipt_id: typeof value.receipt_id === "string" || value.receipt_id === null ? value.receipt_id : undefined,
-    actions: normalizeActions(value.actions),
+    actions,
+    action_context: actionContext === undefined || actionContext === null ? undefined : {
+      state: actionContext.state as string,
+      missing_facts: actionContext.missing_facts as string[] | undefined,
+    },
   };
 }
 

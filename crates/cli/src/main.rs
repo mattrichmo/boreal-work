@@ -699,22 +699,18 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
                 )
             })?
         };
-        // Bootstrap is the one explicitly labeled compatibility path. The
-        // production store requires a project workspace binding before it
-        // can append `project.init`; the shared store needs an atomic
-        // bootstrap primitive to remove this exception without creating an
-        // unbound operation. Every post-init route below uses the canonical
-        // production schema.
-        let store = SqliteStore::open(&path, LEGACY_SCHEMA).map_err(map_store_error)?;
+        let binding = workspace_binding(&binding_root)?;
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).map_err(map_store_error)?;
         let app = WorkApplication::new(&store);
         let initialized_at = now();
         let result = app
-            .init_project(
+            .init_project_with_workspace(
                 &ProjectId::new(project.clone()),
                 &parsed.options.actor,
                 "agent",
                 "cli",
                 "CLI agent",
+                &binding,
                 &initialized_at,
                 operation.to_owned(),
             )
@@ -737,13 +733,6 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         } else {
             (None, None)
         };
-        bind_project_workspace(
-            &store,
-            &project,
-            &binding_root,
-            result.changed.then_some(operation),
-            &initialized_at,
-        )?;
         return Ok(CliResult {
             outcome,
             revision: Some(result.snapshot_revision),
@@ -2589,6 +2578,16 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
             "hard_deadline": stamp(attempt.max_attempt_deadline.as_millis()),
         })
     });
+    // A compatibility status row does not yet carry the v3 identity/proof
+    // facts required to make action descriptors authoritative.  Do not send
+    // synthetic denied descriptors here: they would override the legacy
+    // discovery hint in clients while still claiming that the row is
+    // selectable.  Once the store supplies a complete action context, the
+    // same response includes the canonical descriptor set.
+    let actions = item
+        .actions
+        .as_ref()
+        .map(|actions| action_decision_json(actions, true));
     json!({
         "work_id": item.work.id.as_str(),
         "project_id": item.work.project_id.as_str(),
@@ -2599,20 +2598,23 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "lifecycle": lifecycle_name(item.work.lifecycle),
         "priority": item.work.priority,
         "dispatch_policy": dispatch_policy_name(item.work.dispatch_policy),
-        "status": status_name(item.display_status()),
+        // `status` is the status/2 compatibility field. Keep the richer
+        // status/3 value in `display_status` so newer clients can render
+        // expiry as its own recovery state without breaking older clients.
+        "status": status2_name(item.display_status()),
         "display_status": status_name(item.display_status()),
         // Compatibility status rows predate the v3 identity/proof read model.
         // Keep their legacy readiness hint for discovery, but keep the
         // server-derived action set alongside it; mutating commands still
         // authorize through their own canonical transaction.
-        "claimable": status_item_selection_eligible(item),
-        "claimable_for_actor": status_item_selection_eligible(item),
+        "claimable": item.claimable_for_actor(),
+        "claimable_for_actor": item.claimable_for_actor(),
         "primary_reason": item.decision.primary_reason.stable_code(),
         "reason_codes": item.decision.reason_codes.iter().map(|reason| reason.stable_code()).collect::<Vec<_>>(),
         "next_action": item.decision.next_action.map(domain_action_name),
         "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
         "attempt": attempt,
-        "actions": action_decision_json(&item.actions, false),
+        "actions": actions,
         "action_context": {
             "state": item.action_context.state(),
             "missing_facts": item.action_context.missing_facts(),
@@ -2621,7 +2623,7 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "dependencies": item.dependency_blockers.iter().map(|blocker| json!({
                 "work_id": blocker.work_id.as_str(),
                 "display_status": status_name(blocker.display_status),
-                "status": status_name(blocker.display_status),
+                "status": status2_name(blocker.display_status),
                 "satisfies_default": blocker.satisfies_default,
                 "satisfied": blocker.satisfies_default,
             })).collect::<Vec<_>>(),
@@ -2696,11 +2698,7 @@ fn inline_status_action(action: boreal_domain::actions::ActionKind) -> bool {
 /// this is exactly the server-derived Claim decision. Until then, the real
 /// claim/start mutation remains the authority and can reject the candidate.
 fn status_item_selection_eligible(item: &boreal_application::StatusWork) -> bool {
-    if item.action_context.state() == "unavailable" {
-        item.decision.claimable_for_actor
-    } else {
-        item.claimable_for_actor()
-    }
+    item.claimable_for_actor()
 }
 
 fn action_descriptor_json(
@@ -2924,6 +2922,13 @@ fn status_name(status: boreal_domain::DerivedStatus) -> &'static str {
         boreal_domain::DerivedStatus::RetryWait => "retry_wait",
         boreal_domain::DerivedStatus::ExpiredReview => "expired_review",
         boreal_domain::DerivedStatus::Cancelled => "cancelled",
+    }
+}
+
+fn status2_name(status: boreal_domain::DerivedStatus) -> &'static str {
+    match status {
+        boreal_domain::DerivedStatus::ExpiredReview => "blocked",
+        other => status_name(other),
     }
 }
 
@@ -5240,16 +5245,10 @@ fn resolve_workspace_root(gate_root: &Path) -> Result<PathBuf, CliError> {
     Ok(root)
 }
 
-/// Installs the project/workspace identity after `init` has created the
-/// project-local files. The database lineage comes from the store's
-/// canonical opener; the CLI contributes only the resolved workspace root.
-fn bind_project_workspace(
-    store: &SqliteStore,
-    project_id: &str,
-    project_root: &Path,
-    operation_id: Option<&str>,
-    now: &str,
-) -> Result<(), CliError> {
+/// Resolves the validated project/workspace identity supplied to the atomic
+/// production bootstrap primitive. Filesystem canonicalization stays outside
+/// the SQLite transaction; only the resulting immutable binding is persisted.
+fn workspace_binding(project_root: &Path) -> Result<WorkspaceBinding, CliError> {
     let canonical_root = fs::canonicalize(project_root).map_err(|error| {
         CliError::with(
             ErrorCode::NotFound,
@@ -5277,16 +5276,7 @@ fn bind_project_workspace(
             format!("cannot establish the project workspace identity: {error}"),
         )
     })?;
-    let identity = IdentityStore::new(store);
-    let context = identity
-        .bind_project(project_id, &binding, now)
-        .map_err(map_identity_error)?;
-    if let Some(operation_id) = operation_id {
-        identity
-            .record_operation_context(&context, operation_id)
-            .map_err(map_identity_error)?;
-    }
-    Ok(())
+    Ok(binding)
 }
 
 fn map_identity_error(error: IdentityError) -> CliError {
@@ -7077,6 +7067,14 @@ mod tests {
             "queued"
         );
         assert_eq!(status_name(boreal_domain::DerivedStatus::Ready), "ready");
+        assert_eq!(
+            status2_name(boreal_domain::DerivedStatus::ExpiredReview),
+            "blocked"
+        );
+        assert_eq!(
+            status_name(boreal_domain::DerivedStatus::ExpiredReview),
+            "expired_review"
+        );
     }
 
     #[test]
@@ -7419,7 +7417,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a shared atomic production bootstrap primitive"]
     fn production_schema_bootstrap_binds_identity_before_project_init() {
         let path = env::temp_dir().join(format!(
             "boreal-cli-production-bootstrap-{}.sqlite",
@@ -7429,17 +7426,49 @@ mod tests {
         let store = SqliteStore::open(&path, PRODUCTION_SCHEMA)
             .expect("production schema opens before bootstrap");
         let app = WorkApplication::new(&store);
-
-        app.init_project(
-            &ProjectId::new("production-bootstrap"),
-            "agent-1",
-            "agent",
-            "cli",
-            "CLI agent",
-            "unix-ms:1",
-            "op-production-bootstrap",
+        let binding = WorkspaceBinding::new(
+            "/tmp/boreal-production-bootstrap",
+            "/tmp/boreal-production-bootstrap",
+            "sha256:production-bootstrap",
         )
-        .expect("production bootstrap must bind identity before project.init");
+        .expect("bootstrap binding is valid");
+
+        let result = app
+            .init_project_with_workspace(
+                &ProjectId::new("production-bootstrap"),
+                "agent-1",
+                "agent",
+                "cli",
+                "CLI agent",
+                &binding,
+                "unix-ms:1",
+                "op-production-bootstrap",
+            )
+            .expect("production bootstrap must bind identity before project.init");
+        assert!(result.changed);
+        let identity = IdentityStore::new(&store);
+        assert_eq!(
+            identity.workspace_binding("production-bootstrap").unwrap(),
+            binding
+        );
+        let context = identity.context("production-bootstrap").unwrap();
+        assert!(identity
+            .operation(&context, "op-production-bootstrap")
+            .unwrap()
+            .is_some());
+        let replay = app
+            .init_project_with_workspace(
+                &ProjectId::new("production-bootstrap"),
+                "agent-1",
+                "agent",
+                "cli",
+                "CLI agent",
+                &binding,
+                "unix-ms:2",
+                "op-production-bootstrap",
+            )
+            .expect("identical bootstrap retries must read back");
+        assert!(!replay.changed);
 
         let _ = fs::remove_file(path);
     }
