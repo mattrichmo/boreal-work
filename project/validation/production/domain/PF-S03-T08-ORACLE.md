@@ -10,7 +10,7 @@ to the accepted policy artifacts and the T08-owned source record
 | Transition contract | `boreal.work-transition/2` |
 | Fixture revision | `m02-candidate.1` |
 | Accepted contract source | `784a41b3802c29a76721c55eef2e9493283396c2` |
-| Current committed source revision at attempt-4 start | `0d9611a017d5dc167e92fe79e8d65756fbac2d5a` |
+| Current committed source revision at attempt-5 start | `3017a1dbebaa7945f82b2a2512ec0c1eabbd69c9` |
 | Contract manifest SHA-256 | `131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa` |
 | Status/actions SHA-256 | `b2b41ffd640811118e2c8f0ac0ba9c60d79cc46ccc73135cdcf609ae384b3a94` |
 | Transition table SHA-256 | `4a22bceb49b8d40d96a872f2ae3aed8b79a81d5636339c609914a05b3a2a9d38` |
@@ -63,7 +63,7 @@ look like a passing property run.
 
 If coordinator integration changes the committed `HEAD` or any bound bytes,
 the source record's `current_source_revision` and affected `artifact::`
-hashes must be regenerated, then the focused target and attempt-4 evidence
+hashes must be regenerated, then the focused target and latest attempt
 must be rerun on that exact tree.
 
 This is pure-domain evidence only. It does not claim store transactions,

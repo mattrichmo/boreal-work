@@ -8,10 +8,10 @@ committed-revision field and rerun the target if integration produces a new
 `HEAD`.
 
 base_source_revision: `0d9611a017d5dc167e92fe79e8d65756fbac2d5a`
-current_source_revision: `0d9611a017d5dc167e92fe79e8d65756fbac2d5a`
+current_source_revision: `3017a1dbebaa7945f82b2a2512ec0c1eabbd69c9`
 accepted_contract_source_revision: `784a41b3802c29a76721c55eef2e9493283396c2`
 fixture_revision: `m02-candidate.1`
-worktree_state: `dirty; unrelated worker paths are preserved; no commit or push by this worker`
+worktree_state: `tracked source clean at the bound commit; untracked memory/ is excluded from evidence`
 
 ## Normative artifact hashes
 
@@ -36,7 +36,7 @@ artifact::crates/domain/src/decision_inputs.rs = `24895893d826f6a540975e648392de
 artifact::crates/domain/src/dependencies.rs = `43001bf2e6009aea63d74662cd47fd1d65183ba76759280c20edeb4076298112`
 artifact::crates/domain/src/time_policy.rs = `58ee17cdcad6e4cd7f42f75f68c5526471ce278d8c6f098c011f5207b5d2ac58`
 artifact::crates/domain/tests/production_properties.rs = `9f88c311759c119d4c35eec5deec5882442dd0e23845fcbe7ef5e189726f0439`
-artifact::project/validation/production/domain/PF-S03-T08-ORACLE.md = `f354a5299a8ed1a6130e31205978abf8043bb94a3be84969457aca516bb07a8d`
+artifact::project/validation/production/domain/PF-S03-T08-ORACLE.md = `87a997bc8ceed1d83d71ea77fd733358b60fc4747f460ea7d4d3c074f560de3a`
 ```
 
 ## Contract identity and compatibility boundary
@@ -50,10 +50,10 @@ scheduled-start reason and a denied claim at the pre-activation boundary.
 ## Regeneration rule for integration
 
 If the coordinator's final integration commit is not
-`0d9611a017d5dc167e92fe79e8d65756fbac2d5a`, regenerate
+`3017a1dbebaa7945f82b2a2512ec0c1eabbd69c9`, regenerate
 `current_source_revision` here to that exact committed `HEAD`, recompute every
 `artifact::` hash above (including the test target and oracle document if
 their bytes changed), rerun the focused target with `--nocapture`, and update
-the attempt-4 `COMMANDS.md`, `EVIDENCE.md`, and `HANDOFF.md` identities. A
+the new attempt's `COMMANDS.md`, `EVIDENCE.md`, and `HANDOFF.md` identities. A
 source or contract implementation change also requires the corresponding
 hash update and a fresh focused result; do not reuse this receipt.

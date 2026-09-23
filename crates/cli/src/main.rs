@@ -54,7 +54,11 @@ mod service;
 mod setup;
 mod update;
 
-const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+/// The compatibility schema is reserved for explicitly labeled fixtures and
+/// in-process legacy tests. Shipped CLI/service/dashboard paths must use the
+/// exact production payload below so `SqliteStore` enables its canonical
+/// identity and operation/audit enforcement.
+const LEGACY_SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
 const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 const MAX_JSON_BYTES: usize = boreal_protocol::bounds::MAX_INLINE_OUTPUT_BYTES;
 const ENVELOPE_METADATA_BUDGET: usize = 4096;
@@ -695,7 +699,13 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
                 )
             })?
         };
-        let store = SqliteStore::open(&path, SCHEMA).map_err(map_store_error)?;
+        // Bootstrap is the one explicitly labeled compatibility path. The
+        // production store requires a project workspace binding before it
+        // can append `project.init`; the shared store needs an atomic
+        // bootstrap primitive to remove this exception without creating an
+        // unbound operation. Every post-init route below uses the canonical
+        // production schema.
+        let store = SqliteStore::open(&path, LEGACY_SCHEMA).map_err(map_store_error)?;
         let app = WorkApplication::new(&store);
         let initialized_at = now();
         let result = app
@@ -742,7 +752,7 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
             ..CliResult::default()
         });
     }
-    let store = SqliteStore::open(&path, SCHEMA).map_err(map_store_error)?;
+    let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).map_err(map_store_error)?;
     let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
     dispatch(&parsed, operation, &app, &adapter, &store)
@@ -2591,13 +2601,22 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "dispatch_policy": dispatch_policy_name(item.work.dispatch_policy),
         "status": status_name(item.display_status()),
         "display_status": status_name(item.display_status()),
-        "claimable": item.decision.claimable_for_actor,
-        "claimable_for_actor": item.decision.claimable_for_actor,
+        // Compatibility status rows predate the v3 identity/proof read model.
+        // Keep their legacy readiness hint for discovery, but keep the
+        // server-derived action set alongside it; mutating commands still
+        // authorize through their own canonical transaction.
+        "claimable": status_item_selection_eligible(item),
+        "claimable_for_actor": status_item_selection_eligible(item),
         "primary_reason": item.decision.primary_reason.stable_code(),
         "reason_codes": item.decision.reason_codes.iter().map(|reason| reason.stable_code()).collect::<Vec<_>>(),
         "next_action": item.decision.next_action.map(domain_action_name),
         "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
         "attempt": attempt,
+        "actions": action_decision_json(&item.actions, false),
+        "action_context": {
+            "state": item.action_context.state(),
+            "missing_facts": item.action_context.missing_facts(),
+        },
         "gates": { "open": open, "satisfied": satisfied },
         "dependencies": item.dependency_blockers.iter().map(|blocker| json!({
                 "work_id": blocker.work_id.as_str(),
@@ -2616,6 +2635,197 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
             })).collect::<Vec<_>>(),
         },
     })
+}
+
+fn action_decision_json(
+    decision: &boreal_domain::actions::ActionDecision,
+    context_available: bool,
+) -> Value {
+    json!({
+        "allowed": decision
+            .allowed
+            .iter()
+            .filter(|descriptor| inline_status_action(descriptor.action))
+            .map(|descriptor| action_descriptor_json(descriptor, context_available))
+            .collect::<Vec<_>>(),
+        "denied": decision
+            .denied
+            .iter()
+            .filter(|denied| inline_status_action(denied.descriptor.action))
+            .map(|denied| {
+                json!({
+                    "descriptor": action_descriptor_json(&denied.descriptor, context_available),
+                    "reason": {
+                        "code": action_denial_code(&denied.reason),
+                        "detail": format!("{:?}", denied.reason),
+                    },
+                    "reason_code": action_denial_code(&denied.reason),
+                    "recovery": denied
+                        .recovery
+                        .iter()
+                        .map(|action| action_kind_name(*action))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// The status envelope carries the action vocabulary consumed by the current
+/// terminal client. The domain still evaluates the complete action set; the
+/// remaining descriptors are available through the dedicated action/readback
+/// routes rather than making a normal paginated status page exceed its inline
+/// protocol bound.
+fn inline_status_action(action: boreal_domain::actions::ActionKind) -> bool {
+    use boreal_domain::actions::ActionKind;
+    matches!(
+        action,
+        ActionKind::Inspect
+            | ActionKind::Claim
+            | ActionKind::AcceptAttempt
+            | ActionKind::StartAttempt
+            | ActionKind::AttachEvidence
+            | ActionKind::FinishClose
+            | ActionKind::Release
+            | ActionKind::Recover
+    )
+}
+
+/// Select a candidate for discovery without turning a compatibility status
+/// hint into authorization. Once the store supplies v3 identity/proof facts,
+/// this is exactly the server-derived Claim decision. Until then, the real
+/// claim/start mutation remains the authority and can reject the candidate.
+fn status_item_selection_eligible(item: &boreal_application::StatusWork) -> bool {
+    if item.action_context.state() == "unavailable" {
+        item.decision.claimable_for_actor
+    } else {
+        item.claimable_for_actor()
+    }
+}
+
+fn action_descriptor_json(
+    descriptor: &boreal_domain::actions::ActionDescriptor,
+    context_available: bool,
+) -> Value {
+    json!({
+        "action": action_kind_name(descriptor.action),
+        "target": {
+            "project_id": descriptor.target.project_id.as_str(),
+            "work_id": descriptor.target.work_id.as_str(),
+            "entity_revision": context_available.then_some(descriptor.target.revision.get()),
+        },
+        "expected_project_revision": descriptor.expected_project_revision.0,
+        "expected_entity_revision": context_available.then_some(descriptor.expected_entity_revision.get()),
+        "expected_proof_revision": context_available.then(|| descriptor.expected_proof_revision.map(|revision| revision.get())).flatten(),
+        "attempt": context_available.then(|| descriptor.attempt.as_ref().map(|attempt| json!({
+            "attempt_id": attempt.attempt_id.as_str(),
+            "fence": attempt.fence.get(),
+        }))).flatten(),
+        "required_roles": descriptor
+            .required_roles
+            .iter()
+            .map(|role| actor_role_name(*role))
+            .collect::<Vec<_>>(),
+        "required_inputs": descriptor
+            .required_inputs
+            .iter()
+            .map(|input| action_input_name(*input))
+            .collect::<Vec<_>>(),
+        "confirmation": descriptor.confirmation,
+        "read_only": descriptor.read_only,
+        "recovery": descriptor.recovery,
+    })
+}
+
+fn action_kind_name(value: boreal_domain::actions::ActionKind) -> &'static str {
+    use boreal_domain::actions::ActionKind::*;
+    match value {
+        Inspect => "inspect",
+        ReadHistory => "read_history",
+        ReadOperation => "read_operation",
+        Export => "export",
+        Publish => "publish",
+        Claim => "claim",
+        AcceptAttempt => "accept_attempt",
+        StartAttempt => "start_attempt",
+        Checkpoint => "checkpoint",
+        AttachEvidence => "attach_evidence",
+        Submit => "submit",
+        RequestReview => "request_review",
+        Review => "review",
+        FinishClose => "finish_close",
+        Close => "close",
+        Stop => "stop",
+        Release => "release",
+        PausePolicy => "pause_policy",
+        ResumePolicy => "resume_policy",
+        Cancel => "cancel",
+        Reopen => "reopen",
+        ResolveHold => "resolve_hold",
+        WaiveDependency => "waive_dependency",
+        ForceGate => "force_gate",
+        Recover => "recover",
+        ReconcileResource => "reconcile_resource",
+        Repair => "repair",
+    }
+}
+
+fn action_input_name(value: boreal_domain::actions::ActionInputKind) -> &'static str {
+    use boreal_domain::actions::ActionInputKind::*;
+    match value {
+        ExpectedProjectRevision => "expected_project_revision",
+        ExpectedEntityRevision => "expected_entity_revision",
+        ExpectedProofRevision => "expected_proof_revision",
+        AttemptId => "attempt_id",
+        Fence => "fence",
+        SessionId => "session_id",
+        OperationId => "operation_id",
+        Confirmation => "confirmation",
+        Reason => "reason",
+        Comment => "comment",
+        Evidence => "evidence",
+        Summary => "summary",
+        ReviewDecision => "review_decision",
+        RecoveryDisposition => "recovery_disposition",
+    }
+}
+
+fn actor_role_name(value: boreal_domain::ActorRole) -> &'static str {
+    match value {
+        boreal_domain::ActorRole::Agent => "agent",
+        boreal_domain::ActorRole::Reviewer => "reviewer",
+        boreal_domain::ActorRole::Operator => "operator",
+        boreal_domain::ActorRole::Publisher => "publisher",
+    }
+}
+
+fn action_denial_code(value: &boreal_domain::actions::ActionDenialReason) -> &'static str {
+    use boreal_domain::actions::ActionDenialReason::*;
+    match value {
+        Unauthenticated => "unauthenticated",
+        ScopeMismatch => "scope_mismatch",
+        InvalidFacts => "invalid_facts",
+        AvailabilityUnavailable(_) => "availability_unavailable",
+        IntegrityQuarantined => "integrity_quarantined",
+        IntegrityDegraded => "integrity_degraded",
+        RoleDenied { .. } => "role_denied",
+        DelegationInvalid => "delegation_invalid",
+        PolicyDenied => "policy_denied",
+        StatusDenied(_) => "status_denied",
+        HoldActive(_) => "hold_active",
+        StaleSnapshot { .. } => "stale_snapshot",
+        StaleEntity { .. } => "stale_entity",
+        StaleProof { .. } => "stale_proof",
+        MissingAttempt => "attempt_missing",
+        StaleFence { .. } => "stale_fence",
+        AttemptOwnerMismatch => "attempt_owner_mismatch",
+        AttemptPhaseDenied(_) => "attempt_phase_denied",
+        MissingSubmission => "submission_missing",
+        ReviewNotIndependent => "review_not_independent",
+        RecoveryRequired => "recovery_required",
+        NoActiveHold => "hold_missing",
+        ActionNotApplicable => "action_not_applicable",
+    }
 }
 
 fn lifecycle_name(value: PersistedLifecycle) -> &'static str {
@@ -3622,7 +3832,7 @@ fn next_result(
     if let Some(item) = snapshot
         .items
         .into_iter()
-        .find(|item| item.work.kind == WorkKind::Task && item.decision.claimable_for_actor)
+        .find(|item| item.work.kind == WorkKind::Task && status_item_selection_eligible(item))
     {
         let work_id = item.work.id.as_str().to_owned();
         let next = AgentNextDto {
@@ -5929,16 +6139,67 @@ fn finish_close_request_digest(
             "actor_id": actor,
             "session_id": session,
             "expected_revision": expected_revision,
-            "receipt_id": receipt.receipt_id.as_str(),
-            "receipt_operation_id": receipt.operation_id.as_str(),
-            "gate_id": receipt.gate_id.as_str(),
-            "source_snapshot_hash": receipt.source_snapshot_hash.as_str(),
-            "config_identity": receipt.config_identity.as_str(),
-            "output_digest": receipt.output_digest,
-            "output_ref": receipt.output_ref,
+            "receipt": {
+                "schema_version": receipt.schema_version,
+                "receipt_id": receipt.receipt_id.as_str(),
+                "operation_id": receipt.operation_id.as_str(),
+                "subject": {
+                    "work_id": receipt.work_id.as_str(),
+                    "attempt_id": receipt.attempt_id.as_str(),
+                    "fence": receipt.fence.get(),
+                    "gate_id": receipt.gate_id.as_str(),
+                },
+                "executable": receipt.executable,
+                "argv": receipt.argv,
+                "cwd": receipt.cwd,
+                "exit_code": receipt.exit_code,
+                "started_at": receipt.started_at.as_millis(),
+                "ended_at": receipt.ended_at.as_millis(),
+                "source_snapshot_hash": receipt.source_snapshot_hash.as_str(),
+                "config_identity": receipt.config_identity.as_str(),
+                "environment_fingerprint": receipt.environment_fingerprint,
+                "output_digest": receipt.output_digest,
+                "output_ref": receipt.output_ref,
+                "coverage": {
+                    "kind": finish_gate_kind_name(receipt.coverage.kind),
+                    "profile_id": receipt.coverage.profile_id.as_str(),
+                    "profile_version": receipt.coverage.profile_version,
+                    "observables": receipt.coverage.observables,
+                },
+                "attestation": finish_attestation_name(receipt.attestation),
+                "result": finish_receipt_result_name(receipt.result),
+            },
             "summary": summary_body,
         }),
     )
+}
+
+fn finish_gate_kind_name(kind: GateKind) -> &'static str {
+    match kind {
+        GateKind::Checkpoint => "checkpoint",
+        GateKind::Verification => "verification",
+        GateKind::Review => "review",
+        GateKind::OperatorApproval => "operator_approval",
+        GateKind::Summary => "summary",
+        GateKind::Audit => "audit",
+    }
+}
+
+fn finish_attestation_name(attestation: ExecutorAttestation) -> &'static str {
+    match attestation {
+        ExecutorAttestation::BorealWitnessed => "boreal_witnessed",
+        ExecutorAttestation::ExternalAttested => "external_attested",
+        ExecutorAttestation::SelfReported => "self_reported",
+        ExecutorAttestation::Unknown => "unknown",
+    }
+}
+
+fn finish_receipt_result_name(result: ReceiptResult) -> &'static str {
+    match result {
+        ReceiptResult::Passed => "passed",
+        ReceiptResult::Failed => "failed",
+        ReceiptResult::Stale => "stale",
+    }
 }
 
 fn finish_result_operation_id(operation: &str) -> String {
@@ -6080,6 +6341,17 @@ fn finish_result_readback(
     operation: &str,
     result_operation: &str,
 ) -> Result<Option<CliResult>, CliError> {
+    let parent = journal
+        .readback(operation)
+        .map_err(map_application_error)?
+        .and_then(|readback| readback.operation)
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                "finish_close result exists without its parent operation",
+            )
+        })?;
     if let Some(readback) = journal
         .readback(result_operation)
         .map_err(map_application_error)?
@@ -6098,17 +6370,63 @@ fn finish_result_readback(
                 "finish_close result operation has an unexpected command",
             ));
         }
+        if record.operation_id != result_operation
+            || record.project_id != parent.project_id
+            || record.actor_id != parent.actor_id
+            || record.session_id != parent.session_id
+            || record.expected_revision != parent.expected_revision
+            || record.attempt_id != parent.attempt_id
+            || record.fence != parent.fence
+        {
+            return Err(CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                "finish_close result operation identity does not match its parent",
+            ));
+        }
+        let expected_request_digest = canonical_request_digest(
+            "finish.close.result/v1",
+            json!({
+                "parent_operation_id": parent.operation_id,
+                "parent_request_digest": parent.request_digest,
+            }),
+        );
+        if record.request_digest != expected_request_digest {
+            return Err(CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                "finish_close result operation digest does not match its parent",
+            ));
+        }
+        let result_value: Value = serde_json::from_str(&record.result_json).map_err(|error| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                format!("finish_close result is invalid JSON: {error}"),
+            )
+        })?;
+        if result_value
+            .get("parent_operation_id")
+            .and_then(Value::as_str)
+            != Some(parent.operation_id.as_str())
+            || result_value
+                .get("parent_request_digest")
+                .and_then(Value::as_str)
+                != Some(parent.request_digest.as_str())
+        {
+            return Err(CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                "finish_close result payload does not match its parent",
+            ));
+        }
         return finish_result_from_operation(&record).map(Some);
     }
-    if let Some(readback) = journal.readback(operation).map_err(map_application_error)? {
-        if let Some(record) = readback.operation {
-            if !matches!(
-                record.outcome,
-                StoreOperationOutcome::Busy | StoreOperationOutcome::Unknown
-            ) {
-                return finish_result_from_operation(&record).map(Some);
-            }
-        }
+    if !matches!(
+        parent.outcome,
+        StoreOperationOutcome::Busy | StoreOperationOutcome::Unknown
+    ) {
+        return finish_result_from_operation(&parent).map(Some);
     }
     Ok(None)
 }
@@ -6130,6 +6448,7 @@ fn append_finish_result_operation(
     let created_at = now();
     let result_json = json!({
         "parent_operation_id": parent_operation,
+        "parent_request_digest": parent_request_digest,
         "close": result,
     })
     .to_string();
@@ -6261,7 +6580,7 @@ fn select_claimable_work(
     Ok(snapshot
         .items
         .into_iter()
-        .find(|item| item.work.kind == WorkKind::Task && item.decision.claimable_for_actor)
+        .find(|item| item.work.kind == WorkKind::Task && status_item_selection_eligible(item))
         .map(|item| item.work.id.as_str().to_owned()))
 }
 
@@ -7061,6 +7380,71 @@ mod tests {
     }
 
     #[test]
+    fn shipped_post_init_routes_require_canonical_project_binding() {
+        let path = env::temp_dir().join(format!(
+            "boreal-cli-production-schema-route-{}.sqlite",
+            now_ms_u64()
+        ));
+        let db = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+
+        run(&args(&["init", "production-route", "--db", &db]))
+            .expect("bootstrap initialization succeeds");
+
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA)
+            .expect("post-init route reopens through production schema");
+        assert!(store.is_canonical_production());
+        store
+            .execute_batch(
+                "DELETE FROM boreal_project_identity
+                 WHERE project_id = 'production-route';",
+            )
+            .expect("fixture removes the workspace binding");
+        drop(store);
+
+        let error = run(&args(&[
+            "work",
+            "create",
+            "production-route",
+            "unbound-work",
+            "Unbound work",
+            "--db",
+            &db,
+        ]))
+        .expect_err("canonical post-init route must reject an unbound project");
+        assert_eq!(error.code, ErrorCode::ClaimConflict);
+        assert!(error.message.contains("workspace identity binding"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "requires a shared atomic production bootstrap primitive"]
+    fn production_schema_bootstrap_binds_identity_before_project_init() {
+        let path = env::temp_dir().join(format!(
+            "boreal-cli-production-bootstrap-{}.sqlite",
+            now_ms_u64()
+        ));
+        let _ = fs::remove_file(&path);
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA)
+            .expect("production schema opens before bootstrap");
+        let app = WorkApplication::new(&store);
+
+        app.init_project(
+            &ProjectId::new("production-bootstrap"),
+            "agent-1",
+            "agent",
+            "cli",
+            "CLI agent",
+            "unix-ms:1",
+            "op-production-bootstrap",
+        )
+        .expect("production bootstrap must bind identity before project.init");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn dependency_add_is_idempotent_and_cycle_failures_are_typed() {
         let path = env::temp_dir().join(format!("boreal-cli-dependency-{}.sqlite", now_ms_u64()));
         let db = path.to_string_lossy().to_string();
@@ -7507,11 +7891,253 @@ mod tests {
         ]))
         .expect_err("missing work is rejected before session registration");
         assert_eq!(error.code, ErrorCode::NotFound);
-        let store = SqliteStore::open(&path, SCHEMA).expect("database reopens");
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("database reopens");
         assert!(store
             .session("p", "session-preflight")
             .expect("session read succeeds")
             .is_none());
+        let _ = fs::remove_file(path);
+    }
+
+    fn finish_receipt_fixture() -> ReceiptPayload {
+        ReceiptPayload {
+            schema_version: "boreal.receipt.v1".to_owned(),
+            receipt_id: ReceiptId::new("receipt-finish-digest"),
+            operation_id: OperationId::new("receipt-operation-finish-digest"),
+            work_id: WorkId::new("finish-work"),
+            attempt_id: AttemptId::new("finish-attempt"),
+            fence: Fence::new(3),
+            gate_id: GateId::new("verification"),
+            executable: "bwrk-check".to_owned(),
+            argv: vec!["bwrk-check".to_owned(), "--strict".to_owned()],
+            cwd: "/workspace".to_owned(),
+            exit_code: 0,
+            started_at: TimestampMs::from_millis(10),
+            ended_at: TimestampMs::from_millis(11),
+            source_snapshot_hash: SourceVersionId::new("source-finish-digest"),
+            config_identity: ConfigIdentity::new("config-finish-digest"),
+            environment_fingerprint: "env-finish-digest".to_owned(),
+            output_digest: Some("sha256:output-finish-digest".to_owned()),
+            output_ref: Some("artifacts/output.txt".to_owned()),
+            coverage: ReceiptCoverage {
+                kind: GateKind::Verification,
+                profile_id: boreal_domain::ProfileId::new("focused"),
+                profile_version: "7".to_owned(),
+                observables: vec!["exit_status".to_owned(), "summary".to_owned()],
+            },
+            attestation: ExecutorAttestation::ExternalAttested,
+            result: ReceiptResult::Passed,
+        }
+    }
+
+    #[test]
+    fn finish_close_digest_changes_for_each_proof_relevant_receipt_field() {
+        let base = finish_receipt_fixture();
+        let digest = |receipt: &ReceiptPayload| {
+            finish_close_request_digest(
+                &ProjectId::new("finish-project"),
+                "finish-work",
+                "finish-attempt",
+                3,
+                "actor-finish",
+                "session-finish",
+                Some(19),
+                receipt,
+                "finish summary",
+            )
+        };
+        let expected = digest(&base);
+        let mut variants = Vec::new();
+
+        let mut value = base.clone();
+        value.schema_version.push_str("-changed");
+        variants.push(("schema_version", value));
+        let mut value = base.clone();
+        value.receipt_id = ReceiptId::new("receipt-finish-digest-2");
+        variants.push(("receipt_id", value));
+        let mut value = base.clone();
+        value.operation_id = OperationId::new("receipt-operation-finish-digest-2");
+        variants.push(("operation_id", value));
+        let mut value = base.clone();
+        value.work_id = WorkId::new("finish-work-2");
+        variants.push(("work_id", value));
+        let mut value = base.clone();
+        value.attempt_id = AttemptId::new("finish-attempt-2");
+        variants.push(("attempt_id", value));
+        let mut value = base.clone();
+        value.fence = Fence::new(4);
+        variants.push(("fence", value));
+        let mut value = base.clone();
+        value.gate_id = GateId::new("checkpoint");
+        variants.push(("gate_id", value));
+        let mut value = base.clone();
+        value.executable.push_str("-changed");
+        variants.push(("executable", value));
+        let mut value = base.clone();
+        value.argv.push("--changed".to_owned());
+        variants.push(("argv", value));
+        let mut value = base.clone();
+        value.cwd.push_str("/changed");
+        variants.push(("cwd", value));
+        let mut value = base.clone();
+        value.exit_code = 1;
+        variants.push(("exit_code", value));
+        let mut value = base.clone();
+        value.started_at = TimestampMs::from_millis(12);
+        variants.push(("started_at", value));
+        let mut value = base.clone();
+        value.ended_at = TimestampMs::from_millis(13);
+        variants.push(("ended_at", value));
+        let mut value = base.clone();
+        value.source_snapshot_hash = SourceVersionId::new("source-finish-digest-2");
+        variants.push(("source_snapshot_hash", value));
+        let mut value = base.clone();
+        value.config_identity = ConfigIdentity::new("config-finish-digest-2");
+        variants.push(("config_identity", value));
+        let mut value = base.clone();
+        value.environment_fingerprint.push_str("-changed");
+        variants.push(("environment_fingerprint", value));
+        let mut value = base.clone();
+        value.output_digest = Some("sha256:output-finish-digest-2".to_owned());
+        variants.push(("output_digest", value));
+        let mut value = base.clone();
+        value.output_ref = Some("artifacts/output-2.txt".to_owned());
+        variants.push(("output_ref", value));
+        let mut value = base.clone();
+        value.coverage.kind = GateKind::Summary;
+        variants.push(("coverage.kind", value));
+        let mut value = base.clone();
+        value.coverage.profile_id = boreal_domain::ProfileId::new("reviewed");
+        variants.push(("coverage.profile_id", value));
+        let mut value = base.clone();
+        value.coverage.profile_version.push_str("-changed");
+        variants.push(("coverage.profile_version", value));
+        let mut value = base.clone();
+        value.coverage.observables.push("new_observable".to_owned());
+        variants.push(("coverage.observables", value));
+        let mut value = base.clone();
+        value.attestation = ExecutorAttestation::BorealWitnessed;
+        variants.push(("attestation", value));
+        let mut value = base;
+        value.result = ReceiptResult::Failed;
+        variants.push(("result", value));
+
+        for (field, variant) in variants {
+            assert_ne!(
+                expected,
+                digest(&variant),
+                "receipt field {field} is not bound"
+            );
+        }
+    }
+
+    #[test]
+    fn finish_close_result_readback_rejects_mismatched_result_identity() {
+        let path = env::temp_dir().join(format!(
+            "boreal-cli-finish-readback-{}.sqlite",
+            now_ms_u64()
+        ));
+        let _ = fs::remove_file(&path);
+        run(&args(&[
+            "init",
+            "finish-project",
+            "--db",
+            path.to_str().unwrap(),
+        ]))
+        .expect("project initializes");
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("database reopens");
+        let identity = IdentityStore::new(&store)
+            .context("finish-project")
+            .expect("identity context opens");
+        let app = WorkApplication::new(&store);
+        let journal = app.authenticated_operation_journal(&identity);
+        let parent_operation = "op-finish-readback";
+        let result_operation = finish_result_operation_id(parent_operation);
+        let parent_digest =
+            canonical_request_digest("finish.close/v2", json!({"fixture": "finish-readback"}));
+        let timestamp = stamp(1);
+        journal
+            .append(
+                OperationRecord {
+                    operation_id: parent_operation.to_owned(),
+                    project_id: "finish-project".to_owned(),
+                    command: "finish_close".to_owned(),
+                    actor_id: DEFAULT_ACTOR.to_owned(),
+                    session_id: None,
+                    expected_revision: Some(19),
+                    attempt_id: Some("finish-attempt".to_owned()),
+                    fence: Some(3),
+                    request_digest: parent_digest.clone(),
+                    outcome: StoreOperationOutcome::Busy,
+                    result_json: json!({"result_operation_id": result_operation}).to_string(),
+                    revision: 0,
+                    created_at: timestamp.clone(),
+                    completed_at: None,
+                },
+                AuditEventRecord {
+                    project_id: "finish-project".to_owned(),
+                    revision: 0,
+                    operation_id: parent_operation.to_owned(),
+                    event_type: "close.requested".to_owned(),
+                    subject_type: "attempt".to_owned(),
+                    subject_id: "finish-attempt".to_owned(),
+                    actor_id: DEFAULT_ACTOR.to_owned(),
+                    session_id: None,
+                    fence: Some(3),
+                    as_of: timestamp.clone(),
+                    payload_json: "{}".to_owned(),
+                },
+            )
+            .expect("parent intent appends");
+        let result_digest = canonical_request_digest(
+            "finish.close.result/v1",
+            json!({
+                "parent_operation_id": parent_operation,
+                "parent_request_digest": parent_digest,
+            }),
+        );
+        journal
+            .append(
+                OperationRecord {
+                    operation_id: result_operation.clone(),
+                    project_id: "finish-project".to_owned(),
+                    command: "finish_close.result".to_owned(),
+                    actor_id: DEFAULT_ACTOR.to_owned(),
+                    session_id: None,
+                    expected_revision: Some(19),
+                    attempt_id: Some("wrong-attempt".to_owned()),
+                    fence: Some(3),
+                    request_digest: result_digest,
+                    outcome: StoreOperationOutcome::Rejected,
+                    result_json: json!({
+                        "parent_operation_id": parent_operation,
+                        "parent_request_digest": parent_digest,
+                        "close": {"close_state": "open"}
+                    })
+                    .to_string(),
+                    revision: 0,
+                    created_at: timestamp.clone(),
+                    completed_at: Some(timestamp.clone()),
+                },
+                AuditEventRecord {
+                    project_id: "finish-project".to_owned(),
+                    revision: 0,
+                    operation_id: result_operation.clone(),
+                    event_type: "close.completed".to_owned(),
+                    subject_type: "attempt".to_owned(),
+                    subject_id: "finish-attempt".to_owned(),
+                    actor_id: DEFAULT_ACTOR.to_owned(),
+                    session_id: None,
+                    fence: Some(3),
+                    as_of: timestamp,
+                    payload_json: "{}".to_owned(),
+                },
+            )
+            .expect("mismatched result appends for corruption fixture");
+
+        let error = finish_result_readback(&journal, parent_operation, &result_operation)
+            .expect_err("mismatched result identity is rejected");
+        assert_eq!(error.code, ErrorCode::ProtocolMismatch);
         let _ = fs::remove_file(path);
     }
 
@@ -7546,7 +8172,7 @@ mod tests {
         .expect("start data");
         let attempt_id = started["attempt_id"].as_str().expect("attempt id");
         let fence = started["fence"].as_u64().expect("fence");
-        SqliteStore::open(&db_path, SCHEMA)
+        SqliteStore::open(&db_path, PRODUCTION_SCHEMA)
             .expect("database reopens")
             .execute_batch(
                 "INSERT INTO source_version
@@ -7557,7 +8183,7 @@ mod tests {
                          'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');",
             )
             .expect("source snapshot registers");
-        SqliteStore::open(&db_path, SCHEMA)
+        SqliteStore::open(&db_path, PRODUCTION_SCHEMA)
             .expect("database reopens for proof context")
             .execute_batch(&format!(
                 "UPDATE attempt

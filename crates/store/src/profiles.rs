@@ -54,11 +54,14 @@ impl ProfileVersion {
         definition_json: impl Into<String>,
         created_at: impl Into<String>,
     ) -> Result<Self, StoreError> {
+        let definition_json = canonical_json(&definition_json.into()).map_err(|_| {
+            StoreError::Invalid("acceptance profile definition is not JSON".to_owned())
+        })?;
         let profile = Self {
             profile_id: profile_id.into(),
             version,
             policy_digest: policy_digest.into(),
-            definition_json: definition_json.into(),
+            definition_json,
             created_at: created_at.into(),
         };
         profile.validate_shape()?;
@@ -459,6 +462,26 @@ impl PinnedRequirements {
             .filter(|declaration| declaration.required)
             .map(|declaration| declaration.requirement_id.clone())
             .collect()
+    }
+
+    /// Returns the immutable declarations that can block acceptance.
+    ///
+    /// This is intentionally derived from the pinned declaration snapshot,
+    /// never from observed `gate` or `receipt` rows.  Closeout and status
+    /// callers can therefore distinguish “the observation is missing” from
+    /// “the requirement does not exist.”
+    pub fn required_declarations(&self) -> impl Iterator<Item = &GateRequirementDeclaration> {
+        self.declarations
+            .iter()
+            .filter(|declaration| declaration.required)
+    }
+
+    /// Returns whether a required declaration of the supplied kind exists.
+    /// The caller should use this against a persisted snapshot, not a live
+    /// projection of observed gate rows.
+    pub fn requires_kind(&self, kind: &str) -> bool {
+        self.required_declarations()
+            .any(|declaration| declaration.kind == kind)
     }
 
     fn validate_for_persistence(&self) -> Result<(), StoreError> {
@@ -1013,6 +1036,56 @@ impl<'a> ProfileStore<'a> {
     ) -> Result<Option<PinnedRequirements>, StoreError> {
         self.ensure_pinned_requirements_schema()?;
         self.read_pinned_requirements_inner(project_id, work_id, proof_revision)
+    }
+
+    /// Reads the latest immutable requirement snapshot for a work item.
+    ///
+    /// A missing snapshot is a corruption/repair condition, not an empty
+    /// requirement set.  This is the API shared closeout/status integration
+    /// should use when it needs the current declaration set.
+    pub fn current_pinned_requirements(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<PinnedRequirements, StoreError> {
+        self.ensure_pinned_requirements_schema()?;
+        let mut statement = self.store.prepare(
+            "SELECT MAX(proof_revision)
+             FROM boreal_pinned_requirement
+             WHERE project_id = ?1 AND work_id = ?2",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, work_id)?;
+        if statement.step()? != SQLITE_ROW {
+            return Err(StoreError::Corrupt(format!(
+                "missing pinned requirement revision for {project_id}/{work_id}"
+            )));
+        }
+        let revision = statement
+            .column_optional_i64(0)?
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                StoreError::Corrupt(format!(
+                    "missing pinned requirement revision for {project_id}/{work_id}"
+                ))
+            })?;
+        self.read_pinned_requirements_inner(project_id, work_id, revision)?
+            .ok_or_else(|| {
+                StoreError::Corrupt(format!(
+                    "pinned requirement revision {revision} disappeared for {project_id}/{work_id}"
+                ))
+            })
+    }
+
+    /// Returns required declarations from the latest persisted snapshot.
+    /// This deliberately has no “none means no gates” fallback.
+    pub fn current_required_declarations(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<Vec<GateRequirementDeclaration>, StoreError> {
+        let requirements = self.current_pinned_requirements(project_id, work_id)?;
+        Ok(requirements.required_declarations().cloned().collect())
     }
 
     fn read_pinned_requirements_inner(

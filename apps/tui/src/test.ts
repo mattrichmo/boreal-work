@@ -6,6 +6,8 @@ import {
   MountedWorkflowController,
   RevisionedStatusResponse,
   RevisionRefreshCoordinator,
+  ServerActionDescriptor,
+  ServerActionSet,
   StatusItem,
   TuiServiceError,
   TuiWorkflowContext,
@@ -96,6 +98,22 @@ function item(work_id: string, status: StatusItem["status"], extra: Partial<Stat
   };
 }
 
+function serverActionDescriptor(action: string): ServerActionDescriptor {
+  return {
+    action,
+    target: { project_id: "project_test", work_id: "server-owned", entity_revision: null },
+    expected_project_revision: 4,
+    expected_entity_revision: null,
+    expected_proof_revision: null,
+    attempt: null,
+    required_roles: ["agent"],
+    required_inputs: ["expected_project_revision"],
+    confirmation: null,
+    read_only: false,
+    recovery: false,
+  };
+}
+
 function monitoring(revision: number, items: StatusItem[]): Envelope<RevisionedStatusResponse> {
   return envelope(revision, {
     revision,
@@ -159,6 +177,31 @@ assert(disabled(expired, "release")?.enabled === false && disabled(expired, "rel
 assert(disabled(gateOpen, "finish")?.enabled === false && disabled(gateOpen, "finish")?.reason === "required gate is open", "gate finish disabled");
 assert(disabled(gateOpen, "evidence")?.enabled === true, "gate evidence remains available");
 assert(workflowDisplayState(gateOpen) === "gate", "open gate is a distinct display state");
+const unavailableServerActions: ServerActionSet = {
+  allowed: [],
+  denied: [{
+    descriptor: serverActionDescriptor("claim"),
+    reason: { code: "availability_unavailable", detail: "v3 identity facts are unavailable" },
+    reason_code: "availability_unavailable",
+    recovery: ["inspect"],
+  }],
+};
+const serverOwned = item("server-owned", "ready", {
+  claimable: true,
+  claimable_for_actor: true,
+  actions: unavailableServerActions,
+});
+assert(
+  disabled(serverOwned, "claim")?.enabled === false
+    && disabled(serverOwned, "claim")?.reason === "availability_unavailable: v3 identity facts are unavailable",
+  "server action denial owns TUI availability",
+);
+const serverAllowsClaim = item("server-owned", "blocked", {
+  claimable: false,
+  claimable_for_actor: false,
+  actions: { allowed: [serverActionDescriptor("claim")], denied: [] },
+});
+assert(disabled(serverAllowsClaim, "claim")?.enabled === true, "server action allowance overrides display status");
 assert(parseLineCommand("help").kind === "help", "line shell parses help");
 assert(parseLineCommand("select task-flow").kind === "select", "line shell parses work selection");
 assert(parseLineCommand("exit").kind === "quit", "line shell accepts exit alias");

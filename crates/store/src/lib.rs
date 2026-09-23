@@ -12,7 +12,7 @@ use boreal_domain::{
 };
 use serde_json::{json, Value};
 use std::borrow::Borrow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, NulError};
 use std::fmt;
 use std::fmt::Write as _;
@@ -636,6 +636,12 @@ struct StatusGateRow {
     kind: GateKind,
     required: bool,
     state: GateState,
+}
+
+#[derive(Default)]
+struct StatusGateRead {
+    diagnostics: BTreeMap<String, GateDiagnostics>,
+    requirement_diagnostics: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -3738,6 +3744,47 @@ impl SqliteStore {
         finish_transaction(self, result)
     }
 
+    /// Reports whether the immutable requirement projection is available to a
+    /// status read. Canonical production stores must have the complete
+    /// migration-installed contract; schema-v2 fixtures may retain the
+    /// observed-gate fallback until they opt into the projection.
+    fn pinned_requirement_schema_installed_for_read(&self) -> Result<bool, StoreError> {
+        if self.canonical_production {
+            ProfileStore::new(self).ensure_pinned_requirements_schema()?;
+            return Ok(true);
+        }
+        Ok(self.table_exists("boreal_pinned_requirement")?
+            && self.table_exists("boreal_pinned_requirement_gate")?)
+    }
+
+    /// Reads the immutable requirement snapshot when the caller is on the
+    /// persisted-profile path. A noncanonical schema-v2 fixture without the
+    /// additive tables retains its observed-gate compatibility behavior; an
+    /// installed but missing/corrupt snapshot is never treated as empty.
+    fn current_pinned_requirements_for_policy(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<Option<PinnedRequirements>, StoreError> {
+        if !self.pinned_requirement_schema_installed_for_read()? {
+            return Ok(None);
+        }
+        match ProfileStore::new(self).current_pinned_requirements(project_id, work_id) {
+            Ok(requirements) => Ok(Some(requirements)),
+            Err(StoreError::Corrupt(detail))
+                if !self.canonical_production
+                    && detail.starts_with("missing pinned requirement revision") =>
+            {
+                // Explicitly noncanonical schema-v2 fixtures may still use
+                // observed gate rows until they opt into immutable pinned
+                // requirements. A missing opt-in is compatibility fallback;
+                // an existing but malformed snapshot remains quarantined.
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     // Used by both read transactions and the canonical claim write transaction.
     // The caller owns the transaction boundary; never open a nested BEGIN here.
     fn read_project_status_in_transaction(
@@ -3757,8 +3804,10 @@ impl SqliteStore {
         // two avoidable N+1 query families from large status snapshots.
         let current_attempts = self.current_attempts_for_project(project_id)?;
         let active_holds = self.active_hard_holds_for_project(project_id)?;
-        let gate_diagnostics =
+        let gate_read =
             self.status_gate_diagnostics_for_project(project_id, &current_attempts, revision.0)?;
+        let gate_diagnostics = gate_read.diagnostics;
+        let requirement_diagnostics = gate_read.requirement_diagnostics;
         let mut planning_facts = self.status_planning_facts_for_project(project_id)?;
 
         let mut rows = self.prepare(
@@ -3770,7 +3819,15 @@ impl SqliteStore {
         )?;
         rows.bind_text(1, project_id)?;
         let mut works = Vec::with_capacity(total as usize);
-        let mut record_diagnostics = Vec::new();
+        let mut record_diagnostics = requirement_diagnostics
+            .iter()
+            .map(|(work_id, detail)| StatusRecordDiagnostic {
+                work_id: work_id.clone(),
+                title: None,
+                code: "acceptance_requirements_corrupt".to_owned(),
+                detail: detail.clone(),
+            })
+            .collect::<Vec<_>>();
         while rows.step()? == SQLITE_ROW {
             let work_id = rows.column_text(0)?;
             let current_attempt = current_attempts.get(&work_id).cloned();
@@ -3804,6 +3861,10 @@ impl SqliteStore {
                 let (schedule, activation_at) = planning_facts
                     .remove(&work_id)
                     .unwrap_or(Ok((None, None)))?;
+                let mut hard_holds = active_holds.get(&work_id).cloned().unwrap_or_default();
+                if requirement_diagnostics.contains_key(&work_id) {
+                    hard_holds.push(ReasonCode::HardHold("integrity_quarantined".to_owned()));
+                }
                 let work = WorkItem {
                     id: WorkId::new(work_id.clone()),
                     project_id: ProjectId::new(rows.column_text(1)?),
@@ -3816,7 +3877,7 @@ impl SqliteStore {
                         StoreError::Corrupt(format!("work {work_id} has priority outside u8 range"))
                     })?,
                     dispatch_policy: parse_dispatch_policy(&rows.column_text(5)?)?,
-                    hard_holds: active_holds.get(&work_id).cloned().unwrap_or_default(),
+                    hard_holds,
                     acceptance_profile: AcceptanceProfile {
                         id: ProfileId::new(rows.column_text(8)?),
                         version: rows.column_u64(9)?.to_string(),
@@ -4234,22 +4295,24 @@ impl SqliteStore {
         project_id: &str,
         current_attempts: &BTreeMap<String, AttemptRecord>,
         revision: u64,
-    ) -> Result<BTreeMap<String, GateDiagnostics>, StoreError> {
+    ) -> Result<StatusGateRead, StoreError> {
+        let pinned_schema_installed = self.pinned_requirement_schema_installed_for_read()?;
+        let mut requirement_diagnostics = BTreeMap::new();
+        if self.canonical_production && !pinned_schema_installed {
+            return Err(StoreError::Corrupt(
+                "canonical production schema is missing pinned requirement tables".to_owned(),
+            ));
+        }
         let mut gate_rows = Vec::new();
-        let gate_query = if self.table_exists("boreal_pinned_requirement")?
-            && self.table_exists("boreal_pinned_requirement_gate")?
-        {
-            "SELECT p.work_id, p.work_id || ':' || r.gate_id,
-                    p.profile_id, p.profile_version, r.kind, r.required,
-                    COALESCE(observed.state, 'open')
+        let gate_query = if pinned_schema_installed {
+            "SELECT p.work_id, p.proof_revision, p.subject_kind,
+                    p.profile_id, p.profile_version, p.profile_digest,
+                    p.provenance_json, p.declarations_json, p.resolved_digest,
+                    ap.policy_digest, ap.definition_json
              FROM boreal_pinned_requirement p
-             JOIN boreal_pinned_requirement_gate r
-               ON r.project_id = p.project_id
-              AND r.work_id = p.work_id
-              AND r.proof_revision = p.proof_revision
-             LEFT JOIN gate observed
-               ON observed.work_id = p.work_id
-              AND observed.gate_id = p.work_id || ':' || r.gate_id
+             LEFT JOIN acceptance_profile ap
+               ON ap.profile_id = p.profile_id
+              AND ap.version = p.profile_version
              WHERE p.project_id = ?1
                AND p.proof_revision = (
                  SELECT MAX(current.proof_revision)
@@ -4257,38 +4320,377 @@ impl SqliteStore {
                  WHERE current.project_id = p.project_id
                    AND current.work_id = p.work_id
                )
-             UNION ALL
-             SELECT g.work_id, g.gate_id, g.profile_id, g.profile_version,
-                    g.kind, g.required, g.state
-             FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
-             WHERE wi.project_id = ?1
-               AND NOT EXISTS (
-                 SELECT 1
-                 FROM boreal_pinned_requirement p
-                 WHERE p.project_id = wi.project_id
-                   AND p.work_id = wi.work_id
-               )
-             ORDER BY 1, 2"
+             ORDER BY p.work_id"
         } else {
-            "SELECT g.work_id, g.gate_id, g.profile_id, g.profile_version,
-                    g.kind, g.required, g.state
+            "SELECT g.work_id, 0, '', g.profile_id, g.profile_version,
+                    '', '', '', '', '', g.kind, g.required, g.state
              FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
              WHERE wi.project_id = ?1
              ORDER BY g.work_id, g.gate_id"
         };
         let mut statement = self.prepare(gate_query)?;
         statement.bind_text(1, project_id)?;
-        while statement.step()? == SQLITE_ROW {
-            gate_rows.push(StatusGateRow {
-                work_id: statement.column_text(0)?,
-                gate_id: statement.column_text(1)?,
-                profile_id: statement.column_text(2)?,
-                profile_version: statement.column_u64(3)?,
-                kind: parse_gate_kind(&statement.column_text(4)?)?,
-                required: statement.column_i64(5)? == 1,
-                state: parse_gate_state(&statement.column_text(6)?)?,
-            });
+        if pinned_schema_installed {
+            let mut requirements = BTreeMap::<String, PinnedRequirements>::new();
+            while statement.step()? == SQLITE_ROW {
+                let work_id = statement.column_text(0)?;
+                let result = (|| {
+                    let proof_revision = statement.column_u64(1)?;
+                    let subject_kind = match statement.column_text(2)?.as_str() {
+                        "task" => RequirementSubjectKind::Task,
+                        "container" => RequirementSubjectKind::Container,
+                        value => {
+                            return Err(StoreError::Corrupt(format!(
+                                "unknown pinned requirement subject kind: {value}"
+                            )))
+                        }
+                    };
+                    let profile_id = statement.column_text(3)?;
+                    let profile_version = statement.column_u64(4)?;
+                    let profile_digest = statement.column_text(5)?;
+                    let provenance_json = statement.column_text(6)?;
+                    let declarations_json = statement.column_text(7)?;
+                    let resolved_digest = statement.column_text(8)?;
+                    let stored_profile_digest = statement.column_optional_text(9)?.ok_or_else(|| {
+                        StoreError::Corrupt(format!(
+                            "pinned requirements reference missing acceptance profile {profile_id}/{profile_version}"
+                        ))
+                    })?;
+                    let definition_json = statement.column_optional_text(10)?.ok_or_else(|| {
+                        StoreError::Corrupt(format!(
+                            "pinned requirements reference missing acceptance profile {profile_id}/{profile_version}"
+                        ))
+                    })?;
+                    if stored_profile_digest != profile_digest {
+                        return Err(StoreError::Corrupt(format!(
+                            "pinned requirements profile digest drift for {profile_id}/{profile_version}: pinned {profile_digest}, stored {stored_profile_digest}"
+                        )));
+                    }
+                    let profile = ProfileVersion::new(
+                        profile_id.clone(),
+                        profile_version,
+                        stored_profile_digest,
+                        definition_json,
+                        "persisted",
+                    )?;
+                    profile.validate_content_digest().map_err(|error| {
+                        StoreError::Corrupt(format!(
+                            "acceptance profile {profile_id}/{profile_version} content is not immutable: {error}"
+                        ))
+                    })?;
+                    let provenance: Value =
+                        serde_json::from_str(&provenance_json).map_err(|_| {
+                            StoreError::Corrupt(
+                                "pinned requirements provenance is not valid JSON".to_owned(),
+                            )
+                        })?;
+                    let provenance_object = provenance.as_object().ok_or_else(|| {
+                        StoreError::Corrupt(
+                            "pinned requirements provenance is not an object".to_owned(),
+                        )
+                    })?;
+                    let provenance_profile_id = provenance_object
+                        .get("profile_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(
+                                "pinned provenance profile id is invalid".to_owned(),
+                            )
+                        })?;
+                    let provenance_profile_version = provenance_object
+                        .get("profile_version")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(
+                                "pinned provenance profile version is invalid".to_owned(),
+                            )
+                        })?;
+                    let provenance_profile_digest = provenance_object
+                        .get("profile_digest")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(
+                                "pinned provenance profile digest is invalid".to_owned(),
+                            )
+                        })?;
+                    let resolved_at = provenance_object
+                        .get("resolved_at")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(
+                                "pinned provenance resolved_at is invalid".to_owned(),
+                            )
+                        })?;
+                    let provenance_source = provenance_object
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            StoreError::Corrupt("pinned provenance source is invalid".to_owned())
+                        })?;
+                    if provenance_profile_id != profile_id
+                        || provenance_profile_version != profile_version
+                        || provenance_profile_digest != profile_digest
+                        || provenance_source.is_empty()
+                        || resolved_at.is_empty()
+                    {
+                        return Err(StoreError::Corrupt(format!(
+                            "pinned requirements provenance drifted for {project_id}/{work_id}"
+                        )));
+                    }
+                    let resolved = PinnedRequirements::resolve(
+                        &profile,
+                        project_id,
+                        &work_id,
+                        proof_revision,
+                        subject_kind,
+                        resolved_at,
+                    )?;
+                    let persisted_declarations: Value = serde_json::from_str(&declarations_json)
+                        .map_err(|_| {
+                            StoreError::Corrupt(format!(
+                                "pinned requirements declarations are not valid JSON for {work_id}"
+                            ))
+                        })?;
+                    let resolved_document: Value =
+                        serde_json::from_str(&resolved.canonical_json()?).map_err(|_| {
+                            StoreError::Corrupt(format!(
+                                "pinned requirements canonical document is malformed for {work_id}"
+                            ))
+                        })?;
+                    if persisted_declarations
+                        != resolved_document
+                            .get("requirements")
+                            .cloned()
+                            .unwrap_or(Value::Null)
+                        || resolved_digest != resolved.resolved_digest
+                    {
+                        return Err(StoreError::Corrupt(format!(
+                            "pinned requirement header drifted for {project_id}/{work_id}/revision-{proof_revision}"
+                        )));
+                    }
+                    Ok(resolved)
+                })();
+                match result {
+                    Ok(resolved) => {
+                        requirements.insert(work_id, resolved);
+                    }
+                    Err(StoreError::Corrupt(detail)) => {
+                        requirement_diagnostics.insert(work_id, detail);
+                    }
+                    Err(other) => return Err(other),
+                }
+            }
+
+            let mut work_ids = self
+                .prepare("SELECT work_id FROM work_item WHERE project_id = ?1 ORDER BY work_id")?;
+            work_ids.bind_text(1, project_id)?;
+            while work_ids.step()? == SQLITE_ROW {
+                let work_id = work_ids.column_text(0)?;
+                if self.canonical_production
+                    && !requirements.contains_key(&work_id)
+                    && !requirement_diagnostics.contains_key(&work_id)
+                {
+                    requirement_diagnostics
+                        .insert(work_id, "missing pinned requirement revision".to_owned());
+                }
+            }
+
+            let mut child_rows = self.prepare(
+                "SELECT r.work_id, r.proof_revision, r.requirement_id,
+                        r.gate_id, r.kind, r.required, r.subject_kind,
+                        r.profile_id, r.profile_version, r.profile_digest,
+                        r.provenance_json, r.declaration_json,
+                        COALESCE(observed.state, 'open')
+                 FROM boreal_pinned_requirement_gate r
+                 LEFT JOIN gate observed
+                   ON observed.work_id = r.work_id
+                  AND observed.gate_id = r.work_id || ':' || r.gate_id
+                 WHERE r.project_id = ?1
+                   AND r.proof_revision = (
+                     SELECT MAX(current.proof_revision)
+                     FROM boreal_pinned_requirement current
+                     WHERE current.project_id = r.project_id
+                       AND current.work_id = r.work_id
+                   )
+                 ORDER BY r.work_id, r.requirement_id",
+            )?;
+            child_rows.bind_text(1, project_id)?;
+            let mut seen = BTreeMap::<String, BTreeSet<String>>::new();
+            while child_rows.step()? == SQLITE_ROW {
+                let work_id = child_rows.column_text(0)?;
+                let Some(pinned) = requirements.get(&work_id) else {
+                    continue;
+                };
+                let result = (|| {
+                    let proof_revision = child_rows.column_u64(1)?;
+                    if proof_revision != pinned.proof_revision {
+                        return Err(StoreError::Corrupt(format!(
+                            "pinned requirement child revision drifted for {work_id}"
+                        )));
+                    }
+                    let requirement_id = child_rows.column_text(2)?;
+                    let expected = pinned
+                        .declarations
+                        .iter()
+                        .find(|declaration| declaration.requirement_id == requirement_id)
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(format!(
+                                "pinned requirement child {requirement_id} is not in the immutable header"
+                            ))
+                        })?;
+                    let expected_document: Value = serde_json::from_str(&pinned.canonical_json()?)
+                        .map_err(|_| {
+                            StoreError::Corrupt(format!(
+                                "pinned requirements canonical document is malformed for {work_id}"
+                            ))
+                        })?;
+                    let expected_declaration = expected_document
+                        .get("requirements")
+                        .and_then(Value::as_array)
+                        .and_then(|values| {
+                            values.iter().find(|value| {
+                                value.get("requirement_id").and_then(Value::as_str)
+                                    == Some(requirement_id.as_str())
+                            })
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(format!(
+                                "pinned requirement child {requirement_id} is not reconstructable"
+                            ))
+                        })?;
+                    let child_declaration: Value =
+                        serde_json::from_str(&child_rows.column_text(11)?).map_err(|_| {
+                            StoreError::Corrupt(format!(
+                                "pinned requirement {requirement_id} declaration is malformed"
+                            ))
+                        })?;
+                    let child_provenance: Value =
+                        serde_json::from_str(&child_rows.column_text(10)?).map_err(|_| {
+                            StoreError::Corrupt(format!(
+                                "pinned requirement {requirement_id} provenance is malformed"
+                            ))
+                        })?;
+                    let expected_provenance = json!({
+                        "profile_id": pinned.provenance.profile_id,
+                        "profile_version": pinned.provenance.profile_version,
+                        "profile_digest": pinned.provenance.profile_digest,
+                        "resolved_at": pinned.provenance.resolved_at,
+                        "source": pinned.provenance.source,
+                    });
+                    let child_required = child_rows.column_i64(5)? == 1;
+                    let expected_subject_kind = match pinned.subject_kind {
+                        RequirementSubjectKind::Task => "task",
+                        RequirementSubjectKind::Container => "container",
+                    };
+                    if child_declaration != expected_declaration
+                        || child_rows.column_text(3)? != expected.gate_id
+                        || child_rows.column_text(4)? != expected.kind
+                        || child_required != expected.required
+                        || child_rows.column_text(6)? != expected_subject_kind
+                        || child_rows.column_text(7)? != pinned.profile.profile_id
+                        || child_rows.column_u64(8)? != pinned.profile.version
+                        || child_rows.column_text(9)? != pinned.profile.policy_digest
+                        || child_provenance != expected_provenance
+                    {
+                        return Err(StoreError::Corrupt(format!(
+                            "pinned requirement child {requirement_id} drifted from its immutable header"
+                        )));
+                    }
+                    let gate_id = format!("{work_id}:{}", expected.gate_id);
+                    Ok((
+                        StatusGateRow {
+                            work_id: work_id.clone(),
+                            gate_id,
+                            profile_id: pinned.profile.profile_id.clone(),
+                            profile_version: pinned.profile.version,
+                            kind: parse_gate_kind(&child_rows.column_text(4)?)?,
+                            required: expected.required,
+                            state: parse_gate_state(&child_rows.column_text(12)?)?,
+                        },
+                        requirement_id,
+                    ))
+                })();
+                match result {
+                    Ok((row, requirement_id)) => {
+                        seen.entry(work_id.clone())
+                            .or_default()
+                            .insert(requirement_id);
+                        gate_rows.push(row);
+                    }
+                    Err(StoreError::Corrupt(detail)) => {
+                        requirement_diagnostics.insert(work_id, detail);
+                    }
+                    Err(other) => return Err(other),
+                }
+            }
+            for (work_id, pinned) in &requirements {
+                if requirement_diagnostics.contains_key(work_id) {
+                    continue;
+                }
+                let expected = pinned
+                    .declarations
+                    .iter()
+                    .map(|declaration| declaration.requirement_id.as_str())
+                    .collect::<BTreeSet<_>>();
+                let observed = seen.get(work_id).cloned().unwrap_or_default();
+                if expected.len() != observed.len()
+                    || expected.iter().any(|id| !observed.contains(*id))
+                {
+                    let missing = expected
+                        .iter()
+                        .find(|id| !observed.contains(**id))
+                        .copied()
+                        .unwrap_or("unknown");
+                    requirement_diagnostics.insert(
+                        work_id.clone(),
+                        format!(
+                            "pinned requirement child {missing} is missing from the immutable declaration set"
+                        ),
+                    );
+                }
+            }
+            if !self.canonical_production {
+                let mut legacy_rows = self.prepare(
+                    "SELECT g.work_id, g.gate_id, g.profile_id, g.profile_version,
+                            g.kind, g.required, g.state
+                     FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
+                     WHERE wi.project_id = ?1
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM boreal_pinned_requirement current
+                         WHERE current.project_id = wi.project_id
+                           AND current.work_id = wi.work_id
+                       )
+                     ORDER BY g.work_id, g.gate_id",
+                )?;
+                legacy_rows.bind_text(1, project_id)?;
+                while legacy_rows.step()? == SQLITE_ROW {
+                    gate_rows.push(StatusGateRow {
+                        work_id: legacy_rows.column_text(0)?,
+                        gate_id: legacy_rows.column_text(1)?,
+                        profile_id: legacy_rows.column_text(2)?,
+                        profile_version: legacy_rows.column_u64(3)?,
+                        kind: parse_gate_kind(&legacy_rows.column_text(4)?)?,
+                        required: legacy_rows.column_i64(5)? == 1,
+                        state: parse_gate_state(&legacy_rows.column_text(6)?)?,
+                    });
+                }
+            }
+        } else {
+            while statement.step()? == SQLITE_ROW {
+                gate_rows.push(StatusGateRow {
+                    work_id: statement.column_text(0)?,
+                    gate_id: statement.column_text(1)?,
+                    profile_id: statement.column_text(3)?,
+                    profile_version: statement.column_u64(4)?,
+                    kind: parse_gate_kind(&statement.column_text(10)?)?,
+                    required: statement.column_i64(11)? == 1,
+                    state: parse_gate_state(&statement.column_text(12)?)?,
+                });
+            }
         }
+        gate_rows.retain(|row| !requirement_diagnostics.contains_key(&row.work_id));
 
         let mut receipts = BTreeMap::<(String, String, u64, String), StatusReceiptFact>::new();
         let mut statement = self.prepare(
@@ -4463,7 +4865,26 @@ impl SqliteStore {
                 .map(|gate| gate.gate_id.clone())
                 .collect();
         }
-        Ok(diagnostics)
+        for work_id in requirement_diagnostics.keys() {
+            diagnostics.insert(
+                work_id.clone(),
+                GateDiagnostics {
+                    project_id: project_id.to_owned(),
+                    work_id: work_id.clone(),
+                    attempt_id: current_attempts
+                        .get(work_id)
+                        .map(|attempt| attempt.attempt_id.clone()),
+                    fence: current_attempts.get(work_id).map(|attempt| attempt.fence),
+                    revision,
+                    gates: Vec::new(),
+                    missing: vec!["requirements_missing".to_owned()],
+                },
+            );
+        }
+        Ok(StatusGateRead {
+            diagnostics,
+            requirement_diagnostics,
+        })
     }
 
     /// Reads the current attempt by its work subject. This is the bounded
@@ -7142,13 +7563,22 @@ impl SqliteStore {
                 diagnostics.missing.sort();
                 diagnostics.missing.dedup();
             }
-            if self.summary_required(&request.project_id, &request.work_id)?
-                && !self.current_summary_matches_close(request, &attempt)?
-            {
+            let summary_required =
+                match self.summary_required(&request.project_id, &request.work_id) {
+                    Ok(required) => required,
+                    Err(StoreError::Corrupt(_)) => {
+                        diagnostics.missing.push("requirements_missing".to_owned());
+                        false
+                    }
+                    Err(error) => return Err(error),
+                };
+            if summary_required && !self.current_summary_matches_close(request, &attempt)? {
                 diagnostics.missing.push("summary".to_owned());
                 diagnostics.missing.sort();
                 diagnostics.missing.dedup();
             }
+            diagnostics.missing.sort();
+            diagnostics.missing.dedup();
             if !diagnostics.missing.is_empty() {
                 let revision = self.bump_revision_in_transaction(&request.project_id)?;
                 let result_json =
@@ -7469,6 +7899,11 @@ impl SqliteStore {
     }
 
     fn summary_required(&self, project_id: &str, work_id: &str) -> Result<bool, StoreError> {
+        if let Some(requirements) =
+            self.current_pinned_requirements_for_policy(project_id, work_id)?
+        {
+            return Ok(requirements.requires_kind("summary"));
+        }
         let mut statement = self.prepare(
             "SELECT 1 FROM gate g
              JOIN work_item wi ON wi.work_id = g.work_id
@@ -7631,6 +8066,25 @@ impl SqliteStore {
                 expected: format!("{}/{}", expected.work_id, expected.attempt_id),
                 actual: format!("{}/{}", attempt.work_id, attempt.attempt_id),
             }));
+        }
+
+        if let Some(requirements) =
+            self.current_pinned_requirements_for_policy(&request.project_id, &expected.work_id)?
+        {
+            let declaration = requirements.declarations.iter().find(|declaration| {
+                declaration.gate_id == expected.gate_id
+                    || format!("{}:{}", expected.work_id, declaration.gate_id) == expected.gate_id
+            });
+            let Some(declaration) = declaration else {
+                return Ok(Some(receipt_rejected("receipt_subject_mismatch")));
+            };
+            if requirements.profile.profile_id != expected.profile_id
+                || requirements.profile.version != expected.profile_version
+                || declaration.kind != gate_kind(expected.gate_kind)
+                || declaration.required != expected.gate_required
+            {
+                return Ok(Some(receipt_rejected("receipt_policy_mismatch")));
+            }
         }
 
         let mut gate = self.prepare(
@@ -7800,9 +8254,23 @@ impl SqliteStore {
         fence: Option<u64>,
         revision: u64,
     ) -> Result<GateDiagnostics, StoreError> {
-        let gate_query = if self.table_exists("boreal_pinned_requirement")?
-            && self.table_exists("boreal_pinned_requirement_gate")?
-        {
+        let pinned_requirements =
+            match self.current_pinned_requirements_for_policy(project_id, work_id) {
+                Ok(requirements) => requirements,
+                Err(StoreError::Corrupt(_)) => {
+                    return Ok(GateDiagnostics {
+                        project_id: project_id.to_owned(),
+                        work_id: work_id.to_owned(),
+                        attempt_id: attempt_id.map(str::to_owned),
+                        fence,
+                        revision,
+                        gates: Vec::new(),
+                        missing: vec!["requirements_missing".to_owned()],
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+        let gate_query = if pinned_requirements.is_some() {
             "SELECT p.work_id || ':' || r.gate_id, r.kind, r.required,
                     COALESCE(observed.state, 'open')
              FROM boreal_pinned_requirement p
@@ -7819,16 +8287,6 @@ impl SqliteStore {
                  FROM boreal_pinned_requirement current
                  WHERE current.project_id = p.project_id
                    AND current.work_id = p.work_id
-               )
-             UNION ALL
-             SELECT g.gate_id, g.kind, g.required, g.state
-             FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
-             WHERE wi.project_id = ?1 AND g.work_id = ?2
-               AND NOT EXISTS (
-                 SELECT 1
-                 FROM boreal_pinned_requirement p
-                 WHERE p.project_id = wi.project_id
-                   AND p.work_id = wi.work_id
                )
              ORDER BY 1"
         } else {

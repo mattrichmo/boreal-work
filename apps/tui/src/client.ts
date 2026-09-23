@@ -130,6 +130,33 @@ export interface ActivitySummary {
   summary?: string;
 }
 
+/** Server-owned action context for one status snapshot. */
+export interface ServerActionDescriptor {
+  action: string;
+  target: { project_id: string; work_id: string; entity_revision: number | null };
+  expected_project_revision: number;
+  expected_entity_revision: number | null;
+  expected_proof_revision?: number | null;
+  attempt?: { attempt_id: string; fence: number } | null;
+  required_roles: string[];
+  required_inputs: string[];
+  confirmation?: string | null;
+  read_only: boolean;
+  recovery: boolean;
+}
+
+export interface ServerDeniedAction {
+  descriptor: ServerActionDescriptor;
+  reason: { code: string; detail?: string };
+  reason_code?: string;
+  recovery: string[];
+}
+
+export interface ServerActionSet {
+  allowed: ServerActionDescriptor[];
+  denied: ServerDeniedAction[];
+}
+
 export interface StatusItem {
   work_id: string;
   project_id?: string;
@@ -158,6 +185,8 @@ export interface StatusItem {
   receipt?: unknown;
   receipt_id?: string | null;
   diagnostic?: StatusDiagnostic;
+  /** Present on current service responses; absent is the legacy compatibility path. */
+  actions?: ServerActionSet;
 }
 
 export interface StatusDiagnostic {
@@ -780,6 +809,81 @@ function normalizeStatusItem(value: unknown): StatusItem {
       };
     });
   };
+  const normalizeActionDescriptor = (raw: unknown): ServerActionDescriptor => {
+    if (!isObject(raw) || typeof raw.action !== "string" || !isObject(raw.target)
+      || typeof raw.target.project_id !== "string" || typeof raw.target.work_id !== "string"
+      || (raw.target.entity_revision !== null && (typeof raw.target.entity_revision !== "number" || !Number.isInteger(raw.target.entity_revision)))
+      || typeof raw.expected_project_revision !== "number" || !Number.isInteger(raw.expected_project_revision)
+      || (raw.expected_entity_revision !== null && (typeof raw.expected_entity_revision !== "number" || !Number.isInteger(raw.expected_entity_revision)))
+      || !Array.isArray(raw.required_roles) || !raw.required_roles.every((role) => typeof role === "string")
+      || !Array.isArray(raw.required_inputs) || !raw.required_inputs.every((input) => typeof input === "string")
+      || typeof raw.read_only !== "boolean" || typeof raw.recovery !== "boolean") {
+      throw new ProtocolEnvelopeError("status action descriptor has invalid fields");
+    }
+    const proofRevision = raw.expected_proof_revision;
+    if (proofRevision !== undefined && proofRevision !== null
+      && (typeof proofRevision !== "number" || !Number.isInteger(proofRevision))) {
+      throw new ProtocolEnvelopeError("status action proof revision must be an integer or null");
+    }
+    const confirmation = raw.confirmation;
+    if (confirmation !== undefined && confirmation !== null && typeof confirmation !== "string") {
+      throw new ProtocolEnvelopeError("status action confirmation must be a string or null");
+    }
+    let attempt: ServerActionDescriptor["attempt"];
+    if (raw.attempt !== undefined && raw.attempt !== null) {
+      if (!isObject(raw.attempt) || typeof raw.attempt.attempt_id !== "string"
+        || typeof raw.attempt.fence !== "number" || !Number.isInteger(raw.attempt.fence)) {
+        throw new ProtocolEnvelopeError("status action attempt has invalid fields");
+      }
+      attempt = { attempt_id: raw.attempt.attempt_id, fence: raw.attempt.fence };
+    } else {
+      attempt = raw.attempt === null ? null : undefined;
+    }
+    return {
+      action: raw.action,
+      target: {
+        project_id: raw.target.project_id,
+        work_id: raw.target.work_id,
+        entity_revision: raw.target.entity_revision as number | null,
+      },
+      expected_project_revision: raw.expected_project_revision,
+      expected_entity_revision: raw.expected_entity_revision as number | null,
+      expected_proof_revision: proofRevision as number | null | undefined,
+      attempt,
+      required_roles: raw.required_roles as string[],
+      required_inputs: raw.required_inputs as string[],
+      confirmation: confirmation as string | null | undefined,
+      read_only: raw.read_only,
+      recovery: raw.recovery,
+    };
+  };
+  const normalizeActions = (raw: unknown): ServerActionSet | undefined => {
+    if (raw === undefined) return undefined;
+    if (!isObject(raw) || !Array.isArray(raw.allowed) || !Array.isArray(raw.denied)) {
+      throw new ProtocolEnvelopeError("status actions must contain allowed and denied arrays");
+    }
+    const denied = raw.denied.map((entry) => {
+      if (!isObject(entry) || !isObject(entry.reason) || !Array.isArray(entry.recovery)) {
+        throw new ProtocolEnvelopeError("status denied action has invalid fields");
+      }
+      if (typeof entry.reason.code !== "string" || !entry.recovery.every((action) => typeof action === "string")) {
+        throw new ProtocolEnvelopeError("status denied action reason has invalid fields");
+      }
+      return {
+        descriptor: normalizeActionDescriptor(entry.descriptor),
+        reason: {
+          code: entry.reason.code,
+          detail: typeof entry.reason.detail === "string" ? entry.reason.detail : undefined,
+        },
+        reason_code: typeof entry.reason_code === "string" ? entry.reason_code : undefined,
+        recovery: entry.recovery as string[],
+      };
+    });
+    return {
+      allowed: raw.allowed.map(normalizeActionDescriptor),
+      denied,
+    };
+  };
   const dependencyValue = isObject(value.dependency) ? value.dependency.prerequisites : value.dependencies;
   const dependencies = normalizeDependencies(dependencyValue);
   const nextStatusChange = value.next_status_change_at;
@@ -812,6 +916,7 @@ function normalizeStatusItem(value: unknown): StatusItem {
     lifecycle: typeof value.lifecycle === "string" ? normalizeStateSpelling(value.lifecycle) : undefined,
     receipt: value.receipt,
     receipt_id: typeof value.receipt_id === "string" || value.receipt_id === null ? value.receipt_id : undefined,
+    actions: normalizeActions(value.actions),
   };
 }
 
@@ -1370,11 +1475,58 @@ export interface ActionAvailabilityContext {
   pending_operation?: PendingOperation;
 }
 
+const serverActionNames: Partial<Record<TuiAction, string[]>> = {
+  claim: ["claim"],
+  accept_start: ["accept_attempt", "start_attempt"],
+  evidence: ["attach_evidence"],
+  finish: ["finish_close"],
+  release: ["release"],
+};
+
+function serverActionAvailability(
+  item: StatusItem,
+  busy: ReadonlySet<TuiAction>,
+  context: ActionAvailabilityContext,
+): ActionAvailability[] {
+  const server = item.actions;
+  if (!server) return [];
+  const pendingOperation = context.pending_operation;
+  const disabled = (action: TuiAction, descriptor: ServerActionDescriptor | undefined, reason: string | null): ActionAvailability => ({
+    action,
+    enabled: !!descriptor && !busy.has(action) && !pendingOperation,
+    reason: busy.has(action)
+      ? "operation already in progress"
+      : pendingOperation
+        ? `operation ${pendingOperation.operation_id} has unknown outcome; read it back before retrying`
+        : reason,
+    requires_confirmation: descriptor?.confirmation !== null && descriptor?.confirmation !== undefined,
+  });
+  return (["claim", "accept_start", "evidence", "finish", "release"] as const).map((action) => {
+    const names = serverActionNames[action] ?? [];
+    const allowed = server.allowed.find((descriptor) => names.includes(descriptor.action));
+    if (allowed) return disabled(action, allowed, null);
+    const denial = server.denied.find((entry) => names.includes(entry.descriptor.action));
+    const reason = denial
+      ? `${denial.reason.code}${denial.reason.detail ? `: ${denial.reason.detail}` : ""}`
+      : "action is not available at this revision";
+    return disabled(action, undefined, reason);
+  });
+}
+
 export function actionAvailability(
   item: StatusItem,
   busy: ReadonlySet<TuiAction> = new Set(),
   context: ActionAvailabilityContext = {},
 ): ActionAvailability[] {
+  if (item.diagnostic) {
+    return (["claim", "accept_start", "evidence", "finish", "release"] as const).map((action) => ({
+      action,
+      enabled: false,
+      reason: `unavailable: ${item.diagnostic?.code ?? "corrupt record"}`,
+      requires_confirmation: true,
+    }));
+  }
+  if (item.actions) return serverActionAvailability(item, busy, context);
   const status = statusOf(item);
   const blocked = status === "blocked";
   const queued = status === "queued";
@@ -1395,10 +1547,6 @@ export function actionAvailability(
         : reason,
     requires_confirmation: confirmation,
   });
-  if (item.diagnostic) {
-    return (["claim", "accept_start", "evidence", "finish", "release"] as const).map((action) =>
-      disabled(action, `unavailable: ${item.diagnostic?.code ?? "corrupt record"}`, false));
-  }
   return [
     disabled("claim", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : item.claimable ? null : "work is not claimable at this revision", item.claimable && !blocked && !queued && !expired),
     disabled("accept_start", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : hasAttempt && status === "claimed" ? null : "a claimed attempt is required", hasAttempt && status === "claimed" && !blocked && !queued && !expired),

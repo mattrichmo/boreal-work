@@ -36,6 +36,32 @@ fn initialized_store() -> SqliteStore {
 
 fn execution_store() -> SqliteStore {
     let store = initialized_store();
+    // This is an explicitly noncanonical schema-v2 compatibility fixture. The
+    // rows below are intentionally inserted directly to preserve the seam's
+    // adapter coverage, so establish the immutable profile and pinned
+    // requirement snapshot through the public profile API before exercising
+    // any acceptance reads.
+    let provisional = profiles::ProfileVersion::new(
+        "seam-focused",
+        1,
+        "sha256:placeholder",
+        r#"{"gates":[{"id":"verification","kind":"verification","required":true}]}"#,
+        "unix-ms:0",
+    )
+    .expect("compatibility profile shape is valid");
+    let profile = profiles::ProfileVersion::from_canonical_definition(
+        "seam-focused",
+        1,
+        provisional
+            .computed_digest()
+            .expect("compatibility digest computes"),
+        provisional.definition_json(),
+        "unix-ms:0",
+    )
+    .expect("compatibility profile is content-bound");
+    profiles::ProfileStore::new(&store)
+        .register(&profile)
+        .expect("compatibility profile registers");
     store
         .execute_batch(
             "
@@ -47,11 +73,11 @@ fn execution_store() -> SqliteStore {
                acceptance_profile_id, acceptance_profile_version, title,
                description, created_at, updated_at)
             VALUES ('w1', 'p1', 'task', 'open', 'automatic',
-                    'focused', 1, 'Seam work', '', 'unix-ms:0', 'unix-ms:0');
+                    'seam-focused', 1, 'Seam work', '', 'unix-ms:0', 'unix-ms:0');
             INSERT INTO gate
               (gate_id, work_id, profile_id, profile_version, kind, required,
                state, subject_ref, updated_at)
-            VALUES ('verification', 'w1', 'focused', 1, 'verification', 1,
+            VALUES ('w1:verification', 'w1', 'seam-focused', 1, 'verification', 1,
                     'open', '', 'unix-ms:0');
             INSERT INTO attempt
               (attempt_id, work_id, actor_id, harness_id, session_id, fence,
@@ -65,6 +91,18 @@ fn execution_store() -> SqliteStore {
             ",
         )
         .expect("execution fixture inserts");
+    let requirements = profiles::PinnedRequirements::resolve(
+        &profile,
+        "p1",
+        "w1",
+        1,
+        profiles::RequirementSubjectKind::Task,
+        "unix-ms:0",
+    )
+    .expect("compatibility requirements resolve");
+    profiles::ProfileStore::new(&store)
+        .persist_pinned_requirements(&requirements)
+        .expect("compatibility requirements pin");
     store
 }
 
@@ -75,7 +113,7 @@ fn gate_update_request(
     GateStateUpdateRequest {
         project_id: "p1".to_owned(),
         work_id: "w1".to_owned(),
-        gate_id: "verification".to_owned(),
+        gate_id: "w1:verification".to_owned(),
         state: GateState::Satisfied,
         actor_id: "agent-1".to_owned(),
         session_id: Some("s1".to_owned()),
@@ -103,7 +141,7 @@ fn qualified_root_adapter_delegates_to_one_root_mutation_boundary() {
     );
     assert_eq!(
         acceptance::AcceptanceStore::new(&store)
-            .gate("p1", "w1", "verification")
+            .gate("p1", "w1", "w1:verification")
             .unwrap()
             .unwrap()
             .state,
@@ -128,7 +166,7 @@ fn qualified_root_adapter_delegates_to_one_root_mutation_boundary() {
     assert_eq!(store.project_revision("p1").unwrap().0, initial + 1);
     assert_eq!(
         acceptance::AcceptanceStore::new(&store)
-            .gate("p1", "w1", "verification")
+            .gate("p1", "w1", "w1:verification")
             .unwrap()
             .unwrap()
             .state,
@@ -215,14 +253,14 @@ fn execution_seam_preserves_admission_replay_and_lifecycle_states() {
         work_id: "w1".to_owned(),
         attempt_id: "a1".to_owned(),
         fence: 1,
-        gate_id: "verification".to_owned(),
+        gate_id: "w1:verification".to_owned(),
         actor_id: "agent-1".to_owned(),
         session_id: Some("s1".to_owned()),
         request_digest: "sha256:exec-request".to_owned(),
         artifact_ref: "artifact:exec".to_owned(),
         source_version_id: None,
         config_identity: "config-1".to_owned(),
-        profile_id: "focused".to_owned(),
+        profile_id: "seam-focused".to_owned(),
         profile_version: 1,
         admitted_at: "unix-ms:1000".to_owned(),
     };
@@ -269,7 +307,7 @@ fn acceptance_seam_reads_pinned_gate_and_exact_binding() {
     let store = execution_store();
     let acceptance = acceptance::AcceptanceStore::new(&store);
     let gate = acceptance
-        .gate("p1", "w1", "verification")
+        .gate("p1", "w1", "w1:verification")
         .expect("gate reads")
         .expect("gate exists");
     assert_eq!(gate.kind, GateKind::Verification);
@@ -277,7 +315,7 @@ fn acceptance_seam_reads_pinned_gate_and_exact_binding() {
     let diagnostics = acceptance
         .diagnostics("p1", "w1", "a1", 1)
         .expect("gate diagnostics read");
-    assert_eq!(diagnostics.missing, vec!["verification".to_owned()]);
+    assert_eq!(diagnostics.missing, vec!["w1:verification".to_owned()]);
 
     let binding = acceptance::AcceptanceBinding {
         project_id: "p1".to_owned(),
@@ -286,7 +324,7 @@ fn acceptance_seam_reads_pinned_gate_and_exact_binding() {
         fence: 1,
         source_version_id: None,
         config_identity: "config-1".to_owned(),
-        profile_id: "focused".to_owned(),
+        profile_id: "seam-focused".to_owned(),
         profile_version: 1,
     };
     assert!(binding.matches(&binding.clone()));

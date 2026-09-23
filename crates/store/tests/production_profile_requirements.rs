@@ -11,7 +11,10 @@ use boreal_store::profiles::{
     PinnedRequirements, PinnedRequirementsOutcome, ProfileRegistry, ProfileStore, ProfileVersion,
     RegistrationOutcome, RequirementFinding, RequirementSubjectKind,
 };
-use boreal_store::{SqliteStore, StoreError};
+use boreal_store::{
+    CloseIntentRequest, ReceiptAcceptanceExpectation, ReceiptAttestation, ReceiptInsertRequest,
+    ReceiptOutcome, ReceiptSubmissionKind, SqliteStore, StoreError,
+};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -77,6 +80,22 @@ fn insert_work(store: &SqliteStore, work_id: &str, profile_id: &str, version: u6
                      '{profile_id}', {version}, 'Profile test work', '', 't1', 't1');"
         ))
         .expect("work inserts");
+}
+
+fn remove_one_pinned_declaration(store: &SqliteStore, work_id: &str) {
+    store
+        .execute_batch(&format!(
+            "DROP TRIGGER boreal_pinned_requirement_gate_immutable_delete;
+             DELETE FROM boreal_pinned_requirement_gate
+              WHERE project_id = 'p1' AND work_id = '{work_id}'
+                AND requirement_id = 'verification@verification';
+             CREATE TRIGGER boreal_pinned_requirement_gate_immutable_delete
+               BEFORE DELETE ON boreal_pinned_requirement_gate
+             BEGIN
+               SELECT RAISE(ABORT, 'pinned_requirement_gate_immutable');
+             END;"
+        ))
+        .expect("pinned declaration corruption fixture applies");
 }
 
 #[test]
@@ -352,6 +371,89 @@ fn persisted_requirements_survive_observation_deletion() {
 }
 
 #[test]
+fn current_requirement_readback_remains_authoritative_after_gate_deletion() {
+    let store = initialized_store();
+    let pinned_profile = profile(
+        "closeout",
+        1,
+        r#"{"gates":[{"id":"summary","kind":"summary","required":true},{"id":"audit","kind":"audit","required":false}]}"#,
+    );
+    let store_api = ProfileStore::new(&store);
+    store_api
+        .register(&pinned_profile)
+        .expect("profile registers");
+    insert_work(&store, "closeout-work", "closeout", 1);
+    let requirements = PinnedRequirements::resolve(
+        &pinned_profile,
+        "p1",
+        "closeout-work",
+        1,
+        RequirementSubjectKind::Task,
+        "t1",
+    )
+    .expect("requirements resolve");
+    store_api
+        .persist_pinned_requirements(&requirements)
+        .expect("requirements persist");
+
+    // The live gate projection is an observation and may disappear during
+    // repair.  The current requirement API must still return the summary
+    // declaration from the immutable snapshot.
+    store
+        .execute_batch(
+            "INSERT INTO gate
+               (gate_id, work_id, profile_id, profile_version, kind, required,
+                state, subject_ref, updated_at)
+             VALUES ('summary', 'closeout-work', 'closeout', 1, 'summary',
+                     1, 'open', '', 't1');
+             DELETE FROM gate WHERE gate_id = 'summary';",
+        )
+        .expect("observation deletion succeeds");
+    let declarations = store_api
+        .current_required_declarations("p1", "closeout-work")
+        .expect("current requirements read");
+    assert_eq!(declarations.len(), 1);
+    assert_eq!(declarations[0].kind, "summary");
+    assert!(store_api
+        .current_pinned_requirements("p1", "closeout-work")
+        .expect("current snapshot read")
+        .requires_kind("summary"));
+}
+
+#[test]
+fn missing_current_requirement_snapshot_is_corruption_not_empty_acceptance() {
+    let store = initialized_store();
+    let error = ProfileStore::new(&store)
+        .current_required_declarations("p1", "never-pinned")
+        .expect_err("missing requirement snapshot must fail closed");
+    assert!(
+        matches!(error, StoreError::Corrupt(message) if message.contains("missing pinned requirement revision"))
+    );
+}
+
+#[test]
+fn semantically_identical_profile_json_has_one_content_identity() {
+    let compact = profile(
+        "canonical",
+        1,
+        r#"{"gates":[{"id":"verification","kind":"verification","required":true}]}"#,
+    );
+    let formatted = ProfileVersion::new(
+        "canonical",
+        1,
+        compact.policy_digest.clone(),
+        r#"{ "gates": [ { "required": true, "kind": "verification", "id": "verification" } ] }"#,
+        "t0",
+    )
+    .expect("formatted profile shape is valid");
+    assert_eq!(formatted.definition_json, compact.definition_json);
+    assert_eq!(
+        formatted.computed_digest().expect("digest computes"),
+        compact.policy_digest
+    );
+}
+
+#[test]
 fn conflicting_repin_is_rejected_and_identical_repin_is_idempotent() {
     let store = initialized_store();
     let pinned_profile = profile("pinned", 1, &task_definition("verification"));
@@ -451,6 +553,224 @@ fn root_work_creation_pins_requirements_and_survives_gate_deletion() {
         .missing
         .iter()
         .any(|gate| gate.ends_with(":verification")));
+}
+
+#[test]
+fn status_quarantines_corrupt_pinned_requirements_instead_of_using_gate_rows() {
+    let store = initialized_store();
+    let work = WorkItem::new(
+        "p1".into(),
+        "status-corrupt".into(),
+        WorkKind::Task,
+        None,
+        "Status corrupt",
+    )
+    .open();
+    store
+        .create_work_operation(
+            &work,
+            "agent-1",
+            "op-status-corrupt",
+            "sha256:op-status-corrupt",
+            "t1",
+        )
+        .expect("work creation pins immutable requirements");
+    remove_one_pinned_declaration(&store, "status-corrupt");
+
+    let snapshot = store
+        .read_project_status("p1")
+        .expect("status remains readable with one corrupt work row");
+    let row = snapshot
+        .works
+        .iter()
+        .find(|row| row.work.id.as_str() == "status-corrupt")
+        .expect("corrupt work remains visible");
+    assert!(snapshot.diagnostics.iter().any(|diagnostic| {
+        diagnostic.work_id == "status-corrupt"
+            && diagnostic.code == "acceptance_requirements_corrupt"
+    }));
+    assert!(row
+        .gate_diagnostics
+        .missing
+        .contains(&"requirements_missing".to_owned()));
+    assert!(row.work.hard_holds.iter().any(|reason| {
+        matches!(reason, boreal_domain::ReasonCode::HardHold(code) if code == "integrity_quarantined")
+    }));
+    assert!(row.gate_diagnostics.gates.is_empty());
+}
+
+#[test]
+fn closeout_rejects_corrupt_pinned_requirements_as_a_requirement_diagnostic() {
+    let store = initialized_store();
+    let work = WorkItem::new(
+        "p1".into(),
+        "close-corrupt".into(),
+        WorkKind::Task,
+        None,
+        "Close corrupt",
+    )
+    .open();
+    store
+        .create_work_operation(
+            &work,
+            "agent-1",
+            "op-close-corrupt-work",
+            "sha256:op-close-corrupt-work",
+            "t1",
+        )
+        .expect("work creation pins immutable requirements");
+    store
+        .execute_batch(
+            "INSERT INTO attempt (
+                attempt_id, work_id, actor_id, harness_id, session_id, fence,
+                current, state, claimed_at, accepted_at, lease_deadline,
+                max_attempt_deadline, review_required_after_expiry,
+                config_identity, binary_identity, protocol_version, schema_version
+             ) VALUES ('attempt-close-corrupt', 'close-corrupt', 'agent-1', 'luna',
+                       NULL, 1, 1, 'verifying', 't1', 't2',
+                       't3', 't4', 1, 'config', 'binary', '2', 2);",
+        )
+        .expect("verifying attempt inserts");
+    remove_one_pinned_declaration(&store, "close-corrupt");
+
+    let request = CloseIntentRequest {
+        project_id: "p1".to_owned(),
+        actor_id: "agent-1".to_owned(),
+        session_id: None,
+        expected_project_revision: None,
+        close_intent_id: "close-intent-corrupt".to_owned(),
+        work_id: "close-corrupt".to_owned(),
+        attempt_id: "attempt-close-corrupt".to_owned(),
+        fence: 1,
+        operation_id: "op-close-intent-corrupt".to_owned(),
+        source_version_id: None,
+        config_identity: "config".to_owned(),
+        profile_id: "focused".to_owned(),
+        profile_version: 1,
+        summary_id: None,
+        at: "t5".to_owned(),
+        request_digest: "sha256:close-intent-corrupt".to_owned(),
+    };
+    store
+        .create_close_intent(&request)
+        .expect("close intent is durable before finalization");
+    let result = store
+        .finalize_close_intent(&CloseIntentRequest {
+            operation_id: "op-close-finalize-corrupt".to_owned(),
+            request_digest: "sha256:close-finalize-corrupt".to_owned(),
+            at: "t6".to_owned(),
+            ..request
+        })
+        .expect("corrupt requirements produce a rejected closeout result");
+    let diagnostics = result
+        .diagnostics
+        .expect("closeout diagnostics are retained");
+    assert!(diagnostics
+        .missing
+        .contains(&"requirements_missing".to_owned()));
+    assert_eq!(
+        result.close_intent.state,
+        boreal_store::CloseIntentState::Open
+    );
+    assert_eq!(
+        store
+            .work("p1", "close-corrupt")
+            .unwrap()
+            .unwrap()
+            .lifecycle,
+        "open"
+    );
+}
+
+#[test]
+fn receipt_admission_fails_closed_when_pinned_gate_declaration_is_corrupt() {
+    let store = initialized_store();
+    let work = WorkItem::new(
+        "p1".into(),
+        "receipt-corrupt".into(),
+        WorkKind::Task,
+        None,
+        "Receipt corrupt",
+    )
+    .open();
+    store
+        .create_work_operation(
+            &work,
+            "agent-1",
+            "op-receipt-corrupt-work",
+            "sha256:op-receipt-corrupt-work",
+            "t1",
+        )
+        .expect("work creation pins immutable requirements");
+    store
+        .execute_batch(
+            "INSERT INTO attempt (
+                attempt_id, work_id, actor_id, harness_id, session_id, fence,
+                current, state, claimed_at, accepted_at, lease_deadline,
+                max_attempt_deadline, review_required_after_expiry,
+                config_identity, binary_identity, protocol_version, schema_version
+             ) VALUES ('attempt-receipt-corrupt', 'receipt-corrupt', 'agent-1', 'luna',
+                       NULL, 1, 1, 'verifying', 't1', 't2', 't3', 't4', 1,
+                       'config', 'binary', '2', 2);",
+        )
+        .expect("receipt attempt inserts");
+    remove_one_pinned_declaration(&store, "receipt-corrupt");
+
+    let gate_id = store
+        .gate_id_for_work("p1", "receipt-corrupt", "verification")
+        .expect("observed gate remains available");
+    let request = ReceiptInsertRequest {
+        project_id: "p1".to_owned(),
+        actor_id: "agent-1".to_owned(),
+        session_id: None,
+        expected_project_revision: None,
+        request_digest: "sha256:receipt-corrupt".to_owned(),
+        receipt_id: "receipt-corrupt".to_owned(),
+        work_id: "receipt-corrupt".to_owned(),
+        attempt_id: "attempt-receipt-corrupt".to_owned(),
+        fence: 1,
+        operation_id: "op-receipt-corrupt".to_owned(),
+        gate_id: Some(gate_id.clone()),
+        executable: "cargo".to_owned(),
+        argv_json: "[\"cargo\",\"test\"]".to_owned(),
+        cwd: ".".to_owned(),
+        exit_code: 0,
+        started_at: "t1".to_owned(),
+        ended_at: "t2".to_owned(),
+        source_version_id: None,
+        config_identity: "config".to_owned(),
+        environment_fingerprint: "env".to_owned(),
+        output_digest: Some("sha256:output".to_owned()),
+        output_ref: None,
+        subject_json: "{\"work_id\":\"receipt-corrupt\"}".to_owned(),
+        coverage_json: "{}".to_owned(),
+        attestation: ReceiptAttestation::SelfReported,
+        submission_kind: ReceiptSubmissionKind::ExternalImport,
+        acceptance: Some(ReceiptAcceptanceExpectation {
+            work_id: "receipt-corrupt".to_owned(),
+            attempt_id: "attempt-receipt-corrupt".to_owned(),
+            fence: 1,
+            source_version_id: None,
+            config_identity: "config".to_owned(),
+            profile_id: "focused".to_owned(),
+            profile_version: 1,
+            gate_id,
+            gate_kind: boreal_domain::GateKind::Verification,
+            gate_required: true,
+            requires_attestation: false,
+        }),
+        result: ReceiptOutcome::Passed,
+        rejection_code: None,
+        created_at: "t2".to_owned(),
+    };
+    assert!(matches!(
+        store.insert_receipt(&request),
+        Err(StoreError::Corrupt(message)) if message.contains("pinned requirement")
+    ));
+    assert!(store
+        .receipt("receipt-corrupt")
+        .expect("receipt lookup")
+        .is_none());
 }
 
 #[test]

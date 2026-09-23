@@ -643,7 +643,7 @@ mod unix {
 
     impl RecoveryBackend for SqliteRecoveryBackend {
         fn load_incomplete(&self) -> Result<Vec<RecoveryEntry>, RecoveryBackendError> {
-            let store = SqliteStore::open(&self.database, SCHEMA)
+            let store = SqliteStore::open(&self.database, super::super::PRODUCTION_SCHEMA)
                 .map_err(|error| RecoveryBackendError::new(error.to_string()))?;
             store
                 .list_incomplete_evidence_executions()
@@ -659,7 +659,7 @@ mod unix {
         }
 
         fn mark_unknown(&self, operation_id: &str) -> Result<(), RecoveryBackendError> {
-            let store = SqliteStore::open(&self.database, SCHEMA)
+            let store = SqliteStore::open(&self.database, super::super::PRODUCTION_SCHEMA)
                 .map_err(|error| RecoveryBackendError::new(error.to_string()))?;
             store
                 .mark_evidence_execution_unknown(operation_id, "service_restart_recovery")
@@ -678,7 +678,7 @@ mod unix {
     impl ServiceHostHooks for ProductionServiceHooks {}
 
     fn schedule_current_attempt_deadlines(database: &Path, timers: &TimerRegistry) {
-        let Ok(store) = SqliteStore::open(database, SCHEMA) else {
+        let Ok(store) = SqliteStore::open(database, super::super::PRODUCTION_SCHEMA) else {
             return;
         };
         let Ok(projects) = store.list_project_ids() else {
@@ -903,7 +903,7 @@ mod unix {
         // Initialize or validate the schema before binding the endpoint. The
         // request workers subsequently open independent connections to this
         // same canonical database.
-        drop(SqliteStore::open(db, SCHEMA).map_err(map_store_error)?);
+        drop(SqliteStore::open(db, super::super::PRODUCTION_SCHEMA).map_err(map_store_error)?);
         let canonical_db = fs::canonicalize(db).map_err(|error| {
             CliError::with(
                 ErrorCode::ServiceUnavailable,
@@ -1825,17 +1825,13 @@ mod unix {
             &self,
             request: ApplicationRequest,
         ) -> Result<ApplicationResponse, boreal_service::ProtocolError> {
-            let schema = if request.command == "update" {
-                super::super::PRODUCTION_SCHEMA
-            } else {
-                SCHEMA
-            };
-            let store = SqliteStore::open(&self.database, schema).map_err(|error| {
-                boreal_service::ProtocolError::new(
-                    boreal_service::ProtocolErrorCode::InvalidPayload,
-                    format!("service database is unavailable: {error}"),
-                )
-            })?;
+            let store = SqliteStore::open(&self.database, super::super::PRODUCTION_SCHEMA)
+                .map_err(|error| {
+                    boreal_service::ProtocolError::new(
+                        boreal_service::ProtocolErrorCode::InvalidPayload,
+                        format!("service database is unavailable: {error}"),
+                    )
+                })?;
             let request_data = serde_json::from_str::<Value>(&request.data).ok();
             let command = request.command.clone();
             let response = ServiceCommandHandler {
@@ -3949,7 +3945,10 @@ mod unix {
         Ok(snapshot
             .items
             .into_iter()
-            .find(|item| item.work.kind == WorkKind::Task && item.decision.claimable_for_actor)
+            .find(|item| {
+                item.work.kind == WorkKind::Task
+                    && super::super::status_item_selection_eligible(item)
+            })
             .map(|item| item.work.id.as_str().to_owned()))
     }
 
@@ -4244,7 +4243,7 @@ mod tests {
     }
 
     fn seed_store(path: &Path) -> SqliteStore {
-        seed_store_with_schema(path, SCHEMA)
+        seed_store_with_schema(path, super::super::LEGACY_SCHEMA)
     }
 
     fn seed_store_with_schema(path: &Path, schema: &str) -> SqliteStore {
@@ -4563,7 +4562,10 @@ mod tests {
     #[test]
     fn unavailable_v3_service_routes_are_rejected_without_schema_mutation() {
         let db = temp_path("intake-discriminant");
-        let schema_v2_fixture = format!("{SCHEMA}\n-- explicit service schema-2 fixture");
+        let schema_v2_fixture = format!(
+            "{}\n-- explicit service schema-2 fixture",
+            super::super::LEGACY_SCHEMA
+        );
         let mut handler = make_handler(seed_store_with_schema(&db, &schema_v2_fixture));
         let before_revision = handler
             .store
@@ -4632,7 +4634,8 @@ mod tests {
     #[test]
     fn create_project_expected_revision_is_rejected_before_side_effects() {
         let db = temp_path("create-project-revision");
-        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+            .expect("temporary legacy schema opens");
         let mut handler = make_handler(store);
         let error = handler
             .create_project(
@@ -4852,7 +4855,8 @@ mod tests {
     #[test]
     fn service_create_routes_preserve_typed_fields_and_replay() {
         let db = temp_path("create-routes.sqlite");
-        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+            .expect("temporary legacy schema opens");
         let mut handler = make_handler(store);
         let project_request = json!({
             "command": "create_project",
@@ -4937,7 +4941,8 @@ mod tests {
     #[test]
     fn service_create_work_rejects_unknown_kind_and_missing_parent() {
         let db = temp_path("create-invalid.sqlite");
-        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+            .expect("temporary legacy schema opens");
         let mut handler = make_handler(store);
         let project = application_envelope(
             &mut handler,
@@ -4998,7 +5003,8 @@ mod tests {
     #[test]
     fn service_work_show_returns_the_same_exact_projection_as_direct_reads() {
         let db = temp_path("work-show.sqlite");
-        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+            .expect("temporary legacy schema opens");
         let mut handler = make_handler(store);
         let project = application_envelope(
             &mut handler,
@@ -5187,7 +5193,8 @@ mod tests {
     fn bounded_service_creates_project_and_work_over_the_real_socket_route() {
         let db = temp_path("cs.sqlite");
         let socket = temp_path("cs.sock");
-        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+            .expect("temporary legacy schema opens");
         let host = match ServiceHost::bind(
             &socket,
             make_handler(store),

@@ -68,7 +68,7 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
     })?;
     let context = resolve_dashboard_context(parsed, &current_dir)?;
     let database = existing_database_path(&context, parsed)?;
-    let store = SqliteStore::open(&database, SCHEMA).map_err(map_store_error)?;
+    let store = SqliteStore::open(&database, super::PRODUCTION_SCHEMA).map_err(map_store_error)?;
     let project_ids = store.list_project_ids().map_err(map_store_error)?;
     let project = resolve_project_id(
         parsed.options.project.as_deref(),
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[test]
     fn store_project_listing_is_exact_and_stably_sorted() {
-        let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+        let store = SqliteStore::open_in_memory(super::PRODUCTION_SCHEMA).unwrap();
         store.create_project("zeta", "unix-ms:1").unwrap();
         store.create_project("alpha", "unix-ms:1").unwrap();
         assert_eq!(
