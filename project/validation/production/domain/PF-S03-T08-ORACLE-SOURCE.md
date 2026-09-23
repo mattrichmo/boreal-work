@@ -1,17 +1,15 @@
 # PF-S03-T08 oracle source binding
 
-This record is the source-bound input for the PF-S03-T08 pure-domain oracle.
-The focused target reads these fields, verifies the committed `HEAD`, and
-computes SHA-256 over the included contract and domain implementation bytes.
-The worker did not commit or push; the coordinator must regenerate the
-committed-revision field and rerun the target if integration produces a new
-`HEAD`.
+This record is the tracked policy/artifact input for the PF-S03-T08
+pure-domain oracle. Exact checkout identity is supplied by a generated
+validation manifest so a committed record never contains a hash of its own
+future commit.
 
-base_source_revision: `0d9611a017d5dc167e92fe79e8d65756fbac2d5a`
-current_source_revision: `3017a1dbebaa7945f82b2a2512ec0c1eabbd69c9`
+source_binding: `external-generated-validation-input`
+manifest_env: `BOREAL_PRODUCTION_ORACLE_MANIFEST`
 accepted_contract_source_revision: `784a41b3802c29a76721c55eef2e9493283396c2`
 fixture_revision: `m02-candidate.1`
-worktree_state: `tracked source clean at the bound commit; untracked memory/ is excluded from evidence`
+worktree_state: `reported by the external manifest; untracked paths are excluded from artifact identity`
 
 ## Normative artifact hashes
 
@@ -35,8 +33,8 @@ artifact::crates/domain/src/actions.rs = `8ac6bdecee87c1d14c139a8fe9554be2b448a6
 artifact::crates/domain/src/decision_inputs.rs = `24895893d826f6a540975e648392de6e677b03e5b7434175711dc6b64f4ed85d`
 artifact::crates/domain/src/dependencies.rs = `43001bf2e6009aea63d74662cd47fd1d65183ba76759280c20edeb4076298112`
 artifact::crates/domain/src/time_policy.rs = `58ee17cdcad6e4cd7f42f75f68c5526471ce278d8c6f098c011f5207b5d2ac58`
-artifact::crates/domain/tests/production_properties.rs = `9f88c311759c119d4c35eec5deec5882442dd0e23845fcbe7ef5e189726f0439`
-artifact::project/validation/production/domain/PF-S03-T08-ORACLE.md = `87a997bc8ceed1d83d71ea77fd733358b60fc4747f460ea7d4d3c074f560de3a`
+artifact::crates/domain/tests/production_properties.rs = `f520e5c7804fb0204694d2eb03869599bce45b25f8e73ff6e06783763888384b`
+artifact::project/validation/production/domain/PF-S03-T08-ORACLE.md = `50a8e50d57b7276ddb438e98988153841d15cf6b737135f71eeedeb5095f07a5`
 ```
 
 ## Contract identity and compatibility boundary
@@ -47,13 +45,14 @@ serializer. Schedule semantics are tested through the existing pure-domain
 decision values, while status/2 compatibility remains `queued` plus the
 scheduled-start reason and a denied claim at the pre-activation boundary.
 
+The generated manifest records live `HEAD` and SHA-256 for every compiled
+normative, domain, and T08/T10 oracle artifact. The test requires it, checks
+that its revision still equals live `HEAD`, and compares each digest to the
+compiled bytes. The tracked hashes above remain independently enforced.
+
 ## Regeneration rule for integration
 
-If the coordinator's final integration commit is not
-`3017a1dbebaa7945f82b2a2512ec0c1eabbd69c9`, regenerate
-`current_source_revision` here to that exact committed `HEAD`, recompute every
-`artifact::` hash above (including the test target and oracle document if
-their bytes changed), rerun the focused target with `--nocapture`, and update
-the new attempt's `COMMANDS.md`, `EVIDENCE.md`, and `HANDOFF.md` identities. A
-source or contract implementation change also requires the corresponding
-hash update and a fresh focused result; do not reuse this receipt.
+Generate the external manifest from the exact checkout immediately before the
+focused target and pass it through `BOREAL_PRODUCTION_ORACLE_MANIFEST`. A
+source or contract change requires a fresh manifest and focused result; do not
+reuse an old manifest or receipt.

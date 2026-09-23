@@ -10,7 +10,7 @@ to the accepted policy artifacts and the T08-owned source record
 | Transition contract | `boreal.work-transition/2` |
 | Fixture revision | `m02-candidate.1` |
 | Accepted contract source | `784a41b3802c29a76721c55eef2e9493283396c2` |
-| Current committed source revision at attempt-5 start | `3017a1dbebaa7945f82b2a2512ec0c1eabbd69c9` |
+| Exact source revision | Supplied by the required external generated manifest at test time |
 | Contract manifest SHA-256 | `131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa` |
 | Status/actions SHA-256 | `b2b41ffd640811118e2c8f0ac0ba9c60d79cc46ccc73135cdcf609ae384b3a94` |
 | Transition table SHA-256 | `4a22bceb49b8d40d96a872f2ae3aed8b79a81d5636339c609914a05b3a2a9d38` |
@@ -20,6 +20,13 @@ Changing any contract, fixture, policy, or accepted source identity requires
 an intentional oracle update and a fresh task attempt. The test also embeds
 the contract markers so a missing or renamed policy artifact cannot silently
 look like a passing property run.
+
+The source revision is deliberately an external validation input rather than
+a tracked commit-hash literal. The generator at
+`crates/domain/tests/generate_production_oracle_manifest.py` records live
+`HEAD` and the SHA-256 of every compiled normative, domain, and T08/T10 oracle
+artifact. `production_properties` requires that manifest, checks its revision
+against live `HEAD`, and checks each digest against compiled bytes.
 
 ## Pure-domain coverage
 
@@ -62,9 +69,9 @@ look like a passing property run.
   scheduled-start reason and a non-claimable action before activation.
 
 If coordinator integration changes the committed `HEAD` or any bound bytes,
-the source record's `current_source_revision` and affected `artifact::`
-hashes must be regenerated, then the focused target and latest attempt
-must be rerun on that exact tree.
+generate a fresh external manifest and rerun the focused target on that exact
+tree. Tracked artifact hashes still require a reviewed source-record update
+when their normative inputs change.
 
 This is pure-domain evidence only. It does not claim store transactions,
 authenticated service behavior, operation replay/readback, genuine verifier

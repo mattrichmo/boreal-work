@@ -5,7 +5,7 @@
 //! include the seed and case index, which is the minimal counterexample needed
 //! to reproduce a failing pure-domain rule.
 
-use std::{collections::BTreeSet, fmt::Write as _, path::Path, process::Command};
+use std::{collections::BTreeSet, env, fmt::Write as _, fs, path::Path, process::Command};
 
 use boreal_domain::actions::{
     all_action_kinds, evaluate_action, evaluate_actions, ActionAuthorization, ActionDenialReason,
@@ -145,6 +145,29 @@ fn oracle_field(name: &str) -> &str {
         .unwrap_or_else(|| panic!("missing oracle source field {name:?}"))
 }
 
+const VALIDATION_MANIFEST_ENV: &str = "BOREAL_PRODUCTION_ORACLE_MANIFEST";
+
+fn validation_manifest() -> String {
+    let path = env::var(VALIDATION_MANIFEST_ENV).unwrap_or_else(|_| {
+        panic!(
+            "{VALIDATION_MANIFEST_ENV} is required; generate an external production-oracle manifest before running this target"
+        )
+    });
+    fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!("failed to read {VALIDATION_MANIFEST_ENV} at {path}: {error}")
+    })
+}
+
+fn manifest_field<'a>(manifest: &'a str, name: &str) -> &'a str {
+    manifest
+        .lines()
+        .find_map(|line| line.strip_prefix(name).map(str::trim))
+        .and_then(|value| value.strip_prefix('`'))
+        .and_then(|value| value.strip_suffix('`'))
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("missing validation manifest field {name:?}"))
+}
+
 fn current_git_head() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("git")
@@ -171,6 +194,20 @@ fn assert_artifact_digest(path: &str, actual: &[u8]) {
         expected,
         "normative artifact drift: {path}"
     );
+}
+
+fn assert_manifest_artifact_digest(manifest: &str, path: &str, actual: &[u8]) {
+    let field = format!("artifact::{path} =");
+    assert_eq!(
+        sha256_hex(actual),
+        manifest_field(manifest, &field),
+        "generated validation manifest drift: {path}"
+    );
+}
+
+fn assert_bound_artifact(manifest: &str, path: &str, actual: &[u8]) {
+    assert_artifact_digest(path, actual);
+    assert_manifest_artifact_digest(manifest, path, actual);
 }
 
 fn assert_transition_table_row(id: &str) {
@@ -1046,51 +1083,98 @@ fn oracle_identity_and_minimal_counterexample_replay_are_explicit() {
             .contains("scheduled_start")
     );
 
-    assert_eq!(current_git_head(), oracle_field("current_source_revision:"));
-    assert_artifact_digest(
+    let manifest = validation_manifest();
+    assert_eq!(
+        manifest_field(&manifest, "schema:"),
+        "boreal.production-oracle-source-manifest/1"
+    );
+    assert_eq!(
+        manifest_field(&manifest, "binding:"),
+        "external-generated-validation-input"
+    );
+    assert_eq!(
+        current_git_head(),
+        manifest_field(&manifest, "source_revision:")
+    );
+    assert_bound_artifact(
+        &manifest,
         "project/spec/production/contract-manifest.json",
         include_bytes!("../../../project/spec/production/contract-manifest.json"),
     );
-    assert_artifact_digest(
+    assert_bound_artifact(
+        &manifest,
         "project/spec/production/status-and-actions.md",
         include_bytes!("../../../project/spec/production/status-and-actions.md"),
     );
-    assert_artifact_digest(
+    assert_bound_artifact(
+        &manifest,
         "project/spec/transition-table.md",
         include_bytes!("../../../project/spec/transition-table.md"),
     );
-    assert_artifact_digest(
+    assert_bound_artifact(
+        &manifest,
         "project/spec/production/reason-registry.json",
         include_bytes!("../../../project/spec/production/reason-registry.json"),
     );
-    assert_artifact_digest(
+    assert_bound_artifact(
+        &manifest,
         "project/validation/production/domain/PF-S03-T08-ORACLE.md",
         include_bytes!("../../../project/validation/production/domain/PF-S03-T08-ORACLE.md"),
     );
-    assert_artifact_digest("crates/domain/src/lib.rs", include_bytes!("../src/lib.rs"));
-    assert_artifact_digest(
+    assert_manifest_artifact_digest(
+        &manifest,
+        "project/validation/production/domain/PF-S03-T10-ORACLE.md",
+        include_bytes!("../../../project/validation/production/domain/PF-S03-T10-ORACLE.md"),
+    );
+    assert_manifest_artifact_digest(
+        &manifest,
+        "project/validation/production/domain/PF-S03-T08-ORACLE-SOURCE.md",
+        include_bytes!("../../../project/validation/production/domain/PF-S03-T08-ORACLE-SOURCE.md"),
+    );
+    assert_manifest_artifact_digest(
+        &manifest,
+        "project/validation/production/domain/PF-S03-T10-ORACLE-SOURCE.md",
+        include_bytes!("../../../project/validation/production/domain/PF-S03-T10-ORACLE-SOURCE.md"),
+    );
+    assert_bound_artifact(
+        &manifest,
+        "crates/domain/src/lib.rs",
+        include_bytes!("../src/lib.rs"),
+    );
+    assert_bound_artifact(
+        &manifest,
         "crates/domain/src/status_evaluator.rs",
         include_bytes!("../src/status_evaluator.rs"),
     );
-    assert_artifact_digest(
+    assert_bound_artifact(
+        &manifest,
         "crates/domain/src/actions.rs",
         include_bytes!("../src/actions.rs"),
     );
-    assert_artifact_digest(
+    assert_bound_artifact(
+        &manifest,
         "crates/domain/src/decision_inputs.rs",
         include_bytes!("../src/decision_inputs.rs"),
     );
-    assert_artifact_digest(
+    assert_bound_artifact(
+        &manifest,
         "crates/domain/src/dependencies.rs",
         include_bytes!("../src/dependencies.rs"),
     );
-    assert_artifact_digest(
+    assert_bound_artifact(
+        &manifest,
         "crates/domain/src/time_policy.rs",
         include_bytes!("../src/time_policy.rs"),
     );
-    assert_artifact_digest(
+    assert_bound_artifact(
+        &manifest,
         "crates/domain/tests/production_properties.rs",
         include_bytes!("production_properties.rs"),
+    );
+    assert_manifest_artifact_digest(
+        &manifest,
+        "crates/domain/tests/production_t10_oracle.rs",
+        include_bytes!("production_t10_oracle.rs"),
     );
 
     let original = StatusCase {

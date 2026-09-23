@@ -1,11 +1,12 @@
 # PF-S03-T10 oracle source binding
 
-This record is the source-bound input for the PF-S03-T10 pure-domain oracle.
-The test target reads these fields and verifies the current Git revision and
-the actual included artifact bytes. A policy or source change therefore
-requires a new reviewed record rather than silently reusing the old vectors.
+This record is the tracked policy input for the PF-S03-T10 pure-domain oracle.
+Exact checkout identity is supplied by the external generated validation
+manifest used with the combined oracle run. A policy or source change
+therefore requires a new reviewed record rather than silently reusing vectors.
 
-current_source_revision: `70514f0ed2521df710c3c913f50ff9d759f5e743`
+source_binding: `external-generated-validation-input`
+manifest_env: `BOREAL_PRODUCTION_ORACLE_MANIFEST`
 accepted_contract_source_revision: `784a41b3802c29a76721c55eef2e9493283396c2`
 fixture_revision: `m02-candidate.1`
 
