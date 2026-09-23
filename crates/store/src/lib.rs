@@ -32,6 +32,7 @@ pub mod execution;
 pub mod identity;
 pub mod jobs;
 mod knowledge;
+pub mod maintenance;
 mod migrations;
 pub mod operations;
 pub mod profiles;
@@ -40,6 +41,7 @@ mod status_evaluation;
 pub mod transactions;
 mod work_model_v3;
 pub use knowledge::*;
+pub use maintenance::{MaintenanceJobInput, MaintenanceJobRecord, MaintenanceJobTransition};
 pub use migrations::{
     checksum, MigrationBackend, MigrationDiagnostic, MigrationError, MigrationLedgerEntry,
     MigrationOutcome, MigrationPlan, MigrationRunner, MigrationState, MigrationStep,
@@ -214,6 +216,21 @@ WHEN EXISTS (
 BEGIN
   SELECT RAISE(ABORT, 'dependency_cycle');
 END;
+
+CREATE TABLE IF NOT EXISTS boreal_maintenance_job (
+  operation_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (trim(kind) <> ''),
+  database_path TEXT NOT NULL CHECK (trim(database_path) <> ''),
+  package_path TEXT NOT NULL CHECK (trim(package_path) <> ''),
+  request_digest TEXT NOT NULL CHECK (trim(request_digest) <> ''),
+  stage TEXT NOT NULL CHECK (stage IN ('registered','running','readback_required','committed','rejected','unknown')),
+  result_json TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS boreal_maintenance_job_stage
+  ON boreal_maintenance_job(stage, operation_id);
 "#;
 
 const REPAIR_AUDIT_EVENT_VERIFIER_CHECK: &str = r#"
@@ -602,6 +619,46 @@ pub struct StatusWorkRecord {
     pub activation_at: Option<TimestampMs>,
     pub current_attempt: Option<AttemptRecord>,
     pub gate_diagnostics: GateDiagnostics,
+    /// Canonical facts read alongside the status row for action-context
+    /// projections. These are observations only; the application still
+    /// evaluates the action policy and mutations re-read them transactionally.
+    pub action_facts: StatusActionFacts,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusActionFacts {
+    pub entity_revision: Option<u64>,
+    pub proof_revision: Option<u64>,
+    pub authenticated_session_id: Option<String>,
+    pub source_version_id: Option<String>,
+    pub config_identity: Option<String>,
+    pub integrity: StatusIntegrity,
+    pub missing_facts: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StatusIntegrity {
+    Valid,
+    Degraded,
+    Quarantined,
+}
+
+impl StatusActionFacts {
+    pub fn unavailable() -> Self {
+        Self {
+            entity_revision: None,
+            proof_revision: None,
+            authenticated_session_id: None,
+            source_version_id: None,
+            config_identity: None,
+            integrity: StatusIntegrity::Quarantined,
+            missing_facts: vec![
+                "entity_revision".to_owned(),
+                "proof_identity".to_owned(),
+                "authenticated_session".to_owned(),
+            ],
+        }
+    }
 }
 
 /// A bounded, read-only diagnostic for a canonical work row that could not be
@@ -1663,6 +1720,7 @@ impl SqliteStore {
                     .to_owned(),
             ));
         }
+        maintenance::ensure_schema(self)?;
         self.verify_additive_store_schema_contract()
     }
 
@@ -1719,6 +1777,10 @@ impl SqliteStore {
                 "job_id,operation_id,project_id,subject_type,subject_id,kind,request_digest,stage,side_effect_ref,source_identity,config_identity,actor_id,session_id,started_at,deadline,result_digest,reconciliation_state,error_message,created_at,updated_at",
             ),
             (
+                "boreal_maintenance_job",
+                "operation_id,kind,database_path,package_path,request_digest,stage,result_json,error_message,created_at,updated_at",
+            ),
+            (
                 "boreal_pinned_requirement",
                 "project_id,work_id,proof_revision,subject_kind,profile_id,profile_version,profile_digest,provenance_json,declarations_json,resolved_digest,pinned_at",
             ),
@@ -1747,6 +1809,7 @@ impl SqliteStore {
             "boreal_operation_identity_scope",
             "boreal_recovery_unresolved",
             "boreal_recovery_decision_subject",
+            "boreal_maintenance_job_stage",
             "boreal_resource_live_key",
             "boreal_resource_attempt",
             "boreal_resource_release_subject",
@@ -4770,6 +4833,7 @@ impl SqliteStore {
                     activation_at,
                     current_attempt,
                     gate_diagnostics: diagnostics,
+                    action_facts: StatusActionFacts::unavailable(),
                 }),
                 Err(error) => record_diagnostics.push(StatusRecordDiagnostic {
                     work_id,

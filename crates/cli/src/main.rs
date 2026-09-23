@@ -26,10 +26,10 @@ use boreal_protocol::{
 use boreal_source::SourceCatalog;
 use boreal_store::identity::{IdentityError, IdentityStore, WorkspaceBinding};
 use boreal_store::{
-    AttemptRecord, AuditEventRecord, EvidenceExecutionState,
-    OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation, ReceiptOutcome,
-    ReceiptRecord, SqliteBackupPackageReport, SqliteRestorePackageReport, SqliteStore, StoreError,
-    WorkRecord,
+    AttemptRecord, AuditEventRecord, EvidenceExecutionState, MaintenanceJobInput,
+    MaintenanceJobTransition, OperationOutcome as StoreOperationOutcome, OperationRecord,
+    ReceiptAttestation, ReceiptOutcome, ReceiptRecord, SqliteBackupPackageReport,
+    SqliteRestorePackageReport, SqliteStore, StoreError, WorkRecord,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -626,7 +626,7 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         return service::run_update(&parsed, operation);
     }
     if matches!(parsed.path.as_slice(), [path] if path == "backup" || path == "restore") {
-        return backup_restore_result(&parsed);
+        return backup_restore_result(&parsed, operation);
     }
     let setup_command = setup::is_setup_command(&parsed.path);
     let setup_requested = setup::should_setup(&parsed);
@@ -714,7 +714,7 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
                 &ProjectId::new(project.clone()),
                 &parsed.options.actor,
                 "agent",
-                "cli",
+                &service::local_credential_ref(),
                 "CLI agent",
                 &binding,
                 &initialized_at,
@@ -748,12 +748,23 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         });
     }
     let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).map_err(map_store_error)?;
+    if store.is_canonical_production() {
+        store
+            .authenticate_actor(&parsed.options.actor, &service::local_credential_ref())
+            .map_err(|error| {
+                CliError::with(
+                    ErrorCode::PermissionDenied,
+                    ApplicationOutcome::Rejected,
+                    error.to_string(),
+                )
+            })?;
+    }
     let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
     dispatch(&parsed, operation, &app, &adapter, &store)
 }
 
-fn backup_restore_result(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
+fn backup_restore_result(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, CliError> {
     let package = parsed
         .options
         .positionals
@@ -773,8 +784,100 @@ fn backup_restore_result(parsed: &ParsedCommand) -> Result<CliResult, CliError> 
                 ));
             }
             let store = SqliteStore::open(&database, PRODUCTION_SCHEMA).map_err(map_store_error)?;
-            let report = store.backup_package_to(&package).map_err(map_store_error)?;
+            let request_digest = canonical_request_digest(
+                "maintenance.backup/v1",
+                json!({
+                    "database_path": database,
+                    "package_path": package,
+                }),
+            );
+            let registration = store
+                .register_maintenance_job(&MaintenanceJobInput {
+                    operation_id: operation.to_owned(),
+                    kind: "backup".to_owned(),
+                    database_path: database.to_string_lossy().into_owned(),
+                    package_path: package.to_string_lossy().into_owned(),
+                    request_digest,
+                    created_at: now(),
+                })
+                .map_err(map_store_error)?;
+            if registration.replayed {
+                if registration.job.stage == "committed" {
+                    let data: Value = registration
+                        .job
+                        .result_json
+                        .as_deref()
+                        .ok_or_else(|| CliError::invalid("committed backup readback has no result"))
+                        .and_then(|value| {
+                            serde_json::from_str(value).map_err(|error| {
+                                CliError::invalid(format!("invalid backup readback: {error}"))
+                            })
+                        })?;
+                    return bounded_result(Some(data), None).map(|mut result| {
+                        result.outcome = ApplicationOutcome::Unchanged;
+                        result.human = Some(
+                            "Backup operation already committed; returned durable readback."
+                                .to_owned(),
+                        );
+                        result
+                    });
+                }
+                return Err(CliError::unknown_delivery(
+                    operation,
+                    format!(
+                        "backup operation {operation} is {} and requires readback before retry",
+                        registration.job.stage
+                    ),
+                ));
+            }
+            store
+                .transition_maintenance_job(&MaintenanceJobTransition {
+                    operation_id: operation.to_owned(),
+                    expected_stage: "registered".to_owned(),
+                    next_stage: "running".to_owned(),
+                    at: now(),
+                    result_json: None,
+                    error_message: None,
+                })
+                .map_err(map_store_error)?;
+            let report = match store.backup_package_to(&package) {
+                Ok(report) => report,
+                Err(error) => {
+                    let _ = store.transition_maintenance_job(&MaintenanceJobTransition {
+                        operation_id: operation.to_owned(),
+                        expected_stage: "running".to_owned(),
+                        next_stage: "rejected".to_owned(),
+                        at: now(),
+                        result_json: None,
+                        error_message: Some(error.to_string()),
+                    });
+                    return Err(map_store_error(error));
+                }
+            };
             let data = backup_package_json(&report);
+            let result_json = serde_json::to_string(&data).map_err(|error| {
+                CliError::invalid(format!("backup result encoding failed: {error}"))
+            })?;
+            store
+                .transition_maintenance_job(&MaintenanceJobTransition {
+                    operation_id: operation.to_owned(),
+                    expected_stage: "running".to_owned(),
+                    next_stage: "readback_required".to_owned(),
+                    at: now(),
+                    result_json: None,
+                    error_message: None,
+                })
+                .map_err(map_store_error)?;
+            store
+                .transition_maintenance_job(&MaintenanceJobTransition {
+                    operation_id: operation.to_owned(),
+                    expected_stage: "readback_required".to_owned(),
+                    next_stage: "committed".to_owned(),
+                    at: now(),
+                    result_json: Some(result_json),
+                    error_message: None,
+                })
+                .map_err(map_store_error)?;
             bounded_result(Some(data), None).map(|mut result| {
                 result.outcome = ApplicationOutcome::Changed;
                 result.human = Some(format!(
@@ -791,9 +894,120 @@ fn backup_restore_result(parsed: &ParsedCommand) -> Result<CliResult, CliError> 
             })
         }
         Some("restore") => {
-            let report =
-                SqliteStore::restore_package_to(&package, &database).map_err(map_store_error)?;
+            if !package.is_dir() {
+                return Err(CliError::with(
+                    ErrorCode::NotFound,
+                    ApplicationOutcome::Rejected,
+                    format!(
+                        "restore package directory does not exist: {}",
+                        package.display()
+                    ),
+                ));
+            }
+            // Keep the restore job beside the immutable package. Mutating the
+            // packaged database before validation would invalidate its manifest
+            // digest and destroy the very readback boundary we are recording.
+            let maintenance_database = package.join(".boreal-maintenance.sqlite");
+            let source_store = SqliteStore::open(&maintenance_database, PRODUCTION_SCHEMA)
+                .map_err(map_store_error)?;
+            let request_digest = canonical_request_digest(
+                "maintenance.restore/v1",
+                json!({
+                    "database_path": database,
+                    "package_path": package,
+                }),
+            );
+            let registration = source_store
+                .register_maintenance_job(&MaintenanceJobInput {
+                    operation_id: operation.to_owned(),
+                    kind: "restore".to_owned(),
+                    database_path: database.to_string_lossy().into_owned(),
+                    package_path: package.to_string_lossy().into_owned(),
+                    request_digest,
+                    created_at: now(),
+                })
+                .map_err(map_store_error)?;
+            if registration.replayed {
+                if registration.job.stage == "committed" {
+                    let data: Value = registration
+                        .job
+                        .result_json
+                        .as_deref()
+                        .ok_or_else(|| {
+                            CliError::invalid("committed restore readback has no result")
+                        })
+                        .and_then(|value| {
+                            serde_json::from_str(value).map_err(|error| {
+                                CliError::invalid(format!("invalid restore readback: {error}"))
+                            })
+                        })?;
+                    return bounded_result(Some(data), None).map(|mut result| {
+                        result.outcome = ApplicationOutcome::Unchanged;
+                        result.human = Some(
+                            "Restore operation already committed; returned durable readback."
+                                .to_owned(),
+                        );
+                        result
+                    });
+                }
+                return Err(CliError::unknown_delivery(
+                    operation,
+                    format!(
+                        "restore operation {operation} is {} and requires readback before retry",
+                        registration.job.stage
+                    ),
+                ));
+            }
+            source_store
+                .transition_maintenance_job(&MaintenanceJobTransition {
+                    operation_id: operation.to_owned(),
+                    expected_stage: "registered".to_owned(),
+                    next_stage: "running".to_owned(),
+                    at: now(),
+                    result_json: None,
+                    error_message: None,
+                })
+                .map_err(map_store_error)?;
+            let report = match SqliteStore::restore_package_to(&package, &database) {
+                Ok(report) => report,
+                Err(error) => {
+                    let _ = source_store.transition_maintenance_job(&MaintenanceJobTransition {
+                        operation_id: operation.to_owned(),
+                        expected_stage: "running".to_owned(),
+                        next_stage: "rejected".to_owned(),
+                        at: now(),
+                        result_json: None,
+                        error_message: Some(error.to_string()),
+                    });
+                    return Err(map_store_error(error));
+                }
+            };
             let data = restore_package_json(&report);
+            let result_json = serde_json::to_string(&data).map_err(|error| {
+                CliError::invalid(format!("restore result encoding failed: {error}"))
+            })?;
+            let maintenance_store = SqliteStore::open(&maintenance_database, PRODUCTION_SCHEMA)
+                .map_err(map_store_error)?;
+            maintenance_store
+                .transition_maintenance_job(&MaintenanceJobTransition {
+                    operation_id: operation.to_owned(),
+                    expected_stage: "running".to_owned(),
+                    next_stage: "readback_required".to_owned(),
+                    at: now(),
+                    result_json: None,
+                    error_message: None,
+                })
+                .map_err(map_store_error)?;
+            maintenance_store
+                .transition_maintenance_job(&MaintenanceJobTransition {
+                    operation_id: operation.to_owned(),
+                    expected_stage: "readback_required".to_owned(),
+                    next_stage: "committed".to_owned(),
+                    at: now(),
+                    result_json: Some(result_json),
+                    error_message: None,
+                })
+                .map_err(map_store_error)?;
             bounded_result(Some(data), None).map(|mut result| {
                 result.outcome = ApplicationOutcome::Changed;
                 result.human = Some(format!(
@@ -2689,6 +2903,26 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         .actions
         .as_ref()
         .map(|actions| action_decision_json(actions, true));
+    let action_context = match &item.action_context {
+        boreal_application::StatusActionContext::Unavailable { missing_facts } => json!({
+            "state": "unavailable",
+            "missing_facts": missing_facts,
+        }),
+        boreal_application::StatusActionContext::FactsRead {
+            entity_revision,
+            proof_revision,
+            session_id,
+            integrity,
+            missing_facts,
+        } => json!({
+            "state": item.action_context.state(),
+            "entity_revision": entity_revision,
+            "proof_revision": proof_revision,
+            "authenticated_session_id": session_id,
+            "integrity": integrity,
+            "missing_facts": missing_facts,
+        }),
+    };
     json!({
         "work_id": item.work.id.as_str(),
         "project_id": item.work.project_id.as_str(),
@@ -2716,10 +2950,7 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
         "attempt": attempt,
         "actions": actions,
-        "action_context": {
-            "state": item.action_context.state(),
-            "missing_facts": item.action_context.missing_facts(),
-        },
+        "action_context": action_context,
         "gates": { "open": open, "satisfied": satisfied },
         "dependencies": item.dependency_blockers.iter().map(|blocker| json!({
                 "work_id": blocker.work_id.as_str(),
@@ -8056,7 +8287,10 @@ mod tests {
         assert_eq!(task["kind"], "task");
         assert_eq!(task["claimable_for_actor"], true);
         assert_eq!(task["actions"], Value::Null);
-        assert_eq!(task["action_context"]["state"], "unavailable");
+        assert_eq!(task["action_context"]["state"], "partial");
+        assert!(task["action_context"]["missing_facts"]
+            .as_array()
+            .is_some_and(|facts| facts.iter().any(|fact| fact == "authenticated_session")));
 
         let _ = fs::remove_file(path);
     }

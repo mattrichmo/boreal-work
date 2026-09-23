@@ -48,6 +48,7 @@ fn cli_backup_and_restore_use_manifest_and_new_restore_epoch() {
             .arg(&package)
             .args(["--db"])
             .arg(&database)
+            .args(["--operation-id", "backup-readback-1"])
             .args(["--json"])
             .output()
             .expect("backup starts"),
@@ -55,6 +56,24 @@ fn cli_backup_and_restore_use_manifest_and_new_restore_epoch() {
     assert_eq!(backup["data"]["restore_supported"], true);
     assert!(package.join("database.sqlite").exists());
     assert!(package.join("manifest.json").exists());
+
+    let backup_readback = json(
+        Command::new(binary)
+            .current_dir(&root)
+            .args(["backup"])
+            .arg(&package)
+            .args(["--db"])
+            .arg(&database)
+            .args(["--operation-id", "backup-readback-1"])
+            .args(["--json"])
+            .output()
+            .expect("backup readback starts"),
+    );
+    assert_eq!(backup_readback["outcome"], "unchanged");
+    assert_eq!(
+        backup_readback["data"]["manifest_sha256"],
+        backup["data"]["manifest_sha256"]
+    );
 
     let restore = json(
         Command::new(binary)

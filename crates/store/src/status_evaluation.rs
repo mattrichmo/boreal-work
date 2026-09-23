@@ -193,6 +193,31 @@ impl SqliteStore {
         })
     }
 
+    /// Authenticate the caller against the credential binding stored for the
+    /// actor. A role lookup alone is not authentication: production adapters
+    /// must supply the locally derived credential bound to this process.
+    pub fn authenticate_actor(
+        &self,
+        actor_id: &str,
+        credential_ref: &str,
+    ) -> Result<ActorContext, StoreError> {
+        let mut row = self.prepare("SELECT role, credential_ref FROM actor WHERE actor_id = ?1")?;
+        row.bind_text(1, actor_id)?;
+        if row.step()? != SQLITE_ROW {
+            return Err(StoreError::NotFound {
+                entity: "actor",
+                id: actor_id.to_owned(),
+            });
+        }
+        let stored_credential = row.column_text(1)?;
+        if stored_credential != credential_ref {
+            return Err(StoreError::Conflict(
+                "caller credential does not match the actor binding".to_owned(),
+            ));
+        }
+        self.actor_context(actor_id)
+    }
+
     /// Freeze work, graph, attempt, gate and actor policy in the same read.
     pub fn read_project_status_for_actor(
         &self,
@@ -202,10 +227,123 @@ impl SqliteStore {
         self.execute_batch("BEGIN")?;
         let result = (|| {
             let actor = self.actor_context(actor_id)?;
-            let snapshot = self.read_project_status_in_transaction(project_id)?;
+            let mut snapshot = self.read_project_status_in_transaction(project_id)?;
+            self.populate_status_action_facts(&mut snapshot, actor_id)?;
             Ok((snapshot, actor))
         })();
         finish_transaction(self, result)
+    }
+
+    /// Attach the non-derived facts needed by the action projection while the
+    /// status snapshot's read transaction is still open. Missing facts remain
+    /// explicit; this method never invents a proof, session, or revision.
+    fn populate_status_action_facts(
+        &self,
+        snapshot: &mut ProjectStatusRead,
+        actor_id: &str,
+    ) -> Result<(), StoreError> {
+        let session_id = self.status_session_for_actor(snapshot.project_id.as_str(), actor_id)?;
+        let has_entity_revisions = self.table_exists("boreal_entity_revision")?;
+        let has_pinned_requirements = self.table_exists("boreal_pinned_requirement")?;
+        for row in &mut snapshot.works {
+            let mut facts = StatusActionFacts {
+                entity_revision: None,
+                proof_revision: None,
+                authenticated_session_id: session_id.clone(),
+                source_version_id: row
+                    .current_attempt
+                    .as_ref()
+                    .and_then(|attempt| attempt.source_version_id.clone()),
+                config_identity: row
+                    .current_attempt
+                    .as_ref()
+                    .map(|attempt| attempt.config_identity.clone()),
+                integrity: StatusIntegrity::Valid,
+                missing_facts: Vec::new(),
+            };
+
+            if has_entity_revisions {
+                let mut entity = self.prepare(
+                    "SELECT entity_revision, proof_revision
+                     FROM boreal_entity_revision
+                     WHERE project_id = ?1 AND work_id = ?2",
+                )?;
+                entity.bind_text(1, snapshot.project_id.as_str())?;
+                entity.bind_text(2, row.work.id.as_str())?;
+                if entity.step()? == SQLITE_ROW {
+                    facts.entity_revision = Some(entity.column_u64(0)?);
+                    facts.proof_revision = Some(entity.column_u64(1)?);
+                }
+            }
+            if facts.entity_revision.is_none() {
+                facts.missing_facts.push("entity_revision".to_owned());
+            }
+            if has_pinned_requirements && facts.proof_revision.is_none() {
+                let mut proof = self.prepare(
+                    "SELECT MAX(proof_revision)
+                     FROM boreal_pinned_requirement
+                     WHERE project_id = ?1 AND work_id = ?2",
+                )?;
+                proof.bind_text(1, snapshot.project_id.as_str())?;
+                proof.bind_text(2, row.work.id.as_str())?;
+                if proof.step()? == SQLITE_ROW {
+                    facts.proof_revision = proof.column_optional_i64(0)?;
+                }
+            }
+            if facts.proof_revision.is_none() {
+                facts.missing_facts.push("proof_revision".to_owned());
+            }
+            if facts.authenticated_session_id.is_none() {
+                facts.missing_facts.push("authenticated_session".to_owned());
+            }
+            if row.current_attempt.is_some()
+                && (facts.source_version_id.is_none() || facts.config_identity.is_none())
+            {
+                facts.missing_facts.push("proof_identity".to_owned());
+            }
+            if snapshot
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.work_id == row.work.id.as_str())
+            {
+                facts.integrity = StatusIntegrity::Quarantined;
+                facts.missing_facts.push("integrity".to_owned());
+            }
+            facts.missing_facts.sort();
+            facts.missing_facts.dedup();
+            row.action_facts = facts;
+        }
+        Ok(())
+    }
+
+    fn status_session_for_actor(
+        &self,
+        project_id: &str,
+        actor_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT DISTINCT session.session_id
+             FROM session
+             JOIN operation registration
+               ON registration.session_id = session.session_id
+              AND registration.command = 'session.register'
+              AND registration.project_id = ?1
+             WHERE session.actor_id = ?2 AND session.state = 'active'
+             ORDER BY session.session_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, actor_id)?;
+        let mut selected = None;
+        while statement.step()? == SQLITE_ROW {
+            let value = statement.column_text(0)?;
+            if selected.is_some() {
+                return Err(StoreError::Conflict(
+                    "status action context has multiple active authenticated sessions".to_owned(),
+                ));
+            }
+            selected = Some(value);
+        }
+        Ok(selected)
     }
 
     /// Caller must hold the write transaction. This does not open a nested

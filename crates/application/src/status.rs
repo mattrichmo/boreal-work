@@ -12,7 +12,7 @@ use boreal_domain::{
     DependencyPolicy, DerivedStatus, GateId, GateKind, GateRequirement, GateState, Revision,
     RollupCounts, StatusContext, StatusDecision, TimestampMs, WorkId, WorkItem,
 };
-use boreal_store::{SqliteStore, StatusRecordDiagnostic, StatusWorkRecord};
+use boreal_store::{SqliteStore, StatusActionFacts, StatusRecordDiagnostic, StatusWorkRecord};
 use std::{collections::BTreeMap, fmt};
 
 pub const STATUS_CONTRACT_VERSION: &str = "boreal.work-status/2";
@@ -32,6 +32,7 @@ pub struct StatusWorkInput {
     pub current_attempt: Option<Attempt>,
     pub gates: Vec<GateRequirement>,
     pub gate_reasons: Vec<GateReason>,
+    pub action_facts: Option<StatusActionFacts>,
 }
 
 impl StatusWorkInput {
@@ -45,6 +46,7 @@ impl StatusWorkInput {
             current_attempt: None,
             gates,
             gate_reasons: Vec::new(),
+            action_facts: None,
         }
     }
 }
@@ -151,16 +153,40 @@ pub enum StatusActionContext {
     /// from a normal policy denial so clients can explain the unavailable
     /// action context and avoid presenting fabricated proof metadata.
     Unavailable { missing_facts: Vec<&'static str> },
+    /// The store supplied concrete revision/session/integrity observations.
+    /// The action set remains absent while proof facts are incomplete.
+    FactsRead {
+        entity_revision: Option<u64>,
+        proof_revision: Option<u64>,
+        session_id: Option<String>,
+        integrity: &'static str,
+        missing_facts: Vec<String>,
+    },
 }
 
 impl StatusActionContext {
     pub fn state(&self) -> &'static str {
-        "unavailable"
+        match self {
+            Self::Unavailable { .. } => "unavailable",
+            Self::FactsRead { missing_facts, .. } if missing_facts.is_empty() => "available",
+            Self::FactsRead { .. } => "partial",
+        }
     }
 
     pub fn missing_facts(&self) -> &[&'static str] {
         match self {
             Self::Unavailable { missing_facts } => missing_facts,
+            Self::FactsRead { .. } => &[],
+        }
+    }
+
+    pub fn missing_fact_names(&self) -> Vec<String> {
+        match self {
+            Self::Unavailable { missing_facts } => missing_facts
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            Self::FactsRead { missing_facts, .. } => missing_facts.clone(),
         }
     }
 }
@@ -534,6 +560,7 @@ fn status_input_from_store_row(row: &StatusWorkRecord) -> Result<StatusWorkInput
         })
         .collect();
     input.current_attempt = row.status_attempt().map_err(|error| error.to_string())?;
+    input.action_facts = Some(row.action_facts.clone());
     Ok(input)
 }
 
@@ -560,12 +587,29 @@ fn status2_rollup(decisions: &[StatusDecision]) -> RollupCounts {
 /// complete v3 context; until then the compatibility read remains useful for
 /// discovery and mutation routes keep their own canonical authorization.
 fn status_actions(
-    _input: &StatusWorkInput,
+    input: &StatusWorkInput,
     _actor: &ActorContext,
     _project_revision: Revision,
     _as_of: TimestampMs,
     _decision: &StatusDecision,
 ) -> (StatusActionContext, Option<ActionDecision>) {
+    if let Some(facts) = &input.action_facts {
+        let integrity = match facts.integrity {
+            boreal_store::StatusIntegrity::Valid => "valid",
+            boreal_store::StatusIntegrity::Degraded => "degraded",
+            boreal_store::StatusIntegrity::Quarantined => "quarantined",
+        };
+        return (
+            StatusActionContext::FactsRead {
+                entity_revision: facts.entity_revision,
+                proof_revision: facts.proof_revision,
+                session_id: facts.authenticated_session_id.clone(),
+                integrity,
+                missing_facts: facts.missing_facts.clone(),
+            },
+            None,
+        );
+    }
     (
         StatusActionContext::Unavailable {
             missing_facts: vec!["entity_revision", "proof_identity", "authenticated_session"],
@@ -693,6 +737,7 @@ mod tests {
                 gates: gate_rows,
                 missing: Vec::new(),
             },
+            action_facts: boreal_store::StatusActionFacts::unavailable(),
         };
         let input = status_input_from_store_row(&row).expect("canonical planning facts decode");
         assert_eq!(input.schedule, row.schedule);

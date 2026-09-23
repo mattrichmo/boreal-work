@@ -63,6 +63,29 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
         || (path == &["evidence".to_owned(), "add".to_owned()] && parsed.options.receipt.is_some())
 }
 
+/// Derive the caller binding from the local operating-system identity. The
+/// value is intentionally not accepted from user input on production routes;
+/// it is only serialized into the local request envelope after derivation.
+pub(crate) fn local_credential_ref() -> String {
+    #[cfg(unix)]
+    {
+        let uid = Command::new("/usr/bin/id")
+            .arg("-u")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned());
+        return format!("os-uid:{uid}");
+    }
+    #[cfg(not(unix))]
+    {
+        "os-user:unknown".to_owned()
+    }
+}
+
 #[cfg(not(unix))]
 pub(crate) fn run_service(
     _parsed: &ParsedCommand,
@@ -1328,6 +1351,7 @@ mod unix {
         let mut data = json!({
             "project_id": if project.is_empty() { Value::Null } else { json!(project) },
             "actor_id": parsed.options.actor,
+            "credential_ref": local_credential_ref(),
             "harness_id": parsed.options.harness,
             "session_id": parsed.options.session,
         });
@@ -1346,7 +1370,7 @@ mod unix {
                 data["name"] = json!(project);
                 data["description"] = json!("");
                 data["actor_role"] = json!(parsed.options.actor_role.as_deref().unwrap_or("agent"));
-                data["credential_ref"] = json!("cli");
+                data["credential_ref"] = json!(local_credential_ref());
                 data["expected_revision"] = parsed
                     .options
                     .expected_revision
@@ -2001,6 +2025,43 @@ mod unix {
 
     impl ServiceCommandHandler {
         fn dispatch(&mut self, request: &ApplicationRequest, data: &Value) -> ServiceResult {
+            if self.store.is_canonical_production()
+                && !matches!(request.command.as_str(), "workflow_list" | "workflow_show")
+            {
+                let actor_id = data
+                    .get("actor_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CliError::invalid("authenticated request requires actor_id"))?;
+                let supplied = data
+                    .get("credential_ref")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        CliError::with(
+                            ErrorCode::PermissionDenied,
+                            ApplicationOutcome::Rejected,
+                            "authenticated request requires a local credential binding",
+                        )
+                    })?;
+                let local = local_credential_ref();
+                if supplied != local {
+                    return Err(CliError::with(
+                        ErrorCode::PermissionDenied,
+                        ApplicationOutcome::Rejected,
+                        "caller credential is not bound to this local process",
+                    ));
+                }
+                if request.command != "create_project" {
+                    self.store
+                        .authenticate_actor(actor_id, &local)
+                        .map_err(|error| {
+                            CliError::with(
+                                ErrorCode::PermissionDenied,
+                                ApplicationOutcome::Rejected,
+                                error.to_string(),
+                            )
+                        })?;
+                }
+            }
             match request.command.as_str() {
                 "workflow_list" => self.workflow_list(),
                 "workflow_show" => self.workflow_show(data),
