@@ -98,22 +98,23 @@ fn online_backup_and_restore_round_trip_live_database() {
 }
 
 #[test]
-fn canonical_production_backup_and_restore_require_external_job_boundary() {
+fn canonical_production_raw_backup_is_available_but_restore_requires_package_boundary() {
     let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production opens");
 
-    let backup = store.backup_to(std::env::temp_dir().join("boreal-production-backup.sqlite"));
-    assert!(matches!(
-        backup,
-        Err(StoreError::Conflict(message))
-            if message.contains("identity-bound external-job admission")
-    ));
+    let backup_path = temp_path("canonical-production-backup");
+    remove_sqlite_files(&backup_path);
+    let backup = store
+        .backup_to(&backup_path)
+        .expect("raw online backup succeeds");
+    assert!(backup.pages_copied > 0);
 
-    let restore = store.restore_from(std::env::temp_dir().join("boreal-production-restore.sqlite"));
+    let restore = store.restore_from(&backup_path);
     assert!(matches!(
         restore,
         Err(StoreError::Conflict(message))
-            if message.contains("restore-epoch reconciliation")
+            if message.contains("restore_package_to")
     ));
+    remove_sqlite_files(&backup_path);
 }
 
 #[test]

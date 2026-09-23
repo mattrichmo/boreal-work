@@ -98,6 +98,124 @@ fn unbound_canonical_production_rejects_consequential_operation_writes() {
 }
 
 #[test]
+fn production_bootstrap_binds_workspace_and_replays_only_the_same_identity() {
+    let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema opens");
+    let binding = binding();
+    IdentityStore::new(&store)
+        .install(
+            &DatabaseIdentity::new("database-bootstrap", 1).expect("database identity is valid"),
+            "unix-ms:1",
+        )
+        .expect("controlled database identity installs");
+    let first = store
+        .initialize_project_with_workspace(
+            "p1",
+            "agent-1",
+            "agent",
+            "credential-1",
+            "Agent 1",
+            "op-bootstrap",
+            "sha256:bootstrap-request",
+            &DatabaseIdentity::new("database-bootstrap", 1).unwrap(),
+            &binding,
+            "unix-ms:1",
+        )
+        .expect("atomic production bootstrap commits");
+    assert!(!first.replayed);
+
+    let identity = IdentityStore::new(&store);
+    assert_eq!(identity.workspace_binding("p1").unwrap(), binding);
+    let context = identity.context("p1").unwrap();
+    assert!(identity
+        .operation(&context, "op-bootstrap")
+        .unwrap()
+        .is_some());
+
+    let replay = store
+        .initialize_project_with_workspace(
+            "p1",
+            "agent-1",
+            "agent",
+            "credential-1",
+            "Agent 1",
+            "op-bootstrap",
+            "sha256:bootstrap-request",
+            &DatabaseIdentity::new("database-bootstrap", 1).unwrap(),
+            &binding,
+            "unix-ms:2",
+        )
+        .expect("identical bootstrap is an exact replay");
+    assert!(replay.replayed);
+    assert_eq!(replay.revision, first.revision);
+
+    let alternate = WorkspaceBinding::new(
+        "/tmp/boreal-boundary-other",
+        "/tmp/boreal-boundary-other",
+        "sha256:boundary-binding-other",
+    )
+    .expect("alternate binding is valid");
+    let error = store
+        .initialize_project_with_workspace(
+            "p1",
+            "agent-1",
+            "agent",
+            "credential-1",
+            "Agent 1",
+            "op-bootstrap",
+            "sha256:bootstrap-request",
+            &DatabaseIdentity::new("database-bootstrap", 1).unwrap(),
+            &alternate,
+            "unix-ms:3",
+        )
+        .expect_err("a replay for another workspace must be rejected");
+    assert!(matches!(
+        error,
+        StoreError::Conflict(message) if message.contains("another workspace binding")
+    ));
+}
+
+#[test]
+fn production_bootstrap_rolls_back_project_and_binding_on_precommit_failure() {
+    let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema opens");
+    IdentityStore::new(&store)
+        .install(
+            &DatabaseIdentity::new("database-bootstrap-rollback", 1)
+                .expect("database identity is valid"),
+            "unix-ms:1",
+        )
+        .expect("controlled database identity installs");
+    store
+        .execute_batch("DROP TABLE boreal_operation_identity")
+        .expect("test removes the final operation identity seam");
+
+    let error = store
+        .initialize_project_with_workspace(
+            "p-rollback",
+            "agent-1",
+            "agent",
+            "credential-1",
+            "Agent 1",
+            "op-rollback",
+            "sha256:rollback-request",
+            &DatabaseIdentity::new("database-bootstrap-rollback", 1).unwrap(),
+            &binding(),
+            "unix-ms:2",
+        )
+        .expect_err("pre-commit identity failure must abort bootstrap");
+    assert!(
+        matches!(error, StoreError::Conflict(ref message) if message.contains("boreal_operation_identity")),
+        "unexpected pre-commit error: {error:?}"
+    );
+    assert!(store
+        .list_project_ids()
+        .expect("project discovery remains readable")
+        .is_empty());
+    assert!(!store
+        .operation_exists("op-rollback")
+        .expect("operation lookup remains readable"));
+}
+
+#[test]
 fn bound_canonical_production_replay_returns_the_original_outcome() {
     let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema opens");
     store

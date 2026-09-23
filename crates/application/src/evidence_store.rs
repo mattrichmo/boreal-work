@@ -22,6 +22,7 @@ use crate::{
     ReceiptExpectation, ReceiptExpectationBase, ReceiptPayload, ReviewDecision,
     ReviewDecisionRequest, SqliteStore, SummaryPayload, WorkApplication,
 };
+use boreal_store::jobs::ExternalJobInput;
 
 const VERIFIER_JOB_PREFIX: &str = "verifier:";
 
@@ -165,41 +166,49 @@ impl WorkApplication<'_> {
             &stamp(now),
         )?;
 
-        if let Some(identity) = identity.as_ref() {
-            ExternalEffectAdapter::new_with_identity(self.store(), identity)
-                .admit(&external_request)?;
-        } else {
-            // Schema-v2 fixtures do not have a canonical identity boundary.
-            // Keep their compatibility path explicit and never manufacture a
-            // context merely to make the production API appear available.
-            ExternalEffectAdapter::new(self.store()).admit(&external_request)?;
-        }
-
-        // Keep the evidence row last.  The journal and external-job sidecar
-        // are the durable pending/readback state during this boundary.  If
-        // the store rejects the semantic admission, no evidence execution
-        // row can remain without its operation, audit event, and job.
-        let admitted =
-            self.store()
-                .admit_evidence_execution(EvidenceExecutionAdmissionRequest {
-                    operation_id: request.operation_id.as_str().to_owned(),
-                    project_id,
-                    work_id: request.expectation.work_id.as_str().to_owned(),
-                    attempt_id: request.expectation.attempt_id.as_str().to_owned(),
-                    fence: request.expectation.fence.get(),
-                    gate_id,
-                    actor_id: actor_id.to_owned(),
-                    session_id: session_id.map(str::to_owned),
-                    request_digest,
-                    artifact_ref: artifact_ref.to_owned(),
-                    source_version_id: Some(
-                        request.expectation.source_snapshot_hash.as_str().to_owned(),
-                    ),
-                    config_identity: request.expectation.config_identity.as_str().to_owned(),
-                    profile_id: request.expectation.profile_id.as_str().to_owned(),
-                    profile_version,
-                    admitted_at: stamp(now),
-                })?;
+        // The execution identity and the external-job sidecar are admitted in
+        // one store transaction.  A semantic rejection therefore creates
+        // neither record, while a crash can only commit both (or neither).
+        // Replays repair either half written by an older implementation and
+        // never grant a second process launch.
+        let evidence_request = EvidenceExecutionAdmissionRequest {
+            operation_id: request.operation_id.as_str().to_owned(),
+            project_id,
+            work_id: request.expectation.work_id.as_str().to_owned(),
+            attempt_id: request.expectation.attempt_id.as_str().to_owned(),
+            fence: request.expectation.fence.get(),
+            gate_id,
+            actor_id: actor_id.to_owned(),
+            session_id: session_id.map(str::to_owned),
+            request_digest,
+            artifact_ref: artifact_ref.to_owned(),
+            source_version_id: Some(request.expectation.source_snapshot_hash.as_str().to_owned()),
+            config_identity: request.expectation.config_identity.as_str().to_owned(),
+            profile_id: request.expectation.profile_id.as_str().to_owned(),
+            profile_version,
+            admitted_at: stamp(now),
+        };
+        let external_input = ExternalJobInput {
+            job_id: external_request.job_id.clone(),
+            operation_id: external_request.operation_id.clone(),
+            project_id: external_request.project_id.clone(),
+            subject_type: external_request.subject_type.clone(),
+            subject_id: external_request.subject_id.clone(),
+            kind: external_request.kind.clone(),
+            request_digest: external_request.request_digest.clone(),
+            source_identity: external_request.source_identity.clone(),
+            config_identity: external_request.config_identity.clone(),
+            actor_id: external_request.actor_id.clone(),
+            session_id: external_request.session_id.clone(),
+            deadline: external_request.deadline.clone(),
+            created_at: external_request.created_at.clone(),
+        };
+        let admitted = self.store().admit_evidence_execution_with_external_job(
+            identity.as_ref(),
+            &evidence_request,
+            &external_input,
+            evidence_request.admitted_at.as_str(),
+        )?;
 
         Ok(admitted)
     }
@@ -1779,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn verifier_admission_failure_leaves_no_execution_without_journal_and_job() {
+    fn verifier_admission_rejection_leaves_no_execution_or_external_job() {
         let (store, project) = legacy_verifier_setup();
         let app = WorkApplication::new(&store);
         let request = verifier_request("op-verifier-admission-order");
@@ -1810,7 +1819,132 @@ mod tests {
         assert!(store
             .external_job(project.as_str(), "verifier:op-verifier-admission-order")
             .expect("read verifier job")
+            .is_none());
+    }
+
+    #[test]
+    fn verifier_admission_replay_repairs_either_durable_half_without_second_job() {
+        let (store, project) = production_verifier_setup();
+        let app = WorkApplication::new(&store);
+        let request = verifier_request("op-verifier-admission-repair");
+
+        let first = app
+            .admit_witnessed_execution(
+                "agent-one",
+                None,
+                &request,
+                "artifact://verifier-output",
+                TimestampMs::from_millis(1_100),
+            )
+            .expect("admit witnessed execution");
+        assert!(!first.replayed);
+        let job_id = "verifier:op-verifier-admission-repair";
+        let context = IdentityStore::new(&store)
+            .context(project.as_str())
+            .expect("read verifier identity context");
+        assert_eq!(
+            store
+                .external_job_with_identity(&context, job_id)
+                .expect("read initial verifier job")
+                .expect("initial verifier job")
+                .stage,
+            "admitted"
+        );
+
+        // Model a crash after the execution identity committed but before a
+        // legacy adapter committed its sidecar. The same operation replay
+        // must recreate the job without creating a second execution identity.
+        store
+            .execute_batch("DELETE FROM boreal_external_job WHERE job_id = 'verifier:op-verifier-admission-repair'")
+            .expect("remove sidecar for recovery fixture");
+        let repaired_job = app
+            .admit_witnessed_execution(
+                "agent-one",
+                None,
+                &request,
+                "artifact://verifier-output",
+                TimestampMs::from_millis(1_100),
+            )
+            .expect("repair missing verifier job");
+        assert!(repaired_job.replayed);
+        assert_eq!(
+            store
+                .external_job_with_identity(&context, job_id)
+                .expect("read repaired verifier job")
+                .expect("repaired verifier job")
+                .stage,
+            "admitted"
+        );
+
+        // Model the inverse legacy half-write. Replaying the same immutable
+        // request restores the execution row while reusing the existing job.
+        store
+            .execute_batch(
+                "DELETE FROM evidence_execution
+                 WHERE operation_id = 'op-verifier-admission-repair'",
+            )
+            .expect("remove execution for recovery fixture");
+        let repaired_execution = app
+            .admit_witnessed_execution(
+                "agent-one",
+                None,
+                &request,
+                "artifact://verifier-output",
+                TimestampMs::from_millis(1_100),
+            )
+            .expect("repair missing evidence execution");
+        assert!(!repaired_execution.replayed);
+        assert!(store
+            .evidence_execution(request.operation_id.as_str())
+            .expect("read repaired evidence execution")
             .is_some());
+        assert_eq!(
+            store
+                .external_job_with_identity(&context, job_id)
+                .expect("read reused verifier job")
+                .expect("reused verifier job")
+                .stage,
+            "admitted"
+        );
+    }
+
+    #[test]
+    fn verifier_unknown_outcome_remains_readback_required_after_atomic_admission() {
+        let (store, project) = production_verifier_setup();
+        let app = WorkApplication::new(&store);
+        let request = verifier_request("op-verifier-unknown-readback");
+
+        app.admit_witnessed_execution(
+            "agent-one",
+            None,
+            &request,
+            "artifact://verifier-unknown-readback",
+            TimestampMs::from_millis(1_100),
+        )
+        .expect("admit witnessed execution");
+        app.start_witnessed_execution(
+            request.operation_id.as_str(),
+            TimestampMs::from_millis(1_200),
+        )
+        .expect("start witnessed execution");
+
+        let unknown = app
+            .mark_witnessed_execution_unknown(
+                request.operation_id.as_str(),
+                "verifier_process_outcome_unknown",
+            )
+            .expect("mark unknown execution");
+        assert_eq!(unknown.state, EvidenceExecutionState::Unknown);
+
+        let readback = app
+            .readback_witnessed_execution(request.operation_id.as_str())
+            .expect("read back unknown verifier");
+        assert!(matches!(
+            readback,
+            ExternalEffectResolution::ReadbackRequired(job)
+                if job.stage == "readback_required"
+                    && job.project_id == project.as_str()
+        ));
     }
 
     #[test]

@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, NulError};
 use std::fmt;
 use std::fmt::Write as _;
+use std::fs;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -63,6 +64,10 @@ const MISSING_CLOSE_COMPLETED_AUDIT_EVENT: &str =
 const PRODUCTION_SCHEMA_SQL: &str = include_str!("../../../project/spec/schema-production.sql");
 const LEGACY_SCHEMA_V2_SQL: &str = include_str!("../../../project/spec/schema-v2.sql");
 const WORK_MODEL_SCHEMA_V3_SQL: &str = include_str!("../../../project/spec/schema-v3.sql");
+const BACKUP_MANIFEST_FILE: &str = "manifest.json";
+const BACKUP_DATABASE_FILE: &str = "database.sqlite";
+const BACKUP_FORMAT_VERSION: u64 = 1;
+const BACKUP_PACKAGE_KIND: &str = "boreal.sqlite.backup";
 
 const PRODUCTION_EXTERNAL_JOB_IDENTITY_TRIGGER_SQL: &str = r#"
 CREATE TRIGGER IF NOT EXISTS boreal_external_job_identity_guard
@@ -748,6 +753,38 @@ pub struct SqliteBackupReport {
     pub source_page_count: u64,
     pub pages_copied: u64,
     pub busy_retries: u64,
+}
+
+/// A validated package-level SQLite backup. The database file is accompanied
+/// by a manifest so restore can fail closed on schema, identity, or external
+/// artifact mismatches instead of treating a raw file copy as a complete
+/// project backup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteBackupPackageReport {
+    pub package_path: PathBuf,
+    pub database_path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub backup: SqliteBackupReport,
+    pub project_count: u64,
+    pub referenced_blob_count: u64,
+    pub published_memory_count: u64,
+    pub restore_supported: bool,
+}
+
+/// Result of replacing a destination database from a validated backup
+/// package. The old destination is retained at `previous_database_path` when
+/// one existed, making an interrupted or operator-rejected restore recoverable
+/// without reopening the old lineage as current.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteRestorePackageReport {
+    pub package_path: PathBuf,
+    pub destination_path: PathBuf,
+    pub previous_database_path: Option<PathBuf>,
+    pub source_database_instance_id: String,
+    pub source_restore_epoch: u64,
+    pub current_database_instance_id: String,
+    pub current_restore_epoch: u64,
+    pub backup: SqliteBackupReport,
 }
 
 /// The durable session state values accepted by schema v2.
@@ -1820,12 +1857,6 @@ impl SqliteStore {
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<SqliteBackupReport, StoreError> {
-        if self.canonical_production {
-            return Err(StoreError::Conflict(
-                "canonical production backup requires identity-bound external-job admission and readback"
-                    .to_owned(),
-            ));
-        }
         let destination = destination.as_ref();
         if destination == Path::new(":memory:") {
             return Err(StoreError::Invalid(
@@ -1869,12 +1900,283 @@ impl SqliteStore {
             return Err(error);
         }
         unsafe { sqlite3_busy_timeout(target, 1_000) };
-        let report = backup_database(self.database, target);
+        let report = backup_database(self.database, target).and_then(|report| {
+            let journal_mode = CString::new("PRAGMA journal_mode=DELETE;")
+                .expect("static SQLite pragma has no NUL");
+            let result = unsafe {
+                sqlite3_exec(
+                    target,
+                    journal_mode.as_ptr(),
+                    None,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if result == SQLITE_OK {
+                Ok(report)
+            } else {
+                Err(database_error(target, result))
+            }
+        });
         let close_result = unsafe { sqlite3_close(target) };
         if close_result != SQLITE_OK && report.is_ok() {
             return Err(database_error(self.database, close_result));
         }
         report
+    }
+
+    /// Creates a self-describing production backup package. The SQLite file
+    /// is copied with the online-backup API, then reopened read-only and
+    /// described by a manifest generated from that copied snapshot. This
+    /// ordering keeps identity, project bindings, blob references, and memory
+    /// publication references on one coherent snapshot boundary.
+    pub fn backup_package_to(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> Result<SqliteBackupPackageReport, StoreError> {
+        if !self.canonical_production {
+            return Err(StoreError::Invalid(
+                "production backup packages require the canonical production schema".to_owned(),
+            ));
+        }
+        if self.database_path.is_none() {
+            return Err(StoreError::Invalid(
+                "production backup packages require a persistent database path".to_owned(),
+            ));
+        }
+        let destination = destination.as_ref();
+        ensure_backup_package_path(destination)?;
+        let parent = destination.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot create backup package parent {}: {error}",
+                parent.display()
+            ))
+        })?;
+        let staging = backup_staging_path(destination, "package")?;
+        fs::create_dir(&staging).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot create backup staging directory {}: {error}",
+                staging.display()
+            ))
+        })?;
+        let result = (|| {
+            let database_path = staging.join(BACKUP_DATABASE_FILE);
+            let backup = self.backup_to(&database_path).map_err(|error| {
+                StoreError::Unavailable(format!("cannot create package SQLite snapshot: {error}"))
+            })?;
+            let snapshot =
+                Self::open_read_only(&database_path).map_err(|error| {
+                    StoreError::Unavailable(format!(
+                    "cannot reopen package SQLite snapshot {} (exists={}, metadata={:?}): {error}",
+                    database_path.display(),
+                    database_path.exists(),
+                    fs::metadata(&database_path).ok().map(|metadata| metadata.len())
+                ))
+                })?;
+            let manifest = snapshot.backup_manifest()?;
+            let manifest_path = staging.join(BACKUP_MANIFEST_FILE);
+            let encoded = serde_json::to_vec_pretty(&manifest).map_err(|error| {
+                StoreError::Invalid(format!("cannot encode backup manifest: {error}"))
+            })?;
+            fs::write(&manifest_path, encoded).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot write backup manifest {}: {error}",
+                    manifest_path.display()
+                ))
+            })?;
+            let project_count = manifest
+                .get("projects")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len) as u64;
+            let referenced_blob_count = manifest
+                .get("referenced_blobs")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len) as u64;
+            let published_memory_count = manifest
+                .get("published_memory")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len) as u64;
+            let restore_supported = referenced_blob_count == 0 && published_memory_count == 0;
+            drop(snapshot);
+            fs::rename(&staging, destination).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot publish backup package {}: {error}",
+                    destination.display()
+                ))
+            })?;
+            Ok(SqliteBackupPackageReport {
+                package_path: destination.to_path_buf(),
+                database_path: destination.join(BACKUP_DATABASE_FILE),
+                manifest_path: destination.join(BACKUP_MANIFEST_FILE),
+                backup,
+                project_count,
+                referenced_blob_count,
+                published_memory_count,
+                restore_supported,
+            })
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
+    }
+
+    /// Restores a validated production backup package into a database path.
+    /// The package is copied into a staging database, validated, and assigned
+    /// a new database lineage/restore epoch before the destination is swapped.
+    /// A previous destination is retained beside the new database for manual
+    /// rollback; it is never silently deleted.
+    pub fn restore_package_to(
+        package: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<SqliteRestorePackageReport, StoreError> {
+        let package = package.as_ref();
+        let destination = destination.as_ref();
+        if destination == Path::new(":memory:") {
+            return Err(StoreError::Invalid(
+                "production restore destination must be a filesystem path".to_owned(),
+            ));
+        }
+        ensure_backup_package_path_exists(package)?;
+        reject_symlink(destination)?;
+        let manifest_path = package.join(BACKUP_MANIFEST_FILE);
+        let database_path = package.join(BACKUP_DATABASE_FILE);
+        let manifest = read_backup_manifest(&manifest_path)?;
+        validate_backup_manifest(&manifest)?;
+        if manifest
+            .get("referenced_blobs")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+            || manifest
+                .get("published_memory")
+                .and_then(Value::as_array)
+                .is_some_and(|values| !values.is_empty())
+        {
+            return Err(StoreError::Conflict(
+                "backup package references external blobs or published Git memory; an artifact bundle is required before restore"
+                    .to_owned(),
+            ));
+        }
+        let source = Self::open_read_only(&database_path)?;
+        source.validate_backup_manifest(&manifest)?;
+        let source_identity = manifest_database_identity(&manifest)?;
+        let source_runtime = source.sqlite_runtime_identity();
+        if !source_runtime.at_least((3, 8, 0)) {
+            return Err(StoreError::Invalid(format!(
+                "SQLite runtime {} is too old for production restore",
+                source_runtime.libversion
+            )));
+        }
+
+        let parent = destination.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot create restore destination parent {}: {error}",
+                parent.display()
+            ))
+        })?;
+        let existing_identity = if destination.exists() {
+            let existing = Self::open(destination, PRODUCTION_SCHEMA_SQL)?;
+            existing.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            let identity = identity::IdentityStore::new(&existing)
+                .database_identity()
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            drop(existing);
+            if destination.with_extension("sqlite-wal").exists()
+                || destination.with_extension("sqlite-shm").exists()
+            {
+                return Err(StoreError::Busy(
+                    "restore destination still has active SQLite WAL sidecars".to_owned(),
+                ));
+            }
+            Some(identity)
+        } else {
+            None
+        };
+        let current_epoch =
+            existing_identity
+                .as_ref()
+                .map_or(source_identity.restore_epoch.get(), |identity| {
+                    identity
+                        .restore_epoch
+                        .get()
+                        .max(source_identity.restore_epoch.get())
+                });
+        let next_epoch = current_epoch
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Invalid("restore epoch overflow".to_owned()))?;
+        let current_database_instance_id = format!(
+            "{}-restore-{next_epoch}",
+            source_identity.database_instance_id.as_str()
+        );
+        let staging = backup_staging_path(destination, "restore")?;
+        let staging_database = staging.join(BACKUP_DATABASE_FILE);
+        fs::create_dir(&staging).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot create restore staging directory {}: {error}",
+                staging.display()
+            ))
+        })?;
+        let result = (|| {
+            let backup = source.backup_to(&staging_database)?;
+            let restored = Self::open(&staging_database, PRODUCTION_SCHEMA_SQL)?;
+            restored.execute_batch("BEGIN IMMEDIATE")?;
+            let restore_result = identity::IdentityStore::new(&restored).restore(
+                current_database_instance_id.clone(),
+                next_epoch,
+                &production_now(),
+            );
+            if let Err(error) = restore_result {
+                let _ = restored.execute_batch("ROLLBACK");
+                return Err(StoreError::Corrupt(error.to_string()));
+            }
+            restored.execute_batch("COMMIT")?;
+            restored.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            drop(restored);
+            let staged_wal = staging_database.with_extension("sqlite-wal");
+            let staged_shm = staging_database.with_extension("sqlite-shm");
+            let _ = fs::remove_file(staged_wal);
+            let _ = fs::remove_file(staged_shm);
+
+            let previous_database_path = if destination.exists() {
+                let previous = restore_previous_path(destination, next_epoch)?;
+                fs::rename(destination, &previous).map_err(|error| {
+                    StoreError::Unavailable(format!(
+                        "cannot retain previous database {}: {error}",
+                        previous.display()
+                    ))
+                })?;
+                Some(previous)
+            } else {
+                None
+            };
+            if let Err(error) = fs::rename(&staging_database, destination) {
+                if let Some(previous) = previous_database_path.as_ref() {
+                    let _ = fs::rename(previous, destination);
+                }
+                return Err(StoreError::Unavailable(format!(
+                    "cannot publish restored database {}: {error}",
+                    destination.display()
+                )));
+            }
+            let _ = fs::remove_dir_all(&staging);
+            Ok(SqliteRestorePackageReport {
+                package_path: package.to_path_buf(),
+                destination_path: destination.to_path_buf(),
+                previous_database_path,
+                source_database_instance_id: source_identity.database_instance_id.to_string(),
+                source_restore_epoch: source_identity.restore_epoch.get(),
+                current_database_instance_id,
+                current_restore_epoch: next_epoch,
+                backup,
+            })
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        drop(source);
+        result
     }
 
     /// Restores this store from a source database using SQLite's online backup
@@ -1886,7 +2188,7 @@ impl SqliteStore {
     pub fn restore_from(&self, source: impl AsRef<Path>) -> Result<SqliteBackupReport, StoreError> {
         if self.canonical_production {
             return Err(StoreError::Conflict(
-                "canonical production restore requires identity-bound admission, source consistency, and restore-epoch reconciliation"
+                "canonical production restore requires restore_package_to so the destination can be staged, validated, and atomically replaced"
                     .to_owned(),
             ));
         }
@@ -1937,6 +2239,156 @@ impl SqliteStore {
             return Err(database_error(self.database, close_result));
         }
         report
+    }
+
+    fn backup_manifest(&self) -> Result<Value, StoreError> {
+        let database = identity::IdentityStore::new(self)
+            .database_identity()
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let mut projects = Vec::new();
+        for project_id in self.list_project_ids()? {
+            let binding = identity::IdentityStore::new(self)
+                .workspace_binding(&project_id)
+                .map_err(|error| StoreError::Conflict(error.to_string()))?;
+            projects.push(json!({
+                "project_id": project_id,
+                "canonical_root": binding.canonical_root(),
+                "canonical_worktree": binding.canonical_worktree(),
+                "binding_digest": binding.binding_digest(),
+            }));
+        }
+
+        let mut blobs = Vec::new();
+        let mut blob_statement = self.prepare(
+            "SELECT blob_digest, byte_count, media_type, path, verified_at, created_at
+             FROM blob ORDER BY blob_digest",
+        )?;
+        while blob_statement.step()? == SQLITE_ROW {
+            blobs.push(json!({
+                "blob_digest": blob_statement.column_text(0)?,
+                "byte_count": blob_statement.column_u64(1)?,
+                "media_type": blob_statement.column_text(2)?,
+                "path": blob_statement.column_text(3)?,
+                "verified_at": blob_statement.column_optional_text(4)?,
+                "created_at": blob_statement.column_text(5)?,
+            }));
+        }
+
+        let mut published_memory = Vec::new();
+        let mut memory_statement = self.prepare(
+            "SELECT publication_id, project_id, memory_entry_id, manifest_path,
+                    git_revision, content_digest, updated_at
+             FROM memory_publication
+             WHERE state = 'published'
+             ORDER BY publication_id",
+        )?;
+        while memory_statement.step()? == SQLITE_ROW {
+            published_memory.push(json!({
+                "publication_id": memory_statement.column_text(0)?,
+                "project_id": memory_statement.column_text(1)?,
+                "memory_entry_id": memory_statement.column_text(2)?,
+                "manifest_path": memory_statement.column_text(3)?,
+                "git_revision": memory_statement.column_optional_text(4)?,
+                "content_digest": memory_statement.column_text(5)?,
+                "updated_at": memory_statement.column_text(6)?,
+            }));
+        }
+
+        Ok(json!({
+            "kind": BACKUP_PACKAGE_KIND,
+            "format_version": BACKUP_FORMAT_VERSION,
+            "schema": {
+                "id": PRODUCTION_SCHEMA_ID,
+                "version": WORK_MODEL_SCHEMA_VERSION,
+                "contract_version": PRODUCTION_SCHEMA_CONTRACT_VERSION,
+                "checksum": checksum(PRODUCTION_SCHEMA_SQL.as_bytes()),
+            },
+            "sqlite_runtime": self.sqlite_runtime_identity().as_json(),
+            "database_identity": {
+                "database_instance_id": database.database_instance_id.as_str(),
+                "restore_epoch": database.restore_epoch.get(),
+            },
+            "projects": projects,
+            "referenced_blobs": blobs,
+            "published_memory": published_memory,
+            "restore_policy": {
+                "external_artifacts_packaged": false,
+                "requires_new_restore_epoch": true,
+                "retains_previous_database": true,
+            },
+            "created_at": production_now(),
+        }))
+    }
+
+    fn validate_backup_manifest(&self, manifest: &Value) -> Result<(), StoreError> {
+        validate_backup_manifest(manifest)?;
+        let database = identity::IdentityStore::new(self)
+            .database_identity()
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let expected_database = manifest_database_identity(manifest)?;
+        if database != expected_database {
+            return Err(StoreError::Conflict(
+                "backup manifest database identity does not match the SQLite snapshot".to_owned(),
+            ));
+        }
+        let manifest_projects = manifest
+            .get("projects")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                StoreError::Corrupt("backup manifest projects is not an array".to_owned())
+            })?;
+        let project_ids = self.list_project_ids()?;
+        let mut manifest_ids = manifest_projects
+            .iter()
+            .map(|project| {
+                project
+                    .get("project_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(
+                            "backup manifest project is missing project_id".to_owned(),
+                        )
+                    })
+                    .map(str::to_owned)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        manifest_ids.sort();
+        if manifest_ids != project_ids {
+            return Err(StoreError::Conflict(
+                "backup manifest project identity set does not match the SQLite snapshot"
+                    .to_owned(),
+            ));
+        }
+        for project in manifest_projects {
+            let project_id = project
+                .get("project_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    StoreError::Corrupt("backup manifest project is missing project_id".to_owned())
+                })?;
+            let binding = identity::IdentityStore::new(self)
+                .workspace_binding(project_id)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            let digest = project
+                .get("binding_digest")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    StoreError::Corrupt(
+                        "backup manifest project is missing binding_digest".to_owned(),
+                    )
+                })?;
+            if digest != binding.binding_digest()
+                || project.get("canonical_root").and_then(Value::as_str)
+                    != Some(binding.canonical_root())
+                || project.get("canonical_worktree").and_then(Value::as_str)
+                    != Some(binding.canonical_worktree())
+            {
+                return Err(StoreError::Conflict(format!(
+                    "backup manifest workspace binding does not match project {project_id}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn create_project(&self, project_id: &str, now: &str) -> Result<(), StoreError> {
@@ -2049,6 +2501,238 @@ impl SqliteStore {
             Ok(MutationResult {
                 operation_id: operation_id.to_owned(),
                 revision: revision.0,
+                replayed: false,
+            })
+        })();
+        match result {
+            Ok(value) => {
+                self.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Initializes a canonical production project and binds its workspace in
+    /// the same SQLite transaction as the identity-bound `project.init`
+    /// operation and audit event.
+    ///
+    /// The workspace binding is validated by the application/path boundary;
+    /// this method persists it only after the project row exists inside the
+    /// caller-owned transaction. A pre-commit error rolls back the project,
+    /// binding, operation, and audit rows together. A commit error is
+    /// intentionally returned as an ambiguous outcome: callers must resolve
+    /// the original operation ID by readback before retrying.
+    #[allow(clippy::too_many_arguments)]
+    pub fn initialize_project_with_workspace(
+        &self,
+        project_id: &str,
+        actor_id: &str,
+        actor_role: &str,
+        credential_ref: &str,
+        display_name: &str,
+        operation_id: &str,
+        request_digest: &str,
+        database: &identity::DatabaseIdentity,
+        binding: &identity::WorkspaceBinding,
+        now: &str,
+    ) -> Result<MutationResult, StoreError> {
+        if !self.canonical_production {
+            return Err(StoreError::Invalid(
+                "identity-bound project bootstrap requires the canonical production schema"
+                    .to_owned(),
+            ));
+        }
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let identity = identity::IdentityStore::new(self);
+            let current_database = identity
+                .database_identity()
+                .map_err(|error| StoreError::Conflict(format!("project identity: {error}")))?;
+            if current_database != *database {
+                return Err(StoreError::Conflict(format!(
+                    "project bootstrap database identity changed before commit: expected {}, epoch {}; actual {}, epoch {}",
+                    database.database_instance_id,
+                    database.restore_epoch,
+                    current_database.database_instance_id,
+                    current_database.restore_epoch,
+                )));
+            }
+
+            // An existing operation is only replayable after its project and
+            // workspace identity are both visible. An operation row without
+            // that binding is a partial legacy bootstrap and is quarantined;
+            // this method never repairs it by binding alone.
+            if let Some(existing) = self.operation(operation_id)? {
+                if existing.project_id != project_id
+                    || existing.command != "project.init"
+                    || existing.actor_id != actor_id
+                    || existing.session_id.is_some()
+                    || existing.expected_revision.is_some()
+                    || existing.attempt_id.is_some()
+                    || existing.fence.is_some()
+                    || existing.request_digest != request_digest
+                {
+                    return Err(StoreError::Conflict(format!(
+                        "operation {operation_id} was already used with another immutable bootstrap identity"
+                    )));
+                }
+                let stored_binding = identity.workspace_binding(project_id).map_err(|error| {
+                    StoreError::Conflict(format!(
+                        "project.init {operation_id} is not replayable: workspace identity is incomplete ({error})"
+                    ))
+                })?;
+                if stored_binding != *binding {
+                    return Err(StoreError::Conflict(format!(
+                        "operation {operation_id} was already committed for another workspace binding"
+                    )));
+                }
+                let context = identity.context(project_id).map_err(|error| {
+                    StoreError::Conflict(format!(
+                        "project.init {operation_id} has an invalid identity context: {error}"
+                    ))
+                })?;
+                let replay = operations::OperationJournal::new(self)
+                    .replay_in_context(
+                        &context,
+                        &operations::OperationIdentity::from_record(
+                            &existing,
+                            Some(("project".to_owned(), project_id.to_owned())),
+                        ),
+                    )?
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(format!(
+                            "project.init {operation_id} has no identity-bound readback"
+                        ))
+                    })?;
+                return Ok(MutationResult {
+                    operation_id: operation_id.to_owned(),
+                    revision: replay
+                        .operation
+                        .as_ref()
+                        .map(|operation| operation.revision)
+                        .unwrap_or(existing.revision),
+                    replayed: true,
+                });
+            }
+
+            // A project row without the matching operation is not a safe
+            // initialization readback. A fresh CLI operation ID may still
+            // safely repeat an already-complete init, but only when the
+            // existing binding and original identity-bound project.init can
+            // both be read back. Do not create a second history.
+            match self.project_revision(project_id) {
+                Ok(revision) => {
+                    let stored_binding = identity.workspace_binding(project_id).map_err(|error| {
+                        StoreError::Conflict(format!(
+                            "project {project_id} exists without a complete workspace identity: {error}"
+                        ))
+                    })?;
+                    if stored_binding != *binding {
+                        return Err(StoreError::Conflict(format!(
+                            "project {project_id} is already bound to another workspace"
+                        )));
+                    }
+                    let context = identity.context(project_id).map_err(|error| {
+                        StoreError::Conflict(format!(
+                            "project {project_id} has an invalid identity context: {error}"
+                        ))
+                    })?;
+                    let mut initialization = self.prepare(
+                        "SELECT operation_id
+                         FROM operation
+                         WHERE project_id = ?1 AND command = 'project.init'
+                         ORDER BY revision ASC LIMIT 1",
+                    )?;
+                    initialization.bind_text(1, project_id)?;
+                    if initialization.step()? != SQLITE_ROW {
+                        return Err(StoreError::Conflict(format!(
+                            "project {project_id} exists without a replayable project.init operation; bootstrap recovery is required"
+                        )));
+                    }
+                    let original_operation_id = initialization.column_text(0)?;
+                    identity
+                        .operation(&context, &original_operation_id)
+                        .map_err(|error| {
+                            StoreError::Conflict(format!(
+                                "project {project_id} initialization readback is incomplete: {error}"
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(format!(
+                                "project {project_id} project.init has no identity-bound readback"
+                            ))
+                        })?;
+                    return Ok(MutationResult {
+                        operation_id: operation_id.to_owned(),
+                        revision: revision.0,
+                        replayed: true,
+                    });
+                }
+                Err(StoreError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+
+            self.ensure_actor(actor_id, actor_role, credential_ref, display_name, now)?;
+            let focused_profile = profile_version_for_work(&AcceptanceProfile::focused(), now)?;
+            self.ensure_acceptance_profile(
+                &focused_profile.profile_id,
+                focused_profile.version,
+                &focused_profile.policy_digest,
+                &focused_profile.definition_json,
+                now,
+            )?;
+            self.create_project(project_id, now)?;
+            let context = identity
+                .bind_project(project_id, binding, now)
+                .map_err(|error| StoreError::Conflict(format!("project identity: {error}")))?;
+            let payload = json_object(json!({"project_id": project_id}))?;
+            let readback = self.append_identity_operation_audit_in_transaction(
+                &context,
+                OperationRecord {
+                    operation_id: operation_id.to_owned(),
+                    project_id: project_id.to_owned(),
+                    command: "project.init".to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    expected_revision: None,
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request_digest.to_owned(),
+                    outcome: OperationOutcome::Changed,
+                    result_json: payload.clone(),
+                    revision: 0,
+                    created_at: now.to_owned(),
+                    completed_at: Some(now.to_owned()),
+                },
+                AuditEventRecord {
+                    project_id: project_id.to_owned(),
+                    revision: 0,
+                    operation_id: operation_id.to_owned(),
+                    event_type: "work.created".to_owned(),
+                    subject_type: "project".to_owned(),
+                    subject_id: project_id.to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    fence: None,
+                    as_of: now.to_owned(),
+                    payload_json: payload,
+                },
+            )?;
+            Ok(MutationResult {
+                operation_id: operation_id.to_owned(),
+                revision: readback
+                    .operation
+                    .as_ref()
+                    .map(|operation| operation.revision)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(
+                            "project.init committed without an operation readback".to_owned(),
+                        )
+                    })?,
                 replayed: false,
             })
         })();
@@ -6471,6 +7155,22 @@ impl SqliteStore {
         request: impl Borrow<EvidenceExecutionAdmissionRequest>,
     ) -> Result<EvidenceExecutionAdmissionResult, StoreError> {
         let request = request.borrow();
+        if let Some(existing) = self.evidence_execution(&request.operation_id)? {
+            return replay_evidence_execution_admission(request, existing);
+        }
+
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = self.admit_evidence_execution_in_transaction(request);
+        finish_transaction(self, result)
+    }
+
+    /// Performs the semantic evidence-admission write without opening or
+    /// closing a transaction. Composite adapters use this to commit the
+    /// execution identity together with the external-job admission record.
+    pub(crate) fn admit_evidence_execution_in_transaction(
+        &self,
+        request: &EvidenceExecutionAdmissionRequest,
+    ) -> Result<EvidenceExecutionAdmissionResult, StoreError> {
         if request.operation_id.is_empty()
             || request.project_id.is_empty()
             || request.work_id.is_empty()
@@ -6487,108 +7187,96 @@ impl SqliteStore {
         if let Some(existing) = self.evidence_execution(&request.operation_id)? {
             return replay_evidence_execution_admission(request, existing);
         }
+        let attempt = self
+            .attempt_record(&request.attempt_id, true)?
+            .ok_or_else(|| StoreError::NotCurrent {
+                attempt_id: request.attempt_id.clone(),
+            })?;
+        if attempt.project_id != request.project_id || attempt.work_id != request.work_id {
+            return Err(StoreError::WrongSubject {
+                expected: format!("{}/{}", request.project_id, request.work_id),
+                actual: format!("{}/{}", attempt.project_id, attempt.work_id),
+            });
+        }
+        if attempt.fence != request.fence {
+            return Err(StoreError::StaleFence {
+                expected: request.fence,
+                actual: attempt.fence,
+            });
+        }
+        if attempt.actor_id != request.actor_id {
+            return Err(StoreError::WrongOwner {
+                expected: request.actor_id.clone(),
+                actual: attempt.actor_id,
+            });
+        }
+        if attempt.session_id != request.session_id {
+            return Err(StoreError::WrongOwner {
+                expected: request.session_id.clone().unwrap_or_default(),
+                actual: attempt.session_id.unwrap_or_default(),
+            });
+        }
+        if attempt.phase != AttemptPhase::Running {
+            return Err(StoreError::IllegalTransition {
+                from: attempt.phase,
+                operation: "admit evidence execution",
+            });
+        }
+        if timestamp_cmp(&request.admitted_at, &attempt.hard_deadline) != std::cmp::Ordering::Less {
+            return Err(StoreError::HardDeadlineElapsed);
+        }
+        if timestamp_cmp(&request.admitted_at, &attempt.lease_deadline) != std::cmp::Ordering::Less
+        {
+            return Err(StoreError::LeaseExpired);
+        }
+        if attempt.source_version_id != request.source_version_id
+            || attempt.config_identity != request.config_identity
+        {
+            return Err(StoreError::Conflict(
+                "evidence execution context no longer matches the current attempt".to_owned(),
+            ));
+        }
+        let gate = self
+            .gate(&request.project_id, &request.work_id, &request.gate_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "gate",
+                id: request.gate_id.clone(),
+            })?;
+        if gate.profile_id != request.profile_id || gate.profile_version != request.profile_version
+        {
+            return Err(StoreError::Conflict(
+                "evidence execution policy no longer matches the work profile".to_owned(),
+            ));
+        }
 
-        self.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| {
-            if let Some(existing) = self.evidence_execution(&request.operation_id)? {
-                return replay_evidence_execution_admission(request, existing);
-            }
-            let attempt = self
-                .attempt_record(&request.attempt_id, true)?
-                .ok_or_else(|| StoreError::NotCurrent {
-                    attempt_id: request.attempt_id.clone(),
-                })?;
-            if attempt.project_id != request.project_id || attempt.work_id != request.work_id {
-                return Err(StoreError::WrongSubject {
-                    expected: format!("{}/{}", request.project_id, request.work_id),
-                    actual: format!("{}/{}", attempt.project_id, attempt.work_id),
-                });
-            }
-            if attempt.fence != request.fence {
-                return Err(StoreError::StaleFence {
-                    expected: request.fence,
-                    actual: attempt.fence,
-                });
-            }
-            if attempt.actor_id != request.actor_id {
-                return Err(StoreError::WrongOwner {
-                    expected: request.actor_id.clone(),
-                    actual: attempt.actor_id,
-                });
-            }
-            if attempt.session_id != request.session_id {
-                return Err(StoreError::WrongOwner {
-                    expected: request.session_id.clone().unwrap_or_default(),
-                    actual: attempt.session_id.unwrap_or_default(),
-                });
-            }
-            if attempt.phase != AttemptPhase::Running {
-                return Err(StoreError::IllegalTransition {
-                    from: attempt.phase,
-                    operation: "admit evidence execution",
-                });
-            }
-            if timestamp_cmp(&request.admitted_at, &attempt.hard_deadline)
-                != std::cmp::Ordering::Less
-            {
-                return Err(StoreError::HardDeadlineElapsed);
-            }
-            if timestamp_cmp(&request.admitted_at, &attempt.lease_deadline)
-                != std::cmp::Ordering::Less
-            {
-                return Err(StoreError::LeaseExpired);
-            }
-            if attempt.source_version_id != request.source_version_id
-                || attempt.config_identity != request.config_identity
-            {
-                return Err(StoreError::Conflict(
-                    "evidence execution context no longer matches the current attempt".to_owned(),
-                ));
-            }
-            let gate = self
-                .gate(&request.project_id, &request.work_id, &request.gate_id)?
-                .ok_or_else(|| StoreError::NotFound {
-                    entity: "gate",
-                    id: request.gate_id.clone(),
-                })?;
-            if gate.profile_id != request.profile_id
-                || gate.profile_version != request.profile_version
-            {
-                return Err(StoreError::Conflict(
-                    "evidence execution policy no longer matches the work profile".to_owned(),
-                ));
-            }
-
-            let mut statement = self.prepare(
-                "INSERT INTO evidence_execution
-                 (operation_id, project_id, work_id, attempt_id, fence, gate_id,
-                  actor_id, session_id, request_digest, artifact_ref, state, admitted_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'admitted', ?11)",
-            )?;
-            statement.bind_text(1, &request.operation_id)?;
-            statement.bind_text(2, &request.project_id)?;
-            statement.bind_text(3, &request.work_id)?;
-            statement.bind_text(4, &request.attempt_id)?;
-            statement.bind_i64(5, request.fence)?;
-            statement.bind_text(6, &request.gate_id)?;
-            statement.bind_text(7, &request.actor_id)?;
-            statement.bind_optional_text(8, request.session_id.as_deref())?;
-            statement.bind_text(9, &request.request_digest)?;
-            statement.bind_text(10, &request.artifact_ref)?;
-            statement.bind_text(11, &request.admitted_at)?;
-            statement.run()?;
-            Ok(EvidenceExecutionAdmissionResult {
-                execution: self
-                    .evidence_execution(&request.operation_id)?
-                    .ok_or_else(|| {
-                        StoreError::Corrupt(
-                            "admitted evidence execution could not be read back".to_owned(),
-                        )
-                    })?,
-                replayed: false,
-            })
-        })();
-        finish_transaction(self, result)
+        let mut statement = self.prepare(
+            "INSERT INTO evidence_execution
+             (operation_id, project_id, work_id, attempt_id, fence, gate_id,
+              actor_id, session_id, request_digest, artifact_ref, state, admitted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'admitted', ?11)",
+        )?;
+        statement.bind_text(1, &request.operation_id)?;
+        statement.bind_text(2, &request.project_id)?;
+        statement.bind_text(3, &request.work_id)?;
+        statement.bind_text(4, &request.attempt_id)?;
+        statement.bind_i64(5, request.fence)?;
+        statement.bind_text(6, &request.gate_id)?;
+        statement.bind_text(7, &request.actor_id)?;
+        statement.bind_optional_text(8, request.session_id.as_deref())?;
+        statement.bind_text(9, &request.request_digest)?;
+        statement.bind_text(10, &request.artifact_ref)?;
+        statement.bind_text(11, &request.admitted_at)?;
+        statement.run()?;
+        Ok(EvidenceExecutionAdmissionResult {
+            execution: self
+                .evidence_execution(&request.operation_id)?
+                .ok_or_else(|| {
+                    StoreError::Corrupt(
+                        "admitted evidence execution could not be read back".to_owned(),
+                    )
+                })?,
+            replayed: false,
+        })
     }
 
     pub fn evidence_execution(
@@ -9728,6 +10416,168 @@ fn same_path(left: &Path, right: &Path) -> bool {
     normalized_path(left)
         .zip(normalized_path(right))
         .is_some_and(|(a, b)| a == b)
+}
+
+fn ensure_backup_package_path(path: &Path) -> Result<(), StoreError> {
+    reject_symlink(path)?;
+    if path.exists() {
+        return Err(StoreError::Conflict(format!(
+            "backup package destination already exists: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_backup_package_path_exists(path: &Path) -> Result<(), StoreError> {
+    reject_symlink(path)?;
+    if !path.is_dir() {
+        return Err(StoreError::Invalid(format!(
+            "backup package is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn reject_symlink(path: &Path) -> Result<(), StoreError> {
+    if fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(StoreError::Invalid(format!(
+            "backup or restore path must not be a symlink: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn backup_staging_path(destination: &Path, label: &str) -> Result<PathBuf, StoreError> {
+    let file_name = destination
+        .file_name()
+        .ok_or_else(|| StoreError::Invalid("backup path must name a file or directory".to_owned()))?
+        .to_string_lossy();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| StoreError::Unavailable(format!("system clock unavailable: {error}")))?
+        .as_nanos();
+    let staging = destination.parent().unwrap_or(Path::new(".")).join(format!(
+        ".{file_name}.{label}.{}.{}.tmp",
+        std::process::id(),
+        stamp
+    ));
+    if staging.exists() {
+        return Err(StoreError::Conflict(format!(
+            "backup staging path already exists: {}",
+            staging.display()
+        )));
+    }
+    Ok(staging)
+}
+
+fn restore_previous_path(destination: &Path, epoch: u64) -> Result<PathBuf, StoreError> {
+    let name = destination
+        .file_name()
+        .ok_or_else(|| {
+            StoreError::Invalid("restore destination must name a database file".to_owned())
+        })?
+        .to_string_lossy();
+    let previous = destination
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!("{name}.pre-restore-{epoch}"));
+    if previous.exists() {
+        return Err(StoreError::Conflict(format!(
+            "previous restore retention path already exists: {}",
+            previous.display()
+        )));
+    }
+    Ok(previous)
+}
+
+fn read_backup_manifest(path: &Path) -> Result<Value, StoreError> {
+    let bytes = fs::read(path).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot read backup manifest {}: {error}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| StoreError::Corrupt(format!("backup manifest is not valid JSON: {error}")))
+}
+
+fn validate_backup_manifest(manifest: &Value) -> Result<(), StoreError> {
+    if manifest.get("kind").and_then(Value::as_str) != Some(BACKUP_PACKAGE_KIND) {
+        return Err(StoreError::Invalid(
+            "unsupported Boreal backup package kind".to_owned(),
+        ));
+    }
+    if manifest.get("format_version").and_then(Value::as_u64) != Some(BACKUP_FORMAT_VERSION) {
+        return Err(StoreError::Invalid(
+            "unsupported Boreal backup package format version".to_owned(),
+        ));
+    }
+    let schema = manifest
+        .get("schema")
+        .and_then(Value::as_object)
+        .ok_or_else(|| StoreError::Corrupt("backup manifest schema is missing".to_owned()))?;
+    if schema.get("id").and_then(Value::as_str) != Some(PRODUCTION_SCHEMA_ID)
+        || schema.get("version").and_then(Value::as_i64) != Some(WORK_MODEL_SCHEMA_VERSION)
+        || schema.get("contract_version").and_then(Value::as_str)
+            != Some(PRODUCTION_SCHEMA_CONTRACT_VERSION)
+        || schema.get("checksum").and_then(Value::as_str)
+            != Some(checksum(PRODUCTION_SCHEMA_SQL.as_bytes()).as_str())
+    {
+        return Err(StoreError::Conflict(
+            "backup package schema identity is incompatible with this binary".to_owned(),
+        ));
+    }
+    let identity = manifest
+        .get("database_identity")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            StoreError::Corrupt("backup manifest database_identity is missing".to_owned())
+        })?;
+    if identity
+        .get("database_instance_id")
+        .and_then(Value::as_str)
+        .is_none()
+        || identity
+            .get("restore_epoch")
+            .and_then(Value::as_u64)
+            .is_none()
+    {
+        return Err(StoreError::Corrupt(
+            "backup manifest database identity is incomplete".to_owned(),
+        ));
+    }
+    for key in ["projects", "referenced_blobs", "published_memory"] {
+        if !manifest.get(key).is_some_and(Value::is_array) {
+            return Err(StoreError::Corrupt(format!(
+                "backup manifest {key} is not an array"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn manifest_database_identity(manifest: &Value) -> Result<identity::DatabaseIdentity, StoreError> {
+    validate_backup_manifest(manifest)?;
+    let identity = manifest
+        .get("database_identity")
+        .and_then(Value::as_object)
+        .expect("validated backup manifest has database identity");
+    let database_instance_id = identity
+        .get("database_instance_id")
+        .and_then(Value::as_str)
+        .expect("validated backup manifest has database instance id");
+    let restore_epoch = identity
+        .get("restore_epoch")
+        .and_then(Value::as_u64)
+        .expect("validated backup manifest has restore epoch");
+    identity::DatabaseIdentity::new(database_instance_id, restore_epoch)
+        .map_err(|error| StoreError::Corrupt(error.to_string()))
 }
 
 fn schema_requests_work_model_v3(schema_sql: &str) -> bool {

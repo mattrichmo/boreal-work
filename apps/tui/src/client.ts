@@ -908,14 +908,15 @@ function normalizeStatusItem(value: unknown): StatusItem {
     };
   };
   const actions = normalizeActions(value.actions);
-  const actionContext = value.action_context;
-  if (actionContext !== undefined && actionContext !== null
-    && (!isObject(actionContext) || typeof actionContext.state !== "string"
-      || (actionContext.missing_facts !== undefined
-        && (!Array.isArray(actionContext.missing_facts)
-          || !actionContext.missing_facts.every((fact) => typeof fact === "string"))))) {
+  const rawActionContext = value.action_context;
+  if (rawActionContext !== undefined && rawActionContext !== null
+    && (!isObject(rawActionContext) || typeof rawActionContext.state !== "string"
+      || (rawActionContext.missing_facts !== undefined
+        && (!Array.isArray(rawActionContext.missing_facts)
+          || !rawActionContext.missing_facts.every((fact) => typeof fact === "string"))))) {
     throw new ProtocolEnvelopeError("status action context has invalid fields");
   }
+  const actionContext = isObject(rawActionContext) ? rawActionContext : undefined;
   if (actions) {
     const descriptors = [
       ...actions.allowed,
@@ -961,10 +962,10 @@ function normalizeStatusItem(value: unknown): StatusItem {
     receipt: value.receipt,
     receipt_id: typeof value.receipt_id === "string" || value.receipt_id === null ? value.receipt_id : undefined,
     actions,
-    action_context: actionContext === undefined || actionContext === null ? undefined : {
+    action_context: actionContext ? {
       state: actionContext.state as string,
       missing_facts: actionContext.missing_facts as string[] | undefined,
-    },
+    } : undefined,
   };
 }
 

@@ -7,7 +7,7 @@
 
 use super::{
     identity::{IdentityContext, IdentityStore},
-    SqliteStore, StoreError,
+    EvidenceExecutionAdmissionRequest, EvidenceExecutionAdmissionResult, SqliteStore, StoreError,
 };
 
 const SQLITE_ROW: i32 = 100;
@@ -165,6 +165,70 @@ impl SqliteStore {
             validate_job_authority(self, context, input)?;
             validate_job_subject(self, input)?;
             register_external_job_row(self, input)
+        })
+    }
+
+    /// Atomically couples the durable evidence-execution identity to its
+    /// external verifier admission. The operation/audit journal is written by
+    /// the application immediately before this seam; this transaction makes
+    /// the execution row and the job's admitted state an all-or-nothing pair.
+    /// A retry repairs either legacy half-written side by replaying both
+    /// immutable identities without granting a second process launch.
+    pub fn admit_evidence_execution_with_external_job(
+        &self,
+        context: Option<&IdentityContext>,
+        evidence: &EvidenceExecutionAdmissionRequest,
+        input: &ExternalJobInput,
+        admitted_at: &str,
+    ) -> Result<EvidenceExecutionAdmissionResult, StoreError> {
+        validate_input(input)?;
+        if input.project_id != evidence.project_id
+            || input.subject_type != "work"
+            || input.subject_id != evidence.work_id
+            || input.request_digest != evidence.request_digest
+            || input.actor_id != evidence.actor_id
+            || input.session_id != evidence.session_id
+            || input.source_identity.as_deref() != evidence.source_version_id.as_deref()
+            || input.config_identity.as_deref() != Some(evidence.config_identity.as_str())
+        {
+            return Err(StoreError::Conflict(
+                "evidence execution and external job identities disagree".to_owned(),
+            ));
+        }
+        if let Some(context) = context {
+            if input.project_id != context.project_id {
+                return Err(StoreError::WrongSubject {
+                    expected: context.project_id.clone(),
+                    actual: input.project_id.clone(),
+                });
+            }
+        } else {
+            ensure_legacy_external_job_compatibility(self, &input.project_id)?;
+        }
+
+        with_transaction(self, || {
+            if let Some(context) = context {
+                validate_job_authority(self, context, input)?;
+            }
+            validate_job_subject(self, input)?;
+            let admitted = self.admit_evidence_execution_in_transaction(evidence)?;
+            let registration = register_external_job_row(self, input)?;
+            if registration.job.stage == "registered" {
+                advance_external_job_row(
+                    self,
+                    &ExternalJobTransitionInput {
+                        project_id: input.project_id.clone(),
+                        job_id: input.job_id.clone(),
+                        expected_stage: "registered".to_owned(),
+                        next_stage: "admitted".to_owned(),
+                        at: admitted_at.to_owned(),
+                        side_effect_ref: None,
+                        result_digest: None,
+                        error_message: None,
+                    },
+                )?;
+            }
+            Ok(admitted)
         })
     }
 

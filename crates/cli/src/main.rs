@@ -28,7 +28,8 @@ use boreal_store::identity::{IdentityError, IdentityStore, WorkspaceBinding};
 use boreal_store::{
     AttemptRecord, AuditEventRecord, EvidenceExecutionState,
     OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation, ReceiptOutcome,
-    ReceiptRecord, SqliteStore, StoreError, WorkRecord,
+    ReceiptRecord, SqliteBackupPackageReport, SqliteRestorePackageReport, SqliteStore, StoreError,
+    WorkRecord,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -82,6 +83,8 @@ Usage:
   bwrk install [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk update [--json]
   bwrk upgrade --machine [--json]  (alias for update)
+  bwrk backup PACKAGE_DIR [--db PATH] [--json]
+  bwrk restore PACKAGE_DIR [--db PATH] [--json]
   bwrk service run --db PATH --socket PATH [--max-requests N] [--dispatch-workers N] [--dispatch-capacity N] [--json]
   bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
   bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--json]
@@ -622,6 +625,9 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         }
         return service::run_update(&parsed, operation);
     }
+    if matches!(parsed.path.as_slice(), [path] if path == "backup" || path == "restore") {
+        return backup_restore_result(&parsed);
+    }
     let setup_command = setup::is_setup_command(&parsed.path);
     let setup_requested = setup::should_setup(&parsed);
     if setup_command && parsed.options.expected_revision.is_some() {
@@ -745,6 +751,96 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
     dispatch(&parsed, operation, &app, &adapter, &store)
+}
+
+fn backup_restore_result(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
+    let package = parsed
+        .options
+        .positionals
+        .first()
+        .map(PathBuf::from)
+        .ok_or_else(|| CliError::invalid("backup or restore requires a package directory"))?;
+    let database = PathBuf::from(&parsed.options.db);
+    ensure_db_parent(&database)?;
+    let _database_owner = direct_database_maintenance_owner(&database)?;
+    match parsed.path.first().map(String::as_str) {
+        Some("backup") => {
+            if !database.exists() {
+                return Err(CliError::with(
+                    ErrorCode::NotFound,
+                    ApplicationOutcome::Rejected,
+                    format!("database does not exist: {}", database.display()),
+                ));
+            }
+            let store = SqliteStore::open(&database, PRODUCTION_SCHEMA).map_err(map_store_error)?;
+            let report = store.backup_package_to(&package).map_err(map_store_error)?;
+            let data = backup_package_json(&report);
+            bounded_result(Some(data), None).map(|mut result| {
+                result.outcome = ApplicationOutcome::Changed;
+                result.human = Some(format!(
+                    "Backup written to {} ({} project(s), restore {}.)",
+                    report.package_path.display(),
+                    report.project_count,
+                    if report.restore_supported {
+                        "supported"
+                    } else {
+                        "blocked by external references"
+                    }
+                ));
+                result
+            })
+        }
+        Some("restore") => {
+            let report =
+                SqliteStore::restore_package_to(&package, &database).map_err(map_store_error)?;
+            let data = restore_package_json(&report);
+            bounded_result(Some(data), None).map(|mut result| {
+                result.outcome = ApplicationOutcome::Changed;
+                result.human = Some(format!(
+                    "Restored {} to {} at restore epoch {}. Previous database: {}",
+                    report.package_path.display(),
+                    report.destination_path.display(),
+                    report.current_restore_epoch,
+                    report
+                        .previous_database_path
+                        .as_ref()
+                        .map_or_else(|| "none".to_owned(), |path| path.display().to_string())
+                ));
+                result
+            })
+        }
+        _ => Err(CliError::invalid("unknown backup/restore route")),
+    }
+}
+
+fn backup_package_json(report: &SqliteBackupPackageReport) -> Value {
+    json!({
+        "package_path": report.package_path,
+        "database_path": report.database_path,
+        "manifest_path": report.manifest_path,
+        "source_page_count": report.backup.source_page_count,
+        "pages_copied": report.backup.pages_copied,
+        "busy_retries": report.backup.busy_retries,
+        "project_count": report.project_count,
+        "referenced_blob_count": report.referenced_blob_count,
+        "published_memory_count": report.published_memory_count,
+        "restore_supported": report.restore_supported,
+    })
+}
+
+fn restore_package_json(report: &SqliteRestorePackageReport) -> Value {
+    json!({
+        "package_path": report.package_path,
+        "destination_path": report.destination_path,
+        "previous_database_path": report.previous_database_path,
+        "source_database_instance_id": report.source_database_instance_id,
+        "source_restore_epoch": report.source_restore_epoch,
+        "current_database_instance_id": report.current_database_instance_id,
+        "current_restore_epoch": report.current_restore_epoch,
+        "source_page_count": report.backup.source_page_count,
+        "pages_copied": report.backup.pages_copied,
+        "busy_retries": report.backup.busy_retries,
+    })
 }
 
 fn workflow_result(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
@@ -1289,7 +1385,11 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
             // command namespace.
             path.push(arg.clone());
             index += 1;
-        } else if (path.len() < 2 && !matches!(path.first().map(String::as_str), Some("init")))
+        } else if (path.len() < 2
+            && !matches!(
+                path.first().map(String::as_str),
+                Some("init" | "backup" | "restore")
+            ))
             || (path.len() == 2
                 && ((path.as_slice() == ["work", "hold"]
                     && matches!(arg.as_str(), "add" | "resolve"))
@@ -1351,6 +1451,7 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["workflows", "show"] => options.positionals.len() == 1,
         ["update"] => options.positionals.is_empty() && !options.machine,
         ["upgrade"] => options.positionals.is_empty() && options.machine,
+        ["backup"] | ["restore"] => positionals == 1 && options.socket.is_none(),
         ["init"] | ["setup"] | ["install"] => positionals <= 1,
         _ if matches!(path.first().copied(), Some("commands" | "help")) => {
             options.positionals.is_empty()
@@ -6835,6 +6936,65 @@ fn map_dependency_error(error: ApplicationError) -> CliError {
     }
 }
 
+/// Maintenance commands use the same local election as normal direct CLI
+/// operations, but bind the lock to the database rather than guessing a
+/// project from a backup package. Restore must not race a service or another
+/// direct writer while it swaps the database path.
+fn direct_database_maintenance_owner(
+    path: &Path,
+) -> Result<Option<boreal_service::ProjectElection>, CliError> {
+    let canonical_db = if path.exists() {
+        fs::canonicalize(path).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("database identity is unavailable: {error}"),
+            )
+        })?
+    } else {
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let parent = fs::canonicalize(parent).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("database parent identity is unavailable: {error}"),
+            )
+        })?;
+        parent.join(
+            path.file_name()
+                .ok_or_else(|| CliError::invalid("database path must name a database file"))?,
+        )
+    };
+    let runtime_dir = canonical_db
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".boreal-service-runtime");
+    let database_identity = format!("database:{}", canonical_db.to_string_lossy());
+    let owner_id = format!(
+        "maintenance-process:{}:{}",
+        std::process::id(),
+        sha256_content_digest(database_identity.as_bytes())
+    );
+    boreal_service::ProjectElection::try_acquire(&runtime_dir, database_identity, owner_id)
+        .map(Some)
+        .map_err(|error| {
+            let outcome = match error {
+                boreal_service::ElectionError::Busy(_) => ApplicationOutcome::Busy,
+                _ => ApplicationOutcome::Failed,
+            };
+            let code = if outcome == ApplicationOutcome::Busy {
+                ErrorCode::ServiceBusy
+            } else {
+                ErrorCode::ServiceUnavailable
+            };
+            CliError::with(
+                code,
+                outcome,
+                format!("database maintenance could not acquire ownership: {error}"),
+            )
+        })
+}
+
 fn map_store_error(error: StoreError) -> CliError {
     let (code, outcome) = match error {
         StoreError::Unavailable(_) => (ErrorCode::ServiceUnavailable, ApplicationOutcome::Failed),
@@ -7895,6 +8055,8 @@ mod tests {
             .expect("task row");
         assert_eq!(task["kind"], "task");
         assert_eq!(task["claimable_for_actor"], true);
+        assert_eq!(task["actions"], Value::Null);
+        assert_eq!(task["action_context"]["state"], "unavailable");
 
         let _ = fs::remove_file(path);
     }

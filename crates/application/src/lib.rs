@@ -19,6 +19,7 @@ mod sqlite_adapter;
 mod workflow_assets;
 
 use boreal_domain::{validate_parent, ProjectId, WorkItem};
+use boreal_store::identity::{IdentityStore, WorkspaceBinding};
 pub use boreal_store::OperationReadback;
 use boreal_store::{
     ClaimResult, SqliteStore, StoreError, WorkEditInput, WorkHoldAddInput, WorkPage, WorkRecord,
@@ -176,6 +177,63 @@ impl<'a> WorkApplication<'a> {
             display_name,
             &operation_id,
             &request_digest,
+            now,
+        )?;
+        Ok(OperationResult {
+            operation_id,
+            snapshot_revision: mutation.revision,
+            changed: !mutation.replayed,
+            value: (),
+        })
+    }
+
+    /// Canonical production bootstrap. The store commits the project row,
+    /// workspace identity, operation identity, and audit event together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn init_project_with_workspace(
+        &self,
+        project_id: &ProjectId,
+        actor_id: &str,
+        actor_role: &str,
+        credential_ref: &str,
+        display_name: &str,
+        binding: &WorkspaceBinding,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<()>, ApplicationError> {
+        let operation_id = operation_id.into();
+        let database = IdentityStore::new(self.store)
+            .database_identity()
+            .map_err(|error| {
+                ApplicationError::Store(StoreError::Conflict(format!(
+                    "project bootstrap identity: {error}"
+                )))
+            })?;
+        let request_digest = canonical_request_digest(
+            "project.init/v2",
+            json!({
+                "project_id": project_id.as_str(),
+                "actor_id": actor_id,
+                "actor_role": actor_role,
+                "credential_ref": credential_ref,
+                "display_name": display_name,
+                "database_instance_id": database.database_instance_id.as_str(),
+                "restore_epoch": database.restore_epoch.get(),
+                "canonical_root": binding.canonical_root(),
+                "canonical_worktree": binding.canonical_worktree(),
+                "binding_digest": binding.binding_digest(),
+            }),
+        );
+        let mutation = self.store.initialize_project_with_workspace(
+            project_id.as_str(),
+            actor_id,
+            actor_role,
+            credential_ref,
+            display_name,
+            &operation_id,
+            &request_digest,
+            &database,
+            binding,
             now,
         )?;
         Ok(OperationResult {

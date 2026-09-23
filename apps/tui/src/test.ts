@@ -196,6 +196,12 @@ assert(
     && disabled(serverOwned, "claim")?.reason === "availability_unavailable: v3 identity facts are unavailable",
   "server action denial owns TUI availability",
 );
+const mismatchedServerAction = item("row-owned", "ready", {
+  actions: { allowed: [serverActionDescriptor("claim")], denied: [] },
+});
+throws(
+  () => buildStatusView(monitoring(6, [mismatchedServerAction])),
+);
 const serverAllowsClaim = item("server-owned", "blocked", {
   claimable: false,
   claimable_for_actor: false,
@@ -1231,6 +1237,37 @@ assert(fullDto.items[0].gates?.open[0].required === false && fullDto.has_more &&
 assert(fullDto.next_status_change_at === fullDtoEnvelope.next_status_change_at && fullDto.timing?.elapsed_ms === 4, "snapshot timing and next deadline survive validation");
 assert(fullDto.recovery?.action === "operation_show", "structured recovery metadata survives validation");
 assert(actionAvailability({ ...fullDto.items[0], attempt: { attempt_id: "attempt-dto", fence: 4, phase: "accepted" } }, new Set(), { receipt_available: true }).find((entry) => entry.action === "finish")?.enabled === true, "optional open gates do not disable finish");
+
+// This is the exact status/2 compatibility shape emitted by the CLI while
+// the legacy row lacks v3 identity/proof/session facts. The status field is
+// `blocked`, but the structured expiry reason preserves `expired_review` for
+// the TUI and the absent action set leaves legacy discovery available.
+const legacyExpiredEnvelope = envelope(112, {
+  contract_version: "boreal.work-status/2",
+  project_id: "project_test",
+  project_revision: 112,
+  total: 1,
+  counts: { matched: 1, blocked: 1 },
+  items: [{
+    work_id: "legacy-expired",
+    project_id: "project_test",
+    status: "blocked",
+    claimable: false,
+    claimable_for_actor: false,
+    primary_reason: "expiry_review_required",
+    reason_codes: ["expiry_review_required", "lease_elapsed"],
+    next_action: "review_expiry",
+    actions: null,
+    action_context: {
+      state: "unavailable",
+      missing_facts: ["entity_revision", "proof_identity", "authenticated_session"],
+    },
+  }],
+} as unknown as RevisionedStatusResponse);
+const legacyExpired = buildStatusView(legacyExpiredEnvelope);
+assert(legacyExpired.items[0].status === "expired_review", "status/2 blocked expiry decodes to expired_review");
+assert(contextualAction(legacyExpired.items[0]) === "review expiry", "status/2 expiry keeps its recovery action");
+assert(actionAvailability(legacyExpired.items[0]).find((entry) => entry.action === "release")?.reason === "expiry requires review", "status/2 expiry keeps structured recovery reason");
 
 const hostileText = renderMountedView({
   mounted: true,

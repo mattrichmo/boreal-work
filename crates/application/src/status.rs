@@ -5,16 +5,8 @@
 //! supplies the graph, attempt, gate, and pagination context to the pure
 //! domain evaluators and never persists the resulting status.
 
+use boreal_domain::actions::ActionDecision;
 use boreal_domain::work_model_v3::WorkSchedule;
-use boreal_domain::{
-    actions::{evaluate_actions, ActionDecision, ActionEvaluationInput},
-    decision_inputs::{
-        ActorAuthorityInput, Availability, DecisionInputs, EntityIdentity, EntityRevision,
-        EvaluationClock, Fact, FactKind, FactSubject, HoldId, HoldInput, HoldsInput,
-        IntegrityInput, IntegrityLevel, IntegrityScope, LifecycleInput, PermittedAction,
-        PermittedActionsInput, PrincipalBinding, TerminalDecision,
-    },
-};
 use boreal_domain::{
     dependency_satisfied, evaluate_rollup, evaluate_status, ActorContext, Attempt, CurrentAttempt,
     DependencyPolicy, DerivedStatus, GateId, GateKind, GateRequirement, GateState, Revision,
@@ -178,9 +170,10 @@ pub struct StatusWork {
     pub work: WorkItem,
     pub decision: StatusDecision,
     /// Server-derived action policy for the same snapshot as `decision`.
-    /// Adapters serialize this value; clients must not reconstruct action
-    /// availability from display status or gate labels.
-    pub actions: ActionDecision,
+    /// This is absent for legacy status rows until the store supplies the v3
+    /// identity, proof, and authenticated-session facts. Adapters must never
+    /// serialize a synthetic denied descriptor set.
+    pub actions: Option<ActionDecision>,
     pub action_context: StatusActionContext,
     pub attempt: Option<Attempt>,
     pub gates: GateDiagnostics,
@@ -204,13 +197,16 @@ impl StatusWork {
         self.decision.current_attempt.as_ref()
     }
 
-    /// Claimability exposed by the application contract is the canonical
-    /// action decision, not the legacy status evaluator's independent hint.
-    /// This closes the Operator/Agent mismatch at the adapter boundary while
-    /// leaving the pure status policy unchanged.
+    /// Legacy status rows still need to support no-goal discovery. Their
+    /// readiness hint is not authorization, but it must not be replaced by a
+    /// synthetic denial merely because the v3 action context is unavailable.
+    /// Once a real action set is present, it is authoritative and fail-closed.
     pub fn claimable_for_actor(&self) -> bool {
         self.actions
-            .allows(boreal_domain::actions::ActionKind::Claim)
+            .as_ref()
+            .map_or(self.decision.claimable_for_actor, |actions| {
+                actions.allows(boreal_domain::actions::ActionKind::Claim)
+            })
     }
 }
 
@@ -555,116 +551,27 @@ fn status2_rollup(decisions: &[StatusDecision]) -> RollupCounts {
     counts
 }
 
-/// Bridge the legacy status rows into the domain-owned action evaluator.
+/// Bridge the legacy status rows to the domain-owned action evaluator.
 ///
 /// The v2 status store currently exposes a project snapshot but not the
 /// separate entity/proof identity rows required by the production action
-/// contract.  This adapter therefore carries the known actor, lifecycle,
-/// holds and snapshot revision, while explicitly marking identity/proof facts
-/// unavailable.  It never invents a passing receipt or
-/// approval.  Once the identity read model is exposed by the store, this
-/// function is the single replacement point for those optional facts.
+/// contract. Do not manufacture sentinel identity or proof values here. The
+/// optional action set becomes populated only when the store can supply the
+/// complete v3 context; until then the compatibility read remains useful for
+/// discovery and mutation routes keep their own canonical authorization.
 fn status_actions(
-    input: &StatusWorkInput,
-    actor: &ActorContext,
-    project_revision: Revision,
-    as_of: TimestampMs,
-    decision: &StatusDecision,
-) -> (StatusActionContext, ActionDecision) {
-    let subject = EntityIdentity::new(
-        input.work.project_id.clone(),
-        input.work.id.clone(),
-        // The domain value is required to construct a quarantined input, but
-        // this sentinel is never serialized or used to authorize a mutation.
-        // The real entity cursor must come from the store identity seam.
-        EntityRevision::new(0),
-    );
-    let fact_subject = FactSubject::work(input.work.project_id.clone(), input.work.id.clone());
-    let lifecycle = match input.work.lifecycle {
-        boreal_domain::PersistedLifecycle::Closed => {
-            Some(TerminalDecision::Closed { decided_at: as_of })
-        }
-        boreal_domain::PersistedLifecycle::Cancelled => {
-            Some(TerminalDecision::Cancelled { decided_at: as_of })
-        }
-        boreal_domain::PersistedLifecycle::Draft | boreal_domain::PersistedLifecycle::Open => None,
-    };
-    let holds = input
-        .work
-        .hard_holds
-        .iter()
-        .enumerate()
-        .map(|(index, reason)| HoldInput {
-            id: HoldId::new(format!("{}:status-hold:{index}", input.work.id)),
-            scope: IntegrityScope::work(input.work.project_id.clone(), input.work.id.clone()),
-            code: boreal_domain::decision_inputs::HoldCode::new(reason.stable_code()),
-            entity_revision: subject.revision,
-            active: true,
-        })
-        .collect();
-    let facts = DecisionInputs {
-        subject: subject.clone(),
-        snapshot_revision: project_revision,
-        clock: EvaluationClock::at(as_of),
-        // This is a quarantined compatibility evaluation.  The domain
-        // evaluator is still the only action policy, but its mutating result
-        // must fail closed until the store supplies the missing v3 facts.
-        availability: Availability::Unavailable,
-        lifecycle: Fact::present(LifecycleInput {
-            identity: subject.clone(),
-            lifecycle: input.work.lifecycle,
-            terminal_decision: lifecycle,
-        }),
-        authority: Fact::present(ActorAuthorityInput {
-            project_id: input.work.project_id.clone(),
-            role: actor.role,
-            principal: PrincipalBinding::Authenticated {
-                actor_id: actor.actor_id.clone(),
-            },
-            session_id: None,
-        }),
-        // The status projection already contains gate observations, but it
-        // does not yet carry the immutable proof identity required by the v3
-        // action model.  Keep this fact explicitly absent until the store
-        // identity seam supplies it.
-        requirements: Fact::optional_absent(FactKind::PinnedRequirements, fact_subject.clone()),
-        dependencies: Fact::present(boreal_domain::decision_inputs::DependencyOutcomesInput {
-            edges: Vec::new(),
-        }),
-        holds: Fact::present(HoldsInput { holds }),
-        execution: Fact::optional_absent(FactKind::Execution, fact_subject.clone()),
-        submission: Fact::optional_absent(FactKind::Submission, fact_subject.clone()),
-        review: Fact::optional_absent(FactKind::Review, fact_subject.clone()),
-        recovery: Fact::optional_absent(FactKind::Recovery, fact_subject),
-        integrity: IntegrityInput {
-            scope: IntegrityScope::work(input.work.project_id.clone(), input.work.id.clone()),
-            level: IntegrityLevel::Degraded,
-            diagnostics: Vec::new(),
+    _input: &StatusWorkInput,
+    _actor: &ActorContext,
+    _project_revision: Revision,
+    _as_of: TimestampMs,
+    _decision: &StatusDecision,
+) -> (StatusActionContext, Option<ActionDecision>) {
+    (
+        StatusActionContext::Unavailable {
+            missing_facts: vec!["entity_revision", "proof_identity", "authenticated_session"],
         },
-        permitted_actions: PermittedActionsInput::allowing([
-            PermittedAction::Inspect,
-            PermittedAction::Claim,
-            PermittedAction::AcceptAttempt,
-            PermittedAction::ResumeAttempt,
-            PermittedAction::AttachEvidence,
-            PermittedAction::Submit,
-            PermittedAction::Review,
-            PermittedAction::Finish,
-            PermittedAction::Release,
-            PermittedAction::Recover,
-            PermittedAction::ResolveHold,
-            PermittedAction::Repair,
-        ]),
-    };
-    let context = StatusActionContext::Unavailable {
-        missing_facts: vec!["entity_revision", "proof_identity", "authenticated_session"],
-    };
-    let actions = evaluate_actions(&ActionEvaluationInput::new(
-        &facts,
-        decision.display_status,
-        &decision.reason_codes,
-    ));
-    (context, actions)
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -841,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn public_claimability_uses_the_canonical_action_decision() {
+    fn legacy_claimability_remains_discovery_hint_when_action_context_is_unavailable() {
         let snapshot = project_status(
             &"project".into(),
             &operator(),
@@ -856,17 +763,12 @@ mod tests {
         let item = &snapshot.items[0];
         assert_eq!(item.decision.display_status, DerivedStatus::Ready);
         assert!(item.decision.claimable_for_actor);
-        assert!(!item.claimable_for_actor());
-        assert!(!item
-            .actions
-            .allows(boreal_domain::actions::ActionKind::Claim));
+        assert!(item.claimable_for_actor());
+        assert!(item.actions.is_none());
+        assert_eq!(item.action_context.state(), "unavailable");
         assert_eq!(
-            item.actions
-                .denial(boreal_domain::actions::ActionKind::Claim)
-                .expect("operator denial")
-                .reason
-                .stable_code(),
-            "availability_unavailable"
+            item.action_context.missing_facts(),
+            &["entity_revision", "proof_identity", "authenticated_session"]
         );
     }
 
