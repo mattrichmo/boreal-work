@@ -1,0 +1,14 @@
+{
+  "schema": "boreal.pf-s02.findings.v1",
+  "sprint_id": "PF-S02",
+  "source_revision": "be79688ebefcd6004a9f6f60c4b27a8c99ca6e60",
+  "decision": "blocked_not_accepted",
+  "findings": [
+    {"id": "PF-S02-001", "severity": "blocker", "status": "corrected_pending_independent_review", "summary": "Direct CLI caller authentication was missing before the bounded credential binding correction."},
+    {"id": "PF-S02-002", "severity": "blocker", "status": "corrected_pending_fault_evidence", "summary": "Backup and restore now retain durable maintenance jobs and exact replay readback; crash and native evidence remain open."},
+    {"id": "PF-S02-003", "severity": "blocker", "status": "partial", "summary": "Status projections now expose canonical action facts, while incomplete proof remains fail-closed and full descriptors are not yet wired."},
+    {"id": "PF-S02-004", "severity": "blocker", "status": "corrected_pending_independent_review", "summary": "The production oracle now uses an external source manifest rather than a self-referential tracked commit hash."},
+    {"id": "PF-S02-005", "severity": "major", "status": "open", "summary": "PF-S02 leaf handoffs, independent review, real-service acceptance and release evidence are not certified at this tree."}
+  ],
+  "successor_unlock": false
+}

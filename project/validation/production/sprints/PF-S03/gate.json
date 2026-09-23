@@ -1,0 +1,18 @@
+{
+  "schema": "boreal.pf-s03.gate.v1",
+  "sprint_id": "PF-S03",
+  "decision": "blocked_not_accepted",
+  "source_revision": "be79688ebefcd6004a9f6f60c4b27a8c99ca6e60",
+  "oracle_manifest_sha256": "a50a2800e1eddb0e9372a636f6d22df9b10cea07de7fdd76f2d5c802024884dd",
+  "review": "project/validation/production/sprints/PF-S03/review.md",
+  "findings": "project/validation/production/sprints/PF-S03/findings.json",
+  "reconciliation": "project/validation/production/sprints/PF-S03/reconciliation.md",
+  "revalidation": "project/validation/production/sprints/PF-S03/revalidation.md",
+  "independent_reviewer": null,
+  "successor_unlock": false,
+  "limits": [
+    "The complete status action descriptor envelope is not yet emitted.",
+    "Independent review is not present.",
+    "Genuine service/native/release acceptance remains open."
+  ]
+}

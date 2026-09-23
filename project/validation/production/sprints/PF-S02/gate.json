@@ -1,0 +1,17 @@
+{
+  "schema": "boreal.pf-s02.gate.v1",
+  "sprint_id": "PF-S02",
+  "decision": "blocked_not_accepted",
+  "source_revision": "be79688ebefcd6004a9f6f60c4b27a8c99ca6e60",
+  "review": "project/validation/production/sprints/PF-S02/review.md",
+  "findings": "project/validation/production/sprints/PF-S02/findings.json",
+  "reconciliation": "project/validation/production/sprints/PF-S02/reconciliation.md",
+  "revalidation": "project/validation/production/sprints/PF-S02/revalidation.md",
+  "independent_reviewer": null,
+  "successor_unlock": false,
+  "limits": [
+    "No independent review identity is recorded for this exact tree.",
+    "Full public action descriptors are not yet wired from status facts.",
+    "Crash-injected backup/restore, hostile caller, native platform and genuine release evidence remain open."
+  ]
+}

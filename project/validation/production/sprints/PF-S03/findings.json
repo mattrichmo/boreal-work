@@ -1,0 +1,14 @@
+{
+  "schema": "boreal.pf-s03.findings.v1",
+  "sprint_id": "PF-S03",
+  "source_revision": "be79688ebefcd6004a9f6f60c4b27a8c99ca6e60",
+  "oracle_manifest_sha256": "a50a2800e1eddb0e9372a636f6d22df9b10cea07de7fdd76f2d5c802024884dd",
+  "decision": "blocked_not_accepted",
+  "successor_unlock": false,
+  "findings": [
+    {"id": "PF-S03-001", "severity": "blocker", "status": "partial", "summary": "Status projections carry real action facts but do not yet emit the complete canonical action descriptor set."},
+    {"id": "PF-S03-002", "severity": "blocker", "status": "open", "summary": "Independent review is missing for the exact source tree."},
+    {"id": "PF-S03-003", "severity": "major", "status": "open", "summary": "Genuine service, native and release evidence remains unrun."},
+    {"id": "PF-S03-004", "severity": "major", "status": "corrected_pending_review", "summary": "Oracle binding uses an external source/artifact manifest and no longer self-hashes a tracked commit."}
+  ]
+}
