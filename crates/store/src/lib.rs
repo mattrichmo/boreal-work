@@ -66,7 +66,7 @@ const LEGACY_SCHEMA_V2_SQL: &str = include_str!("../../../project/spec/schema-v2
 const WORK_MODEL_SCHEMA_V3_SQL: &str = include_str!("../../../project/spec/schema-v3.sql");
 const BACKUP_MANIFEST_FILE: &str = "manifest.json";
 const BACKUP_DATABASE_FILE: &str = "database.sqlite";
-const BACKUP_FORMAT_VERSION: u64 = 1;
+const BACKUP_FORMAT_VERSION: u64 = 2;
 const BACKUP_PACKAGE_KIND: &str = "boreal.sqlite.backup";
 
 const PRODUCTION_EXTERNAL_JOB_IDENTITY_TRIGGER_SQL: &str = r#"
@@ -1974,7 +1974,14 @@ impl SqliteStore {
                     fs::metadata(&database_path).ok().map(|metadata| metadata.len())
                 ))
                 })?;
-            let manifest = snapshot.backup_manifest()?;
+            let mut manifest = snapshot.backup_manifest()?;
+            let database_digest = checksum(&fs::read(&database_path).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot read package SQLite snapshot {}: {error}",
+                    database_path.display()
+                ))
+            })?);
+            manifest["database_digest"] = Value::String(database_digest);
             let manifest_path = staging.join(BACKUP_MANIFEST_FILE);
             let encoded = serde_json::to_vec_pretty(&manifest).map_err(|error| {
                 StoreError::Invalid(format!("cannot encode backup manifest: {error}"))
@@ -2042,8 +2049,23 @@ impl SqliteStore {
         reject_symlink(destination)?;
         let manifest_path = package.join(BACKUP_MANIFEST_FILE);
         let database_path = package.join(BACKUP_DATABASE_FILE);
+        reject_symlink(&manifest_path)?;
+        reject_symlink(&database_path)?;
         let manifest = read_backup_manifest(&manifest_path)?;
         validate_backup_manifest(&manifest)?;
+        let actual_database_digest = checksum(&fs::read(&database_path).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot read backup database {}: {error}",
+                database_path.display()
+            ))
+        })?);
+        if manifest.get("database_digest").and_then(Value::as_str)
+            != Some(actual_database_digest.as_str())
+        {
+            return Err(StoreError::Conflict(
+                "backup database digest does not match its manifest".to_owned(),
+            ));
+        }
         if manifest
             .get("referenced_blobs")
             .and_then(Value::as_array)
@@ -2590,6 +2612,17 @@ impl SqliteStore {
                         "operation {operation_id} was already committed for another workspace binding"
                     )));
                 }
+                self.validate_project_init_readback(
+                    &existing,
+                    project_id,
+                    actor_id,
+                    actor_role,
+                    display_name,
+                    request_digest,
+                    database,
+                    binding,
+                )?;
+                self.validate_existing_actor(actor_id, actor_role, credential_ref, display_name)?;
                 let context = identity.context(project_id).map_err(|error| {
                     StoreError::Conflict(format!(
                         "project.init {operation_id} has an invalid identity context: {error}"
@@ -2654,7 +2687,7 @@ impl SqliteStore {
                         )));
                     }
                     let original_operation_id = initialization.column_text(0)?;
-                    identity
+                    let readback = identity
                         .operation(&context, &original_operation_id)
                         .map_err(|error| {
                             StoreError::Conflict(format!(
@@ -2666,6 +2699,27 @@ impl SqliteStore {
                                 "project {project_id} project.init has no identity-bound readback"
                             ))
                         })?;
+                    let original = readback.operation.ok_or_else(|| {
+                        StoreError::Corrupt(format!(
+                            "project {project_id} project.init readback has no operation"
+                        ))
+                    })?;
+                    self.validate_project_init_readback(
+                        &original,
+                        project_id,
+                        actor_id,
+                        actor_role,
+                        display_name,
+                        request_digest,
+                        database,
+                        binding,
+                    )?;
+                    self.validate_existing_actor(
+                        actor_id,
+                        actor_role,
+                        credential_ref,
+                        display_name,
+                    )?;
                     return Ok(MutationResult {
                         operation_id: operation_id.to_owned(),
                         revision: revision.0,
@@ -2689,7 +2743,18 @@ impl SqliteStore {
             let context = identity
                 .bind_project(project_id, binding, now)
                 .map_err(|error| StoreError::Conflict(format!("project identity: {error}")))?;
-            let payload = json_object(json!({"project_id": project_id}))?;
+            let payload = json_object(json!({
+                "project_id": project_id,
+                "actor_id": actor_id,
+                "actor_role": actor_role,
+                "display_name": display_name,
+                "request_digest": request_digest,
+                "database_instance_id": current_database.database_instance_id.as_str(),
+                "restore_epoch": current_database.restore_epoch.get(),
+                "canonical_root": binding.canonical_root(),
+                "canonical_worktree": binding.canonical_worktree(),
+                "binding_digest": binding.binding_digest(),
+            }))?;
             let readback = self.append_identity_operation_audit_in_transaction(
                 &context,
                 OperationRecord {
@@ -3213,6 +3278,25 @@ impl SqliteStore {
         display_name: &str,
         now: &str,
     ) -> Result<(), StoreError> {
+        let mut existing = self.prepare(
+            "SELECT role, credential_ref, display_name
+             FROM actor WHERE actor_id = ?1",
+        )?;
+        existing.bind_text(1, actor_id)?;
+        if existing.step()? == SQLITE_ROW {
+            let stored_role = existing.column_text(0)?;
+            let stored_credential = existing.column_text(1)?;
+            let stored_display_name = existing.column_text(2)?;
+            if stored_role != role
+                || stored_credential != credential_ref
+                || stored_display_name != display_name
+            {
+                return Err(StoreError::Conflict(format!(
+                    "actor {actor_id} identity attributes conflict with the stored principal"
+                )));
+            }
+            return Ok(());
+        }
         let mut statement = self.prepare(
             "INSERT INTO actor (actor_id, role, credential_ref, display_name, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -3224,6 +3308,114 @@ impl SqliteStore {
         statement.bind_text(4, display_name)?;
         statement.bind_text(5, now)?;
         statement.run()
+    }
+
+    fn validate_project_init_readback(
+        &self,
+        record: &OperationRecord,
+        project_id: &str,
+        actor_id: &str,
+        actor_role: &str,
+        display_name: &str,
+        request_digest: &str,
+        database: &identity::DatabaseIdentity,
+        binding: &identity::WorkspaceBinding,
+    ) -> Result<(), StoreError> {
+        if record.project_id != project_id
+            || record.command != "project.init"
+            || record.actor_id != actor_id
+            || record.request_digest != request_digest
+        {
+            return Err(StoreError::Conflict(
+                "project.init readback identity does not match the requested bootstrap".to_owned(),
+            ));
+        }
+        let payload: Value = serde_json::from_str(&record.result_json).map_err(|error| {
+            StoreError::Corrupt(format!("project.init readback is not valid JSON: {error}"))
+        })?;
+        let object = payload.as_object().ok_or_else(|| {
+            StoreError::Corrupt("project.init readback payload is not an object".to_owned())
+        })?;
+        let text = |name: &str| {
+            object.get(name).and_then(Value::as_str).ok_or_else(|| {
+                StoreError::Corrupt(format!("project.init readback is missing {name}"))
+            })
+        };
+        let number = |name: &str| {
+            object.get(name).and_then(Value::as_u64).ok_or_else(|| {
+                StoreError::Corrupt(format!("project.init readback is missing {name}"))
+            })
+        };
+        let values = [
+            ("project_id", project_id, text("project_id")?),
+            ("actor_id", actor_id, text("actor_id")?),
+            ("actor_role", actor_role, text("actor_role")?),
+            ("display_name", display_name, text("display_name")?),
+            ("request_digest", request_digest, text("request_digest")?),
+            (
+                "canonical_root",
+                binding.canonical_root(),
+                text("canonical_root")?,
+            ),
+            (
+                "canonical_worktree",
+                binding.canonical_worktree(),
+                text("canonical_worktree")?,
+            ),
+            (
+                "binding_digest",
+                binding.binding_digest(),
+                text("binding_digest")?,
+            ),
+            (
+                "database_instance_id",
+                database.database_instance_id.as_str(),
+                text("database_instance_id")?,
+            ),
+        ];
+        if let Some((name, expected, actual)) = values
+            .iter()
+            .find(|(_, expected, actual)| expected != actual)
+        {
+            return Err(StoreError::Conflict(format!(
+                "project.init readback field {name} conflicts: expected {expected}, actual {actual}"
+            )));
+        }
+        if number("restore_epoch")? != database.restore_epoch.get() {
+            return Err(StoreError::Conflict(
+                "project.init readback restore epoch conflicts with the requested bootstrap"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_existing_actor(
+        &self,
+        actor_id: &str,
+        role: &str,
+        credential_ref: &str,
+        display_name: &str,
+    ) -> Result<(), StoreError> {
+        let mut existing = self.prepare(
+            "SELECT role, credential_ref, display_name
+             FROM actor WHERE actor_id = ?1",
+        )?;
+        existing.bind_text(1, actor_id)?;
+        if existing.step()? != SQLITE_ROW {
+            return Err(StoreError::Conflict(format!(
+                "project.init actor {actor_id} has no stored principal identity"
+            )));
+        }
+        if existing.column_text(0)? != role
+            || existing.column_text(1)? != credential_ref
+            || existing.column_text(2)? != display_name
+        {
+            return Err(StoreError::Conflict(format!(
+                "actor {actor_id} identity attributes conflict with the stored principal"
+            )));
+        }
+        Ok(())
     }
 
     pub fn ensure_acceptance_profile(
@@ -10558,6 +10750,15 @@ fn validate_backup_manifest(manifest: &Value) -> Result<(), StoreError> {
                 "backup manifest {key} is not an array"
             )));
         }
+    }
+    if manifest
+        .get("database_digest")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return Err(StoreError::Corrupt(
+            "backup manifest database_digest is missing".to_owned(),
+        ));
     }
     Ok(())
 }

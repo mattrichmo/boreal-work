@@ -138,6 +138,35 @@ fn incompatible_manifest_is_rejected_before_destination_creation() {
 }
 
 #[test]
+fn database_tampering_is_rejected_by_the_manifest_digest() {
+    let source_path = temp_path("tampered-source.sqlite");
+    let package_path = temp_path("tampered-package");
+    let target_path = temp_path("tampered-target.sqlite");
+    remove_sqlite_files(&source_path);
+    remove_sqlite_files(&target_path);
+    let _ = fs::remove_dir_all(&package_path);
+
+    let source = initialize(&source_path, "tampered-project");
+    source
+        .backup_package_to(&package_path)
+        .expect("backup succeeds");
+    drop(source);
+    let database_path = package_path.join("database.sqlite");
+    let mut bytes = fs::read(&database_path).expect("backup database reads");
+    bytes.push(0);
+    fs::write(&database_path, bytes).expect("tampered database writes");
+
+    let error = SqliteStore::restore_package_to(&package_path, &target_path)
+        .expect_err("tampered database must fail closed");
+    assert!(matches!(error, StoreError::Conflict(message) if message.contains("database digest")));
+    assert!(!target_path.exists());
+
+    let _ = fs::remove_dir_all(&package_path);
+    remove_sqlite_files(&source_path);
+    remove_sqlite_files(&target_path);
+}
+
+#[test]
 fn external_blob_reference_is_recorded_and_blocks_incomplete_restore() {
     let source_path = temp_path("blob-source.sqlite");
     let package_path = temp_path("blob-package");
