@@ -11,7 +11,7 @@ use crate::{
     decision_inputs::{
         ActorAuthorityInput, AttemptIdentity, Availability, DecisionInputs, EntityIdentity,
         EntityRevision, Fact, HoldCode, HoldInput, IntegrityLevel, PermittedAction,
-        PrincipalBinding, ProofRevision,
+        PrincipalBinding, ProofRevision, ReviewOutcome, SubmissionState,
     },
     ActorId, ActorRole, AttemptPhase, DerivedStatus, ReasonCode, Revision,
 };
@@ -41,6 +41,9 @@ pub enum ActionKind {
     ResumePolicy,
     Cancel,
     Reopen,
+    Retry,
+    RevokeReview,
+    RevokeException,
     ResolveHold,
     WaiveDependency,
     ForceGate,
@@ -49,7 +52,7 @@ pub enum ActionKind {
     Repair,
 }
 
-const ALL_ACTIONS: [ActionKind; 27] = [
+const ALL_ACTIONS: [ActionKind; 30] = [
     ActionKind::Inspect,
     ActionKind::ReadHistory,
     ActionKind::ReadOperation,
@@ -71,6 +74,9 @@ const ALL_ACTIONS: [ActionKind; 27] = [
     ActionKind::ResumePolicy,
     ActionKind::Cancel,
     ActionKind::Reopen,
+    ActionKind::Retry,
+    ActionKind::RevokeReview,
+    ActionKind::RevokeException,
     ActionKind::ResolveHold,
     ActionKind::WaiveDependency,
     ActionKind::ForceGate,
@@ -340,7 +346,14 @@ fn descriptor(input: &ActionEvaluationInput<'_>, action: ActionKind) -> ActionDe
         required_inputs.push(ActionInputKind::Confirmation);
         if matches!(
             action,
-            ActionKind::Cancel | ActionKind::Reopen | ActionKind::ResolveHold
+            ActionKind::Cancel
+                | ActionKind::Reopen
+                | ActionKind::Retry
+                | ActionKind::RevokeReview
+                | ActionKind::RevokeException
+                | ActionKind::WaiveDependency
+                | ActionKind::ForceGate
+                | ActionKind::ResolveHold
         ) {
             required_inputs.push(ActionInputKind::Reason);
             required_inputs.push(ActionInputKind::Comment);
@@ -466,9 +479,46 @@ fn deny_reason(
         return Some(ActionDenialReason::DelegationInvalid);
     }
 
+    if matches!(
+        request.action,
+        ActionKind::StartAttempt
+            | ActionKind::Checkpoint
+            | ActionKind::AttachEvidence
+            | ActionKind::Submit
+    ) && !facts
+        .execution
+        .as_present()
+        .is_some_and(|execution| execution.proof.is_bound())
+        && !(request.action == ActionKind::AttachEvidence
+            && facts
+                .submission
+                .as_present()
+                .is_some_and(|submission| submission.proof.is_bound()))
+    {
+        return Some(ActionDenialReason::InvalidFacts);
+    }
+
+    if requires_attempt_owner(request.action) {
+        let owner_session = facts
+            .execution
+            .as_present()
+            .and_then(|execution| execution.session_id.as_ref())
+            .or_else(|| {
+                facts
+                    .submission
+                    .as_present()
+                    .map(|submission| &submission.session_id)
+            });
+        if owner_session.is_some_and(|session| authority.session_id.as_ref() != Some(session)) {
+            return Some(ActionDenialReason::AttemptOwnerMismatch);
+        }
+    }
+    if action_requires_session(request.action) && authority.session_id.is_none() {
+        return Some(ActionDenialReason::PolicyDenied);
+    }
+
     if requires_attempt_owner(request.action)
-        && authority.role != ActorRole::Operator
-        && current_attempt_actor(facts).is_some_and(|actor| actor != authority.actor_id())
+        && current_attempt_actor(facts).is_none_or(|actor| actor != authority.actor_id())
     {
         return Some(ActionDenialReason::AttemptOwnerMismatch);
     }
@@ -562,6 +612,12 @@ fn current_attempt_actor(facts: &DecisionInputs) -> Option<&ActorId> {
         .execution
         .as_present()
         .map(|execution| &execution.actor_id)
+        .or_else(|| {
+            facts
+                .submission
+                .as_present()
+                .map(|submission| &submission.actor_id)
+        })
 }
 
 fn active_hold(facts: &DecisionInputs) -> Result<Option<&HoldInput>, ActionDenialReason> {
@@ -614,6 +670,8 @@ fn hold_denial(
             | ActionKind::ResolveHold
             | ActionKind::Repair
             | ActionKind::Review
+            | ActionKind::RevokeReview
+            | ActionKind::RevokeException
             | ActionKind::WaiveDependency
             | ActionKind::ForceGate
     ) {
@@ -638,6 +696,9 @@ fn status_denial(
         | ActionKind::Export => None,
         ActionKind::Publish if status == DerivedStatus::Draft => None,
         ActionKind::Publish => Some(ActionDenialReason::StatusDenied(status)),
+        ActionKind::Claim if facts.dispatch_policy == crate::DispatchPolicy::Paused => {
+            Some(ActionDenialReason::PolicyDenied)
+        }
         ActionKind::Claim if status == DerivedStatus::Ready => None,
         ActionKind::Claim => Some(ActionDenialReason::StatusDenied(status)),
         ActionKind::AcceptAttempt => match attempt {
@@ -650,6 +711,17 @@ fn status_denial(
             Some(attempt) => Some(ActionDenialReason::AttemptPhaseDenied(attempt.phase)),
             None => Some(ActionDenialReason::MissingAttempt),
         },
+        ActionKind::AttachEvidence
+            if facts.submission.as_present().is_some()
+                && matches!(
+                    status,
+                    DerivedStatus::NeedsVerification
+                        | DerivedStatus::AwaitingReview
+                        | DerivedStatus::Blocked
+                ) =>
+        {
+            None
+        }
         ActionKind::Checkpoint | ActionKind::AttachEvidence => match attempt {
             Some(attempt)
                 if matches!(
@@ -686,10 +758,16 @@ fn status_denial(
                 DerivedStatus::AwaitingReview | DerivedStatus::Blocked
             ) && facts.submission.as_present().is_some() =>
         {
-            if facts
-                .review
-                .as_present()
-                .is_some_and(|review| review.attempt_actor_id == *actor_id)
+            if current_attempt_actor(facts).is_some_and(|owner| owner == actor_id)
+                || facts.submission.as_present().is_some_and(|submission| {
+                    facts.authority.as_present().is_some_and(|authority| {
+                        authority.authority_root == submission.authority_root
+                    })
+                })
+                || facts
+                    .review
+                    .as_present()
+                    .is_some_and(|review| review.attempt_actor_id == *actor_id)
             {
                 Some(ActionDenialReason::ReviewNotIndependent)
             } else {
@@ -704,7 +782,22 @@ fn status_denial(
                     | DerivedStatus::NeedsVerification
                     | DerivedStatus::AwaitingReview
                     | DerivedStatus::Complete
-            ) =>
+                    | DerivedStatus::Blocked
+            ) && (status != DerivedStatus::Blocked
+                || (!facts.review.as_present().is_some_and(|review| {
+                    matches!(
+                        review.outcome,
+                        ReviewOutcome::Rejected | ReviewOutcome::Returned | ReviewOutcome::Revoked
+                    )
+                }) && (facts.execution.as_present().is_some_and(|attempt| {
+                    matches!(
+                        attempt.phase,
+                        AttemptPhase::Running | AttemptPhase::Verifying
+                    )
+                }) || facts
+                    .submission
+                    .as_present()
+                    .is_some_and(|submission| submission.state == SubmissionState::Sealed)))) =>
         {
             None
         }
@@ -746,6 +839,33 @@ fn status_denial(
             None
         }
         ActionKind::Reopen => Some(ActionDenialReason::StatusDenied(status)),
+        ActionKind::Retry
+            if !matches!(
+                status,
+                DerivedStatus::Closed | DerivedStatus::Cancelled | DerivedStatus::Draft
+            ) && facts.execution.as_present().is_none()
+                && !unresolved_recovery(facts) =>
+        {
+            None
+        }
+        ActionKind::Retry => Some(ActionDenialReason::RecoveryRequired),
+        ActionKind::RevokeReview
+            if facts.submission.as_present().is_some() && facts.review.as_present().is_some() =>
+        {
+            if facts.submission.as_present().is_some_and(|submission| {
+                facts
+                    .authority
+                    .as_present()
+                    .is_some_and(|authority| authority.authority_root == submission.authority_root)
+            }) {
+                Some(ActionDenialReason::ReviewNotIndependent)
+            } else {
+                None
+            }
+        }
+        ActionKind::RevokeReview => Some(ActionDenialReason::MissingSubmission),
+        ActionKind::RevokeException if facts.requirements.as_present().is_some() => None,
+        ActionKind::RevokeException => Some(ActionDenialReason::InvalidFacts),
         ActionKind::ResolveHold if active_hold(facts).ok().flatten().is_some() => None,
         ActionKind::ResolveHold => Some(ActionDenialReason::NoActiveHold),
         ActionKind::WaiveDependency
@@ -795,7 +915,11 @@ fn required_roles(input: &ActionEvaluationInput<'_>, action: ActionKind) -> Vec<
         | ActionKind::ReadOperation
         | ActionKind::Export => Vec::new(),
         ActionKind::Publish => vec![ActorRole::Publisher, ActorRole::Operator],
-        ActionKind::Claim if has_operator_only(input.reasons) => vec![ActorRole::Operator],
+        ActionKind::Claim if input.facts.dispatch_policy == crate::DispatchPolicy::OperatorOnly => {
+            vec![ActorRole::Operator]
+        }
+        // Claim authority is bound to canonical dispatch policy, not a reason
+        // label that could be stale or independently constructed.
         ActionKind::Claim => vec![ActorRole::Agent],
         ActionKind::AcceptAttempt
         | ActionKind::StartAttempt
@@ -804,8 +928,10 @@ fn required_roles(input: &ActionEvaluationInput<'_>, action: ActionKind) -> Vec<
         | ActionKind::Submit
         | ActionKind::RequestReview
         | ActionKind::FinishClose
-        | ActionKind::Close => vec![ActorRole::Agent],
-        ActionKind::Review => vec![ActorRole::Reviewer, ActorRole::Operator],
+        | ActionKind::Close => vec![ActorRole::Agent, ActorRole::Operator],
+        ActionKind::Review | ActionKind::RevokeReview => {
+            vec![ActorRole::Reviewer, ActorRole::Operator]
+        }
         ActionKind::Stop | ActionKind::Release | ActionKind::Recover => {
             vec![ActorRole::Agent, ActorRole::Operator]
         }
@@ -813,18 +939,14 @@ fn required_roles(input: &ActionEvaluationInput<'_>, action: ActionKind) -> Vec<
         | ActionKind::ResumePolicy
         | ActionKind::Cancel
         | ActionKind::Reopen
+        | ActionKind::Retry
+        | ActionKind::RevokeException
         | ActionKind::ResolveHold
         | ActionKind::WaiveDependency
         | ActionKind::ForceGate
         | ActionKind::ReconcileResource
         | ActionKind::Repair => vec![ActorRole::Operator],
     }
-}
-
-fn has_operator_only(reasons: &[ReasonCode]) -> bool {
-    reasons
-        .iter()
-        .any(|reason| matches!(reason, ReasonCode::OperatorOnly))
 }
 
 fn mapped_permission(action: ActionKind) -> Option<PermittedAction> {
@@ -838,7 +960,9 @@ fn mapped_permission(action: ActionKind) -> Option<PermittedAction> {
         ActionKind::StartAttempt => PermittedAction::ResumeAttempt,
         ActionKind::Checkpoint | ActionKind::AttachEvidence => PermittedAction::AttachEvidence,
         ActionKind::Submit => PermittedAction::Submit,
-        ActionKind::RequestReview | ActionKind::Review => PermittedAction::Review,
+        ActionKind::RequestReview | ActionKind::Review | ActionKind::RevokeReview => {
+            PermittedAction::Review
+        }
         ActionKind::FinishClose | ActionKind::Close => PermittedAction::Finish,
         ActionKind::Release => PermittedAction::Release,
         ActionKind::Stop | ActionKind::Recover | ActionKind::ReconcileResource => {
@@ -851,6 +975,8 @@ fn mapped_permission(action: ActionKind) -> Option<PermittedAction> {
         | ActionKind::ResumePolicy
         | ActionKind::Cancel
         | ActionKind::Reopen
+        | ActionKind::Retry
+        | ActionKind::RevokeException
         | ActionKind::WaiveDependency
         | ActionKind::ForceGate => return None,
     })
@@ -876,6 +1002,8 @@ fn is_recovery_action(action: ActionKind) -> bool {
             | ActionKind::ReconcileResource
             | ActionKind::Repair
             | ActionKind::Review
+            | ActionKind::RevokeReview
+            | ActionKind::RevokeException
             | ActionKind::WaiveDependency
             | ActionKind::ForceGate
     )
@@ -911,18 +1039,20 @@ fn action_requires_proof(action: ActionKind) -> bool {
             | ActionKind::FinishClose
             | ActionKind::Close
             | ActionKind::ForceGate
+            | ActionKind::RevokeReview
+            | ActionKind::RevokeException
+            | ActionKind::Retry
+            | ActionKind::Reopen
+            | ActionKind::WaiveDependency
     )
 }
 
 fn action_requires_session(action: ActionKind) -> bool {
-    matches!(
-        action,
-        ActionKind::AcceptAttempt
-            | ActionKind::StartAttempt
-            | ActionKind::Checkpoint
-            | ActionKind::AttachEvidence
-            | ActionKind::Submit
-    )
+    // Every consequential work action is committed through a project-scoped
+    // session at the store boundary. Keep read-only discovery available to
+    // callers without one, but never advertise a mutation the transaction
+    // will reject for missing authenticated session context.
+    !is_read_only(action)
 }
 
 fn requires_attempt_owner(action: ActionKind) -> bool {
@@ -952,6 +1082,9 @@ fn confirmation_for(action: ActionKind) -> Option<&'static str> {
         ActionKind::ResumePolicy => "Resume the previously configured dispatch policy?",
         ActionKind::Cancel => "Cancel this work item with an audited reason?",
         ActionKind::Reopen => "Reopen this terminal work item with an audited reason?",
+        ActionKind::Retry => "Begin a new proof generation, preserving all prior results?",
+        ActionKind::RevokeReview => "Revoke this exact review and invalidate its accepted outcome?",
+        ActionKind::RevokeException => "Revoke this exception without deleting its history?",
         ActionKind::ResolveHold => "Resolve the named hold with an audited reason?",
         ActionKind::WaiveDependency => "Record a scoped dependency waiver?",
         ActionKind::ForceGate => "Record a scoped gate exception without altering evidence?",

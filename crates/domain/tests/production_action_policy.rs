@@ -62,6 +62,7 @@ fn facts(role: ActorRole, principal: PrincipalBinding) -> DecisionInputs {
         snapshot_revision: Revision(12),
         clock: EvaluationClock::at(TimestampMs::from_millis(1_000)),
         availability: Availability::Live,
+        dispatch_policy: boreal_domain::DispatchPolicy::Automatic,
         lifecycle: Fact::present(LifecycleInput {
             identity: subject(),
             lifecycle: PersistedLifecycle::Open,
@@ -69,6 +70,10 @@ fn facts(role: ActorRole, principal: PrincipalBinding) -> DecisionInputs {
         }),
         authority: Fact::present(ActorAuthorityInput {
             project_id: ProjectId::new("project-1"),
+            authority_root: match &principal {
+                PrincipalBinding::Authenticated { actor_id } => actor_id.clone(),
+                PrincipalBinding::Delegated { delegator_id, .. } => delegator_id.clone(),
+            },
             role,
             principal,
             session_id: Some(SessionId::new("session-1")),
@@ -76,6 +81,7 @@ fn facts(role: ActorRole, principal: PrincipalBinding) -> DecisionInputs {
         requirements: Fact::present(PinnedRequirementsInput {
             proof: proof(None),
             requirements: vec![PinnedRequirement {
+                exception: None,
                 id: RequirementId::new("requirement-1"),
                 gate_id: GateId::new("verification"),
                 kind: GateKind::Verification,
@@ -169,7 +175,10 @@ fn descriptors_are_complete_and_stably_ordered() {
             ActionKind::Claim,
         ]
     );
-    assert_eq!(result.denied.len(), 22);
+    assert_eq!(
+        result.denied.len() + result.allowed.len(),
+        boreal_domain::actions::all_action_kinds().len()
+    );
     assert!(result
         .allowed
         .iter()
@@ -299,6 +308,58 @@ fn blocked_work_denies_claim_and_close_but_allows_owner_stop() {
 }
 
 #[test]
+fn blocked_submission_can_record_pending_close_intent_but_not_finalize_close() {
+    let current = attempt(4);
+    let actor = ActorId::new("agent-1");
+    let mut facts = facts(
+        ActorRole::Agent,
+        PrincipalBinding::Authenticated {
+            actor_id: actor.clone(),
+        },
+    );
+    facts.requirements = Fact::present(PinnedRequirementsInput {
+        proof: proof(Some(current.clone())),
+        requirements: vec![PinnedRequirement {
+            exception: None,
+            id: RequirementId::new("checkpoint-requirement"),
+            gate_id: GateId::new("checkpoint"),
+            kind: GateKind::Checkpoint,
+            required: true,
+            state: GateState::Open,
+            verifier_policy: VerifierPolicy {
+                id: VerifierPolicyId::new("checkpoint-policy"),
+                version: "1".to_owned(),
+            },
+        }],
+        review_policy: ReviewRequirementPolicy::NotRequired,
+    });
+    facts.execution = Fact::present(ExecutionInput {
+        attempt: current.clone(),
+        actor_id: actor.clone(),
+        session_id: Some(SessionId::new("session-1")),
+        phase: AttemptPhase::Verifying,
+        claimed_at: TimestampMs::from_millis(10),
+        lease_deadline: TimestampMs::from_millis(20_000),
+        hard_deadline: TimestampMs::from_millis(30_000),
+        proof: proof(Some(current.clone())),
+    });
+    facts.submission = Fact::present(SubmissionInput {
+        actor_id: actor.clone(),
+        session_id: SessionId::new("session-1"),
+        authority_root: actor,
+        id: SubmissionId::new("submission-1"),
+        proof: proof(Some(current)),
+        summary_digest: ContentDigest::new("sha256:summary"),
+        state: SubmissionState::Sealed,
+    });
+    let reasons = [ReasonCode::GateMissing(GateId::new("checkpoint"))];
+    let result = decision(&facts, DerivedStatus::Blocked, &reasons);
+
+    assert!(result.allows(ActionKind::FinishClose));
+    assert!(!result.allows(ActionKind::Close));
+}
+
+#[test]
 fn revision_and_fence_are_required_again_at_mutation_boundary() {
     let current = attempt(4);
     let mut facts = facts(
@@ -396,6 +457,7 @@ fn foreign_scope_and_invalid_delegation_fail_closed() {
         .request();
 
     facts.authority = Fact::present(ActorAuthorityInput {
+        authority_root: ActorId::new("operator-1"),
         project_id: ProjectId::new("project-1"),
         role: ActorRole::Agent,
         principal: PrincipalBinding::Delegated {
@@ -415,10 +477,29 @@ fn foreign_scope_and_invalid_delegation_fail_closed() {
 
 #[test]
 fn operator_only_ready_work_requires_operator_without_changing_status() {
-    let facts = facts(
+    let mut facts = facts(
         ActorRole::Agent,
         PrincipalBinding::Authenticated {
             actor_id: ActorId::new("agent-1"),
+        },
+    );
+    facts.dispatch_policy = boreal_domain::DispatchPolicy::OperatorOnly;
+    let reasons = [ReasonCode::OperatorOnly];
+    let result = decision(&facts, DerivedStatus::Ready, &reasons);
+
+    assert!(!result.allows(ActionKind::Claim));
+    assert!(matches!(
+        denial(&facts, DerivedStatus::Ready, &reasons, ActionKind::Claim),
+        ActionDenialReason::RoleDenied { .. }
+    ));
+}
+
+#[test]
+fn stale_operator_only_reason_cannot_change_canonical_claim_roles() {
+    let facts = facts(
+        ActorRole::Operator,
+        PrincipalBinding::Authenticated {
+            actor_id: ActorId::new("operator-1"),
         },
     );
     let reasons = [ReasonCode::OperatorOnly];
@@ -427,7 +508,8 @@ fn operator_only_ready_work_requires_operator_without_changing_status() {
     assert!(!result.allows(ActionKind::Claim));
     assert!(matches!(
         denial(&facts, DerivedStatus::Ready, &reasons, ActionKind::Claim),
-        ActionDenialReason::RoleDenied { .. }
+        ActionDenialReason::RoleDenied { required, observed }
+            if required == vec![ActorRole::Agent] && observed == ActorRole::Operator
     ));
 }
 

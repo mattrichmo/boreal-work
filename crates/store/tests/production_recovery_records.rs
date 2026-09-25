@@ -163,6 +163,96 @@ fn production_file_store(path: &Path) -> SqliteStore {
 }
 
 #[test]
+fn canonical_recovery_mutations_require_operation_identity() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "boreal-recovery-identity-guard-{}-{suffix}.sqlite",
+        std::process::id()
+    ));
+    let store = production_file_store(&path);
+
+    let create = store.create_recovery_obligation(&obligation("ob-guard"));
+    assert!(matches!(
+        create,
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("authenticated operation identity")
+    ));
+    let resolve = store.resolve_recovery_obligation(&recovery::RecoveryResolutionInput {
+        project_id: "p1".to_owned(),
+        obligation_id: "ob-guard".to_owned(),
+        resolution_id: "decision-guard".to_owned(),
+        actor_id: "operator-1".to_owned(),
+        outcome: "stopped".to_owned(),
+        reason: "unbound resolution must be rejected".to_owned(),
+        resource_state: "unknown".to_owned(),
+        at: "unix-ms:2".to_owned(),
+    });
+    assert!(matches!(
+        resolve,
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("authenticated operation identity")
+    ));
+    let reserve = store.reserve_resource(&recovery::ResourceReservationInput {
+        reservation_id: "res-guard".to_owned(),
+        project_id: "p1".to_owned(),
+        work_id: "w1".to_owned(),
+        attempt_id: "a1".to_owned(),
+        fence: 1,
+        resource_key: "worktree:/tmp/guard".to_owned(),
+        resource_kind: "worktree".to_owned(),
+        owner_actor_id: "operator-1".to_owned(),
+        created_at: "unix-ms:2".to_owned(),
+    });
+    assert!(matches!(
+        reserve,
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("authenticated operation identity")
+    ));
+    let request_release = store.request_resource_release(
+        "p1",
+        "resource:a1",
+        "release-request-guard",
+        "operator-1",
+        "caller-supplied-evidence",
+        "unix-ms:2",
+    );
+    assert!(matches!(
+        request_release,
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("authenticated operation identity")
+    ));
+    let acknowledge_release = store.acknowledge_resource_release(
+        "p1",
+        "resource:a1",
+        "release-ack-guard",
+        "operator-1",
+        "caller-supplied-evidence",
+        "unix-ms:2",
+    );
+    assert!(matches!(
+        acknowledge_release,
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("authenticated operation identity")
+    ));
+    assert!(store
+        .list_unresolved_recovery_obligations("p1", None, 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .resource_reservation("p1", "res-guard")
+        .unwrap()
+        .is_none());
+
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
+#[test]
 fn cleared_current_attempt_retains_unresolved_recovery() {
     let store = store();
     store
@@ -332,6 +422,26 @@ fn crash_after_external_effect_requires_readback_and_replays_idempotently() {
         .mark_external_job_readback_required("p1", "job-1", "verifier-run-1", "unix-ms:4")
         .unwrap();
     assert_eq!(readback.stage, "readback_required");
+    let guessed_failure = store.advance_external_job(&jobs::ExternalJobTransitionInput {
+        project_id: "p1".to_owned(),
+        job_id: "job-1".to_owned(),
+        expected_stage: "readback_required".to_owned(),
+        next_stage: "failed".to_owned(),
+        at: "unix-ms:4.5".to_owned(),
+        side_effect_ref: Some("verifier-run-1".to_owned()),
+        result_digest: None,
+        error_message: Some("assumed failed after timeout".to_owned()),
+    });
+    assert!(matches!(
+        guessed_failure,
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("illegal external job transition")
+    ));
+    assert_eq!(
+        store.external_job("p1", "job-1").unwrap().unwrap().stage,
+        "readback_required",
+        "an unknown external result must remain pending until attributable readback"
+    );
     let replay = store
         .register_external_job(&input)
         .expect("same request replays");
@@ -498,7 +608,6 @@ fn resource_release_requires_acknowledgement_and_is_retry_safe() {
 #[test]
 fn released_recovery_resolution_acknowledges_exact_bound_resource() {
     let store = store();
-    let context = bound_context(&store);
     store
         .reserve_resource(&recovery::ResourceReservationInput {
             reservation_id: "resource:a1".to_owned(),
@@ -525,6 +634,29 @@ fn released_recovery_resolution_acknowledges_exact_bound_resource() {
     store
         .create_recovery_obligation(&obligation("ob-release-bound"))
         .expect("bound recovery obligation persists");
+    let context = bound_context(&store);
+
+    let unbound_ack = store.acknowledge_resource_release(
+        "p1",
+        "resource:a1",
+        "release-ack-unbound",
+        "operator-1",
+        "caller-supplied-evidence",
+        "unix-ms:3",
+    );
+    assert!(matches!(
+        unbound_ack,
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("authenticated operation identity")
+    ));
+    assert_eq!(
+        store
+            .resource_reservation("p1", "resource:a1")
+            .unwrap()
+            .unwrap()
+            .state,
+        "release_pending"
+    );
 
     let plain = store.resolve_recovery_obligation(&recovery::RecoveryResolutionInput {
         project_id: "p1".to_owned(),
@@ -625,19 +757,15 @@ fn unresolved_recovery_survives_production_restart() {
     {
         let store = production_file_store(&path);
         store
-            .create_recovery_obligation(&recovery::RecoveryObligationInput {
-                obligation_id: "ob-restart".to_owned(),
-                project_id: "p1".to_owned(),
-                work_id: "w1".to_owned(),
-                attempt_id: Some("a1".to_owned()),
-                fence: Some(1),
-                reason: "expired".to_owned(),
-                resource_state: "unknown".to_owned(),
-                owner_actor_id: Some("operator-1".to_owned()),
-                next_action: "reconcile_stop".to_owned(),
-                created_at: "unix-ms:1".to_owned(),
-            })
-            .expect("recovery obligation persists before crash");
+            .execute_batch(
+                "INSERT INTO boreal_recovery_obligation
+                 (obligation_id, project_id, work_id, attempt_id, fence, reason,
+                  state, resource_state, owner_actor_id, next_action, created_at)
+                 VALUES ('ob-restart', 'p1', 'w1', 'a1', 1, 'expired',
+                         'unresolved', 'unknown', 'operator-1',
+                         'reconcile_stop', 'unix-ms:1');",
+            )
+            .expect("fixture seeds an unresolved obligation before crash");
     }
     let reopened = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("production restarts");
     let obligations = reopened
@@ -659,10 +787,15 @@ fn unresolved_recovery_survives_production_restart() {
 #[test]
 fn identity_bound_recovery_resolution_is_revisioned_audited_and_idempotent() {
     let store = store();
-    let context = bound_context(&store);
     store
         .create_recovery_obligation(&obligation("ob-bound"))
         .expect("obligation persists");
+    let context = bound_context(&store);
+    assert!(matches!(
+        store.create_recovery_obligation(&obligation("ob-after-bind")),
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("authenticated operation identity")
+    ));
     let expected_revision = store.project_revision("p1").unwrap().0;
     let input = recovery::IdentityBoundRecoveryResolutionInput {
         context: context.clone(),
@@ -681,6 +814,21 @@ fn identity_bound_recovery_resolution_is_revisioned_audited_and_idempotent() {
             at: "unix-ms:5".to_owned(),
         },
     };
+
+    let unbound = store.resolve_recovery_obligation(&input.resolution);
+    assert!(matches!(
+        unbound,
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("authenticated operation identity")
+    ));
+    assert_eq!(
+        store
+            .recovery_obligation("p1", "ob-bound")
+            .unwrap()
+            .unwrap()
+            .state,
+        "unresolved"
+    );
 
     let first = store
         .resolve_recovery_obligation_with_identity(&input)
@@ -725,10 +873,10 @@ fn identity_bound_recovery_resolution_is_revisioned_audited_and_idempotent() {
 #[test]
 fn identity_bound_recovery_resolution_rejects_stale_revision_and_fence() {
     let store = store();
-    let context = bound_context(&store);
     store
         .create_recovery_obligation(&obligation("ob-stale"))
         .expect("obligation persists");
+    let context = bound_context(&store);
     let initial_revision = store.project_revision("p1").unwrap().0;
     let input = recovery::IdentityBoundRecoveryResolutionInput {
         context,

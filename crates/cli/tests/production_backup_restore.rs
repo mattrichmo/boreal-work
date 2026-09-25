@@ -15,8 +15,9 @@ fn temporary_root() -> PathBuf {
 fn json(output: std::process::Output) -> Value {
     assert!(
         output.status.success(),
-        "command failed: {}\n{}",
+        "command failed: {}\nstdout: {}\nstderr: {}",
         output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("command emits JSON")
@@ -27,7 +28,6 @@ fn cli_backup_and_restore_use_manifest_and_new_restore_epoch() {
     let root = temporary_root();
     fs::create_dir_all(&root).expect("temporary root");
     let database = root.join("source.sqlite");
-    let restored = root.join("restored.sqlite");
     let package = root.join("backup-package");
     let binary = env!("CARGO_BIN_EXE_bwrk");
 
@@ -80,8 +80,9 @@ fn cli_backup_and_restore_use_manifest_and_new_restore_epoch() {
             .current_dir(&root)
             .args(["restore"])
             .arg(&package)
+            .args(["--yes"])
             .args(["--db"])
-            .arg(&restored)
+            .arg(&database)
             .args(["--json"])
             .output()
             .expect("restore starts"),

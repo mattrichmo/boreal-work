@@ -1,21 +1,67 @@
 {
   "schema_version": "boreal.workflow_package.v1",
   "package_id": "boreal.core-workflows",
-  "package_version": "1.0.0",
-  "asset_identity": "sha256:3402fd57a473bfccd10888465eb1c714ecda6e7a9af45fdd70589d06b44380d5",
+  "package_version": "1.1.0",
+  "asset_identity": "sha256:a91f63809b9c5a319fda6d456f2f6e92c5c8c6ab383f5fa68eb0f132ecf05cf2",
   "state_authority": "boreal.application.v2",
   "execution_model": "one_action_per_guidance_response",
   "assets": [
-    {"ref": "boreal.workflow.route.v1", "path": "route.json", "kind": "route"},
-    {"ref": "boreal.workflow.context.v1", "path": "context.json", "kind": "context"},
-    {"ref": "boreal.workflow.plan.v1", "path": "plan.json", "kind": "plan"},
-    {"ref": "boreal.workflow.claim.v1", "path": "claim.json", "kind": "claim"},
-    {"ref": "boreal.workflow.finish.v1", "path": "finish.json", "kind": "finish"},
-    {"ref": "boreal.workflow.review.v1", "path": "review.json", "kind": "review"},
-    {"ref": "boreal.workflow.audit.v1", "path": "audit.json", "kind": "audit"},
-    {"ref": "boreal.workflow.handoff.v1", "path": "handoff.json", "kind": "handoff"},
-    {"ref": "boreal.workflow.health.v1", "path": "health.json", "kind": "health"},
-    {"ref": "boreal.workflow.memory.v1", "path": "memory.json", "kind": "memory"}
+    {
+      "ref": "boreal.workflow.route.v1",
+      "path": "route.json",
+      "kind": "route"
+    },
+    {
+      "ref": "boreal.workflow.context.v1",
+      "path": "context.json",
+      "kind": "context"
+    },
+    {
+      "ref": "boreal.workflow.plan.v1",
+      "path": "plan.json",
+      "kind": "plan"
+    },
+    {
+      "ref": "boreal.workflow.claim.v1",
+      "path": "claim.json",
+      "kind": "claim"
+    },
+    {
+      "ref": "boreal.workflow.finish.v1",
+      "path": "finish.json",
+      "kind": "finish"
+    },
+    {
+      "ref": "boreal.workflow.review.v1",
+      "path": "review.json",
+      "kind": "review"
+    },
+    {
+      "ref": "boreal.workflow.audit.v1",
+      "path": "audit.json",
+      "kind": "audit"
+    },
+    {
+      "ref": "boreal.workflow.handoff.v1",
+      "path": "handoff.json",
+      "kind": "handoff"
+    },
+    {
+      "ref": "boreal.workflow.health.v1",
+      "path": "health.json",
+      "kind": "health"
+    },
+    {
+      "ref": "boreal.workflow.memory.v1",
+      "path": "memory.json",
+      "kind": "memory"
+    }
   ],
-  "validation": {"refs_must_be_unique": true, "commands_must_be_allowlisted": true, "inputs_must_be_typed": true, "finish_criteria_must_be_explicit": true, "unknown_fields": "reject"}
+  "validation": {
+    "refs_must_be_unique": true,
+    "commands_must_be_allowlisted": true,
+    "inputs_must_be_typed": true,
+    "finish_criteria_must_be_explicit": true,
+    "unknown_fields": "reject"
+  }
 }

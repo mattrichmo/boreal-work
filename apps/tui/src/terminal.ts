@@ -41,6 +41,52 @@ function clip(line: string, width: number): string {
   return `${line.slice(0, width - 1)}…`;
 }
 
+function readable(value: string): string {
+  const parameterized = /^(prerequisite_open|gate_open|gate_failed|gate_missing|gate_invalid|review_rejected)\((.*)\)$/u.exec(value);
+  if (parameterized) {
+    const names: Record<string, string> = {
+      prerequisite_open: "Waiting for prerequisite",
+      gate_open: "Gate still open",
+      gate_failed: "Gate failed",
+      gate_missing: "Required gate missing",
+      gate_invalid: "Gate needs attention",
+      review_rejected: "Review rejected",
+    };
+    return `${names[parameterized[1]!] ?? parameterized[1]} · ${parameterized[2]}`;
+  }
+  const labels: Record<string, string> = {
+    automatic: "Automatic dispatch",
+    operator_only: "Operator dispatch",
+    paused: "Paused by an operator",
+    claimed: "Claimed",
+    ready: "Ready",
+    queued: "Queued",
+    blocked: "Blocked",
+    complete: "Complete",
+    closed: "Closed",
+    cancelled: "Cancelled",
+    planned: "Planned",
+    active: "Active",
+    completed: "Completed",
+    failed: "Failed",
+    returned: "Returned for changes",
+    accepted: "Accepted",
+    rejected: "Rejected",
+    expired: "Expired",
+    running: "Running",
+    released: "Released",
+    in_progress: "In progress",
+    needs_verification: "Verification needed",
+    awaiting_review: "Awaiting review",
+    expired_review: "Review overdue",
+    retry_wait: "Waiting to retry",
+    closeout_pending: "Closeout in progress",
+    accepted_closed: "Accepted and closed",
+    corrupt: "Unreadable",
+  };
+  return labels[value] ?? value.replaceAll("_", " ").replace(/^./u, (character) => character.toLocaleUpperCase());
+}
+
 function fitHeight(lines: string[], height: number): string[] {
   if (lines.length <= height) return lines;
   const head = Math.min(5, Math.max(1, height - 2));
@@ -64,6 +110,7 @@ function filterLabel(filter: DashboardFilter): string {
     case "all": return "ALL";
     case "active": return "ACTIVE";
     case "expired": return "EXPIRED REVIEW";
+    case "rejected": return "REJECTED REVIEW";
     case "milestones": return "MILESTONES";
     case "sprints": return "SPRINTS";
     case "tasks": return "TASKS";
@@ -91,8 +138,16 @@ function itemMatchesFilter(item: StatusItem, filter: DashboardFilter): boolean {
 function visibleItems(view: MountedView, options: RenderOptions): StatusItem[] {
   const filter = options.filter ?? "all";
   const query = options.search_query?.trim().toLocaleLowerCase();
-  return (view.monitoring?.items ?? []).filter((item) => {
-    if (!itemMatchesFilter(item, filter)) return false;
+  const queues = view.monitoring?.attention_queues;
+  const queueItems = filter === "review" ? queues?.review.items
+    : filter === "rejected" ? queues?.rejected_review.items
+    : filter === "expired" ? queues?.expiry.items
+    : filter === "failed" ? queues?.failed_execution.items
+    : filter === "held" ? queues?.operator_holds.items
+    : filter === "corrupt" ? queues?.damaged_planning.items
+    : undefined;
+  return (queueItems ?? view.monitoring?.items ?? []).filter((item) => {
+    if (!queueItems && !itemMatchesFilter(item, filter)) return false;
     if (!query) return true;
     return [item.work_id, item.title, item.description, item.parent_id, item.kind]
       .filter((value): value is string => typeof value === "string")
@@ -118,15 +173,15 @@ function stateSummary(view: MountedView, narrow: boolean): string {
 }
 
 function renderItem(item: StatusItem, narrow: boolean, selected: boolean): string {
-  const reason = item.reason_codes.length > 0 ? ` | ${item.reason_codes.join(", ")}` : "";
-  const attempt = item.attempt ? ` | attempt ${item.attempt.attempt_id}@${item.attempt.fence}` : "";
-  const state = workflowDisplayState(item);
+  const reason = item.reason_codes.length > 0 ? ` | ${item.reason_codes.map(readable).join(", ")}` : "";
+  const attempt = item.attempt ? ` | attempt ${item.attempt.attempt_id} · generation ${item.attempt.fence}` : "";
+  const state = readable(workflowDisplayState(item));
   const marker = selected ? ">" : " ";
   const kind = item.kind ? `[${item.kind}] ` : "";
   if (item.diagnostic) {
-    const state = "CORRUPT";
+    const state = "UNREADABLE";
     if (narrow) return `${marker}${state.padEnd(9)} ${kind}${item.work_id}${item.title ? ` | ${item.title}` : ""}`;
-    return `${marker} ${state.padEnd(17)} ${kind}${item.work_id}: unreadable record | ${item.diagnostic.code}`;
+    return `${marker} ${state.padEnd(17)} ${kind}${item.work_id}: record needs attention | ${readable(item.diagnostic.code)}`;
   }
   if (narrow) return `${marker}${state.toUpperCase().padEnd(9)} ${kind}${item.work_id}${item.title ? ` | ${item.title}` : ""}`;
   const parent = item.parent_id ? ` | parent ${item.parent_id}` : "";
@@ -137,9 +192,9 @@ function renderItem(item: StatusItem, narrow: boolean, selected: boolean): strin
 
 function renderSelected(item: StatusItem | null, narrow: boolean, receiptAvailable = false): string[] {
   if (!item) return ["", "SELECTED", narrow ? "  None. Use j/k, Enter." : "  No work selected. Use: select WORK_ID"];
-  const lines = ["", "SELECTED", `  ${selectedLabel(item)}`, `  state: ${workflowDisplayState(item)}  claimable: ${item.claimable ? "yes" : "no"}`];
+  const lines = ["", "SELECTED", `  ${selectedLabel(item)}`, `  state: ${readable(workflowDisplayState(item))}  claimable: ${item.claimable ? "yes" : "no"}`];
   if (item.diagnostic) {
-    lines.push(`  CORRUPT: ${item.diagnostic.code}`, `  ${item.diagnostic.detail}`, "  actions: unavailable until the record is repaired");
+    lines.push(`  Record needs attention: ${readable(item.diagnostic.code)}`, `  ${item.diagnostic.detail}`, "  actions: unavailable until the record is repaired");
     return lines;
   }
   if (narrow) {
@@ -149,7 +204,7 @@ function renderSelected(item: StatusItem | null, narrow: boolean, receiptAvailab
   }
   if (item.next_action) lines.push(`  next: ${item.next_action}`);
   if (item.attempt) {
-    lines.push(`  attempt: ${item.attempt.attempt_id}@${item.attempt.fence} phase=${item.attempt.phase ?? "unknown"}`);
+    lines.push(`  attempt: ${item.attempt.attempt_id} · generation ${item.attempt.fence} · phase ${readable(item.attempt.phase ?? "unknown")}`);
     if (item.attempt.actor_id) lines.push(`  owner: ${item.attempt.actor_id}`);
     if (item.attempt.session_id) lines.push(`  session: ${item.attempt.session_id}`);
     if (item.attempt.lease_deadline) lines.push(`  lease: ${item.attempt.lease_deadline}`);
@@ -159,25 +214,25 @@ function renderSelected(item: StatusItem | null, narrow: boolean, receiptAvailab
   if (item.gates?.satisfied.length) lines.push(`  satisfied gates: ${item.gates.satisfied.map((gate) => gate.gate_id).join(", ")}`);
   if (item.kind) lines.push(`  kind: ${item.kind}${item.parent_id ? `  parent: ${item.parent_id}` : ""}`);
   if (item.priority !== undefined || item.dispatch_policy) {
-    lines.push(`  planning: priority=${item.priority ?? "unknown"} dispatch=${item.dispatch_policy ?? "unknown"}`);
+    lines.push(`  planning: priority ${item.priority ?? "unknown"} · dispatch ${readable(item.dispatch_policy ?? "unknown")}`);
   }
   if (item.due_at) lines.push(`  due: ${item.due_at}`);
   if (item.description) lines.push(`  description: ${item.description}`);
   if (item.dependencies?.length) {
     lines.push("  dependencies:", ...item.dependencies.slice(0, 8).map((dependency) =>
-      `    ${dependency.work_id}${dependency.status ? ` [${dependency.status}]` : ""}${dependency.satisfied === undefined ? "" : dependency.satisfied ? " ✓" : " · open"}`));
+      `    ${dependency.work_id}${dependency.status ? ` [${readable(dependency.status)}]` : ""}${dependency.satisfied === undefined ? "" : dependency.satisfied ? " ✓" : " · open"}`));
     if (item.dependencies.length > 8) lines.push(`    … ${item.dependencies.length - 8} more`);
   } else if (item.kind === "task") {
     lines.push("  dependencies: not included by the current status route");
   }
   if (item.activity?.length) {
     lines.push("  recent activity:", ...item.activity.slice(-5).map((event) =>
-      `    ${event.occurred_at ?? "unknown time"} ${event.kind}${event.summary ? ` — ${event.summary}` : ""}`));
+      `    ${event.occurred_at ?? "unknown time"} ${readable(event.kind)}${event.summary ? ` — ${event.summary}` : ""}`));
   } else {
     lines.push("  history: bounded activity route unavailable");
   }
   lines.push(`  evidence: ${receiptAvailable ? "current receipt captured in this session" : "no current receipt captured in this session"}`);
-  if (item.reason_codes.length) lines.push(`  reasons: ${item.reason_codes.join(", ")}`);
+  if (item.reason_codes.length) lines.push(`  reasons: ${item.reason_codes.map(readable).join(", ")}`);
   return lines;
 }
 

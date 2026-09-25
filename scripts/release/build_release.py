@@ -106,6 +106,35 @@ def asset_record(stage: Path, relative: str) -> dict[str, Any]:
     }
 
 
+TUI_UI_MODULES = ("cells", "dashboard", "input", "keys", "layout", "model", "screen", "terminal-size")
+EXCLUDED_TUI_PARTS = {"node_modules", ".git", ".cache", "__pycache__", "coverage"}
+
+
+def stage_tui(root: Path, stage: Path) -> None:
+    """Ship the full authored TUI tree and the complete built runtime separately."""
+    source_root = root / "apps/tui"
+    for module in TUI_UI_MODULES:
+        if not (source_root / "dist/ui" / f"{module}.js").is_file():
+            raise ReleaseBuildError(f"compiled TUI module is missing: ui/{module}.js")
+    for source in sorted(source_root.rglob("*")):
+        relative = source.relative_to(source_root)
+        if any(part in EXCLUDED_TUI_PARTS for part in relative.parts):
+            continue
+        if source.is_symlink():
+            raise ReleaseBuildError(f"TUI source/build contains a symlink: {relative}")
+        if not source.is_file():
+            continue
+        destination = stage / "apps/tui" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        if relative.parts[0] == "dist":
+            runtime = stage / "lib/boreal/tui" / Path(*relative.parts[1:])
+            runtime.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, runtime)
+    # Node must interpret installed .js modules the same way as the source tree.
+    shutil.copy2(source_root / "package.json", stage / "lib/boreal/tui/package.json")
+
+
 def collect_assets(stage: Path) -> list[dict[str, Any]]:
     paths = ["bin/bwrk", "share/boreal/LICENSE", "share/boreal/install.sh"]
     tui_root = stage / "lib/boreal/tui"
@@ -116,7 +145,14 @@ def collect_assets(stage: Path) -> list[dict[str, Any]]:
         for path in sorted(tui_root.rglob("*"))
         if path.is_file()
     )
-    return [asset_record(stage, relative) for relative in sorted(paths)]
+    source_root = stage / "apps/tui"
+    if not (source_root / "src/entrypoint.ts").is_file():
+        raise ReleaseBuildError("full apps/tui source tree is missing from the release")
+    paths.extend(path.relative_to(stage).as_posix() for path in sorted(source_root.rglob("*")) if path.is_file())
+    for module in TUI_UI_MODULES:
+        if not (tui_root / "ui" / f"{module}.js").is_file():
+            raise ReleaseBuildError(f"installed TUI module is missing: ui/{module}.js")
+    return [asset_record(stage, relative) for relative in sorted(set(paths))]
 
 
 def contract_identity(root: Path, output: Path) -> dict[str, Any]:
@@ -306,13 +342,7 @@ def main() -> int:
     (stage / "share/boreal").mkdir(parents=True)
     shutil.copy2(binary, stage / "bin/bwrk")
     (stage / "bin/bwrk").chmod(0o755)
-    for source in sorted(tui_dist.rglob("*")):
-        if source.is_symlink():
-            raise ReleaseBuildError(f"TUI build contains a symlink: {source}")
-        if source.is_file():
-            destination = stage / "lib/boreal/tui" / source.relative_to(tui_dist)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+    stage_tui(root, stage)
     shutil.copy2(root / "LICENSE", stage / "share/boreal/LICENSE")
     shutil.copy2(root / "install.sh", stage / "share/boreal/install.sh")
     (stage / "share/boreal/install.sh").chmod(0o755)

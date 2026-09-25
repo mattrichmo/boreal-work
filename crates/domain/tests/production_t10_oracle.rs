@@ -465,12 +465,14 @@ fn action_facts(role: ActorRole) -> DecisionInputs {
         snapshot_revision: Revision(42),
         clock: EvaluationClock::at(TimestampMs::from_millis(1_000)),
         availability: Availability::Live,
+        dispatch_policy: DispatchPolicy::Automatic,
         lifecycle: Fact::present(LifecycleInput {
             identity: subject.clone(),
             lifecycle: PersistedLifecycle::Open,
             terminal_decision: None,
         }),
         authority: Fact::present(ActorAuthorityInput {
+            authority_root: ActorId::new("actor-1"),
             project_id: ProjectId::new("project-1"),
             role,
             principal: PrincipalBinding::Authenticated {
@@ -481,6 +483,7 @@ fn action_facts(role: ActorRole) -> DecisionInputs {
         requirements: Fact::present(PinnedRequirementsInput {
             proof,
             requirements: vec![PinnedRequirement {
+                exception: None,
                 id: RequirementId::new("requirement-1"),
                 gate_id: GateId::new("verification"),
                 kind: GateKind::Verification,

@@ -170,16 +170,41 @@ test('paste outside a field cannot dispatch or quit; duplicate confirmation disp
         t.send('\x1b[200~c\rq\x1b[201~');
         await tick();
         assert.equal(c.calls.length, 0);
-        t.send('c\r\rc\r');
+        t.send('c');
+        t.send('source-real-version\rconfig-real/v1\r');
+        await tick();
+        assert.equal(c.calls.length, 0, 'claim form requires explicit confirmation after both inputs');
+        t.send('\r\r');
         await tick();
         assert.equal(c.calls.filter(x => x[0] === 'claim').length, 1);
+        assert.deepEqual(c.calls.find(x => x[0] === 'claim').slice(1), ['tui-104', { source_version_id: 'source-real-version', config_identity: 'config-real/v1' }]);
     });
 });
 test('a stale revision cancels the exact confirmation without sending a mutation', async () => {
-    await session(async (c, t) => { t.send('c'); c.data.monitoring.revision++; t.send('\r'); await tick(); assert.equal(c.calls.length, 0); assert.match(t.text(), /snapshot or attempt changed/); });
+    await session(async (c, t) => { t.send('c'); t.send('source-real-version\rconfig-real/v1\r'); c.data.monitoring.revision++; t.send('\r'); await tick(); assert.equal(c.calls.length, 0); assert.match(t.text(), /snapshot or attempt changed/); });
 });
 test('standalone Escape cancels the draft; later Enter only inspects', async () => {
     await session(async (c, t) => { t.send('c'); t.send('\x1b'); await new Promise(r => setTimeout(r, 55)); t.send('\r'); await tick(); assert.equal(c.calls.length, 0); });
+});
+test('claim rejects unknown source/config values and cancellation sends no mutation', async () => {
+    await session(async (c, t) => {
+        t.send('c');
+        t.send('unknown\runknown\r');
+        await tick();
+        assert.equal(c.calls.length, 0);
+        assert.match(t.text(), /real registered source version/);
+        t.send('\x1b');
+        await new Promise(r => setTimeout(r, 55));
+        assert.equal(c.calls.length, 0);
+        t.send('c');
+        t.send('source-real-version\runknown\r');
+        await tick();
+        assert.equal(c.calls.length, 0);
+        assert.match(t.text(), /meaningful execution configuration identity/);
+        t.send('\x1b');
+        await new Promise(r => setTimeout(r, 55));
+        assert.equal(c.calls.length, 0);
+    });
 });
 test('create-work form accepts shortcut letters as text and submits the real fields', async () => {
     await session(async (c, t) => {

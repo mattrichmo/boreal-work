@@ -206,7 +206,9 @@ fn deleted_observations_do_not_delete_requirements_and_profile_drift_quarantines
 
     store
         .execute_batch(
-            "UPDATE acceptance_profile
+            "DROP TRIGGER boreal_profile_strict_immutable_update;
+             DROP TRIGGER boreal_profile_immutable_update;
+             UPDATE acceptance_profile
              SET policy_digest = 'sha256:drifted'
              WHERE profile_id = 'production' AND version = 1;",
         )
@@ -257,7 +259,7 @@ fn exact_identity_replay_is_single_effect_and_rollback_leaves_no_rows() {
 }
 
 #[test]
-fn canonical_release_requires_durable_request_and_acknowledgement() {
+fn unbound_release_helpers_fail_closed_for_canonical_project() {
     let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production opens");
     store
         .create_project("p1", "unix-ms:0")
@@ -293,7 +295,7 @@ fn canonical_release_requires_durable_request_and_acknowledgement() {
         )
         .expect("canonical resource fixture inserts");
 
-    let pending = store
+    let request_error = store
         .request_resource_release(
             "p1",
             "resource:a1",
@@ -302,11 +304,22 @@ fn canonical_release_requires_durable_request_and_acknowledgement() {
             "attempt-terminal:a1:1",
             "unix-ms:1000",
         )
-        .expect("release request persists");
-    assert_eq!(pending.state, "release_pending");
+        .expect_err("unbound helper cannot mutate canonical project state");
+    assert!(matches!(
+        request_error,
+        StoreError::Conflict(message) if message.contains("authenticated operation identity")
+    ));
+    assert_eq!(
+        store
+            .resource_reservation("p1", "resource:a1")
+            .unwrap()
+            .unwrap()
+            .state,
+        "active"
+    );
     assert_eq!(store.list_live_resources("p1", None, 10).unwrap().len(), 1);
 
-    let released = store
+    let acknowledgement_error = store
         .acknowledge_resource_release(
             "p1",
             "resource:a1",
@@ -315,10 +328,17 @@ fn canonical_release_requires_durable_request_and_acknowledgement() {
             "runtime-stopped:a1:1",
             "unix-ms:1100",
         )
-        .expect("release acknowledgement persists");
-    assert_eq!(released.state, "released");
-    assert!(store
-        .list_live_resources("p1", None, 10)
-        .unwrap()
-        .is_empty());
+        .expect_err("unbound acknowledgement cannot mutate canonical project state");
+    assert!(matches!(
+        acknowledgement_error,
+        StoreError::Conflict(message) if message.contains("authenticated operation identity")
+    ));
+    assert_eq!(
+        store
+            .resource_reservation("p1", "resource:a1")
+            .unwrap()
+            .unwrap()
+            .state,
+        "active"
+    );
 }

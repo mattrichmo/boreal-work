@@ -523,6 +523,76 @@ pub fn validate_cycle_assignments(
             return Err(ModelError::AssignmentLineageCycle(assignment.id.clone()));
         }
     }
+
+    let assignments_by_id = assignments
+        .iter()
+        .map(|assignment| (assignment.id.as_str(), assignment))
+        .collect::<BTreeMap<_, _>>();
+    for assignment in assignments {
+        if assignment.state == CycleAssignmentState::CarriedOver
+            && assignment.successor_id.is_none()
+        {
+            return Err(ModelError::AssignmentLineageInvalid(assignment.id.clone()));
+        }
+        if assignment.state != CycleAssignmentState::CarriedOver
+            && assignment.successor_id.is_some()
+        {
+            return Err(ModelError::AssignmentLineageInvalid(assignment.id.clone()));
+        }
+
+        if let Some(predecessor_id) = assignment.predecessor_id.as_deref() {
+            let Some(predecessor) = assignments_by_id.get(predecessor_id) else {
+                return Err(ModelError::AssignmentLineageInvalid(assignment.id.clone()));
+            };
+            if predecessor.successor_id.as_deref() != Some(assignment.id.as_str())
+                || predecessor.state != CycleAssignmentState::CarriedOver
+                || predecessor.work_id != assignment.work_id
+                || predecessor.project_id != assignment.project_id
+                || predecessor.cycle_id == assignment.cycle_id
+            {
+                return Err(ModelError::AssignmentLineageInvalid(assignment.id.clone()));
+            }
+        }
+
+        if let Some(successor_id) = assignment.successor_id.as_deref() {
+            let Some(successor) = assignments_by_id.get(successor_id) else {
+                return Err(ModelError::AssignmentLineageInvalid(assignment.id.clone()));
+            };
+            if successor.predecessor_id.as_deref() != Some(assignment.id.as_str())
+                || successor.work_id != assignment.work_id
+                || successor.project_id != assignment.project_id
+                || successor.cycle_id == assignment.cycle_id
+            {
+                return Err(ModelError::AssignmentLineageInvalid(assignment.id.clone()));
+            }
+        }
+    }
+
+    // Reciprocal links are still invalid when they form a longer loop across
+    // cycles. Walk each chain and reject a repeated assignment identity.
+    let mut traversed = BTreeSet::new();
+    for assignment in assignments {
+        let mut path = Vec::new();
+        let mut on_path = BTreeSet::new();
+        let mut current_id = assignment.id.as_str();
+        loop {
+            if traversed.contains(current_id) {
+                break;
+            }
+            if !on_path.insert(current_id) {
+                return Err(ModelError::AssignmentLineageCycle(assignment.id.clone()));
+            }
+            path.push(current_id);
+            let current = assignments_by_id
+                .get(current_id)
+                .expect("all assignment identities were indexed above");
+            let Some(successor_id) = current.successor_id.as_deref() else {
+                break;
+            };
+            current_id = successor_id;
+        }
+        traversed.extend(path);
+    }
     Ok(())
 }
 
@@ -1094,6 +1164,7 @@ pub enum ModelError {
     InvalidActivation(String),
     MultipleLiveAssignments(WorkId),
     AssignmentLineageCycle(String),
+    AssignmentLineageInvalid(String),
     InvalidLocalDate(LocalDate),
     InvalidLocalTime(LocalTime),
     InvalidRecurrence(&'static str),
@@ -1156,6 +1227,9 @@ impl fmt::Display for ModelError {
             }
             Self::MultipleLiveAssignments(id) => write!(f, "multiple live assignments: {id}"),
             Self::AssignmentLineageCycle(id) => write!(f, "assignment lineage cycle: {id}"),
+            Self::AssignmentLineageInvalid(id) => {
+                write!(f, "assignment lineage is invalid: {id}")
+            }
             Self::InvalidLocalDate(date) => write!(f, "invalid local date: {date:?}"),
             Self::InvalidLocalTime(time) => write!(f, "invalid local time: {time:?}"),
             Self::SlotOutOfRange(slot) => write!(f, "recurrence slot out of range: {slot}"),
@@ -1220,4 +1294,53 @@ fn civil_from_days(days: i64) -> (i32, u8, u8) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year as i32, month as u8, day as u8)
+}
+
+/// Shared role boundary for project planning. A reviewer or publisher cannot
+/// silently acquire planning authority merely by supplying a valid actor ID.
+pub const fn planning_role_allowed(role: crate::ActorRole) -> bool {
+    matches!(role, crate::ActorRole::Agent | crate::ActorRole::Operator)
+}
+
+/// Commitment history is monotone. Reassignment/carry-over creates a new row;
+/// it never resets the state of an earlier commitment.
+pub fn assignment_transition_allowed(prior: &str, next: &str) -> bool {
+    matches!(
+        (prior, next),
+        (
+            "planned",
+            "committed" | "removed" | "carried_over" | "completed"
+        ) | ("committed", "removed" | "carried_over" | "completed")
+    )
+}
+
+/// Project planning permission returned by reads and repeated by transaction writers.
+/// This is distinct from a task's execution/proof action descriptor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectPlanningAction {
+    pub action: &'static str,
+    pub project_id: crate::ProjectId,
+    pub actor_id: crate::ActorId,
+    pub session_id: Option<crate::SessionId>,
+    pub expected_project_revision: crate::Revision,
+    pub allowed: bool,
+    pub denial_reason: Option<&'static str>,
+    pub confirmation: &'static str,
+}
+
+pub fn project_planning_actions(
+    project: &crate::ProjectId,
+    actor: &crate::ActorContext,
+    session: Option<&crate::SessionId>,
+    revision: crate::Revision,
+) -> Vec<ProjectPlanningAction> {
+    ["create_project", "create_work", "cycle_create", "cycle_change", "dependency_edit"].into_iter().map(|action| {
+        let denial=if action=="create_project" {Some("Initialize a separate workspace with bwrk init; this connection already belongs to one project.")}
+            else if session.is_none() {Some("A current authenticated project session is required.")}
+            else if !planning_role_allowed(actor.role) {Some("The current project principal cannot edit planning.")}
+            else {None};
+        ProjectPlanningAction {action,project_id:project.clone(),actor_id:actor.actor_id.clone(),session_id:session.cloned(),
+            expected_project_revision:revision,allowed:denial.is_none(),denial_reason:denial,
+            confirmation:"Confirm the project-scoped planning change at this revision."}
+    }).collect()
 }

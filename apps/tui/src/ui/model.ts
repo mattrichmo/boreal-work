@@ -8,9 +8,14 @@ export const FILTERS: readonly {
 }[] = [
     { id: "all", label: "All work", key: "1" }, { id: "ready", label: "Ready", key: "2" },
     { id: "active", label: "In progress", key: "3" }, { id: "blocked", label: "Blocked", key: "4" },
-    { id: "expired", label: "Needs review", key: "5" }, { id: "closed", label: "Closed", key: "6" },
+    { id: "expired", label: "Expired work", key: "5" }, { id: "closed", label: "Closed", key: "6" },
     { id: "milestones", label: "Milestones", key: "7" }, { id: "sprints", label: "Sprints", key: "8" },
     { id: "tasks", label: "Tasks", key: "9" },
+    { id: "review", label: "Awaiting review", key: "" },
+    { id: "rejected", label: "Rejected review", key: "" },
+    { id: "failed", label: "Failed execution", key: "" },
+    { id: "held", label: "Operator holds", key: "" },
+    { id: "corrupt", label: "Damaged records", key: "" },
 ];
 export const ACTION_NAMES: Record<TuiAction, string> = { create_project: "Initialize project", create_work: "Create work", claim: "Claim work", accept_start: "Start work", evidence: "Attach evidence", finish: "Finish & close", release: "Release claim" };
 export type Focus = "navigation" | "queue" | "inspector";
@@ -44,7 +49,7 @@ export type Modal = {
     offset: number;
 } | {
     kind: "form";
-    action: "create_work" | "evidence" | "finish" | "release";
+    action: "create_work" | "claim" | "evidence" | "finish" | "release";
     workId?: string;
     fields: FormField[];
     index: number;
@@ -86,11 +91,15 @@ export function initialState(view: MountedView, theme: Theme = "dark", ascii = f
         focus: "queue", navIndex: 0, inspectorTab: 0, inspectorOffset: 0, detailOnly: false, sort: "service", frozen: false,
         status: "Ready. Select work to inspect its next available action.", error: false, busy: null, density: "auto", zen: false, theme, ascii, modal: null };
 }
-export function itemStatus(item: StatusItem): string { return item.display_status ?? item.status; }
+export function itemStatus(item: StatusItem): string { return item.diagnostic ? "corrupt" : item.display_status ?? item.status; }
 export function matches(item: StatusItem, filter: DashboardFilter): boolean {
     const s = itemStatus(item);
     if (filter === "all")
         return true;
+    if (filter === "review") return s === "awaiting_review";
+    if (filter === "failed") return item.reason_codes.some(reason => reason.includes("failed") || reason.includes("rejected") || reason.includes("returned"));
+    if (filter === "held") return item.reason_codes.some(reason => reason.includes("hold"));
+    if (filter === "corrupt") return !!item.diagnostic || s === "corrupt";
     if (filter === "active")
         return ["claimed", "in_progress", "needs_verification", "awaiting_review", "complete"].includes(s);
     if (filter === "expired")
@@ -99,9 +108,21 @@ export function matches(item: StatusItem, filter: DashboardFilter): boolean {
         return item.kind === filter.slice(0, -1);
     return s === filter;
 }
+export function selectedAttentionQueue(view: MountedView, filter: DashboardFilter) {
+    const queues = view.monitoring?.attention_queues;
+    return filter === "review" ? queues?.review
+        : filter === "rejected" ? queues?.rejected_review
+        : filter === "expired" ? queues?.expiry
+        : filter === "failed" ? queues?.failed_execution
+        : filter === "held" ? queues?.operator_holds
+        : filter === "corrupt" ? queues?.damaged_planning
+        : undefined;
+}
 export function visibleItems(view: MountedView, state: Pick<DashboardState, "filter" | "query" | "sort">): StatusItem[] {
     const q = state.query.trim().toLocaleLowerCase();
-    const rows = (view.monitoring?.items ?? []).filter(i => matches(i, state.filter) && (!q || [i.work_id, i.title, i.description, i.parent_id, i.kind, i.attempt?.actor_id].some(v => v?.toLocaleLowerCase().includes(q))));
+    const queueItems = selectedAttentionQueue(view, state.filter)?.items;
+    const source = queueItems ?? view.monitoring?.items ?? [];
+    const rows = source.filter(i => (queueItems || matches(i, state.filter)) && (!q || [i.work_id, i.title, i.description, i.parent_id, i.kind, i.attempt?.actor_id].some(v => v?.toLocaleLowerCase().includes(q))));
     if (state.sort === "priority")
         rows.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.work_id.localeCompare(b.work_id));
     if (state.sort === "title")
@@ -132,6 +153,13 @@ export function paletteCommands(view: MountedView, state: DashboardState): Palet
         { id: "page", label: "Load next service page", hint: "]", disabled: !view.monitoring?.has_more },
         { id: "freeze", label: state.frozen ? "Resume live refresh" : "Pause live refresh", hint: "F" },
         { id: "readback", label: "Resolve pending operation", hint: "u · read only", disabled: !view.pending_operations.length },
+        { id: "workspace:project", label: "Project overview", hint: "Workspace · read only" },
+        { id: "workspace:cycles", label: "Cycles", hint: "Workspace · read only" },
+        { id: "workspace:reviews", label: "Reviews", hint: "Workspace · read only" },
+        { id: "workspace:memory", label: "Published memory search", hint: "Workspace · read only" },
+        { id: "workspace:recovery", label: "Recovery obligations", hint: "Workspace · read only" },
+        { id: "workspace:pending", label: "Pending operations", hint: "Workspace · read only", disabled: !view.pending_operations.length },
+        { id: "workspace:unavailable", label: "Unavailable routes", hint: "Workspace · read only" },
         ...(["create_work", "claim", "accept_start", "evidence", "finish", "release"] as const).map(a => {
             const rule = view.actions.find(r => r.action === a);
             return { id: `action:${a}`, label: ACTION_NAMES[a], hint: rule?.enabled ? "Action · confirmation required" : rule?.reason ?? "Select work first", disabled: !rule?.enabled };
@@ -142,7 +170,7 @@ export function paletteCommands(view: MountedView, state: DashboardState): Palet
     const query = state.modal?.kind === "palette" ? state.modal.value.trim().toLocaleLowerCase() : "";
     return commands.filter(c => (state.modal?.kind !== "palette" || state.modal.scope !== "views" || c.id.startsWith("filter:")) && (!query || `${c.label} ${c.hint}`.toLocaleLowerCase().includes(query)));
 }
-export function actionForm(action: "create_work" | "evidence" | "finish" | "release", workId?: string): Extract<Modal, {
+export function actionForm(action: "create_work" | "claim" | "evidence" | "finish" | "release", workId?: string): Extract<Modal, {
     kind: "form";
 }> {
     const field = (name: string, label: string, hint: string, required = true, value = ""): FormField => ({ name, label, hint, required, value });
@@ -153,6 +181,9 @@ export function actionForm(action: "create_work" | "evidence" | "finish" | "rele
         field("parent_id", "Parent identifier", "Optional existing sprint or milestone identifier.", false),
         field("priority", "Priority", "0–255. Higher values are scheduled first.", false, "0"),
         field("description", "Description", "Optional context for the person or agent doing the work.", false),
+    ] : action === "claim" ? [
+        field("source_version_id", "Registered source version", "Use the exact ID from `bwrk source list PROJECT`. If none exists, capture the relevant file with `bwrk source add PROJECT --input PATH --origin ORIGIN`, then list sources again."),
+        field("config_identity", "Execution configuration identity", "Describe the real setup (for example repository revision + toolchain + relevant config version). Never include credentials or use ‘unknown’."),
     ] : action === "evidence" ? [field("receipt", "Receipt JSON", "Paste a real receipt object. No evidence is generated or fabricated here.")]
         : action === "finish" ? [field("summary", "Closeout summary", "Explain what changed and how it was verified.")]
             : [field("reason", "Release reason", "Explain why this claim is being released.", true, "Released by operator")];

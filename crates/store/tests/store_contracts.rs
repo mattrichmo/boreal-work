@@ -288,19 +288,22 @@ fn schema_version_is_idempotent_on_reopen() {
 }
 
 #[test]
-fn foreign_key_rejects_cross_project_parent_and_dependency() {
+fn cross_project_parent_and_dependency_are_rejected() {
     let store = store();
     base(&store);
     let parent_error = store
         .execute_batch("UPDATE work_item SET parent_id = 'w2' WHERE work_id = 'w1'")
         .unwrap_err();
-    assert!(matches!(
-        parent_error,
-        StoreError::Constraint {
-            kind: ConstraintKind::ForeignKey,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &parent_error,
+            StoreError::Constraint {
+                kind: ConstraintKind::Check,
+                ..
+            }
+        ),
+        "cross-project parent was not rejected by its hierarchy guard: {parent_error:?}"
+    );
 
     let dependency_error = store
         .execute_batch(
@@ -308,13 +311,16 @@ fn foreign_key_rejects_cross_project_parent_and_dependency() {
              VALUES ('p1', 'w2', 'w1', 't0')",
         )
         .unwrap_err();
-    assert!(matches!(
-        dependency_error,
-        StoreError::Constraint {
-            kind: ConstraintKind::ForeignKey,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &dependency_error,
+            StoreError::Constraint {
+                kind: ConstraintKind::Check,
+                ..
+            }
+        ),
+        "cross-project dependency was not rejected by its hierarchy guard: {dependency_error:?}"
+    );
 }
 
 #[test]
@@ -418,13 +424,16 @@ fn receipts_and_audit_events_are_append_only() {
     let audit_error = store
         .execute_batch("DELETE FROM audit_event WHERE event_id = 1")
         .unwrap_err();
-    assert!(matches!(
-        audit_error,
-        StoreError::Constraint {
-            kind: ConstraintKind::AppendOnly,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &audit_error,
+            StoreError::Constraint {
+                kind: ConstraintKind::AppendOnly,
+                ..
+            }
+        ),
+        "unexpected audit constraint: {audit_error:?}"
+    );
 }
 
 #[test]
@@ -505,9 +514,6 @@ fn atomic_claim_has_one_winner_and_replays_by_operation_id() {
     store.create_project("p1", "unix-ms:0").unwrap();
     store
         .ensure_actor("agent-1", "agent", "cred-agent", "Agent", "t0")
-        .unwrap();
-    store
-        .ensure_acceptance_profile("focused", 1, "sha256:policy", "{}", "t0")
         .unwrap();
     let work = WorkItem {
         id: WorkId::new("w1"),
@@ -872,7 +878,29 @@ fn lifecycle_rejects_stale_revision_fence_and_wrong_owner_without_writes() {
 #[test]
 fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
     let store = store();
-    base(&store);
+    store
+        .execute_batch(
+            "INSERT INTO project VALUES ('p1', 2, 'boreal.work-status/2', 0, 't0', 't0');
+             INSERT INTO actor VALUES ('agent-1', 'agent', 'cred-agent', 'Agent', 't0');
+             INSERT INTO session VALUES ('s1', 'agent-1', 'luna', 'active', 't0', NULL);",
+        )
+        .expect("project, actor, and session fixtures insert");
+    let canonical_work = WorkItem {
+        id: WorkId::new("w1"),
+        project_id: ProjectId::new("p1"),
+        kind: WorkKind::Task,
+        parent_id: None,
+        title: "Work 1".into(),
+        description: String::new(),
+        lifecycle: PersistedLifecycle::Open,
+        priority: 0,
+        dispatch_policy: boreal_domain::DispatchPolicy::Automatic,
+        hard_holds: Vec::new(),
+        acceptance_profile: boreal_domain::AcceptanceProfile::focused(),
+    };
+    store
+        .create_work(&canonical_work, "unix-ms:0")
+        .expect("work has canonical v3 hierarchy and pinned requirements");
     attempt(&store, "a1", "w1", "s1", 1);
     store
         .ensure_recovery_schema()
@@ -926,6 +954,7 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
         .is_none());
 
     // A replacement claim is not admitted while expiry recovery is unresolved.
+    let blocked_revision = store.project_revision("p1").unwrap().0;
     let blocked_replacement = store.claim_work(
         "p1",
         "w1",
@@ -935,7 +964,7 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
         "a2-blocked",
         "op-claim-blocked",
         "sha256:claim-blocked",
-        Some(1),
+        Some(blocked_revision),
         "unix-ms:3",
         "unix-ms:4",
         "unix-ms:5",
@@ -1006,6 +1035,7 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
     );
 
     // A replacement claim then receives the next monotonic fence.
+    let replacement_revision = store.project_revision("p1").unwrap().0;
     let replacement = store
         .claim_work(
             "p1",
@@ -1016,7 +1046,7 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
             "a2",
             "op-claim-2",
             "sha256:claim-2",
-            Some(2),
+            Some(replacement_revision),
             "unix-ms:3",
             "unix-ms:4",
             "unix-ms:5",

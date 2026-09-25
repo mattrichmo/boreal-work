@@ -9,6 +9,30 @@ fn invoke(args: &[&str]) -> (bool, serde_json::Value) {
     (output.status.success(), value)
 }
 
+fn command_syntax(envelope: &serde_json::Value, path: &str) -> String {
+    envelope["data"]["available"]
+        .as_array()
+        .expect("command registry available routes")
+        .iter()
+        .find(|entry| entry["path"] == path)
+        .unwrap_or_else(|| panic!("missing available route {path}"))["syntax"]
+        .as_str()
+        .unwrap_or_else(|| panic!("route {path} has no syntax"))
+        .to_owned()
+}
+
+fn command_summary(envelope: &serde_json::Value, path: &str) -> String {
+    envelope["data"]["available"]
+        .as_array()
+        .expect("command registry available routes")
+        .iter()
+        .find(|entry| entry["path"] == path)
+        .unwrap_or_else(|| panic!("missing available route {path}"))["summary"]
+        .as_str()
+        .unwrap_or_else(|| panic!("route {path} has no summary"))
+        .to_owned()
+}
+
 #[test]
 fn help_lists_available_and_unavailable_work_children() {
     let (success, envelope) = invoke(&["help", "work", "--json"]);
@@ -39,6 +63,11 @@ fn deep_help_resolves_a_concrete_available_route() {
     assert_eq!(envelope["data"]["path"], "work create");
     assert_eq!(envelope["data"]["entry"]["path"], "work create");
     assert!(envelope["data"]["gap"].is_null());
+    let syntax = envelope["data"]["entry"]["syntax"]
+        .as_str()
+        .expect("work create syntax");
+    assert!(syntax.contains("[--session SESSION_ID]"));
+    assert!(syntax.contains("--expected-revision N"));
 }
 
 #[test]
@@ -67,15 +96,19 @@ fn commands_report_dependency_reads_as_service_capable() {
 }
 
 #[test]
-fn commands_catalogue_v3_routes_as_unavailable_future_capabilities() {
+fn commands_catalogue_lists_the_implemented_intake_capture_route_as_available() {
     let (success, envelope) = invoke(&["commands", "intake", "--json"]);
     assert!(success);
+    let available = envelope["data"]["available"].as_array().unwrap();
+    assert!(available.iter().any(|route| {
+        route["path"] == "intake capture"
+            && route["availability"] == "available"
+            && route["adapters"]["direct"] == true
+    }));
     let unavailable = envelope["data"]["unavailable_routes"].as_array().unwrap();
-    assert!(unavailable
+    assert!(!unavailable
         .iter()
-        .any(|route| route["path"] == "intake capture"
-            && route["code"] == "work_model_v3_not_enabled"));
-    assert!(envelope["data"]["available"].as_array().unwrap().is_empty());
+        .any(|route| route["path"] == "intake capture"));
 }
 
 #[test]
@@ -91,6 +124,104 @@ fn commands_expose_revision_checked_planning_mutations() {
     assert!(paths.contains(&"work hold add"));
     assert!(paths.contains(&"work hold resolve"));
     assert!(paths.contains(&"work dispatch set"));
+}
+
+#[test]
+fn public_command_syntax_exposes_required_identity_and_proof_inputs() {
+    let (success, envelope) = invoke(&["commands", "--json"]);
+    assert!(success);
+
+    let claim = command_syntax(&envelope, "work claim");
+    assert!(claim.contains("--source-version ID"));
+    assert!(claim.contains("--config-identity ID"));
+
+    let finish = command_syntax(&envelope, "agent finish");
+    assert!(finish.contains("--close --receipt PATH --summary PATH"));
+
+    for path in [
+        "review approve",
+        "review reject",
+        "review return",
+        "review revoke",
+        "exception grant",
+        "exception revoke",
+        "dep waive",
+        "work reopen",
+        "work cancel",
+        "work retry",
+        "work publish",
+        "cycle list",
+        "cycle board",
+        "cycle report",
+        "cycle create",
+        "sprint list",
+        "sprint board",
+        "sprint report",
+        "memory draft",
+        "memory review",
+        "memory publish",
+        "memory show",
+        "memory search",
+        "memory readback",
+        "memory reconcile",
+    ] {
+        assert!(
+            command_syntax(&envelope, path).contains("--project PROJECT"),
+            "{path} syntax must expose its project scope"
+        );
+    }
+
+    for path in [
+        "cycle board",
+        "cycle report",
+        "sprint board",
+        "sprint report",
+    ] {
+        let syntax = command_syntax(&envelope, path);
+        assert!(syntax.contains("CYCLE_ID"), "{path} requires an ID");
+        assert!(!syntax.contains("[CYCLE_ID]"), "{path} ID is not optional");
+    }
+
+    assert!(command_syntax(&envelope, "memory show").contains("DRAFT_ID"));
+    assert!(command_syntax(&envelope, "memory search").contains("QUERY"));
+    assert!(command_syntax(&envelope, "memory readback").contains("OPERATION_ID"));
+
+    for path in ["memory draft", "memory review", "memory publish"] {
+        let syntax = command_syntax(&envelope, path);
+        assert!(syntax.contains("--yes --expected-revision N"), "{path}");
+        assert!(!syntax.contains("[--yes"), "{path}");
+    }
+    assert!(command_syntax(&envelope, "memory publish").contains("REVIEW_ID"));
+    assert!(!command_syntax(&envelope, "memory publish").contains("DRAFT_ID"));
+    assert!(command_summary(&envelope, "memory publish").contains("expected_manifest_identity"));
+
+    let agent_start = command_syntax(&envelope, "agent start");
+    assert!(agent_start.contains("[--source-version ID --config-identity ID]"));
+    assert!(command_summary(&envelope, "agent start").contains("new attempt requires both"));
+
+    for path in [
+        "review approve",
+        "review reject",
+        "review return",
+        "review revoke",
+        "exception grant",
+        "exception revoke",
+        "dep waive",
+        "work reopen",
+        "work cancel",
+        "work retry",
+        "work publish",
+    ] {
+        let summary = command_summary(&envelope, path);
+        assert!(
+            summary.contains("expected_entity_revision"),
+            "{path}: {summary}"
+        );
+        assert!(
+            summary.contains("expected_proof_revision"),
+            "{path}: {summary}"
+        );
+    }
 }
 
 #[test]

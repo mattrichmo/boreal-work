@@ -64,6 +64,7 @@ ASSET_KEYS = {
     "title",
     "refs",
     "allowed_commands",
+    "required_server_actions",
     "typed_inputs",
     "finish_criteria",
     "next_refs",
@@ -277,6 +278,8 @@ def _validate_asset(
     for index, command in enumerate(commands):
         _validate_command(command, f"{label}.allowed_commands[{index}]", cli_shapes, cli_flags)
 
+    _string_array(value["required_server_actions"], f"{label}.required_server_actions", non_empty=False)
+
     inputs = value["typed_inputs"]
     if not isinstance(inputs, list) or not inputs:
         raise ValidationError(f"{label}.typed_inputs: expected a non-empty array")
@@ -320,6 +323,17 @@ def _validate_asset(
         if ref not in known_refs:
             raise ValidationError(f"{label}: unknown next ref {ref}")
     return reference, kind, len(commands)
+
+
+def _runtime_command_shapes(root: Path) -> tuple[set[tuple[str, ...]], set[str]]:
+    source=root.parents[2]/"crates/cli/src/command_registry.rs"
+    if not source.is_file():
+        raise ValidationError("executable command registry is missing")
+    text=source.read_text(encoding="utf-8")
+    registry=text.split("const COMMANDS:",1)[1].split("const GAPS:",1)[0]
+    paths=re.findall(r'path:\s*"([^"\n]+)"',registry)
+    main=(root.parents[2]/"crates/cli/src/main.rs").read_text(encoding="utf-8")
+    return {tuple(["bwrk",*path.split()]) for path in paths}, set(re.findall(r'--[a-z][a-z0-9-]*',registry+main))
 
 
 def validate(root: Path) -> ValidationReport:
@@ -420,7 +434,7 @@ def validate(root: Path) -> ValidationReport:
         raise ValidationError("manifest.json.asset_policy: must declare the strict package policy")
 
     cli_contract = _load_json(cli_path, root)
-    cli_shapes, cli_flags = _contract_command_shapes(cli_contract)
+    cli_shapes, cli_flags = _runtime_command_shapes(root) if (root.parents[2]/"crates/cli/src/command_registry.rs").is_file() else _contract_command_shapes(cli_contract)
     total_commands = 0
     for metadata in package_assets:
         path = root / metadata["path"]
@@ -462,10 +476,16 @@ class ValidatorTests(unittest.TestCase):
         import shutil
 
         temporary = tempfile.TemporaryDirectory(prefix="boreal-workflow-validator-")
-        root = Path(temporary.name) / "spec" / "workflows"
+        root = Path(temporary.name) / "project" / "spec" / "workflows"
         root.parent.mkdir(parents=True)
         shutil.copytree(self.source_root, root)
         shutil.copy2(self.spec_root / "cli-contract.json", root.parent / "cli-contract.json")
+        # Negative fixtures use the same executable registry as the real package.
+        # Otherwise an unrelated obsolete command contract masks the intended error.
+        registry_root = root.parents[2] / "crates/cli/src"
+        registry_root.mkdir(parents=True)
+        for name in ("command_registry.rs", "main.rs"):
+            shutil.copy2(self.source_root.parents[2] / "crates/cli/src" / name, registry_root / name)
         return temporary, root
 
     def test_checked_in_package_passes(self) -> None:

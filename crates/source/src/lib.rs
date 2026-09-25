@@ -5,6 +5,8 @@
 //! durably written and verified. Blob availability is checked again when a
 //! version is read, so missing and tampered evidence remains visible.
 
+pub mod workspace_snapshot;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,

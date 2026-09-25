@@ -36,16 +36,57 @@ fn doctor_reports_schema_runtime_and_bounded_status_payload() {
 
     let initialized = Command::new(binary)
         .current_dir(&root)
-        .args(["init", "release-project", "--db"])
+        .args([
+            "init",
+            "release-project",
+            "--actor",
+            "release-agent",
+            "--db",
+        ])
         .arg(&database)
         .args(["--operation-id", "release-init", "--json"])
         .output()
         .expect("init starts");
     let _ = envelope(&initialized);
 
+    let session = Command::new(binary)
+        .current_dir(&root)
+        .args([
+            "session",
+            "start",
+            "--project",
+            "release-project",
+            "--actor",
+            "release-agent",
+            "--harness",
+            "release-acceptance-test",
+            "--session",
+            "release-session",
+            "--db",
+        ])
+        .arg(&database)
+        .args(["--operation-id", "release-session-start", "--json"])
+        .output()
+        .expect("session start starts");
+    let session_value = envelope(&session);
+    let mut expected_revision = session_value["revision"]
+        .as_u64()
+        .expect("session start returns the project revision");
+
     let doctor = Command::new(binary)
         .current_dir(&root)
-        .args(["doctor", "--project", "release-project", "--db"])
+        .args([
+            "doctor",
+            "--project",
+            "release-project",
+            "--actor",
+            "release-agent",
+            "--harness",
+            "release-acceptance-test",
+            "--session",
+            "release-session",
+            "--db",
+        ])
         .arg(&database)
         .args(["--json"])
         .output()
@@ -60,21 +101,24 @@ fn doctor_reports_schema_runtime_and_bounded_status_payload() {
     assert_eq!(doctor_value["data"]["repair"]["available"], false);
 
     for index in 0..32 {
+        let work_id = format!("work-{index}");
+        let expected_revision_arg = expected_revision.to_string();
         let created = Command::new(binary)
             .current_dir(&root)
-            .args([
-                "work",
-                "create",
-                "release-project",
-                &format!("work-{index}"),
-                "release acceptance item",
-                "--db",
-            ])
+            .args(["work", "create", "release-project"])
+            .arg(&work_id)
+            .args(["release acceptance item", "--actor", "release-agent"])
+            .args(["--session", "release-session", "--expected-revision"])
+            .arg(&expected_revision_arg)
+            .args(["--db"])
             .arg(&database)
             .args(["--json"])
             .output()
             .expect("work create starts");
-        let _ = envelope(&created);
+        let created_value = envelope(&created);
+        expected_revision = created_value["revision"]
+            .as_u64()
+            .expect("work create returns the project revision");
     }
 
     let status = Command::new(binary)
@@ -82,6 +126,12 @@ fn doctor_reports_schema_runtime_and_bounded_status_payload() {
         .args([
             "status",
             "release-project",
+            "--actor",
+            "release-agent",
+            "--harness",
+            "release-acceptance-test",
+            "--session",
+            "release-session",
             "--limit",
             "7",
             "--offset",

@@ -175,6 +175,7 @@ for adding a blocking dependency.
 | `bwrk work renew` / `bwrk agent renew` | Keep spelling | Renew only the caller's current fenced lease. Runtime liveness is separate. |
 | `bwrk reservation list` | Keep spelling | Inspect current live reservations and detect orphan/ownership issues. |
 | `bwrk evidence run` | Keep spelling | Execute an approved bounded command and record a structured, attested receipt against an input snapshot. |
+| `bwrk gate policy publish` | New | Operator-authorized, revision-bound publication of an immutable gate policy tied to a captured workspace snapshot and verifier digest. |
 | `bwrk evidence add` | Keep spelling | Attach externally obtained evidence with provenance; self-report is not silently promoted to executor attestation. |
 | `bwrk work verify` | Keep spelling | Check gate satisfaction using structured receipts and return specific mismatch reasons. |
 | `bwrk work release` | Keep spelling | Release only the current attempt and recompute work eligibility, preserving failed evidence. |

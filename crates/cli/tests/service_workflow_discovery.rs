@@ -22,7 +22,17 @@ unsafe extern "C" {
 fn service_workflow_queries_match_direct_assets_without_project_context() {
     let temp = TempDir::new("workflow-discovery");
     let database = temp.path().join("boreal.sqlite");
-    let socket = short_socket_path();
+    let socket = temp.path().join("s.sock");
+
+    let initialized = Command::new(binary())
+        .current_dir(temp.path())
+        .args(["init", "workflow-discovery-project", "--db"])
+        .arg(&database)
+        .args(["--actor", "workflow-discovery-agent", "--json"])
+        .output()
+        .expect("disposable service project initializes");
+    assert_success(&initialized, "initialize service project");
+
     let Some(service) = start_service(temp.path(), &database, &socket) else {
         return;
     };
@@ -165,17 +175,6 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_bwrk")
 }
 
-fn short_socket_path() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is after the Unix epoch")
-        .as_nanos();
-    PathBuf::from(format!(
-        "/tmp/boreal-workflow-{}-{nonce}.sock",
-        std::process::id()
-    ))
-}
-
 struct TempDir {
     path: PathBuf,
 }
@@ -186,10 +185,8 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "boreal-cli-{prefix}-{}-{nonce}",
-            std::process::id()
-        ));
+        let path =
+            PathBuf::from("/tmp").join(format!("bw-{prefix}-{}-{nonce}", std::process::id()));
         fs::create_dir_all(&path).expect("temporary directory creates");
         Self { path }
     }

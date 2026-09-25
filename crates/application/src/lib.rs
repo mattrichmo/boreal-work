@@ -1,10 +1,15 @@
+#![recursion_limit = "512"]
 //! Authoritative v2 use cases and adapter-facing read models.
 //!
 //! CLI, service, and TUI code call this layer. They do not open SQLite or
 //! apply lifecycle transitions themselves.
 
+mod completion;
 mod runtime;
+pub use completion::CompletionMutationRequest;
+mod decision_wire;
 mod status;
+pub use decision_wire::*;
 
 mod evidence;
 mod evidence_store;
@@ -26,7 +31,8 @@ use boreal_store::{
 };
 pub use evidence::*;
 pub use guidance::{
-    guide, guide_checked, Directive, DirectiveSeverity, DirectiveValidationError, GuidanceContext,
+    guidance_subject, guide, guide_checked, guided_action, Directive, DirectiveSeverity,
+    DirectiveValidationError, GuidanceContext,
 };
 pub use hierarchy::*;
 pub use intake::*;
@@ -158,6 +164,24 @@ impl<'a> WorkApplication<'a> {
         now: &str,
         operation_id: impl Into<String>,
     ) -> Result<OperationResult<()>, ApplicationError> {
+        if self.store.is_canonical_production() {
+            return Err(ApplicationError::Invalid(
+                "canonical initialization requires an explicit workspace binding".into(),
+            ));
+        }
+        let protected_credential;
+        let credential_ref = if self.store.is_canonical_production() {
+            if actor_role != "operator" {
+                return Err(ApplicationError::Invalid(
+                    "canonical bootstrap requires an operator principal".into(),
+                ));
+            }
+            protected_credential =
+                boreal_store::principals::credential_digest(project_id.as_str(), credential_ref)?;
+            protected_credential.as_str()
+        } else {
+            credential_ref
+        };
         let operation_id = operation_id.into();
         let request_digest = canonical_request_digest(
             "project.init/v1",
@@ -201,6 +225,19 @@ impl<'a> WorkApplication<'a> {
         now: &str,
         operation_id: impl Into<String>,
     ) -> Result<OperationResult<()>, ApplicationError> {
+        let protected_credential;
+        let credential_ref = if self.store.is_canonical_production() {
+            if actor_role != "operator" {
+                return Err(ApplicationError::Invalid(
+                    "canonical bootstrap requires an operator principal".into(),
+                ));
+            }
+            protected_credential =
+                boreal_store::principals::credential_digest(project_id.as_str(), credential_ref)?;
+            protected_credential.as_str()
+        } else {
+            credential_ref
+        };
         let operation_id = operation_id.into();
         let database = IdentityStore::new(self.store)
             .database_identity()
@@ -270,7 +307,7 @@ impl<'a> WorkApplication<'a> {
         now: &str,
         operation_id: impl Into<String>,
     ) -> Result<OperationResult<WorkRecord>, ApplicationError> {
-        self.create_work_as_with_expected(work, actor_id, None, now, operation_id)
+        self.create_work_as_with_expected(work, actor_id, None, None, now, operation_id)
     }
 
     /// Revision-checked work creation for callers operating from a status
@@ -290,7 +327,32 @@ impl<'a> WorkApplication<'a> {
         self.create_work_as_with_expected(
             work,
             actor_id,
+            None,
             Some(expected_revision),
+            now,
+            operation_id,
+        )
+    }
+
+    pub fn create_work_as_session_checked(
+        &self,
+        work: &WorkItem,
+        actor_id: &str,
+        session_id: &str,
+        expected_revision: Option<u64>,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<WorkRecord>, ApplicationError> {
+        if session_id.trim().is_empty() || expected_revision.is_none() {
+            return Err(ApplicationError::Invalid(
+                "work creation requires a project session and expected revision".into(),
+            ));
+        }
+        self.create_work_as_with_expected(
+            work,
+            actor_id,
+            Some(session_id),
+            expected_revision,
             now,
             operation_id,
         )
@@ -300,6 +362,7 @@ impl<'a> WorkApplication<'a> {
         &self,
         work: &WorkItem,
         actor_id: &str,
+        session_id: Option<&str>,
         expected_revision: Option<u64>,
         now: &str,
         operation_id: impl Into<String>,
@@ -324,6 +387,7 @@ impl<'a> WorkApplication<'a> {
             "project_id": work.project_id.as_str(),
             "work_id": work.id.as_str(),
             "actor_id": actor_id,
+            "session_id": session_id,
             "kind": format!("{:?}", work.kind).to_ascii_lowercase(),
             "parent_id": work.parent_id.as_ref().map(|id| id.as_str()),
             "title": work.title,
@@ -347,9 +411,10 @@ impl<'a> WorkApplication<'a> {
             request["expected_revision"] = json!(expected_revision);
         }
         let request_digest = canonical_request_digest("work.create/v1", request);
-        let mutation = self.store.create_work_operation_checked(
+        let mutation = self.store.create_work_operation_for_session(
             work,
             actor_id,
+            session_id,
             &operation_id,
             &request_digest,
             expected_revision,
@@ -402,6 +467,31 @@ impl<'a> WorkApplication<'a> {
                 ApplicationError::Store(StoreError::NotFound {
                     entity: "work",
                     id: work_id.to_owned(),
+                })
+            })
+    }
+
+    pub fn review_list(
+        &self,
+        project_id: &ProjectId,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<boreal_store::ReviewRecord>, ApplicationError> {
+        Ok(self.store.review_list(project_id.as_str(), limit, offset)?)
+    }
+
+    pub fn review_show(
+        &self,
+        project_id: &ProjectId,
+        review_id: &str,
+    ) -> Result<boreal_store::ReviewRecord, ApplicationError> {
+        self.store
+            .review(review_id)?
+            .filter(|review| review.project_id == project_id.as_str())
+            .ok_or_else(|| {
+                ApplicationError::Store(StoreError::NotFound {
+                    entity: "review",
+                    id: review_id.to_owned(),
                 })
             })
     }
@@ -892,8 +982,38 @@ mod tests {
                 "unix-ms:1767227400000",
                 "unix-ms:1767232800000",
             )
-            .unwrap();
+            .unwrap_or_else(|error| {
+                let (status, _) = store
+                    .read_project_status_for_session(
+                        project.as_str(),
+                        "agent-1",
+                        None,
+                        boreal_domain::TimestampMs(1_767_225_600_000),
+                    )
+                    .expect("status diagnostics remain readable");
+                panic!("{error}; diagnostics: {:#?}", status.diagnostics);
+            });
         assert_eq!(claim.value.fence, 1);
         assert!(claim.changed);
     }
 }
+
+pub mod cycle_runtime;
+
+impl WorkApplication<'_> {
+    pub fn authorize_maintenance(
+        &self,
+        project: &str,
+        actor: &str,
+    ) -> Result<(), ApplicationError> {
+        let (role, _) = self.store_ref().principal_authority(project, actor)?;
+        if !boreal_domain::maintenance::maintenance_role_allowed(role) {
+            return Err(ApplicationError::Invalid(
+                "maintenance requires an authenticated operator".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub use boreal_memory::Citation as MemoryCitation;

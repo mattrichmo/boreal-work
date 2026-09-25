@@ -66,7 +66,13 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
             format!("cannot resolve the working directory: {error}"),
         )
     })?;
-    let context = resolve_dashboard_context(parsed, &current_dir)?;
+    let local = super::project_context::resolve(parsed)?;
+    let context = DashboardContext {
+        metadata_path: Some(local.root.join(".boreal/project.json")),
+        project_root: Some(local.root),
+        project_id: local.project_id,
+        database: local.database,
+    };
     let database = existing_database_path(&context, parsed)?;
     let store = SqliteStore::open(&database, super::PRODUCTION_SCHEMA).map_err(map_store_error)?;
     let project_ids = store.list_project_ids().map_err(map_store_error)?;
@@ -77,6 +83,7 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
         &database,
     )?;
     validate_dashboard_identity(&store, &context, &project, &current_dir, &database)?;
+    super::credentials::authenticate(parsed, &store)?;
 
     if parsed.options.json {
         let mut resolved = parsed.clone();
@@ -135,7 +142,7 @@ fn existing_database_path(
         )
     })?;
 
-    if parsed.options.db == DEFAULT_DATABASE {
+    {
         if let Some(project_root) = context.project_root.as_deref() {
             if !database.starts_with(project_root) {
                 return Err(CliError::invalid(format!(
@@ -445,6 +452,8 @@ fn launch_dashboard(
             .arg(database)
             .arg("--socket")
             .arg(&service_socket)
+            .arg("--project")
+            .arg(project)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -482,6 +491,10 @@ fn launch_dashboard(
             parsed.options.session.clone()
         };
         let mut tui_command = command_for_tui(&tui);
+        tui_command.env(
+            "BOREAL_CREDENTIAL",
+            super::credentials::for_command(parsed)?,
+        );
         tui_command
             .arg("--socket")
             .arg(&service_socket)
@@ -553,15 +566,22 @@ fn private_socket_directory(role: &str) -> Result<(PathBuf, PathBuf), CliError> 
     let nonce = DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed);
     let directory_name = format!("boreal-dashboard-{role}-{}-{nonce}", std::process::id());
     let socket_name = "service.sock";
-    let mut base = env::temp_dir();
+    let cwd = fs::canonicalize(env::current_dir().map_err(|e| CliError::invalid(e.to_string()))?)
+        .map_err(|e| CliError::invalid(e.to_string()))?;
+    let root = cwd
+        .ancestors()
+        .find(|p| p.join(".boreal/project.json").is_file())
+        .ok_or_else(|| CliError::invalid("dashboard requires initialized project metadata"))?;
+    let base = super::project_context::confined_path(root, Path::new(".boreal/runtime"), true)?;
+    fs::create_dir_all(&base).map_err(|e| CliError::invalid(e.to_string()))?;
     if base
         .join(&directory_name)
         .join(socket_name)
         .as_os_str()
         .len()
-        > 96
+        > 100
     {
-        base = PathBuf::from("/tmp");
+        return Err(CliError::invalid("project path is too long for a Unix service socket; use a shorter canonical workspace path"));
     }
     for attempt in 0..16_u8 {
         let name = if attempt == 0 {
@@ -786,6 +806,13 @@ fn probe_service(socket: &Path, project: &str, actor: &str) -> Result<(), String
         std::process::id(),
         DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
+    let cwd = fs::canonicalize(env::current_dir().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let root = cwd
+        .ancestors()
+        .find(|p| p.join(".boreal/project.json").is_file())
+        .ok_or_else(|| "project metadata missing during readiness".to_owned())?;
+    let credential = super::credentials::load(root, project, actor).map_err(|e| e.message)?;
     let payload = json!({
         "api_version": APPLICATION_API_VERSION,
         "schema_version": APPLICATION_SCHEMA_VERSION,
@@ -794,6 +821,7 @@ fn probe_service(socket: &Path, project: &str, actor: &str) -> Result<(), String
             "command": "status",
             "project_id": project,
             "actor_id": actor,
+            "credential_ref": credential,
             "harness_id": "dashboard-readiness",
             "session_id": "dashboard-readiness",
             "limit": 1,
@@ -1182,6 +1210,58 @@ mod signal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn database_path_is_rejected_when_canonicalization_escapes_project_root() {
+        let suffix = DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let project_root = env::temp_dir().join(format!(
+            "boreal-dashboard-path-project-{}-{suffix}",
+            std::process::id()
+        ));
+        let outside_root = env::temp_dir().join(format!(
+            "boreal-dashboard-path-outside-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(project_root.join(".boreal")).unwrap();
+        fs::create_dir_all(&outside_root).unwrap();
+
+        let canonical_root = fs::canonicalize(&project_root).unwrap();
+        let outside_database = outside_root.join("foreign.sqlite");
+        fs::write(&outside_database, b"foreign project database").unwrap();
+        let lexical_database = canonical_root.join(".boreal/linked.sqlite");
+        std::os::unix::fs::symlink(&outside_database, &lexical_database).unwrap();
+
+        let canonical_database = fs::canonicalize(&lexical_database).unwrap();
+        assert!(lexical_database.starts_with(&canonical_root));
+        assert!(!canonical_database.starts_with(&canonical_root));
+
+        let context = DashboardContext {
+            metadata_path: Some(canonical_root.join(".boreal/project.json")),
+            project_root: Some(canonical_root),
+            project_id: "project-a".to_owned(),
+            database: lexical_database,
+        };
+        let error = existing_database_path(
+            &context,
+            &ParsedCommand {
+                path: vec!["dashboard".to_owned()],
+                options: CliOptions::default(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("database resolves outside this project"),
+            "{error:?}"
+        );
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+
+        fs::remove_dir_all(project_root).unwrap();
+        fs::remove_dir_all(outside_root).unwrap();
+    }
 
     #[test]
     fn project_resolution_prefers_explicit_then_bound_metadata() {

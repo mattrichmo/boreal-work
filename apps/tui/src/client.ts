@@ -214,13 +214,25 @@ export interface MonitoringCounts {
   [key: string]: number;
 }
 
+export interface ProjectPlanningAction {
+  action: string;
+  target: { project_id: string };
+  caller: { actor_id: string; session_id: string | null };
+  expected_project_revision: number;
+  allowed: boolean;
+  denial_reason: string | null;
+  confirmation: string;
+}
+
 export interface RevisionedStatusResponse {
+  project_actions?: ProjectPlanningAction[];
   /** Service read-model revision. The envelope revision is authoritative when both exist. */
   revision?: number;
   total?: number;
   items: StatusItem[];
   diagnostics?: StatusDiagnostic[];
   counts?: Partial<MonitoringCounts>;
+  attention_queues?: unknown;
   as_of?: string;
   project_id?: string;
   project_name?: string;
@@ -237,12 +249,14 @@ export interface RevisionedStatusResponse {
 }
 
 export interface MonitoringModel {
+  project_actions?: ProjectPlanningAction[];
   revision: number;
   as_of: string;
   next_status_change_at: string | null;
   total: number;
   counts: MonitoringCounts;
   items: StatusItem[];
+  attention_queues?: AttentionQueuesModel;
   diagnostics: StatusDiagnostic[];
   truncated: boolean;
   project_id?: string;
@@ -256,6 +270,21 @@ export interface MonitoringModel {
   next_offset: number | null;
   timing?: TimingMetadata;
   recovery?: RecoveryMetadata;
+}
+
+export interface AttentionQueueModel {
+  total: number;
+  has_more: boolean;
+  items: StatusItem[];
+}
+
+export interface AttentionQueuesModel {
+  review: AttentionQueueModel;
+  rejected_review: AttentionQueueModel;
+  expiry: AttentionQueueModel;
+  failed_execution: AttentionQueueModel;
+  operator_holds: AttentionQueueModel;
+  damaged_planning: AttentionQueueModel;
 }
 
 /** Backwards-compatible name for the original status groundwork. */
@@ -279,6 +308,7 @@ export interface FramedTransport {
 }
 
 export interface ServiceClientConfig {
+  credential_ref?: string;
   max_payload_bytes?: number;
   project_id?: string;
   actor_id?: string;
@@ -391,6 +421,8 @@ export interface CreateWorkDraftInput {
 export interface ClaimInput {
   project_id: string;
   work_id: string;
+  source_version_id: string;
+  config_identity: string;
   actor_id: string;
   harness_id: string;
   session_id: string;
@@ -398,6 +430,13 @@ export interface ClaimInput {
   claimed_at: string;
   lease_deadline: string;
   hard_deadline: string;
+}
+
+export interface ClaimExecutionContext {
+  /** Exact immutable source version registered for the mounted project. */
+  source_version_id: string;
+  /** Meaningful identity of the execution configuration; never a secret. */
+  config_identity: string;
 }
 
 export interface AcceptStartInput {
@@ -481,7 +520,11 @@ export interface VersionedServiceApi extends StatusReader {
   readOperation?(project_id: string, operation_id: string): Promise<Envelope<OperationReadback>>;
   /** Optional durable receipt payload readback. Finish stays disabled without this seam. */
   readReceipt?(project_id: string, work_id: string, attempt_id: string, fence: number): Promise<Envelope<ReceiptReadback>>;
+  /** Optional read-only workspace projections served by the versioned Rust API. */
+  readWorkspaceView?(kind: WorkspaceViewKind, project_id: string): Promise<Envelope<unknown>>;
 }
+
+export type WorkspaceViewKind = "cycles" | "reviews" | "memory" | "recovery";
 
 export type TuiAction =
   | "create_project" | "create_work" | "claim" | "accept_start"
@@ -503,7 +546,7 @@ export interface Route {
 /** Presentation-only queue filters. The service remains the authority for status. */
 export type DashboardFilter =
   | "all" | "ready" | "active" | "blocked" | "expired" | "closed"
-  | "milestones" | "sprints" | "tasks";
+  | "milestones" | "sprints" | "tasks" | "review" | "rejected" | "failed" | "held" | "corrupt";
 
 export interface DashboardCapability {
   route: string;
@@ -519,14 +562,14 @@ export interface DashboardCapability {
  * implement a local mutation or pretend that a route succeeded.
  */
 export const DASHBOARD_CAPABILITIES: readonly DashboardCapability[] = [
-  { route: "work.edit", label: "Edit work", status: "unavailable", reason: "Rust service route is not exposed yet", owner: "planning/application" },
-  { route: "dependency.add/remove/tree", label: "Dependencies", status: "unavailable", reason: "Rust graph read/write routes are not exposed yet", owner: "planning/application" },
-  { route: "cycle.create/activate/board", label: "Cycles and sprints", status: "unavailable", reason: "Schema-v3 cycle routes are not exposed yet", owner: "hierarchy/application" },
-  { route: "intake.list/promote", label: "Intake", status: "unavailable", reason: "Intake service adapter is not exposed yet", owner: "knowledge/application" },
-  { route: "source.list/verify", label: "Sources", status: "unavailable", reason: "Source adapter route is not exposed yet", owner: "source/application" },
-  { route: "memory.search/publish", label: "Published memory", status: "unavailable", reason: "Memory adapter route is not exposed yet", owner: "memory/application" },
-  { route: "session.end/recover", label: "Session recovery", status: "unavailable", reason: "Operator lifecycle route is not exposed yet", owner: "runtime/service" },
-  { route: "activity.history", label: "Activity history", status: "unavailable", reason: "Bounded activity route is not exposed yet", owner: "protocol/service" },
+  { route: "work.edit", label: "Edit work", status: "unavailable", reason: "This action is not available in this connection", owner: "planning/application" },
+  { route: "dependency.add/remove/tree", label: "Dependencies", status: "unavailable", reason: "Use the project command line to inspect or edit dependencies", owner: "planning/application" },
+  { route: "cycle.create/activate/board", label: "Cycle changes and boards", status: "unavailable", reason: "Cycle lists are available here; use the project command line to create, change, or open a cycle board", owner: "hierarchy/application" },
+  { route: "intake.list/promote", label: "Intake", status: "unavailable", reason: "Use the project command line for this workflow", owner: "knowledge/application" },
+  { route: "source.list/verify", label: "Sources", status: "unavailable", reason: "Use the project command line for this workflow", owner: "source/application" },
+  { route: "memory.publish", label: "Published memory changes", status: "unavailable", reason: "Memory search is available here; use the project command line to draft, review, publish, or reconcile memory", owner: "memory/application" },
+  { route: "session.end/recover", label: "Session recovery resolution", status: "unavailable", reason: "Recovery obligations are visible here; use the project command line to resolve an obligation or end a session", owner: "runtime/service" },
+  { route: "activity.history", label: "Activity history", status: "unavailable", reason: "Use the project command line for this workflow", owner: "protocol/service" },
 ];
 
 export interface StaleRevisionDisplay {
@@ -1178,7 +1221,9 @@ function outerResponse(value: unknown, operation_id: string): unknown {
  * tests and other runtimes can use the same deterministic wire contract.
  */
 export class VersionedServiceClient implements VersionedServiceApi {
+  private scopeIdentity: string | null = null;
   private readonly max_payload_bytes: number;
+  private readonly credential_ref?: string;
   private readonly project_id?: string;
   private readonly actor_id?: string;
   private readonly harness_id?: string;
@@ -1187,6 +1232,7 @@ export class VersionedServiceClient implements VersionedServiceApi {
 
   constructor(private readonly transport: FramedTransport, config: ServiceClientConfig = {}) {
     this.max_payload_bytes = config.max_payload_bytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
+    this.credential_ref = config.credential_ref;
     this.project_id = config.project_id;
     this.actor_id = config.actor_id;
     this.harness_id = config.harness_id;
@@ -1228,6 +1274,34 @@ export class VersionedServiceClient implements VersionedServiceApi {
       target_operation_id,
     };
     return this.call<OperationReadback, typeof data>("operation_show", requestEnvelope(operationId(), data, null));
+  }
+
+  readWorkspaceView(kind: WorkspaceViewKind, project_id: string): Promise<Envelope<unknown>> {
+    requiredString(project_id, "workspace_view.project_id");
+    if (this.project_id && project_id !== this.project_id) {
+      throw new ProtocolEnvelopeError("workspace view belongs to a different mounted project");
+    }
+    let command: string;
+    let data: Record<string, unknown>;
+    switch (kind) {
+      case "cycles":
+        command = "cycle_read";
+        data = { view: "list", project_id, actor_id: this.actor_id, harness_id: this.harness_id, session_id: this.session_id, limit: 100, offset: 0 };
+        break;
+      case "reviews":
+        command = "review_list";
+        data = { project_id, limit: 100, offset: 0 };
+        break;
+      case "memory":
+        command = "memory_command";
+        data = { project_id, memory: { expected_revision: null, confirmed: false, change: { kind: "search", text: null, entry_id: null, source_version_id: null, requested_git_revision: null, limit: 20 } } };
+        break;
+      case "recovery":
+        command = "recovery_command";
+        data = { project_id, recovery: { action: "list", limit: 100 } };
+        break;
+    }
+    return this.call<unknown, typeof data>(command, requestEnvelope(operationId(), data, null));
   }
 
   createProject(request: RequestEnvelope<CreateProjectInput>): Promise<Envelope<unknown>> {
@@ -1307,8 +1381,13 @@ export class VersionedServiceClient implements VersionedServiceApi {
 
   private async call<Response, Request>(command: string, request: RequestEnvelope<Request>, mutation = false): Promise<Envelope<Response>> {
     const validated = validateRequestEnvelope(request);
+    if (isObject(validated.data)) {
+      if (this.project_id && validated.data.project_id && validated.data.project_id !== this.project_id) throw new ProtocolEnvelopeError("request belongs to a different project");
+      if (this.actor_id && validated.data.actor_id && validated.data.actor_id !== this.actor_id) throw new ProtocolEnvelopeError("request belongs to a different principal");
+    }
     const data = isObject(validated.data) ? {
       ...validated.data,
+      ...(this.credential_ref ? { credential_ref: this.credential_ref } : {}),
       command,
       ...(this.project_id && !validated.data.project_id ? { project_id: this.project_id } : {}),
       ...(this.actor_id && !validated.data.actor_id ? { actor_id: this.actor_id } : {}),
@@ -1345,7 +1424,27 @@ export class VersionedServiceClient implements VersionedServiceApi {
     try {
       const decoded = decodeJsonFrame(responseFrame, this.max_payload_bytes);
       const parsed = JSON.parse(decoded) as unknown;
-      return validateEnvelope<Response>(outerResponse(parsed, validated.operation_id));
+      const envelope = validateEnvelope<Response>(outerResponse(parsed, validated.operation_id));
+      if (isObject(envelope.data) && envelope.data.project_id !== undefined && this.project_id && envelope.data.project_id !== this.project_id) {
+        throw new ProtocolEnvelopeError("response belongs to a different project; it was not applied");
+      }
+      if (isObject(envelope.data) && ["changed", "unchanged"].includes(envelope.outcome)) {
+        const scope = envelope.data._scope;
+        if (scope !== undefined || this.credential_ref) {
+          if (!isObject(scope) || scope.project_id !== this.project_id
+            || typeof scope.database_instance_id !== "string" || !scope.database_instance_id
+            || !Number.isSafeInteger(scope.restore_epoch) || Number(scope.restore_epoch) < 1
+            || typeof scope.workspace_binding_digest !== "string" || !scope.workspace_binding_digest.startsWith("sha256:")) {
+            throw new ProtocolEnvelopeError("response has no valid project and database identity; it was not applied");
+          }
+          const identity = JSON.stringify([scope.project_id, scope.database_instance_id, scope.restore_epoch, scope.workspace_binding_digest]);
+          if (this.scopeIdentity !== null && this.scopeIdentity !== identity) {
+            throw new ProtocolEnvelopeError("project database changed or was restored; reconnect before using cached work or retrying an operation");
+          }
+          this.scopeIdentity = identity;
+        }
+      }
+      return envelope;
     } catch (error) {
       if (!mutation) {
         if (error instanceof ProtocolEnvelopeError) throw error;
@@ -1411,12 +1510,14 @@ export function buildMonitoringModel(envelope: Envelope<RevisionedStatusResponse
     .filter((value): value is string => typeof value === "string")
     .sort()[0] ?? null;
   return {
+    project_actions: validated.data.project_actions,
     revision: validated.revision,
     as_of: validated.as_of,
     next_status_change_at: validated.next_status_change_at ?? validated.data.next_status_change_at ?? itemDeadline,
     total,
     counts: normalizeCounts(validated.data.counts, displayItems, total),
     items: displayItems.slice(0, MAX_INLINE_ITEMS),
+    attention_queues: normalizeAttentionQueues(validated.data.attention_queues),
     diagnostics,
     truncated: displayItems.length > MAX_INLINE_ITEMS || hasMore || total > displayItems.length,
     project_id: typeof validated.data.project_id === "string" ? validated.data.project_id : undefined,
@@ -1432,6 +1533,54 @@ export function buildMonitoringModel(envelope: Envelope<RevisionedStatusResponse
     next_offset: nextOffset === null ? null : asNumber(nextOffset, "next_offset"),
     timing: validated.timing ?? validated.data.timing,
     recovery: validated.recovery ?? validated.data.recovery,
+  };
+}
+
+function normalizeAttentionQueues(value: unknown): AttentionQueuesModel | undefined {
+  if (value === undefined) return undefined;
+  if (!isObject(value)) throw new ProtocolEnvelopeError("attention_queues must be an object");
+  const queue = (key: keyof AttentionQueuesModel): AttentionQueueModel => {
+    const raw = value[key];
+    if (!isObject(raw) || !Array.isArray(raw.items)) {
+      throw new ProtocolEnvelopeError(`attention_queues.${key} must contain items`);
+    }
+    const total = asNumber(raw.total, `attention_queues.${key}.total`);
+    if (!Number.isSafeInteger(total) || total < 0 || total < raw.items.length) {
+      throw new ProtocolEnvelopeError(`attention_queues.${key}.total is invalid`);
+    }
+    const items = raw.items.map((entry) => {
+      if (!isObject(entry) || typeof entry.work_id !== "string"
+        || typeof entry.display_status !== "string" || typeof entry.title !== "string"
+        || !Array.isArray(entry.reason_codes)
+        || !entry.reason_codes.every((reason) => typeof reason === "string")) {
+        throw new ProtocolEnvelopeError(`attention_queues.${key} contains an invalid item`);
+      }
+      return normalizeStatusItem({
+        work_id: entry.work_id,
+        title: entry.title,
+        status: entry.display_status,
+        display_status: entry.display_status,
+        reason_codes: entry.reason_codes,
+        claimable: false,
+        next_action: null,
+      });
+    });
+    if (raw.returned !== undefined && raw.returned !== items.length) {
+      throw new ProtocolEnvelopeError(`attention_queues.${key}.returned does not match items`);
+    }
+    const hasMore = raw.has_more === undefined ? total > items.length : raw.has_more;
+    if (typeof hasMore !== "boolean" || hasMore !== (total > items.length)) {
+      throw new ProtocolEnvelopeError(`attention_queues.${key}.has_more is invalid`);
+    }
+    return { total, has_more: hasMore, items };
+  };
+  return {
+    review: queue("review"),
+    rejected_review: queue("rejected_review"),
+    expiry: queue("expiry"),
+    failed_execution: queue("failed_execution"),
+    operator_holds: queue("operator_holds"),
+    damaged_planning: queue("damaged_planning"),
   };
 }
 
@@ -1519,6 +1668,7 @@ function gateIsOpen(item: StatusItem): boolean {
 
 /** The presentation policy mirrors service-provided status; it never derives claimability. */
 export interface ActionAvailabilityContext {
+  authority_fresh?: boolean;
   /** The current service route requires a receipt before finish_close. */
   receipt_available?: boolean;
   pending_operation?: PendingOperation;
@@ -1567,6 +1717,11 @@ export function actionAvailability(
   busy: ReadonlySet<TuiAction> = new Set(),
   context: ActionAvailabilityContext = {},
 ): ActionAvailability[] {
+  if (context.authority_fresh === false) {
+    return (["claim", "accept_start", "evidence", "finish", "release"] as const).map((action) => ({
+      action, enabled: false, reason: context.pending_operation ? `operation ${context.pending_operation.operation_id} has unknown outcome; read it back before retrying` : "Connection or snapshot permissions are stale. Refresh before making changes.", requires_confirmation: true,
+    }));
+  }
   if (item.diagnostic) {
     return (["claim", "accept_start", "evidence", "finish", "release"] as const).map((action) => ({
       action,
@@ -1576,33 +1731,11 @@ export function actionAvailability(
     }));
   }
   if (item.actions) return serverActionAvailability(item, busy, context);
-  const status = statusOf(item);
-  const blocked = status === "blocked";
-  const queued = status === "queued";
-  const expired = status === "expired_review";
-  const gateOpen = gateIsOpen(item);
-  const hasAttempt = !!item.attempt;
-  const receiptAvailable = context.receipt_available !== false;
-  const pendingOperation = context.pending_operation;
-  const accepted = (hasAttempt && ["accepted", "running", "in_progress", "verifying"].includes(item.attempt?.phase ?? ""))
-    || ["accepted", "running", "in_progress"].includes(status);
-  const disabled = (action: TuiAction, reason: string | null, enabled: boolean, confirmation = true): ActionAvailability => ({
-    action,
-    enabled: enabled && !busy.has(action) && !pendingOperation,
-    reason: busy.has(action)
-      ? "operation already in progress"
-      : pendingOperation
-        ? `operation ${pendingOperation.operation_id} has unknown outcome; read it back before retrying`
-        : reason,
-    requires_confirmation: confirmation,
-  });
-  return [
-    disabled("claim", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : item.claimable ? null : "work is not claimable at this revision", item.claimable && !blocked && !queued && !expired),
-    disabled("accept_start", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : hasAttempt && status === "claimed" ? null : "a claimed attempt is required", hasAttempt && status === "claimed" && !blocked && !queued && !expired),
-    disabled("evidence", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : accepted ? null : "an accepted attempt is required", accepted && !blocked && !queued && !expired),
-    disabled("finish", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : gateOpen ? "required gate is open" : !receiptAvailable ? "a current receipt is required" : accepted ? null : "an accepted attempt is required", accepted && !blocked && !queued && !expired && !gateOpen && receiptAvailable),
-    disabled("release", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : hasAttempt ? null : "a current attempt is required", hasAttempt && !blocked && !queued && !expired),
-  ];
+  // A status label is a display fact, never authorization. Older/partial
+  // servers remain readable but cannot silently enable local mutation policy.
+  return (["claim", "accept_start", "evidence", "finish", "release"] as const).map((action) => ({
+    action, enabled: false, reason: "The service has not supplied action permissions. Refresh or check the connection.", requires_confirmation: true,
+  }));
 }
 
 export interface MountedView {
@@ -1662,6 +1795,8 @@ export class TuiWorkflowController {
   private readonly receipts = new Map<string, { attempt_id: string; fence: number; receipt: unknown }>();
   private model: MonitoringModel | null = null;
   private mounted = false;
+  private authorityFresh = false;
+  private minimumObservedRevision = 0;
   private route: Route = { kind: "monitoring" };
   private notice: ControllerNotice | null = null;
   private readonly busy = new Set<TuiAction>();
@@ -1711,8 +1846,27 @@ export class TuiWorkflowController {
 
   unmount(): void {
     this.mounted = false;
+    this.authorityFresh = false;
     this.unsubscribeNotifications?.();
     this.unsubscribeNotifications = null;
+  }
+
+  async readWorkspaceView(kind: WorkspaceViewKind): Promise<Envelope<unknown>> {
+    if (!this.mounted) throw new ProtocolEnvelopeError("workspace views require a mounted project context");
+    if (!this.service.readWorkspaceView) throw new ProtocolEnvelopeError("this service connection does not provide workspace views");
+    const response = await this.service.readWorkspaceView(kind, this.context.project_id);
+    if (response.outcome !== "changed" && response.outcome !== "unchanged") {
+      throw new TuiServiceError(
+        response.error?.code ?? response.outcome,
+        response.error?.message ?? `${kind} view request did not succeed`,
+        response.operation_id,
+        response,
+      );
+    }
+    if (isObject(response.data) && typeof response.data.project_id === "string" && response.data.project_id !== this.context.project_id) {
+      throw new ProtocolEnvelopeError("workspace view belongs to another project; it was not displayed");
+    }
+    return response;
   }
 
   view(): MountedView {
@@ -1720,16 +1874,24 @@ export class TuiWorkflowController {
     const pending = selected ? this.pendingForWork(selected.work_id) : undefined;
     const pendingCreateProject = [...this.pending.values()].find((operation) => operation.action === "create_project");
     const pendingCreateWork = [...this.pending.values()].find((operation) => operation.action === "create_work");
-    const creationActions: ActionAvailability[] = [
-      { action: "create_project", enabled: this.mounted && !pendingCreateProject, reason: !this.mounted ? "controller is not mounted" : pendingCreateProject ? `operation ${pendingCreateProject.operation_id} has unknown outcome; read it back before retrying` : null, requires_confirmation: true },
-      { action: "create_work", enabled: this.mounted && !pendingCreateWork, reason: !this.mounted ? "controller is not mounted" : pendingCreateWork ? `operation ${pendingCreateWork.operation_id} has unknown outcome; read it back before retrying` : null, requires_confirmation: true },
-    ];
+    const creationActions: ActionAvailability[] = (["create_project", "create_work"] as const).map((action) => {
+      const descriptor=this.model?.project_actions?.find((entry)=>entry.action===action);
+      const pending=action==="create_project"?pendingCreateProject:pendingCreateWork;
+      const bound=descriptor?.target?.project_id===this.context.project_id
+        && descriptor?.caller?.actor_id===this.context.actor_id && descriptor?.caller?.session_id===this.context.session_id
+        && descriptor?.expected_project_revision===this.model?.revision;
+      const reason=!this.mounted?"Dashboard is not mounted":pending?`operation ${pending.operation_id} has unknown outcome; read it back before retrying`
+        :!this.authorityFresh?"Refresh the connection before making changes":!bound?"The service has not supplied current project action permissions"
+        :!descriptor?.allowed?(descriptor?.denial_reason??"Project action denied"):null;
+      return {action,enabled:reason===null,reason,requires_confirmation:true};
+    });
     return {
       mounted: this.mounted,
       route: { ...this.route },
       monitoring: this.model,
       selected_work: selected,
       actions: [...creationActions, ...(selected ? actionAvailability(selected, this.busy, {
+        authority_fresh: this.authorityFresh,
         receipt_available: this.currentReceipt(selected) !== undefined,
         pending_operation: pending,
       }) : [])],
@@ -1751,26 +1913,48 @@ export class TuiWorkflowController {
     return this.view();
   }
 
+  private installSnapshot(model: MonitoringModel): boolean {
+    if (model.project_id && model.project_id !== this.context.project_id) {
+      throw new ProtocolEnvelopeError("snapshot belongs to another project; no cached rows were replaced");
+    }
+    if (!this.mounted) return false;
+    if (model.revision < Math.max(this.minimumObservedRevision, this.model?.revision ?? 0)) {
+      this.authorityFresh = false;
+      if (this.notice?.kind !== "stale_revision") this.notice = { kind: "stale_revision", message: "The response predates an observed operation. Last known rows remain read-only." };
+      return false;
+    }
+    this.minimumObservedRevision = Math.max(this.minimumObservedRevision, model.revision);
+    this.model = model;
+    this.authorityFresh = true;
+    return true;
+  }
+
+  private connectionFailed(error: unknown): never {
+    this.authorityFresh = false;
+    this.notice = { kind: "error", message: `Connection unavailable; last known rows are read-only. ${error instanceof Error ? error.message : String(error)}` };
+    throw error;
+  }
+
   refresh(): Promise<MountedView> {
     return this.refreshCoordinator.refresh().then(async (model) => {
-      this.model = model;
+      if (!this.installSnapshot(model)) return this.view();
       if (this.route.work_id) await this.hydrateReceiptForWork(this.route.work_id);
       return this.view();
-    });
+    }).catch((error) => this.connectionFailed(error));
   }
 
   notifyRevision(observedRevision?: number): Promise<MountedView> {
     return this.refreshCoordinator.notifyRevision(observedRevision).then((model) => {
-      this.model = model;
+      this.installSnapshot(model);
       return this.view();
-    });
+    }).catch((error) => this.connectionFailed(error));
   }
 
   notifyDeadline(): Promise<MountedView> {
     return this.refreshCoordinator.notifyDeadline().then((model) => {
-      this.model = model;
+      this.installSnapshot(model);
       return this.view();
-    });
+    }).catch((error) => this.connectionFailed(error));
   }
 
   /** Fetch the next bounded page without pretending the first page is complete. */
@@ -1782,7 +1966,7 @@ export class TuiWorkflowController {
       project_id: this.context.project_id,
       limit: model.limit,
       offset: model.next_offset,
-    }));
+    }).catch((error) => this.connectionFailed(error)));
     const page = buildMonitoringModel(envelope);
     if (page.revision !== model.revision) {
       this.notice = {
@@ -1791,7 +1975,7 @@ export class TuiWorkflowController {
       };
       return this.refresh();
     }
-    this.model = page;
+    if (!this.installSnapshot(page)) return this.view();
     if (this.route.work_id) await this.hydrateReceiptForWork(this.route.work_id);
     return this.view();
   }
@@ -1799,7 +1983,8 @@ export class TuiWorkflowController {
   actionAvailability(work_id: string): ActionAvailability[] {
     const item = this.item(work_id);
     return actionAvailability(item, this.busy, {
-      receipt_available: this.currentReceipt(item) !== undefined,
+      authority_fresh: this.authorityFresh,
+        receipt_available: this.currentReceipt(item) !== undefined,
       pending_operation: this.pendingForWork(work_id),
     });
   }
@@ -1812,9 +1997,15 @@ export class TuiWorkflowController {
       throw new ActionDisabledError(pending.action, "the service does not expose operation readback", pending.work_id);
     }
     const envelope = validateEnvelope<OperationReadback>(await this.service.readOperation(this.context.project_id, operation_id));
+    if (envelope.revision !== null) this.minimumObservedRevision = Math.max(this.minimumObservedRevision, envelope.revision);
     const terminal = envelope.outcome !== "unknown" && envelope.outcome !== "busy"
       && envelope.data?.readback_required !== true;
-    if (terminal) this.pending.delete(operation_id);
+    if (terminal) {
+      this.pending.delete(operation_id);
+      // A readback resolves one operation, not the current action permissions.
+      // Only a fresh project snapshot can re-enable mutations.
+      if (this.mounted) await this.refresh();
+    }
     if (envelope.outcome === "unknown" || envelope.data?.readback_required === true) {
       this.notice = { kind: "unknown", message: `operation ${operation_id} still requires readback` };
     } else {
@@ -1865,13 +2056,24 @@ export class TuiWorkflowController {
     return result;
   }
 
-  async claim(work_id: string): Promise<ActionResult<unknown>> {
+  async claim(work_id: string, execution: ClaimExecutionContext): Promise<ActionResult<unknown>> {
+    const sourceVersionId = execution.source_version_id.trim();
+    const configIdentity = execution.config_identity.trim();
+    const missingConfig = /^(?:unknown|n\/a|none|null|undefined|todo|tbd)$/iu.test(configIdentity);
+    if (!sourceVersionId || /^unknown$/iu.test(sourceVersionId)) {
+      throw new ProtocolEnvelopeError("claim requires a real source_version_id from this project's registered sources; list or capture a source before claiming");
+    }
+    if (!configIdentity || missingConfig) {
+      throw new ProtocolEnvelopeError("claim requires a meaningful config_identity (for example, repository revision plus toolchain/config version); do not use unknown or a placeholder");
+    }
     const item = this.item(work_id);
     this.requireAction(item, "claim");
     const now = this.now();
     const input: ClaimInput = {
       project_id: this.projectId(work_id),
       work_id,
+      source_version_id: sourceVersionId,
+      config_identity: configIdentity,
       actor_id: this.actor(),
       harness_id: this.harness(),
       session_id: this.session(),
@@ -2046,13 +2248,20 @@ export class TuiWorkflowController {
 
   private requireAction(item: StatusItem, action: TuiAction): void {
     const available = actionAvailability(item, this.busy, {
-      receipt_available: this.currentReceipt(item) !== undefined,
+      authority_fresh: this.authorityFresh,
+        receipt_available: this.currentReceipt(item) !== undefined,
       pending_operation: this.pendingForWork(item.work_id),
     }).find((entry) => entry.action === action);
     if (!available?.enabled) throw new ActionDisabledError(action, available?.reason ?? "action unavailable", item.work_id);
   }
 
   private async mutate<T>(action: TuiAction, invoke: (operation_id: string, revision: number | null) => Promise<unknown>, work_id: string | undefined): Promise<ActionResult<T>> {
+    if (!this.mounted) throw new ActionDisabledError(action, "dashboard is not mounted", work_id);
+    if (!this.authorityFresh) throw new ActionDisabledError(action, "refresh the connection before making changes", work_id);
+    if (action==="create_work" || action==="create_project") {
+      const permission=this.view().actions.find((entry)=>entry.action===action);
+      if (!permission?.enabled) throw new ActionDisabledError(action,permission?.reason??"project action unavailable",work_id);
+    }
     if (this.busy.has(action)) throw new ActionDisabledError(action, "operation already in progress", work_id);
     const existing = work_id ? this.pendingForWork(work_id) : [...this.pending.values()].find((entry) => entry.action === action);
     if (existing) {
@@ -2063,7 +2272,9 @@ export class TuiWorkflowController {
     const id = operationId();
     try {
       const envelope = validateEnvelope<T>(await invoke(id, this.model?.revision ?? null));
+      if (envelope.revision !== null) this.minimumObservedRevision = Math.max(this.minimumObservedRevision, envelope.revision);
       if (envelope.outcome === "changed" || envelope.outcome === "unchanged") {
+        this.authorityFresh = false;
         const result: ActionResult<T> = { ok: true, envelope, data: envelope.data };
         if (this.mounted) {
           try {
@@ -2076,6 +2287,7 @@ export class TuiWorkflowController {
       }
       const error = new TuiServiceError(envelope.error?.code ?? "unknown", envelope.error?.message ?? "service rejected operation", envelope.operation_id, envelope as Envelope<unknown>);
       if (error.unknown) {
+        this.authorityFresh = false;
         this.pending.set(envelope.operation_id, { operation_id: envelope.operation_id, action, ...(work_id ? { work_id } : {}) });
         this.notice = {
           kind: "unknown",
@@ -2107,6 +2319,11 @@ export class TuiWorkflowController {
         this.notice = { kind: "error", message: error.message, error };
       }
       return { ok: false, envelope: envelope as Envelope<unknown>, error };
+    } catch (error) {
+      this.authorityFresh = false;
+      this.pending.set(id, { operation_id: id, action, ...(work_id ? { work_id } : {}) });
+      this.notice = { kind: "unknown", message: `Operation ${id} may have been admitted. Read it back before retrying. ${error instanceof Error ? error.message : String(error)}` };
+      throw error;
     } finally {
       this.busy.delete(action);
     }

@@ -50,7 +50,12 @@ fn stored_actor_role_overrides_untrusted_status_context_role() {
     };
     let operator =
         project_status_from_store(&store, &"p".into(), &operator, TimestampMs(10), 100, 0).unwrap();
-    assert!(operator.items[0].decision.claimable_for_actor);
+    assert!(
+        operator.items[0].decision.claimable_for_actor,
+        "operator status decision: {:#?}",
+        operator.items[0]
+    );
+    assert!(operator.items[0].actions.is_none());
     assert_eq!(operator.project_revision, agent.project_revision);
     let unknown = ActorContext {
         actor_id: "unregistered".into(),

@@ -50,12 +50,14 @@ fn valid_inputs() -> DecisionInputs {
         clock: EvaluationClock::at(TimestampMs::from_millis(1_000))
             .with_next_change_at(TimestampMs::from_millis(2_000)),
         availability: Availability::Live,
+        dispatch_policy: boreal_domain::DispatchPolicy::Automatic,
         lifecycle: Fact::present(LifecycleInput {
             identity: subject(),
             lifecycle: PersistedLifecycle::Open,
             terminal_decision: None,
         }),
         authority: Fact::present(ActorAuthorityInput {
+            authority_root: "agent-1".into(),
             project_id: ProjectId::new("project-1"),
             role: ActorRole::Agent,
             principal: PrincipalBinding::Authenticated {
@@ -66,6 +68,7 @@ fn valid_inputs() -> DecisionInputs {
         requirements: Fact::present(PinnedRequirementsInput {
             proof: proof(Some(attempt.clone()), 1),
             requirements: vec![PinnedRequirement {
+                exception: None,
                 id: RequirementId::new("requirement-1"),
                 gate_id: GateId::new("verification"),
                 kind: GateKind::Verification,

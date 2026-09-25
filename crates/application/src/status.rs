@@ -9,14 +9,19 @@ use boreal_domain::actions::ActionDecision;
 use boreal_domain::work_model_v3::WorkSchedule;
 use boreal_domain::{
     dependency_satisfied, evaluate_rollup, evaluate_status, ActorContext, Attempt, CurrentAttempt,
-    DependencyPolicy, DerivedStatus, GateId, GateKind, GateRequirement, GateState, Revision,
-    RollupCounts, StatusContext, StatusDecision, TimestampMs, WorkId, WorkItem,
+    DecisionApiError, DependencyPolicy, DerivedStatus, GateId, GateKind, GateRequirement,
+    GateState, ReasonCode, Revision, RollupCounts, StatusContext, StatusDecision, TimestampMs,
+    WorkId, WorkItem,
 };
-use boreal_store::{SqliteStore, StatusActionFacts, StatusRecordDiagnostic, StatusWorkRecord};
+use boreal_store::{
+    SqliteStore, StatusActionFacts, StatusActionFactsOrigin, StatusRecordDiagnostic,
+    StatusWorkRecord,
+};
 use std::{collections::BTreeMap, fmt};
 
 pub const STATUS_CONTRACT_VERSION: &str = "boreal.work-status/2";
 pub const MAX_STATUS_ROWS: u64 = 1_000;
+pub const MAX_ATTENTION_QUEUE_ITEMS: usize = 20;
 
 /// Canonical read inputs for one work item. The store adapter may populate
 /// these from its read APIs; the derived fields are intentionally absent.
@@ -193,6 +198,7 @@ impl StatusActionContext {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusWork {
+    pub canonical_inputs: Option<boreal_domain::decision_inputs::DecisionInputs>,
     pub work: WorkItem,
     pub decision: StatusDecision,
     /// Server-derived action policy for the same snapshot as `decision`.
@@ -238,6 +244,13 @@ impl StatusWork {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusSnapshot {
+    pub project_actions: Vec<boreal_domain::work_model_v3::ProjectPlanningAction>,
+    /// Ordered physical row identities; permits byte-bounded pagination without losing corrupt rows.
+    pub page_work_ids: Vec<String>,
+    /// Physical rows consumed by this page; several diagnostics may refer to one row.
+    pub page_count: u64,
+    pub quarantined_count: u64,
+    pub project_diagnostics: Vec<StatusRecordDiagnostic>,
     pub contract_version: &'static str,
     pub project_id: boreal_domain::ProjectId,
     pub project_revision: Revision,
@@ -248,20 +261,54 @@ pub struct StatusSnapshot {
     pub counts: RollupCounts,
     pub items: Vec<StatusWork>,
     pub diagnostics: Vec<StatusRecordDiagnostic>,
+    /// Service-backed attention queues computed from the complete canonical
+    /// project read before pagination. Each queue carries an exact total and a
+    /// bounded first page so a dashboard page cannot hide actionable work.
+    pub attention_queues: AttentionQueues,
     pub next_status_change_at: Option<TimestampMs>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AttentionQueues {
+    pub review: AttentionQueue,
+    pub rejected_review: AttentionQueue,
+    pub expiry: AttentionQueue,
+    pub failed_execution: AttentionQueue,
+    pub operator_holds: AttentionQueue,
+    pub damaged_planning: AttentionQueue,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AttentionQueue {
+    pub total: u64,
+    pub items: Vec<AttentionQueueItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttentionQueueItem {
+    pub work_id: String,
+    pub title: String,
+    pub display_status: DerivedStatus,
+    pub reason_codes: Vec<String>,
+}
+
+impl AttentionQueue {
+    fn push(&mut self, item: AttentionQueueItem) {
+        self.total = self.total.saturating_add(1);
+        if self.items.len() < MAX_ATTENTION_QUEUE_ITEMS {
+            self.items.push(item);
+        }
+    }
 }
 
 impl StatusSnapshot {
     pub fn has_more(&self) -> bool {
-        self.offset
-            .saturating_add(self.items.len() as u64)
-            .saturating_add(self.diagnostics.len() as u64)
-            < self.total
+        self.offset.saturating_add(self.page_count) < self.total
     }
 
     pub fn next_offset(&self) -> Option<u64> {
         self.has_more()
-            .then(|| self.offset.saturating_add(self.items.len() as u64))
+            .then(|| self.offset.saturating_add(self.page_count))
     }
 }
 
@@ -364,13 +411,16 @@ pub fn project_status(
     }
 
     let mut all = Vec::with_capacity(inputs.len());
+    let mut all_actions = Vec::with_capacity(inputs.len());
+    let mut all_action_contexts = Vec::with_capacity(inputs.len());
+    let mut canonical_decisions_valid = Vec::with_capacity(inputs.len());
     for (index, input) in inputs.iter().enumerate() {
         let prerequisite_rows = prerequisites[index]
             .iter()
             .filter(|(_, policy)| matches!(policy, DependencyPolicy::ClosedOnly))
             .map(|(prerequisite_index, _)| inputs[*prerequisite_index].work.clone())
             .collect::<Vec<_>>();
-        let decision = evaluate_status(StatusContext {
+        let context = StatusContext {
             work: &input.work,
             prerequisites: &prerequisite_rows,
             current_attempt: input.current_attempt.as_ref(),
@@ -382,12 +432,113 @@ pub fn project_status(
             schedule: input.schedule,
             activation_at: input.activation_at,
             affected_dependents: &affected_dependents[index],
-        });
+        };
+        let canonical_inputs = input
+            .action_facts
+            .as_ref()
+            .and_then(|facts| facts.canonical_inputs.as_ref());
+        let (decision, actions, action_context, canonical_valid) = match canonical_inputs {
+            Some(facts) => match boreal_domain::evaluate_decision_actions(context, facts) {
+                Ok(view) => {
+                    let invalid_facts = facts.validate().err();
+                    let diagnostic = invalid_facts.as_ref().map(|diagnostics| {
+                        format!("canonical_decision_invalid_facts:{}", diagnostics.len())
+                    });
+                    (
+                        view.status,
+                        Some(view.actions),
+                        status_action_context(input, diagnostic.as_deref()),
+                        invalid_facts.is_none(),
+                    )
+                }
+                Err(error) => {
+                    let diagnostic = decision_api_diagnostic(&error);
+                    let safe_recovery = matches!(
+                        error,
+                        DecisionApiError::ContextMismatch(
+                            boreal_domain::DecisionContextMismatch::Dependencies
+                        )
+                    )
+                    .then(|| safe_recovery_actions(facts));
+                    (
+                        rejected_canonical_decision(
+                            &input.work,
+                            input.current_attempt.as_ref(),
+                            &input.gates,
+                            &affected_dependents[index],
+                            as_of,
+                            project_revision,
+                        ),
+                        // A damaged dependency projection invalidates ordinary
+                        // actions, but identity-bound inspect/repair descriptors
+                        // remain useful. Other context mismatches remain fully
+                        // unavailable until refreshed.
+                        safe_recovery,
+                        status_action_context(input, Some(&diagnostic)),
+                        false,
+                    )
+                }
+            },
+            // Compatibility is permitted only for rows explicitly sourced
+            // from the schema-v2 adapter (or pure callers with no store facts).
+            // A canonical row whose fact load failed must not be reinterpreted
+            // by the legacy evaluator as if its missing authority were benign.
+            None => match input.action_facts.as_ref().map(|facts| facts.origin) {
+                None | Some(StatusActionFactsOrigin::LegacyCompatibility) => (
+                    evaluate_status(context),
+                    None,
+                    status_action_context(input, None),
+                    true,
+                ),
+                Some(StatusActionFactsOrigin::Canonical | StatusActionFactsOrigin::Unavailable) => {
+                    let diagnostic = "canonical_decision_facts_unavailable";
+                    (
+                        rejected_canonical_decision(
+                            &input.work,
+                            input.current_attempt.as_ref(),
+                            &input.gates,
+                            &affected_dependents[index],
+                            as_of,
+                            project_revision,
+                        ),
+                        None,
+                        status_action_context(input, Some(diagnostic)),
+                        false,
+                    )
+                }
+            },
+        };
         all.push(decision);
+        all_actions.push(actions);
+        all_action_contexts.push(action_context);
+        canonical_decisions_valid.push(canonical_valid);
     }
 
+    let attention_queues = build_attention_queues(inputs, &all);
+
     let decisions = all.to_vec();
-    let counts = status2_rollup(&decisions);
+    let counts = if inputs.iter().any(|input| {
+        input
+            .action_facts
+            .as_ref()
+            .is_some_and(|facts| facts.canonical_inputs.is_some())
+    }) {
+        let healthy =
+            inputs
+                .iter()
+                .zip(decisions.iter())
+                .zip(canonical_decisions_valid.iter())
+                .filter(|((input, _), canonical_valid)| {
+                    input.action_facts.as_ref().is_some_and(|facts| {
+                        facts.integrity == boreal_store::StatusIntegrity::Valid
+                    }) && **canonical_valid
+                })
+                .map(|((_, decision), _)| decision.clone())
+                .collect::<Vec<_>>();
+        evaluate_rollup(&healthy)
+    } else {
+        status2_rollup(&decisions)
+    };
     let next_status_change_at = decisions
         .iter()
         .filter_map(|decision| decision.next_status_change_at)
@@ -405,28 +556,36 @@ pub fn project_status(
                 .iter()
                 .filter_map(|(prerequisite_index, policy)| {
                     let prerequisite = &inputs[*prerequisite_index];
-                    (!dependency_satisfied(*policy, &prerequisite.work)).then(|| {
+                    let canonical = inputs[index].action_facts.as_ref()
+                        .and_then(|facts| facts.canonical_inputs.as_ref())
+                        .and_then(|facts| facts.dependencies.as_present());
+                    let satisfied = canonical.map_or_else(
+                        || dependency_satisfied(*policy, &prerequisite.work),
+                        |facts| facts.edges.iter().find(|edge| edge.predecessor.work_id == prerequisite.work.id)
+                            .is_some_and(|edge| edge.waiver.is_some() || edge.outcome == boreal_domain::decision_inputs::DependencyOutcome::Closed),
+                    );
+                    (!satisfied).then(|| {
                         DependencyBlocker {
                             work_id: prerequisite.work.id.clone(),
                             display_status: status2_display_status(
                                 all[*prerequisite_index].display_status,
                             ),
-                            satisfies_default: dependency_satisfied(
-                                DependencyPolicy::ClosedOnly,
-                                &prerequisite.work,
+                            satisfies_default: canonical.map_or_else(
+                                || dependency_satisfied(DependencyPolicy::ClosedOnly, &prerequisite.work),
+                                |facts| facts.edges.iter().find(|edge| edge.predecessor.work_id == prerequisite.work.id)
+                                    .is_some_and(|edge| edge.outcome == boreal_domain::decision_inputs::DependencyOutcome::Closed),
                             ),
                             policy: *policy,
                         }
                     })
                 })
                 .collect::<Vec<_>>();
-            let (action_context, actions) =
-                status_actions(&inputs[index], actor, project_revision, as_of, &all[index]);
             StatusWork {
+                canonical_inputs: inputs[index].action_facts.as_ref().and_then(|facts| facts.canonical_inputs.clone()),
                 work: inputs[index].work.clone(),
                 decision: all[index].clone(),
-                actions,
-                action_context,
+                actions: all_actions[index].clone(),
+                action_context: all_action_contexts[index].clone(),
                 attempt: inputs[index].current_attempt.clone(),
                 gates: GateDiagnostics::from_input(&inputs[index]),
                 dependency_blockers,
@@ -435,6 +594,11 @@ pub fn project_status(
         .collect::<Vec<_>>();
 
     Ok(StatusSnapshot {
+        project_actions: Vec::new(),
+        page_work_ids: items.iter().map(|item| item.work.id.to_string()).collect(),
+        page_count: items.len() as u64,
+        quarantined_count: 0,
+        project_diagnostics: Vec::new(),
         contract_version: STATUS_CONTRACT_VERSION,
         project_id: project_id.clone(),
         project_revision,
@@ -445,8 +609,73 @@ pub fn project_status(
         counts,
         items,
         diagnostics: Vec::new(),
+        attention_queues,
         next_status_change_at,
     })
+}
+
+fn build_attention_queues(
+    inputs: &[StatusWorkInput],
+    decisions: &[StatusDecision],
+) -> AttentionQueues {
+    use boreal_domain::decision_inputs::{RecoveryReason, ReviewOutcome};
+
+    let mut queues = AttentionQueues::default();
+    for (input, decision) in inputs.iter().zip(decisions) {
+        let reasons = decision
+            .reason_codes
+            .iter()
+            .map(|reason| reason.stable_code())
+            .collect::<Vec<_>>();
+        let item = AttentionQueueItem {
+            work_id: input.work.id.to_string(),
+            title: input.work.title.clone(),
+            display_status: decision.display_status,
+            reason_codes: reasons,
+        };
+        if decision.display_status == DerivedStatus::AwaitingReview {
+            queues.review.push(item.clone());
+        }
+        let canonical = input
+            .action_facts
+            .as_ref()
+            .and_then(|facts| facts.canonical_inputs.as_ref());
+        if canonical
+            .and_then(|facts| facts.review.as_present())
+            .is_some_and(|review| {
+                matches!(
+                    review.outcome,
+                    ReviewOutcome::Rejected | ReviewOutcome::Returned | ReviewOutcome::Revoked
+                )
+            })
+            || decision.reason_codes.iter().any(|reason| {
+                matches!(reason, ReasonCode::ReviewRejected(_))
+            })
+        {
+            queues.rejected_review.push(item.clone());
+        }
+        if decision.display_status == DerivedStatus::ExpiredReview
+            || decision.reason_codes.iter().any(|reason| {
+                matches!(reason, ReasonCode::ExpiryReviewRequired)
+            })
+        {
+            queues.expiry.push(item.clone());
+        }
+        if canonical
+            .and_then(|facts| facts.recovery.as_present())
+            .is_some_and(|recovery| recovery.unresolved && recovery.reason == RecoveryReason::Failed)
+        {
+            queues.failed_execution.push(item.clone());
+        }
+        if input.work.hard_holds.iter().any(|hold| matches!(hold, ReasonCode::HardHold(_)))
+            || canonical
+                .and_then(|facts| facts.holds.as_present())
+                .is_some_and(|holds| holds.holds.iter().any(|hold| hold.active))
+        {
+            queues.operator_holds.push(item);
+        }
+    }
+    queues
 }
 
 pub use project_status as project_status_snapshot;
@@ -468,8 +697,33 @@ pub fn project_status_from_store(
     limit: u64,
     offset: u64,
 ) -> Result<StatusSnapshot, String> {
+    project_status_from_store_for_session(store, project_id, actor, None, as_of, limit, offset)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn project_status_from_store_for_session(
+    store: &SqliteStore,
+    project_id: &boreal_domain::ProjectId,
+    actor: &ActorContext,
+    session_id: Option<&str>,
+    as_of: TimestampMs,
+    limit: u64,
+    offset: u64,
+) -> Result<StatusSnapshot, String> {
+    if !(1..=MAX_STATUS_ROWS).contains(&limit) {
+        return Err(StatusProjectionError::InvalidPage {
+            limit,
+            max: MAX_STATUS_ROWS,
+        }
+        .to_string());
+    }
     let (persisted, authorized_actor) = store
-        .read_project_status_for_actor(project_id.as_str(), actor.actor_id.as_str())
+        .read_project_status_for_session(
+            project_id.as_str(),
+            actor.actor_id.as_str(),
+            session_id,
+            as_of,
+        )
         .map_err(|error| error.to_string())?;
     let mut diagnostics = persisted.diagnostics.clone();
     let mut inputs = Vec::with_capacity(persisted.works.len());
@@ -514,6 +768,25 @@ pub fn project_status_from_store(
             }
         })
         .collect::<Vec<_>>();
+    // Page physical work identities, not successful decodes or diagnostic count.
+    // This preserves one revision and exact totals even when an entire page is damaged.
+    let page_ids = persisted
+        .ordered_work_ids
+        .iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let valid_before = persisted
+        .ordered_work_ids
+        .iter()
+        .take(offset as usize)
+        .filter(|id| known_work.contains(&WorkId::new((*id).clone())))
+        .count() as u64;
+    let valid_in_page = page_ids
+        .iter()
+        .filter(|id| known_work.contains(&WorkId::new((*id).clone())))
+        .count() as u64;
     let mut snapshot = project_status(
         project_id,
         &authorized_actor,
@@ -521,16 +794,76 @@ pub fn project_status_from_store(
         Revision(persisted.revision.0),
         &inputs,
         &dependencies,
-        limit,
-        offset,
+        valid_in_page.max(1),
+        valid_before,
     )
     .map_err(|error| error.to_string())?;
+    if valid_in_page == 0 {
+        snapshot.items.clear();
+    }
+    snapshot.project_actions = boreal_domain::work_model_v3::project_planning_actions(
+        project_id,
+        &authorized_actor,
+        persisted
+            .caller_session_id
+            .as_ref()
+            .map(|value| boreal_domain::SessionId::new(value.clone()))
+            .as_ref(),
+        snapshot.project_revision,
+    );
+    snapshot.limit = limit;
+    snapshot.offset = offset;
+    snapshot.page_work_ids = persisted
+        .ordered_work_ids
+        .iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .cloned()
+        .collect();
+    snapshot.page_count = page_ids.len() as u64;
     snapshot.total = persisted.total;
-    snapshot.diagnostics = diagnostics;
+    let all_ids = persisted
+        .ordered_work_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    snapshot.quarantined_count = diagnostics
+        .iter()
+        .filter(|diagnostic| all_ids.contains(&diagnostic.work_id))
+        .map(|diagnostic| &diagnostic.work_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64;
+    snapshot.project_diagnostics = diagnostics
+        .iter()
+        .filter(|diagnostic| !all_ids.contains(&diagnostic.work_id))
+        .cloned()
+        .collect();
+    for diagnostic in &diagnostics {
+        if is_planning_diagnostic(&diagnostic.code) {
+            snapshot.attention_queues.damaged_planning.push(AttentionQueueItem {
+                work_id: diagnostic.work_id.clone(),
+                title: diagnostic.title.clone().unwrap_or_default(),
+                display_status: DerivedStatus::Blocked,
+                reason_codes: vec![format!("integrity:{}", diagnostic.code)],
+            });
+        }
+    }
+    snapshot.diagnostics = diagnostics
+        .into_iter()
+        .filter(|diagnostic| page_ids.contains(&diagnostic.work_id))
+        .collect();
     Ok(snapshot)
 }
 
-fn status_input_from_store_row(row: &StatusWorkRecord) -> Result<StatusWorkInput, String> {
+fn is_planning_diagnostic(code: &str) -> bool {
+    let code = code.to_ascii_lowercase();
+    code.contains("cycle")
+        || code.contains("assignment")
+        || code.contains("planning")
+        || code.contains("dependency")
+        || code.contains("corrupt")
+}
+
+pub(crate) fn status_input_from_store_row(row: &StatusWorkRecord) -> Result<StatusWorkInput, String> {
     let mut input = status_input(row.work.clone());
     input.retry_not_before = row
         .status_retry_not_before()
@@ -578,62 +911,119 @@ fn status2_rollup(decisions: &[StatusDecision]) -> RollupCounts {
     counts
 }
 
-/// Bridge the legacy status rows to the domain-owned action evaluator.
-///
-/// The v2 status store currently exposes a project snapshot but not the
-/// separate entity/proof identity rows required by the production action
-/// contract. Do not manufacture sentinel identity or proof values here. The
-/// optional action set becomes populated only when the store can supply the
-/// complete v3 context; until then the compatibility read remains useful for
-/// discovery and mutation routes keep their own canonical authorization.
-fn status_actions(
+/// Preserve the store's action-context observations and attach an explicit
+/// diagnostic when the canonical status/action pair could not be established.
+fn status_action_context(
     input: &StatusWorkInput,
-    _actor: &ActorContext,
-    _project_revision: Revision,
-    _as_of: TimestampMs,
-    _decision: &StatusDecision,
-) -> (StatusActionContext, Option<ActionDecision>) {
+    decision_diagnostic: Option<&str>,
+) -> StatusActionContext {
     if let Some(facts) = &input.action_facts {
-        let integrity = match facts.integrity {
-            boreal_store::StatusIntegrity::Valid => "valid",
-            boreal_store::StatusIntegrity::Degraded => "degraded",
-            boreal_store::StatusIntegrity::Quarantined => "quarantined",
+        let integrity = if decision_diagnostic.is_some() {
+            "quarantined"
+        } else {
+            match facts.integrity {
+                boreal_store::StatusIntegrity::Valid => "valid",
+                boreal_store::StatusIntegrity::Degraded => "degraded",
+                boreal_store::StatusIntegrity::Quarantined => "quarantined",
+            }
         };
-        return (
-            StatusActionContext::FactsRead {
-                entity_revision: facts.entity_revision,
-                proof_revision: facts.proof_revision,
-                session_id: facts.authenticated_session_id.clone(),
-                integrity,
-                missing_facts: facts.missing_facts.clone(),
-            },
-            None,
-        );
+        let mut missing_facts = facts.missing_facts.clone();
+        if let Some(diagnostic) = decision_diagnostic {
+            missing_facts.push(diagnostic.to_owned());
+        }
+        return StatusActionContext::FactsRead {
+            entity_revision: facts.entity_revision,
+            proof_revision: facts.proof_revision,
+            session_id: facts.authenticated_session_id.clone(),
+            integrity,
+            missing_facts,
+        };
     }
-    (
-        StatusActionContext::Unavailable {
-            missing_facts: vec!["entity_revision", "proof_identity", "authenticated_session"],
-        },
-        None,
-    )
+    StatusActionContext::Unavailable {
+        missing_facts: vec!["entity_revision", "proof_identity", "authenticated_session"],
+    }
+}
+
+fn decision_api_diagnostic(error: &DecisionApiError) -> String {
+    match error {
+        DecisionApiError::MissingFact(fact) => {
+            format!("canonical_decision_missing_fact:{fact:?}")
+        }
+        DecisionApiError::InvalidFacts(diagnostics) => {
+            format!("canonical_decision_invalid_facts:{}", diagnostics.len())
+        }
+        DecisionApiError::ContextMismatch(field) => {
+            format!("canonical_decision_context_mismatch:{field:?}")
+        }
+    }
+}
+
+fn safe_recovery_actions(facts: &boreal_domain::DecisionInputs) -> ActionDecision {
+    use boreal_domain::decision_inputs::{IntegrityDiagnostic, IntegrityDiagnosticCode};
+
+    let mut quarantined = facts.clone();
+    quarantined.integrity.level = boreal_domain::decision_inputs::IntegrityLevel::Quarantined;
+    if quarantined.integrity.diagnostics.is_empty() {
+        quarantined.integrity.diagnostics.push(IntegrityDiagnostic {
+            scope: quarantined.integrity.scope.clone(),
+            code: IntegrityDiagnosticCode::Corrupt,
+        });
+    }
+    let reasons = [ReasonCode::HardHold(
+        "canonical_decision_context_mismatch".to_owned(),
+    )];
+    boreal_domain::actions::evaluate_actions(&boreal_domain::actions::ActionEvaluationInput::new(
+        &quarantined,
+        DerivedStatus::Blocked,
+        &reasons,
+    ))
+}
+
+fn rejected_canonical_decision(
+    work: &WorkItem,
+    attempt: Option<&Attempt>,
+    gates: &[GateRequirement],
+    affected_dependents: &[WorkId],
+    as_of: TimestampMs,
+    project_revision: Revision,
+) -> StatusDecision {
+    let reason = ReasonCode::HardHold("canonical_decision_rejected".to_owned());
+    StatusDecision {
+        work_id: work.id.clone(),
+        project_revision,
+        as_of,
+        next_status_change_at: None,
+        display_status: DerivedStatus::Blocked,
+        primary_reason: reason.clone(),
+        reason_codes: vec![reason],
+        claimable_for_actor: false,
+        next_action: None,
+        current_attempt: attempt.map(|attempt| CurrentAttempt {
+            attempt_id: attempt.attempt_id.clone(),
+            fence: attempt.fence,
+            phase: attempt.phase,
+        }),
+        gate_gaps: gates
+            .iter()
+            .filter(|gate| gate.required && gate.state != GateState::Satisfied)
+            .map(|gate| gate.id.clone())
+            .collect(),
+        affected_dependents: affected_dependents.to_vec(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boreal_domain::{AcceptanceProfile, ActorId, AttemptId, Fence, ReasonCode, WorkKind};
+    use boreal_domain::{
+        decision_inputs::*, AcceptanceProfile, ActorId, AttemptId, ConfigIdentity, Fence,
+        PersistedLifecycle, ProfileId, ReasonCode, SessionId, SourceVersionId, WorkKind,
+    };
 
     fn actor() -> ActorContext {
         ActorContext {
             actor_id: ActorId::new("agent"),
             role: boreal_domain::ActorRole::Agent,
-        }
-    }
-
-    fn operator() -> ActorContext {
-        ActorContext {
-            actor_id: ActorId::new("operator"),
-            role: boreal_domain::ActorRole::Operator,
         }
     }
 
@@ -643,6 +1033,309 @@ mod tests {
 
     fn input(id: &str) -> StatusWorkInput {
         StatusWorkInput::new(work(id))
+    }
+
+    fn canonical_facts(work_id: &str) -> boreal_domain::DecisionInputs {
+        let project_id = boreal_domain::ProjectId::new("project");
+        let work_id = WorkId::new(work_id);
+        let subject =
+            EntityIdentity::new(project_id.clone(), work_id.clone(), EntityRevision::new(7));
+        let profile = ProfileIdentity::new(
+            ProfileId::new("focused"),
+            "1",
+            ContentDigest::new("sha256:status-test-profile"),
+        );
+        let proof = ProofIdentity::new(
+            subject.clone(),
+            ProofRevision::new(11),
+            None,
+            SourceVersionId::new("source-1"),
+            ConfigIdentity::new("config-1"),
+            profile,
+            "policy-1",
+        );
+        let actor_id = ActorId::new("agent");
+        let fact_subject = FactSubject::work(project_id.clone(), work_id.clone());
+        boreal_domain::DecisionInputs {
+            subject: subject.clone(),
+            snapshot_revision: Revision(7),
+            clock: EvaluationClock::at(TimestampMs(10)),
+            availability: Availability::Live,
+            dispatch_policy: boreal_domain::DispatchPolicy::Automatic,
+            lifecycle: Fact::present(LifecycleInput {
+                identity: subject,
+                lifecycle: PersistedLifecycle::Open,
+                terminal_decision: None,
+            }),
+            authority: Fact::present(ActorAuthorityInput {
+                project_id: project_id.clone(),
+                authority_root: actor_id.clone(),
+                role: boreal_domain::ActorRole::Agent,
+                principal: PrincipalBinding::Authenticated {
+                    actor_id: actor_id.clone(),
+                },
+                session_id: Some(SessionId::new("session-1")),
+            }),
+            requirements: Fact::present(PinnedRequirementsInput {
+                proof,
+                requirements: Vec::new(),
+                review_policy: ReviewRequirementPolicy::NotRequired,
+            }),
+            dependencies: Fact::present(DependencyOutcomesInput { edges: Vec::new() }),
+            holds: Fact::present(HoldsInput { holds: Vec::new() }),
+            execution: Fact::optional_absent(FactKind::Execution, fact_subject.clone()),
+            submission: Fact::optional_absent(FactKind::Submission, fact_subject.clone()),
+            review: Fact::optional_absent(FactKind::Review, fact_subject.clone()),
+            recovery: Fact::optional_absent(FactKind::Recovery, fact_subject),
+            integrity: IntegrityInput {
+                scope: IntegrityScope::work(project_id, work_id),
+                level: IntegrityLevel::Valid,
+                diagnostics: Vec::new(),
+            },
+            permitted_actions: PermittedActionsInput::allowing([
+                PermittedAction::Inspect,
+                PermittedAction::Claim,
+                PermittedAction::Repair,
+            ]),
+        }
+    }
+
+    fn input_with_canonical_facts(id: &str) -> StatusWorkInput {
+        let mut input = input(id);
+        input.work.acceptance_profile = AcceptanceProfile {
+            id: ProfileId::new("focused"),
+            version: "1".to_owned(),
+            gates: Vec::new(),
+        };
+        input.gates.clear();
+        input.action_facts = Some(StatusActionFacts {
+            origin: StatusActionFactsOrigin::Canonical,
+            canonical_inputs: Some(canonical_facts(id)),
+            entity_revision: Some(7),
+            proof_revision: Some(11),
+            authenticated_session_id: Some("session-1".to_owned()),
+            source_version_id: Some("source-1".to_owned()),
+            config_identity: Some("config-1".to_owned()),
+            integrity: boreal_store::StatusIntegrity::Valid,
+            missing_facts: Vec::new(),
+        });
+        input
+    }
+
+    #[test]
+    fn canonical_projection_uses_one_paired_status_and_action_decision() {
+        let snapshot = project_status(
+            &"project".into(),
+            &actor(),
+            TimestampMs(10),
+            Revision(7),
+            &[input_with_canonical_facts("paired")],
+            &[],
+            10,
+            0,
+        )
+        .unwrap();
+
+        let item = &snapshot.items[0];
+        let actions = item.actions.as_ref().expect("paired action descriptors");
+        assert_eq!(item.decision.display_status, DerivedStatus::Ready);
+        assert_eq!(
+            item.decision.claimable_for_actor,
+            actions.allows(boreal_domain::actions::ActionKind::Claim)
+        );
+        assert!(item.claimable_for_actor());
+        assert_eq!(item.action_context.state(), "available");
+    }
+
+    #[test]
+    fn canonical_context_mismatch_is_diagnostic_and_denies_actions_without_legacy_fallback() {
+        let mut input = input_with_canonical_facts("mismatch");
+        input
+            .action_facts
+            .as_mut()
+            .unwrap()
+            .canonical_inputs
+            .as_mut()
+            .unwrap()
+            .snapshot_revision = Revision(8);
+
+        let snapshot = project_status(
+            &"project".into(),
+            &actor(),
+            TimestampMs(10),
+            Revision(7),
+            &[input],
+            &[],
+            10,
+            0,
+        )
+        .unwrap();
+
+        let item = &snapshot.items[0];
+        assert_eq!(item.decision.display_status, DerivedStatus::Blocked);
+        assert_eq!(
+            item.decision.primary_reason.stable_code(),
+            "canonical_decision_rejected"
+        );
+        assert!(!item.decision.claimable_for_actor);
+        assert!(item.actions.is_none());
+        assert_eq!(item.action_context.state(), "partial");
+        assert!(matches!(
+            &item.action_context,
+            StatusActionContext::FactsRead {
+                integrity: "quarantined",
+                missing_facts,
+                ..
+            } if missing_facts.iter().any(|fact| fact == "canonical_decision_context_mismatch:ProjectRevision")
+        ));
+    }
+
+    #[test]
+    fn unavailable_canonical_facts_do_not_fall_back_to_legacy_readiness() {
+        let mut input = input("unavailable-canonical");
+        input.action_facts = Some(StatusActionFacts::unavailable());
+
+        let snapshot = project_status(
+            &"project".into(),
+            &actor(),
+            TimestampMs(10),
+            Revision(7),
+            &[input],
+            &[],
+            10,
+            0,
+        )
+        .unwrap();
+
+        let item = &snapshot.items[0];
+        assert_eq!(item.decision.display_status, DerivedStatus::Blocked);
+        assert!(!item.claimable_for_actor());
+        assert!(item.actions.is_none());
+        assert!(matches!(
+            &item.action_context,
+            StatusActionContext::FactsRead {
+                integrity: "quarantined",
+                missing_facts,
+                ..
+            } if missing_facts.iter().any(|fact| fact == "canonical_decision_facts_unavailable")
+        ));
+    }
+
+    #[test]
+    fn dependency_context_mismatch_keeps_only_safe_recovery_actions() {
+        let mut input = input_with_canonical_facts("dependency-mismatch");
+        let operator = ActorContext {
+            actor_id: ActorId::new("agent"),
+            role: boreal_domain::ActorRole::Operator,
+        };
+        let facts = input
+            .action_facts
+            .as_mut()
+            .unwrap()
+            .canonical_inputs
+            .as_mut()
+            .unwrap();
+        if let Fact::Present(authority) = &mut facts.authority {
+            authority.role = boreal_domain::ActorRole::Operator;
+        }
+        facts.dependencies = Fact::present(DependencyOutcomesInput {
+            edges: vec![DependencyOutcomeInput {
+                id: DependencyId::new("edge-missing-prerequisite"),
+                predecessor: EntityIdentity::new(
+                    "project".into(),
+                    WorkId::new("unreadable-prerequisite"),
+                    EntityRevision::new(1),
+                ),
+                successor: facts.subject.clone(),
+                policy: DependencyPolicy::ClosedOnly,
+                outcome: DependencyOutcome::Open,
+                outcome_revision: EntityRevision::new(1),
+                waiver: None,
+            }],
+        });
+
+        let snapshot = project_status(
+            &"project".into(),
+            &operator,
+            TimestampMs(10),
+            Revision(7),
+            &[input],
+            &[],
+            10,
+            0,
+        )
+        .unwrap();
+
+        let item = &snapshot.items[0];
+        let actions = item.actions.as_ref().expect("safe recovery descriptors");
+        assert_eq!(item.decision.display_status, DerivedStatus::Blocked);
+        assert!(actions.allows(boreal_domain::actions::ActionKind::Inspect));
+        assert!(actions.allows(boreal_domain::actions::ActionKind::Repair));
+        assert!(!actions.allows(boreal_domain::actions::ActionKind::Claim));
+        assert!(!item.claimable_for_actor());
+    }
+
+    #[test]
+    fn invalid_canonical_facts_are_quarantined_instead_of_split_evaluation() {
+        let mut input = input_with_canonical_facts("invalid-facts");
+        let operator = ActorContext {
+            actor_id: ActorId::new("agent"),
+            role: boreal_domain::ActorRole::Operator,
+        };
+        if let Fact::Present(authority) = &mut input
+            .action_facts
+            .as_mut()
+            .expect("canonical action facts")
+            .canonical_inputs
+            .as_mut()
+            .expect("canonical decision inputs")
+            .authority
+        {
+            authority.role = boreal_domain::ActorRole::Operator;
+        }
+        input
+            .action_facts
+            .as_mut()
+            .unwrap()
+            .canonical_inputs
+            .as_mut()
+            .unwrap()
+            .permitted_actions
+            .denied
+            .push(DeniedAction {
+                action: PermittedAction::Claim,
+                reason: ActionDenialReason::PolicyDenied,
+            });
+
+        let snapshot = project_status(
+            &"project".into(),
+            &operator,
+            TimestampMs(10),
+            Revision(7),
+            &[input],
+            &[],
+            10,
+            0,
+        )
+        .unwrap();
+
+        let item = &snapshot.items[0];
+        assert_eq!(item.decision.display_status, DerivedStatus::Blocked);
+        assert!(!item.claimable_for_actor());
+        let actions = item
+            .actions
+            .as_ref()
+            .expect("safe repair actions remain visible");
+        assert!(actions.allows(boreal_domain::actions::ActionKind::Repair));
+        assert!(!actions.allows(boreal_domain::actions::ActionKind::Claim));
+        assert!(matches!(
+            &item.action_context,
+            StatusActionContext::FactsRead {
+                integrity: "quarantined",
+                missing_facts,
+                ..
+            } if missing_facts.iter().any(|fact| fact == "canonical_decision_invalid_facts:1")
+        ));
     }
 
     #[test]
@@ -737,7 +1430,10 @@ mod tests {
                 gates: gate_rows,
                 missing: Vec::new(),
             },
-            action_facts: boreal_store::StatusActionFacts::unavailable(),
+            // This isolated row fixture exercises the status-only compatibility
+            // projection. Canonical timing/context consistency is covered by
+            // the paired domain API regression.
+            action_facts: boreal_store::StatusActionFacts::legacy_compatibility(),
         };
         let input = status_input_from_store_row(&row).expect("canonical planning facts decode");
         assert_eq!(input.schedule, row.schedule);
@@ -796,7 +1492,7 @@ mod tests {
     fn legacy_claimability_remains_discovery_hint_when_action_context_is_unavailable() {
         let snapshot = project_status(
             &"project".into(),
-            &operator(),
+            &actor(),
             TimestampMs(10),
             Revision(7),
             &[input("ordinary")],

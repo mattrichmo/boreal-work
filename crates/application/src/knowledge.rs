@@ -6,18 +6,20 @@
 //!
 //! * source capture uses the source catalog's durable operation record;
 //! * memory publication uses the Git manifest and expected-base identity;
-//! * migration is validated and staged in memory until a store materializer
-//!   is available, and never pretends that staging changed live work.
+//! * migration preserves the original import as an immutable source, then
+//!   applies safe draft/open work and closed-only dependency rows through one
+//!   store-owned transaction. Historical attempts and proof remain archived
+//!   and do not gain v2 authority.
 //!
 //! Every result carries a request digest and provenance. A caller can persist
 //! that envelope in its operation table and safely reconcile a lost response.
 //! This module deliberately performs no direct SQL.
 
-use std::{fmt, path::Path};
+use std::{collections::BTreeSet, fmt, path::Path};
 
 use boreal_memory::{
-    publication_identity, rebuild_index, Citation as MemoryCitation, Draft, DraftState, IndexError,
-    MemoryError, MemoryIndex, PublicationJobAcquisition, PublicationJobOutcome, PublicationJobPort,
+    rebuild_index, Citation as MemoryCitation, Draft, DraftState, IndexError, MemoryError,
+    MemoryIndex, PublicationJobAcquisition, PublicationJobOutcome, PublicationJobPort,
     PublicationJobReadback, PublicationJobRecord, PublicationJobRequest, PublicationJobState,
     PublicationReceipt, PublicationState, PublishError, Publisher, RetrievalQuery,
     RetrievalResponse,
@@ -33,7 +35,7 @@ use boreal_source::{
     RetrievalResponse as SourceRetrievalResponse, SourceCaptureReceipt, SourceCaptureRequest,
     SourceCatalog, SourceError, SourceVersion,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 use boreal_store::{
     identity::IdentityContext,
@@ -55,6 +57,8 @@ pub enum KnowledgeDurability {
     SourceCatalog,
     /// A reviewed memory entry was committed to the managed Git repository.
     GitCommit,
+    /// The immutable draft/review or publication admission is persisted in SQLite.
+    CanonicalStore,
     /// The operation only produced an in-memory application result.
     InMemory,
     /// The operation produced a validated staging document, but no live store
@@ -263,6 +267,9 @@ pub struct MigrationVerificationResult {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MigrationApplyState {
+    /// The safe work graph was applied atomically and the raw import remains
+    /// available as a registered immutable project source.
+    Applied,
     /// The validated document exists only in the returned staging result.
     StagedOnly,
     /// The source contained unsupported or ambiguous records and therefore
@@ -278,6 +285,12 @@ pub struct MigrationApplyResult {
     pub state: MigrationApplyState,
     pub document: Option<MigrationDocument>,
     pub loss_ledger: Vec<boreal_migration::LossLedgerEntry>,
+    pub source_version_id: Option<String>,
+    pub revision: Option<u64>,
+    pub replayed: bool,
+    pub imported_work_count: usize,
+    pub imported_dependency_count: usize,
+    pub drafted_terminal_work_ids: Vec<String>,
     /// Explicit rather than implicit: this adapter does not claim to have
     /// applied rows to SQLite.
     pub unsupported_capabilities: Vec<String>,
@@ -466,6 +479,37 @@ impl<'a> KnowledgeApplication<'a> {
         actor_id: &str,
         captured_at: &str,
     ) -> Result<SourceStoreRegistrationResult, KnowledgeError> {
+        self.register_captured_source_inner(store, source, operation, actor_id, captured_at, None)
+    }
+
+    pub fn register_captured_source_at_revision(
+        &self,
+        store: &SqliteStore,
+        source: &SourceVersion,
+        operation: &KnowledgeOperation,
+        actor_id: &str,
+        captured_at: &str,
+        expected_revision: u64,
+    ) -> Result<SourceStoreRegistrationResult, KnowledgeError> {
+        self.register_captured_source_inner(
+            store,
+            source,
+            operation,
+            actor_id,
+            captured_at,
+            Some(expected_revision),
+        )
+    }
+
+    fn register_captured_source_inner(
+        &self,
+        store: &SqliteStore,
+        source: &SourceVersion,
+        operation: &KnowledgeOperation,
+        actor_id: &str,
+        captured_at: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<SourceStoreRegistrationResult, KnowledgeError> {
         require_operation(&operation.operation_id)?;
         require_project(&source.project_id)?;
         let availability = match source.availability {
@@ -487,8 +531,7 @@ impl<'a> KnowledgeApplication<'a> {
                 "captured_at": captured_at,
             }),
         );
-        let stored: SourceVersionRegistrationResult =
-            store.register_source_version(&SourceVersionRegistrationInput {
+        let registration_input = SourceVersionRegistrationInput {
                 operation_id: operation.operation_id.clone(),
                 project_id: source.project_id.clone(),
                 actor_id: actor_id.to_owned(),
@@ -506,7 +549,12 @@ impl<'a> KnowledgeApplication<'a> {
                 availability: availability.to_owned(),
                 citation_json: "[]".to_owned(),
                 request_digest: request_digest.clone(),
-            })?;
+            };
+        let stored: SourceVersionRegistrationResult = match expected_revision {
+            Some(expected) => store
+                .register_source_version_at_revision(&registration_input, expected)?,
+            None => store.register_source_version(&registration_input)?,
+        };
         Ok(SourceStoreRegistrationResult {
             operation: KnowledgeOperation {
                 operation_id: operation.operation_id.clone(),
@@ -689,8 +737,35 @@ impl<'a> KnowledgeApplication<'a> {
                 "only an accepted memory review may be published".to_owned(),
             ));
         }
-        let expected_identity = publication_identity(&reviewed.draft, &input.operation_id)
-            .map_err(PublishError::from)?;
+        let mut expected_identity =
+            publisher.publication_request_identity(&reviewed.draft, &input.operation_id)?;
+        if let Some((manifest, content)) =
+            store.memory_publication_plan(&identity.project_id, &input.operation_id)?
+        {
+            expected_identity.manifest_identity = manifest;
+            expected_identity.content_digest = content;
+        }
+        if store.is_canonical_production() {
+            let (stored, decision) = store
+                .approved_memory_draft(&identity.project_id, &reviewed.operation.operation_id)?;
+            if stored.entry_id != reviewed.draft.entry_id
+                || stored.title != reviewed.draft.title
+                || stored.body != reviewed.draft.body
+                || decision.actor_id != reviewed.reviewer_id
+                || stored.citations_json != citations_json(&reviewed.draft.citations).to_string()
+            {
+                return Err(KnowledgeError::Invalid(
+                    "supplied memory result differs from durable reviewed content".into(),
+                ));
+            }
+            store.validate_memory_publication_binding(
+                &identity.project_id,
+                &input.operation_id,
+                &reviewed.operation.operation_id,
+                &publisher.root().path().to_string_lossy(),
+                input.expected_manifest_identity.as_deref(),
+            )?;
+        }
         let memory_root_identity = publisher.root().path().to_string_lossy().into_owned();
         let source_identity = input.source_identity.clone().or_else(|| {
             reviewed
@@ -709,12 +784,10 @@ impl<'a> KnowledgeApplication<'a> {
                 "memory_root_identity": memory_root_identity,
                 "expected_manifest_identity": input.expected_manifest_identity,
                 "review_operation_id": reviewed.operation.operation_id,
+                "expected_revision": store.operation(&input.operation_id)?.and_then(|operation|operation.expected_revision),
                 "actor_id": input.actor_id,
                 "session_id": input.session_id,
                 "deadline": input.deadline,
-                "created_at": input.created_at,
-                "started_at": input.started_at,
-                "observed_at": input.observed_at,
                 "source_identity": source_identity,
                 "config_identity": input.config_identity,
             }),
@@ -998,8 +1071,261 @@ impl<'a> KnowledgeApplication<'a> {
             },
             document,
             loss_ledger: dry_run.loss_ledger.clone(),
+            source_version_id: None,
+            revision: None,
+            replayed: false,
+            imported_work_count: 0,
+            imported_dependency_count: 0,
+            drafted_terminal_work_ids: Vec::new(),
             unsupported_capabilities: vec![
                 "live_store_materialization_requires_store_adapter".to_owned()
+            ],
+        })
+    }
+
+    /// Captures a source migration document, then atomically imports its safe
+    /// work graph into the selected project. Historical attempts, evidence,
+    /// and terminal outcomes remain in the immutable source document and are
+    /// never promoted into accepted v2 proof.
+    pub fn apply_migration_to_store(
+        &self,
+        store: &SqliteStore,
+        project_id: &str,
+        actor_id: &str,
+        operation_id: &str,
+        expected_project_revision: u64,
+        input: &str,
+        now: &str,
+    ) -> Result<MigrationApplyResult, KnowledgeError> {
+        require_project(project_id)?;
+        require_operation(operation_id)?;
+        if actor_id.trim().is_empty() || now.trim().is_empty() {
+            return Err(KnowledgeError::Invalid(
+                "migration apply requires actor and timestamp".to_owned(),
+            ));
+        }
+        let (role, _) = store
+            .principal_authority(project_id, actor_id)
+            .map_err(KnowledgeError::Store)?;
+        if role != boreal_domain::ActorRole::Operator {
+            return Err(KnowledgeError::Invalid(
+                "migration apply requires project operator authority".to_owned(),
+            ));
+        }
+
+        let dry_run = self.migration_dry_run(format!("{operation_id}:plan"), input)?;
+        if !dry_run.ready {
+            return Ok(self.apply_migration(&dry_run)?);
+        }
+        let mut document = match &dry_run.kind {
+            MigrationPlanKind::Legacy { plan } => plan.apply().map_err(|error| {
+                KnowledgeError::Invalid(format!("legacy migration materialization failed: {error}"))
+            })?,
+            MigrationPlanKind::Current { report } => report.document.clone().ok_or_else(|| {
+                KnowledgeError::Invalid("ready migration has no document".to_owned())
+            })?,
+        };
+        document = document.canonicalized();
+        document.validate().map_err(|error| {
+            KnowledgeError::Invalid(format!("migration document is invalid: {error}"))
+        })?;
+        if document.project.id != project_id {
+            return Err(KnowledgeError::Invalid(
+                "migration source project must match the selected project".to_owned(),
+            ));
+        }
+        let verification = self.verify_migration(&dry_run)?;
+        if !verification.ready || verification.document_fingerprint.is_none() {
+            return Err(KnowledgeError::Invalid(
+                "migration verification did not produce a durable document identity".to_owned(),
+            ));
+        }
+
+        let existing_operation = store.operation(operation_id).map_err(KnowledgeError::Store)?;
+        if existing_operation.as_ref().is_some_and(|operation| {
+            operation.command != "migration.apply"
+                || operation.project_id != project_id
+                || operation.actor_id != actor_id
+        }) {
+            return Err(KnowledgeError::Invalid(
+                "migration operation ID is already bound to another command or project".into(),
+            ));
+        }
+        let capture_operation_id = format!("{operation_id}:source");
+        let existing_capture_operation = store
+            .operation(&capture_operation_id)
+            .map_err(KnowledgeError::Store)?;
+        if existing_capture_operation.as_ref().is_some_and(|operation| {
+            operation.command != "source.register"
+                || operation.project_id != project_id
+                || operation.actor_id != actor_id
+        }) {
+            return Err(KnowledgeError::Invalid(
+                "migration source operation ID is already bound to another request".into(),
+            ));
+        }
+        let revision_before_capture = store
+            .project_revision(project_id)
+            .map_err(KnowledgeError::Store)?
+            .0;
+        let expected_before_capture = if existing_operation.is_none() {
+            existing_capture_operation
+                .as_ref()
+                .map(|operation| operation.revision)
+                .unwrap_or(expected_project_revision)
+        } else {
+            revision_before_capture
+        };
+        if existing_operation.is_none() && revision_before_capture != expected_before_capture {
+            return Err(KnowledgeError::Store(boreal_store::StoreError::StaleRevision {
+                expected: expected_before_capture,
+                actual: revision_before_capture,
+            }));
+        }
+        let capture = self.capture_source(SourceCaptureInput {
+            operation_id: capture_operation_id,
+            project_id: project_id.to_owned(),
+            origin: format!("legacy-migration:{}", dry_run.source.source_format),
+            media_type: "application/json".to_owned(),
+            bytes: input.as_bytes().to_vec(),
+        })?;
+        let captured_at = store
+            .source_version(project_id, &capture.source.source_version_id)
+            .map_err(KnowledgeError::Store)?
+            .map_or_else(|| now.to_owned(), |source| source.captured_at);
+        let source_registration = self.register_captured_source(
+            store,
+            &capture.source,
+            &capture.operation,
+            actor_id,
+            &captured_at,
+        )?;
+
+        let source_operation = store
+            .operation(&capture.operation.operation_id)
+            .map_err(KnowledgeError::Store)?
+            .ok_or_else(|| {
+                KnowledgeError::Invalid(
+                    "migration source registration has no operation readback".to_owned(),
+                )
+            })?;
+        let expected_revision = if let Some(revision) = existing_operation
+            .as_ref()
+            .and_then(|operation| operation.expected_revision)
+        {
+            revision
+        } else if existing_capture_operation.is_some() {
+            source_operation.revision
+        } else {
+            let expected_after_source = expected_before_capture
+                .checked_add(u64::from(
+                    source_operation.outcome == boreal_store::OperationOutcome::Changed,
+                ))
+                .ok_or_else(|| {
+                    KnowledgeError::Invalid("project revision overflow during migration".into())
+                })?;
+            if source_registration.revision != expected_after_source {
+                return Err(KnowledgeError::Store(boreal_store::StoreError::StaleRevision {
+                    expected: expected_after_source,
+                    actual: source_registration.revision,
+                }));
+            }
+            expected_after_source
+        };
+
+        let mut drafted_terminal_work_ids = Vec::new();
+        let mut work_items = document
+            .work
+            .iter()
+            .map(|record| {
+                use boreal_domain::{PersistedLifecycle, WorkKind as DomainWorkKind};
+                let kind = match record.kind {
+                    boreal_migration::WorkKind::Milestone => DomainWorkKind::Milestone,
+                    boreal_migration::WorkKind::Sprint => DomainWorkKind::Sprint,
+                    boreal_migration::WorkKind::Task => DomainWorkKind::Task,
+                };
+                let lifecycle = match record.lifecycle {
+                    boreal_migration::Lifecycle::Draft => PersistedLifecycle::Draft,
+                    boreal_migration::Lifecycle::Open => PersistedLifecycle::Open,
+                    boreal_migration::Lifecycle::Closed
+                    | boreal_migration::Lifecycle::Cancelled => {
+                        drafted_terminal_work_ids.push(record.id.clone());
+                        PersistedLifecycle::Draft
+                    }
+                };
+                let mut work = boreal_domain::WorkItem::new(
+                    boreal_domain::ProjectId::new(project_id),
+                    boreal_domain::WorkId::new(record.id.clone()),
+                    kind,
+                    record
+                        .parent_id
+                        .as_ref()
+                        .map(|parent| boreal_domain::WorkId::new(parent.clone())),
+                    record.title.clone(),
+                );
+                work.description = record.description.clone();
+                work.lifecycle = lifecycle;
+                Ok::<_, KnowledgeError>(work)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        work_items = order_imported_work(work_items)?;
+        let dependencies = document
+            .dependencies
+            .iter()
+            .map(|dependency| {
+                (dependency.from_work_id.clone(), dependency.to_work_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let request_digest = canonical_request_digest(
+            "migration.apply/v1",
+            json!({
+                "project_id": project_id,
+                "actor_id": actor_id,
+                "source_version_id": capture.source.source_version_id,
+                "source_document_fingerprint": verification.document_fingerprint,
+                "expected_project_revision": expected_revision,
+                "client_expected_project_revision": expected_project_revision,
+                "work_ids": work_items.iter().map(|work| work.id.as_str()).collect::<Vec<_>>(),
+                "dependencies": dependencies,
+                "drafted_terminal_work_ids": drafted_terminal_work_ids,
+            }),
+        );
+        let mutation = store
+            .apply_migration_work_graph(&boreal_store::MigrationWorkImportInput {
+                project_id: project_id.to_owned(),
+                actor_id: actor_id.to_owned(),
+                operation_id: operation_id.to_owned(),
+                request_digest: request_digest.clone(),
+                expected_project_revision: expected_revision,
+                source_version_id: capture.source.source_version_id.clone(),
+                work_items,
+                dependencies: dependencies.clone(),
+                created_at: now.to_owned(),
+            })
+            .map_err(KnowledgeError::Store)?;
+        Ok(MigrationApplyResult {
+            operation: KnowledgeOperation {
+                operation_id: operation_id.to_owned(),
+                request_digest,
+                durability: KnowledgeDurability::CanonicalStore,
+            },
+            provenance: KnowledgeProvenance {
+                project_id: Some(project_id.to_owned()),
+                migration_source_digest: Some(dry_run.source.source_fingerprint.clone()),
+                ..KnowledgeProvenance::default()
+            },
+            source: dry_run.source,
+            state: MigrationApplyState::Applied,
+            document: Some(document.clone()),
+            loss_ledger: dry_run.loss_ledger,
+            source_version_id: Some(capture.source.source_version_id),
+            revision: Some(mutation.revision),
+            replayed: mutation.replayed,
+            imported_work_count: document.work.len(),
+            imported_dependency_count: dependencies.len(),
+            drafted_terminal_work_ids,
+            unsupported_capabilities: vec![
+                "historical attempts, receipts, reviews, and summaries remain archived as source and are not active v2 evidence".to_owned(),
             ],
         })
     }
@@ -1323,6 +1649,37 @@ fn memory_query(input: &MemorySearchInput) -> Result<RetrievalQuery, KnowledgeEr
     Ok(query)
 }
 
+fn order_imported_work(
+    mut pending: Vec<boreal_domain::WorkItem>,
+) -> Result<Vec<boreal_domain::WorkItem>, KnowledgeError> {
+    let mut ordered = Vec::with_capacity(pending.len());
+    let mut created = BTreeSet::new();
+    while !pending.is_empty() {
+        let mut deferred = Vec::new();
+        let mut made_progress = false;
+        for work in pending {
+            let parent_ready = work
+                .parent_id
+                .as_ref()
+                .is_none_or(|parent| created.contains(parent.as_str()));
+            if parent_ready {
+                created.insert(work.id.as_str().to_owned());
+                ordered.push(work);
+                made_progress = true;
+            } else {
+                deferred.push(work);
+            }
+        }
+        if !made_progress {
+            return Err(KnowledgeError::Invalid(
+                "migration work hierarchy has no resolvable parent order".to_owned(),
+            ));
+        }
+        pending = deferred;
+    }
+    Ok(ordered)
+}
+
 fn require_operation(operation_id: &str) -> Result<(), KnowledgeError> {
     if operation_id.trim().is_empty() {
         return Err(KnowledgeError::Invalid(
@@ -1373,5 +1730,398 @@ mod tests {
     fn current_migration_format_is_detected_without_heuristic_loss() {
         let input = serde_json::json!({"format": FORMAT, "version": FORMAT_VERSION});
         assert!(!input_contains_format(&input.to_string(), LEGACY_FORMAT));
+    }
+}
+
+fn citations_json(citations: &[boreal_memory::Citation]) -> Value {
+    json!(citations
+        .iter()
+        .map(|c| json!({"source_version_id":c.source_version_id,"location":c.location}))
+        .collect::<Vec<_>>())
+}
+fn stored_draft(record: &boreal_store::memory::MemoryDraftRecord) -> Result<Draft, KnowledgeError> {
+    let values: Value = serde_json::from_str(&record.citations_json)
+        .map_err(|e| KnowledgeError::Invalid(e.to_string()))?;
+    let digest=sha256_content_digest(json!({"draft_id":record.draft_id,"entry_id":record.entry_id,"title":record.title,"body":record.body,"citations":values}).to_string().as_bytes());
+    if digest != record.content_digest {
+        return Err(KnowledgeError::Invalid(
+            "stored memory content digest differs".into(),
+        ));
+    }
+
+    let values = values
+        .as_array()
+        .ok_or_else(|| KnowledgeError::Invalid("stored citations are not an array".into()))?;
+    let citations = values
+        .iter()
+        .map(|value| {
+            Ok(boreal_memory::Citation {
+                source_version_id: value
+                    .get("source_version_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| KnowledgeError::Invalid("citation source missing".into()))?
+                    .into(),
+                location: value
+                    .get("location")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| KnowledgeError::Invalid("citation location missing".into()))?
+                    .into(),
+            })
+        })
+        .collect::<Result<Vec<_>, KnowledgeError>>()?;
+    Ok(Draft::new(
+        &record.project_id,
+        &record.entry_id,
+        &record.title,
+        &record.body,
+        citations,
+    )?)
+}
+impl KnowledgeApplication<'_> {
+    pub fn persist_memory_draft(
+        &self,
+        store: &SqliteStore,
+        context: &boreal_store::V3MutationContext,
+        draft_id: &str,
+        input: MemoryDraftInput,
+    ) -> Result<boreal_store::MutationResult, KnowledgeError> {
+        if input.project_id != context.project_id || input.operation_id != context.operation_id {
+            return Err(KnowledgeError::Invalid(
+                "memory draft context mismatch".into(),
+            ));
+        }
+        let draft = self.draft_memory(input)?.draft;
+        for citation in &draft.citations {
+            let verification =
+                self.verify_source(&draft.project_id, &citation.source_version_id)?;
+            if verification.verified_digest.is_none() {
+                return Err(KnowledgeError::Invalid(
+                    "citation source bytes are unavailable or damaged".into(),
+                ));
+            }
+        }
+        let citations = citations_json(&draft.citations);
+        let content_digest=sha256_content_digest(json!({"draft_id":draft_id,"entry_id":draft.entry_id,"title":draft.title,"body":draft.body,"citations":citations}).to_string().as_bytes());
+        Ok(store.record_memory_draft(
+            context,
+            &boreal_store::memory::MemoryDraftRecord {
+                project_id: context.project_id.clone(),
+                draft_id: draft_id.into(),
+                entry_id: draft.entry_id,
+                title: draft.title,
+                body: draft.body,
+                citations_json: citations.to_string(),
+                content_digest,
+                actor_id: context.actor_id.clone(),
+                project_revision: 0,
+            },
+        )?)
+    }
+    pub fn publish_durable_memory(
+        &self,
+        store: &SqliteStore,
+        identity: &IdentityContext,
+        context: &boreal_store::V3MutationContext,
+        root: impl AsRef<Path>,
+        review_id: &str,
+        expected_manifest: &str,
+    ) -> Result<MemoryPublicationResult, KnowledgeError> {
+        let (record, review) = store.approved_memory_draft(&identity.project_id, review_id)?;
+        let draft = stored_draft(&record)?.review(true);
+        for citation in &draft.citations {
+            if self
+                .verify_source(&draft.project_id, &citation.source_version_id)?
+                .verified_digest
+                .is_none()
+            {
+                return Err(KnowledgeError::Invalid(
+                    "publication source verification failed".into(),
+                ));
+            }
+        }
+        let root = boreal_memory::MemoryRoot::new(root.as_ref())?;
+        let binding = boreal_store::identity::IdentityStore::new(store)
+            .workspace_binding(&identity.project_id)
+            .map_err(|e| KnowledgeError::Invalid(e.to_string()))?;
+        if !root.path().starts_with(binding.canonical_root()) {
+            return Err(KnowledgeError::Invalid(
+                "publication root escaped its workspace".into(),
+            ));
+        }
+        let publisher = Publisher::deferred(root);
+        let mut planned = publisher.publication_request_identity(&draft, &context.operation_id)?;
+        if let Some((manifest, content)) =
+            store.memory_publication_plan(&identity.project_id, &context.operation_id)?
+        {
+            planned.manifest_identity = manifest;
+            planned.content_digest = content;
+        }
+        let memory_root = publisher.root().path().to_string_lossy().into_owned();
+        let source_identity = None::<String>;
+        let config_identity = None::<String>;
+        let digest = canonical_request_digest(
+            "memory.publish/v2",
+            json!({
+            "project_id":identity.project_id,"entry_id":draft.entry_id,"content_digest":planned.content_digest,
+            "manifest_identity":planned.manifest_identity,"memory_root_identity":memory_root,
+            "expected_manifest_identity":expected_manifest,"review_operation_id":review_id,"expected_revision":context.expected_revision,
+            "actor_id":context.actor_id,"session_id":context.session_id,"deadline":null,"source_identity":source_identity,"config_identity":config_identity}),
+        );
+        let mut admission = context.clone();
+        admission.request_digest = digest;
+        let job = ExternalJobInput {
+            job_id: context.operation_id.clone(),
+            operation_id: context.operation_id.clone(),
+            project_id: identity.project_id.clone(),
+            subject_type: "project".into(),
+            subject_id: identity.project_id.clone(),
+            kind: ExternalJobKind::MemoryPublication.as_str().into(),
+            request_digest: admission.request_digest.clone(),
+            source_identity: None,
+            config_identity: None,
+            actor_id: context.actor_id.clone(),
+            session_id: context.session_id.clone(),
+            deadline: None,
+            created_at: context.now.clone(),
+        };
+        store.admit_memory_publication(
+            &admission,
+            identity,
+            review_id,
+            &memory_root,
+            Some(expected_manifest),
+            &planned.manifest_identity,
+            &planned.content_digest,
+            &job,
+        )?;
+        let reviewed = ReviewedMemory {
+            operation: KnowledgeOperation {
+                operation_id: review.review_id,
+                request_digest: record.content_digest.clone(),
+                durability: KnowledgeDurability::CanonicalStore,
+            },
+            provenance: KnowledgeProvenance {
+                project_id: Some(identity.project_id.clone()),
+                memory_entry_id: Some(record.entry_id),
+                content_digest: Some(record.content_digest),
+                ..Default::default()
+            },
+            draft,
+            reviewer_id: review.actor_id,
+            accepted: true,
+        };
+        self.publish_memory(
+            store,
+            identity,
+            &publisher,
+            &reviewed,
+            MemoryPublishInput {
+                operation_id: context.operation_id.clone(),
+                expected_manifest_identity: Some(expected_manifest.into()),
+                actor_id: context.actor_id.clone(),
+                session_id: context.session_id.clone(),
+                deadline: None,
+                created_at: context.now.clone(),
+                started_at: context.now.clone(),
+                observed_at: context.now.clone(),
+                source_identity: None,
+                config_identity: None,
+            },
+        )
+    }
+}
+
+fn validate_publication_root(
+    store: &SqliteStore,
+    identity: &IdentityContext,
+    root: &Path,
+) -> Result<(), KnowledgeError> {
+    let binding = boreal_store::identity::IdentityStore::new(store)
+        .workspace_binding(&identity.project_id)
+        .map_err(|error| KnowledgeError::Invalid(error.to_string()))?;
+    let workspace = std::fs::canonicalize(binding.canonical_root())
+        .map_err(|error| KnowledgeError::Invalid(error.to_string()))?;
+    let expected = workspace.join("memory");
+    if root != expected
+        || root
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(KnowledgeError::Invalid(
+            "publication readback must use this project's memory root".into(),
+        ));
+    }
+    if root.exists()
+        && (std::fs::symlink_metadata(root)
+            .map_err(|error| KnowledgeError::Invalid(error.to_string()))?
+            .file_type()
+            .is_symlink()
+            || std::fs::canonicalize(root)
+                .map_err(|error| KnowledgeError::Invalid(error.to_string()))?
+                != expected)
+    {
+        return Err(KnowledgeError::Invalid(
+            "memory root is not a confined directory".into(),
+        ));
+    }
+    Ok(())
+}
+
+impl KnowledgeApplication<'_> {
+    pub fn read_memory_publication(
+        &self,
+        store: &SqliteStore,
+        identity: &IdentityContext,
+        root: impl AsRef<Path>,
+        operation: &str,
+    ) -> Result<Value, KnowledgeError> {
+        let job = store
+            .external_job_by_operation_with_identity(identity, operation)?
+            .ok_or_else(|| KnowledgeError::Invalid("publication operation missing".into()))?;
+        if job.kind != ExternalJobKind::MemoryPublication.as_str() {
+            return Err(KnowledgeError::Invalid(
+                "operation is not a memory publication".into(),
+            ));
+        }
+        validate_publication_root(store, identity, root.as_ref())?;
+        let publisher = Publisher::deferred(boreal_memory::MemoryRoot::new(root.as_ref())?);
+        let observation = publisher.publication_readback(operation)?;
+        let recovery = observation.recovery();
+        let expected = store.memory_publication_plan(&identity.project_id, operation)?;
+        // The committed manifest identity binds the publication plan, while
+        // the commit itself and planned content digest must also agree with
+        // the terminal SQLite job before we call the two stores reconciled.
+        let git_matches_plan = observation.is_resolved()
+            && recovery.is_some_and(|readback| {
+                expected.as_ref().is_some_and(|(manifest, _)| {
+                    readback.manifest_identity.as_ref() == Some(manifest)
+                        && readback
+                            .git_revision
+                            .as_deref()
+                            .is_some_and(|revision| !revision.is_empty())
+                })
+            });
+        let verified_git_revision = recovery.and_then(|readback| readback.git_revision.as_deref());
+        let expected_side_effect_ref =
+            verified_git_revision.map(|revision| format!("git:{revision}"));
+        let database_effect_matches = expected
+            .as_ref()
+            .zip(expected_side_effect_ref.as_deref())
+            .is_some_and(|((_, planned_content_digest), side_effect_ref)| {
+                job.side_effect_ref.as_deref() == Some(side_effect_ref)
+                    && job.result_digest.as_deref() == Some(planned_content_digest.as_str())
+            });
+        let git_state = match (&observation, git_matches_plan) {
+            (boreal_memory::PublicationReadback::NoPublication, _) => "no_commit",
+            (boreal_memory::PublicationReadback::ReadbackRequired(_), _) => "unresolved",
+            (boreal_memory::PublicationReadback::Reconciled(_), true) => "verified_commit",
+            (boreal_memory::PublicationReadback::Reconciled(_), false) => "identity_conflict",
+        };
+        let database_has_unresolved_effect = matches!(
+            job.stage.as_str(),
+            "side_effect_started" | "side_effect_finished" | "readback_required"
+        );
+        let database_terminal = matches!(job.stage.as_str(), "committed" | "reconciled");
+        let reconciliation_state = if git_matches_plan {
+            if database_terminal {
+                if database_effect_matches {
+                    "reconciled"
+                } else {
+                    "database_git_conflict"
+                }
+            } else if matches!(job.stage.as_str(), "failed" | "rejected") {
+                "conflict"
+            } else {
+                "git_committed_db_pending"
+            }
+        } else if matches!(
+            &observation,
+            boreal_memory::PublicationReadback::Reconciled(_)
+        ) {
+            "identity_conflict"
+        } else if matches!(
+            &observation,
+            boreal_memory::PublicationReadback::ReadbackRequired(_)
+        ) {
+            "git_readback_required"
+        } else if database_has_unresolved_effect || database_terminal {
+            "database_effect_unverified"
+        } else if matches!(
+            job.stage.as_str(),
+            "registered" | "admitted" | "running" | "cancel_requested"
+        ) {
+            "publication_pending"
+        } else {
+            "not_published"
+        };
+        Ok(
+            json!({"project_id":identity.project_id,"operation_id":operation,"stage":job.stage,"request_digest":job.request_digest,
+            "database_state":job.stage,"database_reconciliation_state":job.reconciliation_state,
+            "git_state":git_state,"reconciliation_state":reconciliation_state,
+            "readback_required":!(git_matches_plan && database_terminal && database_effect_matches),
+            "git_verified":git_matches_plan,"database_effect_matches":database_effect_matches,
+            "verified_git_revision":if git_matches_plan{verified_git_revision}else{None},
+            "git_observation":format!("{:?}",observation),
+            "error":if git_matches_plan && database_terminal && !database_effect_matches {
+                Some("terminal database publication reference or content digest conflicts with verified Git".to_owned())
+            } else { job.error_message }}),
+        )
+    }
+}
+
+impl KnowledgeApplication<'_> {
+    pub fn review_durable_memory(
+        &self,
+        store: &SqliteStore,
+        context: &boreal_store::V3MutationContext,
+        draft_id: &str,
+        decision: &str,
+        reason: &str,
+    ) -> Result<boreal_store::MutationResult, KnowledgeError> {
+        let record = store
+            .memory_draft(&context.project_id, draft_id)?
+            .ok_or_else(|| KnowledgeError::Invalid("memory draft missing".into()))?;
+        stored_draft(&record)?;
+        Ok(store.record_memory_review(context, draft_id, decision, reason)?)
+    }
+    pub fn reconcile_memory_publication(
+        &self,
+        store: &SqliteStore,
+        identity: &IdentityContext,
+        context: &boreal_store::V3MutationContext,
+        root: impl AsRef<Path>,
+        original_operation: &str,
+    ) -> Result<boreal_store::MutationResult, KnowledgeError> {
+        validate_publication_root(store, identity, root.as_ref())?;
+        let publisher = Publisher::deferred(boreal_memory::MemoryRoot::new(root.as_ref())?);
+        let observation = publisher.publication_readback(original_operation)?;
+        if !observation.is_resolved() {
+            return Err(KnowledgeError::Invalid(
+                "Git publication outcome remains unknown; no result was recorded".into(),
+            ));
+        }
+        let recovery = observation
+            .recovery()
+            .ok_or_else(|| KnowledgeError::Invalid("verified Git readback missing".into()))?;
+        if recovery.operation_id.as_deref() != Some(original_operation) {
+            return Err(KnowledgeError::Invalid(
+                "Git operation identity differs".into(),
+            ));
+        }
+        let manifest = recovery
+            .manifest_identity
+            .as_deref()
+            .ok_or_else(|| KnowledgeError::Invalid("verified manifest missing".into()))?;
+        let git = recovery
+            .git_revision
+            .as_deref()
+            .ok_or_else(|| KnowledgeError::Invalid("verified commit missing".into()))?;
+        Ok(store.reconcile_memory_publication(
+            context,
+            identity,
+            original_operation,
+            manifest,
+            git,
+        )?)
     }
 }

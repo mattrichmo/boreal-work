@@ -5,7 +5,8 @@ use boreal_store::SqliteStore;
 use serde_json::{json, Value};
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    io::{Read, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Output},
     time::{SystemTime, UNIX_EPOCH},
@@ -14,9 +15,11 @@ use std::{
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
 const PROJECT: &str = "evidence-project";
 const WORK: &str = "evidence-task";
-const ACTOR: &str = "evidence-agent";
+const OPERATOR: &str = "evidence-operator";
+const AGENT: &str = "evidence-agent";
 const HARNESS: &str = "evidence-harness";
 const SESSION: &str = "evidence-session";
+const SETUP_SESSION: &str = "evidence-setup-session";
 const SOURCE: &str = "source-hardening";
 const CONFIG: &str = "config-hardening";
 
@@ -191,7 +194,7 @@ impl Fixture {
                     "--db".to_owned(),
                     path(&self.database),
                     "--actor".to_owned(),
-                    ACTOR.to_owned(),
+                    OPERATOR.to_owned(),
                     "--operation-id".to_owned(),
                     "op_evidence_init".to_owned(),
                     "--json".to_owned(),
@@ -214,6 +217,30 @@ impl Fixture {
             &run(
                 &self.root,
                 &vec![
+                    "session".to_owned(),
+                    "start".to_owned(),
+                    "--project".to_owned(),
+                    PROJECT.to_owned(),
+                    "--actor".to_owned(),
+                    OPERATOR.to_owned(),
+                    "--harness".to_owned(),
+                    HARNESS.to_owned(),
+                    "--session".to_owned(),
+                    SETUP_SESSION.to_owned(),
+                    "--db".to_owned(),
+                    path(&self.database),
+                    "--operation-id".to_owned(),
+                    "op_evidence_setup_session".to_owned(),
+                    "--json".to_owned(),
+                ],
+            ),
+            "setup session start",
+        );
+        let expected_revision = store.project_revision(PROJECT).unwrap().0;
+        assert_success(
+            &run(
+                &self.root,
+                &vec![
                     "work".to_owned(),
                     "create".to_owned(),
                     PROJECT.to_owned(),
@@ -224,7 +251,11 @@ impl Fixture {
                     "--db".to_owned(),
                     path(&self.database),
                     "--actor".to_owned(),
-                    ACTOR.to_owned(),
+                    OPERATOR.to_owned(),
+                    "--session".to_owned(),
+                    SETUP_SESSION.to_owned(),
+                    "--expected-revision".to_owned(),
+                    expected_revision.to_string(),
                     "--operation-id".to_owned(),
                     "op_evidence_work".to_owned(),
                     "--json".to_owned(),
@@ -232,6 +263,49 @@ impl Fixture {
             ),
             "work create",
         );
+
+        // Initialization creates an Operator, not an execution Agent. Keep
+        // setup on that bootstrap identity, then enroll a separate Agent using
+        // the production credential and principal APIs used by the CLI.
+        let agent_credential = write_private_credential(&self.root, PROJECT, AGENT);
+        let operator_credential = read_private_credential(&self.root, PROJECT, OPERATOR);
+        let operator = store
+            .authenticate_principal(
+                PROJECT,
+                &operator_credential,
+                boreal_domain::TimestampMs::from_millis(now_ms()),
+            )
+            .expect("bootstrap Operator credential authenticates for this project");
+        assert_eq!(operator.actor_id, OPERATOR);
+        assert_eq!(operator.role, boreal_domain::ActorRole::Operator);
+        store
+            .grant_principal(&boreal_store::principals::PrincipalGrantRequest {
+                project_id: PROJECT.to_owned(),
+                actor_id: OPERATOR.to_owned(),
+                session_id: Some(SETUP_SESSION.to_owned()),
+                principal_actor_id: AGENT.to_owned(),
+                role: boreal_domain::ActorRole::Agent,
+                independent: false,
+                credential: agent_credential.clone(),
+                expires_at_ms: None,
+                display_name: "Evidence hardening test Agent".to_owned(),
+                reason: "enroll the Agent used by this isolated evidence fixture".to_owned(),
+                expected_revision: store.project_revision(PROJECT).unwrap().0,
+                operation_id: "op_evidence_agent_grant".to_owned(),
+                at: format!("unix-ms:{}", now_ms()),
+            })
+            .expect("production principal grant API enrolls the fixture Agent");
+        let agent = store
+            .authenticate_principal(
+                PROJECT,
+                &agent_credential,
+                boreal_domain::TimestampMs::from_millis(now_ms()),
+            )
+            .expect("fixture Agent credential authenticates for this project");
+        assert_eq!(agent.project_id, PROJECT);
+        assert_eq!(agent.actor_id, AGENT);
+        assert_eq!(agent.role, boreal_domain::ActorRole::Agent);
+
         assert_success(
             &run(
                 &self.root,
@@ -241,7 +315,7 @@ impl Fixture {
                     PROJECT.to_owned(),
                     WORK.to_owned(),
                     "--actor".to_owned(),
-                    ACTOR.to_owned(),
+                    AGENT.to_owned(),
                     "--harness".to_owned(),
                     HARNESS.to_owned(),
                     "--session".to_owned(),
@@ -269,7 +343,7 @@ impl Fixture {
                     "--project".to_owned(),
                     PROJECT.to_owned(),
                     "--actor".to_owned(),
-                    ACTOR.to_owned(),
+                    AGENT.to_owned(),
                     "--harness".to_owned(),
                     HARNESS.to_owned(),
                     "--session".to_owned(),
@@ -328,7 +402,7 @@ impl Fixture {
                 "--gate".to_owned(),
                 "verification".to_owned(),
                 "--actor".to_owned(),
-                ACTOR.to_owned(),
+                AGENT.to_owned(),
                 "--harness".to_owned(),
                 HARNESS.to_owned(),
                 "--session".to_owned(),
@@ -393,4 +467,72 @@ fn text(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn write_private_credential(root: &Path, project: &str, actor: &str) -> String {
+    let runtime = root.join(".boreal");
+    let directory = runtime.join("credentials");
+    fs::create_dir_all(&directory).expect("fixture credentials directory is created");
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
+        .expect("fixture runtime directory is private");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .expect("fixture credentials directory is private");
+
+    let mut random = [0_u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut random))
+        .expect("operating-system randomness is available for the fixture credential");
+    let secret = format!(
+        "bwrk1_{}",
+        random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let credential_path = directory.join(format!(
+        "{}.json",
+        boreal_store::checksum(actor.as_bytes()).replace(':', "-")
+    ));
+    let body = json!({
+        "schema_version": "boreal.local-credential.v1",
+        "project_id": project,
+        "actor_id": actor,
+        "credential": secret,
+    });
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options
+        .open(&credential_path)
+        .expect("fixture Agent credential file is created exclusively");
+    file.write_all(&serde_json::to_vec(&body).expect("credential JSON serializes"))
+        .and_then(|()| file.sync_all())
+        .expect("fixture Agent credential is written privately");
+    secret
+}
+
+fn read_private_credential(root: &Path, project: &str, actor: &str) -> String {
+    let credential_path = root.join(".boreal/credentials").join(format!(
+        "{}.json",
+        boreal_store::checksum(actor.as_bytes()).replace(':', "-")
+    ));
+    let credential = serde_json::from_slice::<Value>(
+        &fs::read(credential_path).expect("fixture principal credential exists"),
+    )
+    .expect("fixture credential is valid JSON");
+    assert_eq!(credential["schema_version"], "boreal.local-credential.v1");
+    assert_eq!(credential["project_id"], project);
+    assert_eq!(credential["actor_id"], actor);
+    credential["credential"]
+        .as_str()
+        .expect("fixture credential is present")
+        .to_owned()
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time is after Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("current Unix timestamp fits in u64 milliseconds")
 }

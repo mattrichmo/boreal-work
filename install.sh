@@ -332,8 +332,8 @@ class Screen {
         if (theme === "mono")
             return this.plain();
         const map = theme === "light"
-            ? { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[34;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m", selected: "\x1b[7;1m", heading: "\x1b[1m", border: "\x1b[90m" }
-            : { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[36;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m", selected: "\x1b[7;1m", heading: "\x1b[1m", border: "\x1b[90m" };
+            ? { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[34;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m", selected: "\x1b[7;1m", selected_danger: "\x1b[31;7;1m", heading: "\x1b[1m", border: "\x1b[90m" }
+            : { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[36;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m", selected: "\x1b[7;1m", selected_danger: "\x1b[31;7;1m", heading: "\x1b[1m", border: "\x1b[90m" };
         return this.cells.map((row) => {
             let tone = null, result = "";
             for (const cell of row) {
@@ -1319,6 +1319,7 @@ cleanup() {
   if [ "$ROLLBACK_NEEDED" -eq 1 ]; then
     rollback_item bin/bwrk binary || restore_failed=1
     rollback_item lib/boreal/tui tui || restore_failed=1
+    rollback_item apps/tui tui_source || restore_failed=1
     rollback_item share/boreal/release.json manifest || restore_failed=1
     rollback_item share/boreal/LICENSE license || restore_failed=1
     rollback_item share/boreal/install.sh updater || restore_failed=1
@@ -1390,12 +1391,18 @@ mkdir -p "$PREFIX"
 if mkdir "$PREFIX/.bwrk-install.lock" 2>/dev/null; then INSTALL_LOCK="$PREFIX/.bwrk-install.lock";
 else die "another install or an unrecovered install lock exists at $PREFIX/.bwrk-install.lock"; fi
 printf '%s\n' "$$" > "$INSTALL_LOCK/pid"
-mkdir -p "$PREFIX/bin" "$PREFIX/lib/boreal" "$PREFIX/share/boreal"
+mkdir -p "$PREFIX/bin" "$PREFIX/lib/boreal" "$PREFIX/share/boreal" "$PREFIX/apps"
 INSTALL_STAGE=$(mktemp -d "$PREFIX/.bwrk-install.XXXXXX")
-mkdir -p "$INSTALL_STAGE/bin" "$INSTALL_STAGE/lib/boreal" "$INSTALL_STAGE/share/boreal"
+mkdir -p "$INSTALL_STAGE/bin" "$INSTALL_STAGE/lib/boreal" "$INSTALL_STAGE/share/boreal" "$INSTALL_STAGE/apps"
 cp "$PACKAGE_ROOT/bin/bwrk" "$INSTALL_STAGE/bin/bwrk"
 chmod 755 "$INSTALL_STAGE/bin/bwrk"
-if [ "$INSTALL_TUI" -eq 1 ]; then cp -R "$PACKAGE_ROOT/lib/boreal/tui" "$INSTALL_STAGE/lib/boreal/tui"; fi
+if [ "$INSTALL_TUI" -eq 1 ]; then
+  cp -R "$PACKAGE_ROOT/lib/boreal/tui" "$INSTALL_STAGE/lib/boreal/tui"
+  if [ -d "$PACKAGE_ROOT/apps/tui" ]; then
+    [ "$(find "$PACKAGE_ROOT/apps/tui" -type l -print -quit)" = "" ] || die "TUI source tree must not contain symlinks"
+    cp -R "$PACKAGE_ROOT/apps/tui" "$INSTALL_STAGE/apps/tui"
+  fi
+fi
 cp "$PACKAGE_ROOT/share/boreal/release.json" "$INSTALL_STAGE/share/boreal/release.json"
 cp "$PACKAGE_ROOT/share/boreal/LICENSE" "$INSTALL_STAGE/share/boreal/LICENSE"
 cp "$PACKAGE_ROOT/share/boreal/install.sh" "$INSTALL_STAGE/share/boreal/install.sh"
@@ -1405,7 +1412,7 @@ if [ "$VERIFY_INSTALL" -eq 1 ]; then
   "$INSTALL_STAGE/bin/bwrk" --version || die "staged binary verification failed; existing install is unchanged"
 fi
 BACKUP_ROOT=$(mktemp -d "$PREFIX/.bwrk-backup.XXXXXX")
-mkdir -p "$BACKUP_ROOT/bin" "$BACKUP_ROOT/lib/boreal" "$BACKUP_ROOT/share/boreal"
+mkdir -p "$BACKUP_ROOT/bin" "$BACKUP_ROOT/lib/boreal" "$BACKUP_ROOT/share/boreal" "$BACKUP_ROOT/apps"
 ROLLBACK_NEEDED=1
 publish_item() {
   relative=$1
@@ -1422,9 +1429,21 @@ publish_item() {
 phase 4 "Publish installation"
 publish_item bin/bwrk binary
 publish_item lib/boreal/tui tui
+publish_item apps/tui tui_source
 publish_item share/boreal/release.json manifest
 publish_item share/boreal/LICENSE license
 publish_item share/boreal/install.sh updater
+# Verify the exact published executable, not a PATH-resolved older installation.
+if [ "$VERIFY_INSTALL" -eq 1 ]; then
+  "$PREFIX/bin/bwrk" --version || die "published binary verification failed; restoring prior installation"
+  cmp "$PACKAGE_ROOT/bin/bwrk" "$PREFIX/bin/bwrk" >/dev/null 2>&1 || die "published binary bytes differ; restoring prior installation"
+  if [ "$INSTALL_TUI" -eq 1 ]; then
+    (cd "$PACKAGE_ROOT/lib/boreal/tui" && find . -type f -print) > "$TEMP_ROOT/tui-assets"
+    while IFS= read -r asset; do
+      cmp "$PACKAGE_ROOT/lib/boreal/tui/$asset" "$PREFIX/lib/boreal/tui/$asset" >/dev/null 2>&1 || die "installed TUI asset differs: $asset"
+    done < "$TEMP_ROOT/tui-assets"
+  fi
+fi
 ROLLBACK_NEEDED=0
 
 echo "Boreal ${REQUESTED_VERSION} installed to $PREFIX"

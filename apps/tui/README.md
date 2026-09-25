@@ -48,6 +48,18 @@ mounted controller requires one project and actor and one dashboard-scoped
 harness/session pair. Lifecycle actions cannot override that identity per
 request.
 
+Claim requires an exact `source_version_id` registered to the mounted project
+and a meaningful `config_identity`. The current versioned TUI service client
+does not expose a source-list route, so the interactive form asks the operator
+for both values before it can stage a claim; the plain line shell requires
+`claim --source-version SOURCE_VERSION_ID --config-identity CONFIG_IDENTITY`.
+Use `bwrk source list PROJECT` to select an existing source, or
+`bwrk source add PROJECT --input PATH --origin ORIGIN` to register one first.
+The config identity should identify the effective execution setup (such as a
+repository revision, toolchain, and relevant configuration version), without
+including credentials. The service remains responsible for validating the
+source's project binding. Cancelling the form or confirmation sends no claim.
+
 Proof-gated finish also requires a non-empty typed summary. The line interface
 accepts `finish <summary>` and maps it to the Rust `summary_body` field. The
 full-screen keyboard view now provides a typed summary prompt. If the service

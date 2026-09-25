@@ -371,6 +371,109 @@ fn persisted_requirements_survive_observation_deletion() {
 }
 
 #[test]
+fn persistence_rejects_a_digest_valid_pin_that_disagrees_with_its_profile() {
+    let store = initialized_store();
+    let pinned_profile = profile(
+        "pinned-source",
+        1,
+        r#"{"gates":[{"id":"verification","kind":"verification","required":true}]}"#,
+    );
+    let store_api = ProfileStore::new(&store);
+    store_api
+        .register(&pinned_profile)
+        .expect("profile registers");
+    insert_work(&store, "forged-pin", "pinned-source", 1);
+    let mut forged = PinnedRequirements::resolve(
+        &pinned_profile,
+        "p1",
+        "forged-pin",
+        1,
+        RequirementSubjectKind::Task,
+        "t1",
+    )
+    .expect("requirements resolve");
+
+    // Model a caller that supplies a self-consistent but weaker declaration
+    // set. Its own digest is valid; the immutable profile remains authoritative.
+    forged.declarations.clear();
+    forged.resolved_digest = forged.computed_digest().expect("forged digest computes");
+    assert!(matches!(
+        store_api.persist_pinned_requirements(&forged),
+        Err(StoreError::Conflict(message))
+            if message.contains("differ from immutable profile pinned-source/1")
+    ));
+    assert!(store_api
+        .read_pinned_requirements("p1", "forged-pin", 1)
+        .expect("no partial pin was committed")
+        .is_none());
+}
+
+#[test]
+fn readback_quarantines_a_recomputed_pin_that_omits_profile_requirements() {
+    let store = initialized_store();
+    let pinned_profile = profile(
+        "tampered-pin",
+        1,
+        r#"{"gates":[{"id":"verification","kind":"verification","required":true}]}"#,
+    );
+    let store_api = ProfileStore::new(&store);
+    store_api
+        .register(&pinned_profile)
+        .expect("profile registers");
+    insert_work(&store, "tampered-pin-work", "tampered-pin", 1);
+    let mut weakened = PinnedRequirements::resolve(
+        &pinned_profile,
+        "p1",
+        "tampered-pin-work",
+        1,
+        RequirementSubjectKind::Task,
+        "t1",
+    )
+    .expect("requirements resolve");
+    store_api
+        .persist_pinned_requirements(&weakened)
+        .expect("original requirements persist");
+
+    // This fixture simulates coordinated on-disk corruption: the immutable
+    // header and child are both altered and the snapshot digest is recomputed.
+    // Readback must compare against the separately persisted profile content.
+    weakened.declarations.clear();
+    weakened.resolved_digest = weakened
+        .computed_digest()
+        .expect("tampered digest computes");
+    store
+        .execute_batch(&format!(
+            "DROP TRIGGER boreal_pinned_requirement_immutable_update;
+             DROP TRIGGER boreal_pinned_requirement_gate_immutable_delete;
+             UPDATE boreal_pinned_requirement
+                SET declarations_json = '[]', resolved_digest = '{}'
+              WHERE project_id = 'p1' AND work_id = 'tampered-pin-work'
+                AND proof_revision = 1;
+             DELETE FROM boreal_pinned_requirement_gate
+              WHERE project_id = 'p1' AND work_id = 'tampered-pin-work'
+                AND proof_revision = 1;
+             CREATE TRIGGER boreal_pinned_requirement_immutable_update
+               BEFORE UPDATE ON boreal_pinned_requirement
+             BEGIN
+               SELECT RAISE(ABORT, 'pinned_requirement_immutable');
+             END;
+             CREATE TRIGGER boreal_pinned_requirement_gate_immutable_delete
+               BEFORE DELETE ON boreal_pinned_requirement_gate
+             BEGIN
+               SELECT RAISE(ABORT, 'pinned_requirement_gate_immutable');
+             END;",
+            weakened.resolved_digest
+        ))
+        .expect("coordinated corruption fixture applies and restores guards");
+
+    assert!(matches!(
+        store_api.read_pinned_requirements("p1", "tampered-pin-work", 1),
+        Err(StoreError::Corrupt(message))
+            if message.contains("disagree with immutable profile definition")
+    ));
+}
+
+#[test]
 fn current_requirement_readback_remains_authoritative_after_gate_deletion() {
     let store = initialized_store();
     let pinned_profile = profile(
@@ -952,9 +1055,14 @@ fn malformed_pinned_profile_and_child_content_is_quarantined_on_readback() {
         Err(StoreError::Corrupt(message)) if message.contains("declaration is malformed")
     ));
 
+    // This disposable in-memory store is isolated to the corruption fixture;
+    // remove the production update guards only here so readback can verify
+    // quarantine of malformed historical profile content.
     store
         .execute_batch(
-            "UPDATE acceptance_profile
+            "DROP TRIGGER boreal_profile_strict_immutable_update;
+             DROP TRIGGER boreal_profile_immutable_update;
+             UPDATE acceptance_profile
                 SET definition_json = 'not-json'
               WHERE profile_id = 'malformed' AND version = 1;",
         )

@@ -13,12 +13,42 @@ fn operation_show_reads_completed_create_operation() {
 
     let initialized = Command::new(binary())
         .current_dir(temp.path())
-        .args(["init", "project-readback", "--db"])
+        .args([
+            "init",
+            "project-readback",
+            "--actor",
+            "readback-agent",
+            "--db",
+        ])
         .arg(&database)
         .args(["--operation-id", "op-init-readback", "--json"])
         .output()
         .expect("init launches");
     assert_success(&initialized, "init");
+
+    let session = Command::new(binary())
+        .current_dir(temp.path())
+        .args([
+            "session",
+            "start",
+            "--project",
+            "project-readback",
+            "--actor",
+            "readback-agent",
+            "--harness",
+            "operation-readback-test",
+            "--session",
+            "readback-session",
+            "--db",
+        ])
+        .arg(&database)
+        .args(["--operation-id", "op-session-readback", "--json"])
+        .output()
+        .expect("session start launches");
+    assert_success(&session, "session start");
+    let expected_revision = envelope(&session)["revision"]
+        .as_u64()
+        .expect("session start returns the project revision");
 
     let created = Command::new(binary())
         .current_dir(temp.path())
@@ -30,6 +60,12 @@ fn operation_show_reads_completed_create_operation() {
             "Read operation state",
             "--kind",
             "task",
+            "--actor",
+            "readback-agent",
+            "--session",
+            "readback-session",
+            "--expected-revision",
+            &expected_revision.to_string(),
             "--db",
         ])
         .arg(&database)
@@ -47,8 +83,15 @@ fn operation_show_reads_completed_create_operation() {
         .args([
             "operation",
             "show",
-            "project-readback",
             "op-create-readback",
+            "--project",
+            "project-readback",
+            "--actor",
+            "readback-agent",
+            "--harness",
+            "operation-readback-test",
+            "--session",
+            "readback-session",
             "--db",
         ])
         .arg(&database)
@@ -87,6 +130,12 @@ fn operation_show_reads_completed_create_operation() {
             "--project",
             "project-readback",
             "op-create-readback",
+            "--actor",
+            "readback-agent",
+            "--harness",
+            "operation-readback-test",
+            "--session",
+            "readback-session",
             "--db",
         ])
         .arg(&database)
@@ -112,20 +161,54 @@ fn operation_show_reports_missing_operation_through_public_error_envelope() {
 
     let initialized = Command::new(binary())
         .current_dir(temp.path())
-        .args(["init", "project-readback", "--db"])
+        .args([
+            "init",
+            "project-readback",
+            "--actor",
+            "readback-agent",
+            "--db",
+        ])
         .arg(&database)
         .args(["--operation-id", "op-init-readback-missing", "--json"])
         .output()
         .expect("init launches");
     assert_success(&initialized, "init");
 
+    let session = Command::new(binary())
+        .current_dir(temp.path())
+        .args([
+            "session",
+            "start",
+            "--project",
+            "project-readback",
+            "--actor",
+            "readback-agent",
+            "--harness",
+            "operation-readback-test",
+            "--session",
+            "readback-session",
+            "--db",
+        ])
+        .arg(&database)
+        .args(["--operation-id", "op-session-readback-missing", "--json"])
+        .output()
+        .expect("session start launches");
+    assert_success(&session, "session start");
+
     let missing = Command::new(binary())
         .current_dir(temp.path())
         .args([
             "operation",
             "show",
+            "--project",
             "project-readback",
             "op-does-not-exist",
+            "--actor",
+            "readback-agent",
+            "--harness",
+            "operation-readback-test",
+            "--session",
+            "readback-session",
             "--db",
         ])
         .arg(&database)

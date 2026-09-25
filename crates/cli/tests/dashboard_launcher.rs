@@ -284,10 +284,7 @@ fn dashboard_rejects_metadata_copied_from_another_project_root() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(!result.status.success());
-    assert!(
-        message.contains("not bound to the current project"),
-        "{message}"
-    );
+    assert!(message.contains("not bound to this directory"), "{message}");
     fs::remove_dir_all(source.parent().unwrap()).unwrap();
     fs::remove_dir_all(copied.parent().unwrap()).unwrap();
 }
@@ -340,7 +337,7 @@ fn dashboard_rejects_plausible_metadata_with_a_mismatched_stored_workspace_bindi
 
 #[cfg(unix)]
 #[test]
-fn dashboard_rejects_a_database_symlink_escape_after_resolution() {
+fn dashboard_rejects_a_database_symlink_escape_before_opening_it() {
     let root = temporary_root();
     let outside = temporary_root().with_extension("outside");
     fs::create_dir_all(root.join(".boreal")).unwrap();
@@ -370,7 +367,10 @@ fn dashboard_rejects_a_database_symlink_escape_after_resolution() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(!result.status.success());
-    assert!(message.contains("outside this project"), "{message}");
+    assert!(
+        message.contains("symlink") || message.contains("outside this project"),
+        "{message}"
+    );
     fs::remove_dir_all(&root).unwrap();
     fs::remove_dir_all(&outside).unwrap();
 }
@@ -384,12 +384,12 @@ fn temporary_root() -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_nanos();
+        .as_nanos()
+        % 1_000_000_000;
     let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "boreal-dashboard-integration-{}-{nonce}-{counter}",
-        std::process::id(),
-    ))
+    // Unix-domain socket paths have a small fixed limit. Keep this fixture
+    // root short so macOS's long TMPDIR prefix does not prevent launch tests.
+    Path::new("/tmp").join(format!("bdi-{}-{nonce:x}-{counter:x}", std::process::id(),))
 }
 
 fn write_fixture_tui(path: &Path) {

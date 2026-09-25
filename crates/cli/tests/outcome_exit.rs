@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     io::{Read, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -13,6 +14,8 @@ use std::{
 };
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+const BOOTSTRAP_OPERATOR: &str = "bootstrap-operator";
+const FIXTURE_HARNESS: &str = "outcome-exit-test";
 
 #[test]
 fn no_ready_is_unchanged_json_and_exits_zero() {
@@ -41,7 +44,20 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
     let database = root.join("boreal.sqlite");
     let receipt = root.join("receipt.json");
     let summary = root.join("summary.txt");
-    assert_success(run(&root, ["init", "p", "--db", path(&database), "--json"]));
+    assert_success(run(
+        &root,
+        [
+            "init",
+            "p",
+            "--actor",
+            BOOTSTRAP_OPERATOR,
+            "--db",
+            path(&database),
+            "--json",
+        ],
+    ));
+    let expected_revision =
+        start_session(&root, &database, "p", BOOTSTRAP_OPERATOR, "close-session");
     assert_success(run(
         &root,
         [
@@ -50,11 +66,39 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
             "p",
             "w",
             "task",
+            "--actor",
+            BOOTSTRAP_OPERATOR,
+            "--session",
+            "close-session",
+            "--harness",
+            FIXTURE_HARNESS,
+            "--expected-revision",
+            &expected_revision.to_string(),
             "--db",
             path(&database),
             "--json",
         ],
     ));
+    enroll_agent(
+        &root,
+        &database,
+        "p",
+        BOOTSTRAP_OPERATOR,
+        "close-session",
+        "close-agent",
+        "op_close_agent_grant",
+    );
+    SqliteStore::open(&database, SCHEMA)
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO source_version
+             (source_version_id, project_id, origin, access_scope, content_digest,
+              media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+             VALUES ('source-1', 'p', 'fixture.md', 'project',
+                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');",
+        )
+        .unwrap();
     let started = run(
         &root,
         [
@@ -63,8 +107,16 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
             "w",
             "--project",
             "p",
+            "--actor",
+            "close-agent",
             "--session",
-            "s",
+            "close-agent-session",
+            "--harness",
+            FIXTURE_HARNESS,
+            "--source-version",
+            "source-1",
+            "--config-identity",
+            "config-1",
             "--db",
             path(&database),
             "--json",
@@ -81,13 +133,7 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
     SqliteStore::open(&database, SCHEMA)
         .unwrap()
         .execute_batch(&format!(
-            "INSERT INTO source_version
-             (source_version_id, project_id, origin, access_scope, content_digest,
-              media_type, byte_count, captured_at, parser_identity, availability, citation_json)
-             VALUES ('source-1', 'p', 'fixture.md', 'project',
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                     'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');
-             UPDATE attempt SET source_version_id = 'source-1', config_identity = 'config-1'
+            "UPDATE attempt SET source_version_id = 'source-1', config_identity = 'config-1'
              WHERE attempt_id = '{}';",
             attempt_id
         ))
@@ -135,8 +181,12 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
             "--close",
             "--project",
             "p",
+            "--actor",
+            "close-agent",
             "--session",
-            "s",
+            "close-agent-session",
+            "--harness",
+            FIXTURE_HARNESS,
             "--attempt",
             &attempt_id,
             "--fence",
@@ -177,7 +227,20 @@ fn direct_claim_conflict_emits_error_and_nonzero_exit() {
     let root = temporary_root("claim-conflict");
     fs::create_dir_all(&root).unwrap();
     let database = root.join("boreal.sqlite");
-    assert_success(run(&root, ["init", "p", "--db", path(&database), "--json"]));
+    assert_success(run(
+        &root,
+        [
+            "init",
+            "p",
+            "--actor",
+            BOOTSTRAP_OPERATOR,
+            "--db",
+            path(&database),
+            "--json",
+        ],
+    ));
+    let expected_revision =
+        start_session(&root, &database, "p", BOOTSTRAP_OPERATOR, "claim-session");
     assert_success(run(
         &root,
         [
@@ -186,11 +249,48 @@ fn direct_claim_conflict_emits_error_and_nonzero_exit() {
             "p",
             "w",
             "task",
+            "--actor",
+            BOOTSTRAP_OPERATOR,
+            "--session",
+            "claim-session",
+            "--harness",
+            FIXTURE_HARNESS,
+            "--expected-revision",
+            &expected_revision.to_string(),
             "--db",
             path(&database),
             "--json",
         ],
     ));
+    enroll_agent(
+        &root,
+        &database,
+        "p",
+        BOOTSTRAP_OPERATOR,
+        "claim-session",
+        "claim-owner",
+        "op_claim_owner_grant",
+    );
+    enroll_agent(
+        &root,
+        &database,
+        "p",
+        BOOTSTRAP_OPERATOR,
+        "claim-session",
+        "claim-contender",
+        "op_claim_contender_grant",
+    );
+    SqliteStore::open(&database, SCHEMA)
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO source_version
+             (source_version_id, project_id, origin, access_scope, content_digest,
+              media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+             VALUES ('source-1', 'p', 'fixture.md', 'project',
+                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');",
+        )
+        .unwrap();
     assert_success(run(
         &root,
         [
@@ -198,8 +298,16 @@ fn direct_claim_conflict_emits_error_and_nonzero_exit() {
             "claim",
             "p",
             "w",
+            "--actor",
+            "claim-owner",
             "--session",
             "owner-session",
+            "--harness",
+            FIXTURE_HARNESS,
+            "--source-version",
+            "source-1",
+            "--config-identity",
+            "config-1",
             "--db",
             path(&database),
             "--json",
@@ -213,8 +321,16 @@ fn direct_claim_conflict_emits_error_and_nonzero_exit() {
             "claim",
             "p",
             "w",
+            "--actor",
+            "claim-contender",
             "--session",
             "contender-session",
+            "--harness",
+            FIXTURE_HARNESS,
+            "--source-version",
+            "source-1",
+            "--config-identity",
+            "config-1",
             "--db",
             path(&database),
             "--json",
@@ -337,6 +453,156 @@ fn assert_socket_outcome(outcome: &str, code: &str, expected_exit: i32, readback
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_bwrk")
+}
+
+fn start_session(root: &Path, database: &Path, project: &str, actor: &str, session: &str) -> u64 {
+    let output = run(
+        root,
+        [
+            "session",
+            "start",
+            "--project",
+            project,
+            "--actor",
+            actor,
+            "--session",
+            session,
+            "--harness",
+            FIXTURE_HARNESS,
+            "--db",
+            path(database),
+            "--json",
+        ],
+    );
+    assert_success(output.clone());
+    envelope(&output)["revision"]
+        .as_u64()
+        .expect("session start returns the project revision")
+}
+
+fn enroll_agent(
+    root: &Path,
+    database: &Path,
+    project: &str,
+    operator: &str,
+    operator_session: &str,
+    agent: &str,
+    operation_id: &str,
+) {
+    let credential = write_private_credential(root, project, agent);
+    let operator_credential = read_private_credential(root, project, operator);
+    let store = SqliteStore::open(database, SCHEMA).expect("fixture database opens");
+    let authenticated_operator = store
+        .authenticate_principal(
+            project,
+            &operator_credential,
+            boreal_domain::TimestampMs::from_millis(now_ms()),
+        )
+        .expect("bootstrap Operator credential authenticates");
+    assert_eq!(authenticated_operator.actor_id, operator);
+    assert_eq!(
+        authenticated_operator.role,
+        boreal_domain::ActorRole::Operator
+    );
+
+    let grant = store
+        .grant_principal(&boreal_store::principals::PrincipalGrantRequest {
+            project_id: project.to_owned(),
+            actor_id: authenticated_operator.actor_id,
+            session_id: Some(operator_session.to_owned()),
+            principal_actor_id: agent.to_owned(),
+            role: boreal_domain::ActorRole::Agent,
+            independent: false,
+            credential: credential.clone(),
+            expires_at_ms: None,
+            display_name: format!("{agent} test Agent"),
+            reason: "enroll a project-local Agent for the CLI integration test".to_owned(),
+            expected_revision: store
+                .project_revision(project)
+                .expect("project revision reads")
+                .0,
+            operation_id: operation_id.to_owned(),
+            at: format!("unix-ms:{}", now_ms()),
+        })
+        .expect("production principal grant API enrolls the Agent");
+    assert!(!grant.replayed);
+    let authenticated_agent = store
+        .authenticate_principal(
+            project,
+            &credential,
+            boreal_domain::TimestampMs::from_millis(now_ms()),
+        )
+        .expect("private local Agent credential authenticates");
+    assert_eq!(authenticated_agent.actor_id, agent);
+    assert_eq!(authenticated_agent.role, boreal_domain::ActorRole::Agent);
+}
+
+fn write_private_credential(root: &Path, project: &str, actor: &str) -> String {
+    let runtime = root.join(".boreal");
+    let directory = runtime.join("credentials");
+    fs::create_dir_all(&directory).expect("credential directory creates");
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
+        .expect("project runtime directory is private");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .expect("credential directory is private");
+
+    let mut random = [0_u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut random))
+        .expect("operating-system randomness is available");
+    let secret = format!(
+        "bwrk1_{}",
+        random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let credential_path = directory.join(format!(
+        "{}.json",
+        boreal_store::checksum(actor.as_bytes()).replace(':', "-")
+    ));
+    let body = json!({
+        "schema_version": "boreal.local-credential.v1",
+        "project_id": project,
+        "actor_id": actor,
+        "credential": secret,
+    });
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options
+        .open(&credential_path)
+        .expect("private Agent credential file is created exclusively");
+    file.write_all(&serde_json::to_vec(&body).expect("credential JSON serializes"))
+        .and_then(|()| file.sync_all())
+        .expect("private Agent credential is written");
+    secret
+}
+
+fn read_private_credential(root: &Path, project: &str, actor: &str) -> String {
+    let credential_path = root.join(".boreal/credentials").join(format!(
+        "{}.json",
+        boreal_store::checksum(actor.as_bytes()).replace(':', "-")
+    ));
+    let credential = serde_json::from_slice::<Value>(
+        &fs::read(credential_path).expect("bootstrap Operator credential exists"),
+    )
+    .expect("bootstrap Operator credential is valid JSON");
+    assert_eq!(credential["schema_version"], "boreal.local-credential.v1");
+    assert_eq!(credential["project_id"], project);
+    assert_eq!(credential["actor_id"], actor);
+    credential["credential"]
+        .as_str()
+        .expect("bootstrap Operator credential is present")
+        .to_owned()
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time is after Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("current Unix timestamp fits in u64 milliseconds")
 }
 
 fn temporary_root(label: &str) -> PathBuf {

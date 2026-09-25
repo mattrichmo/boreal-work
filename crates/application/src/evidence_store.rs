@@ -84,6 +84,20 @@ impl WorkApplication<'_> {
         artifact_ref: &str,
         now: TimestampMs,
     ) -> Result<EvidenceExecutionAdmissionResult, ApplicationError> {
+        let valid_policy_identity = request
+            .gate_policy_identity
+            .strip_prefix("sha256:")
+            .is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|value| value.is_ascii_hexdigit() && !value.is_ascii_uppercase())
+            });
+        if !valid_policy_identity {
+            return Err(ApplicationError::Evidence(
+                crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptPolicyMismatch),
+            ));
+        }
         let project_id = self.project_for_work(request.expectation.work_id.as_str())?;
         let identity = self.identity_context(&project_id)?;
         let gate_id = self.store().gate_id_for_work(
@@ -106,6 +120,7 @@ impl WorkApplication<'_> {
                 "attempt_id": request.expectation.attempt_id.as_str(),
                 "fence": request.expectation.fence.get(),
                 "gate_id": gate_id.as_str(),
+                "gate_policy_identity": request.gate_policy_identity,
                 "source_version_id": request.expectation.source_snapshot_hash.as_str(),
                 "config_identity": request.expectation.config_identity.as_str(),
                 "profile_id": request.expectation.profile_id.as_str(),
@@ -383,6 +398,21 @@ impl WorkApplication<'_> {
                 crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptSubjectMismatch),
             ));
         }
+        let outcome_matches_receipt = match result.outcome {
+            crate::EvidenceExecutionOutcome::Passed => {
+                result.receipt.result == ReceiptResult::Passed
+            }
+            crate::EvidenceExecutionOutcome::Failed
+            | crate::EvidenceExecutionOutcome::TimedOut
+            | crate::EvidenceExecutionOutcome::Uncertain => {
+                result.receipt.result == ReceiptResult::Failed
+            }
+        };
+        if !outcome_matches_receipt {
+            return Err(ApplicationError::Evidence(
+                crate::EvidenceValidationError::new(EvidenceErrorCode::ExecutionResultInvalid),
+            ));
+        }
         result
             .receipt
             .validate_for(&request.expectation)
@@ -497,7 +527,7 @@ impl WorkApplication<'_> {
     ) -> Result<AcceptanceEvaluation, ApplicationError> {
         let attempt = self
             .store()
-            .current_attempt(project_id, attempt_id.as_str())?;
+            .proof_attempt(project_id, attempt_id.as_str())?;
         if attempt.work_id != work_id.as_str() || attempt.fence != fence.get() {
             return Err(ApplicationError::Evidence(
                 crate::EvidenceValidationError::new(EvidenceErrorCode::StaleFence),
@@ -568,7 +598,7 @@ impl WorkApplication<'_> {
         let project_id = self.project_for_work(receipt.work_id.as_str())?;
         let attempt = self
             .store()
-            .current_attempt(&project_id, receipt.attempt_id.as_str())?;
+            .proof_attempt(&project_id, receipt.attempt_id.as_str())?;
         if attempt.work_id != receipt.work_id.as_str()
             || attempt.actor_id != actor_id
             || attempt.session_id.as_deref() != session_id
@@ -780,6 +810,28 @@ impl WorkApplication<'_> {
                 )
             })
             .transpose()?;
+        let policy_digest = if self.store().is_canonical_production() {
+            let pin = boreal_store::profiles::ProfileStore::new(self.store())
+                .current_pinned_requirements(&project_id, review.work_id.as_str())?;
+            if pin.profile.version.to_string() != review.policy_version {
+                return Err(ApplicationError::Store(boreal_store::StoreError::Conflict(
+                    "review policy version is not the pinned profile version".into(),
+                )));
+            }
+            let attempt = self
+                .store()
+                .proof_attempt(&project_id, review.attempt_id.as_str())?;
+            if attempt.actor_id != review.attempt_actor_id.as_str()
+                || attempt.config_identity != review.config_identity.as_str()
+            {
+                return Err(ApplicationError::Store(boreal_store::StoreError::Conflict(
+                    "review owner/configuration is not the submitted context".into(),
+                )));
+            }
+            pin.profile.policy_digest
+        } else {
+            review.policy_version.clone()
+        };
         let result = self.store().insert_review(ReviewInsertRequest {
             project_id,
             actor_id: actor_id.as_str().to_owned(),
@@ -797,7 +849,7 @@ impl WorkApplication<'_> {
             },
             reason: review.reason.clone(),
             source_version_id: Some(review.source_snapshot_hash.as_str().to_owned()),
-            policy_digest: review.policy_version.clone(),
+            policy_digest,
             operation_id: format!("review:{}", review.review_id),
             request_digest: canonical_request_digest(
                 "review.decide/v1",
@@ -881,15 +933,24 @@ impl WorkApplication<'_> {
             actor_id: actor_id.to_owned(),
             session_id: session_id.map(str::to_owned),
             expected_project_revision,
-            close_intent_id: format!("close:{}", intent.attempt_id),
+            close_intent_id: close_candidate_id(intent),
             work_id: intent.work_id.as_str().to_owned(),
             attempt_id: intent.attempt_id.as_str().to_owned(),
             fence: intent.fence.get(),
-            operation_id: format!("close:request:{}", intent.attempt_id),
+            operation_id: format!("request:{}", close_candidate_id(intent)),
             source_version_id: Some(intent.source_snapshot_hash.as_str().to_owned()),
             config_identity: intent.config_identity.as_str().to_owned(),
             profile_id: intent.profile_id.as_str().to_owned(),
-            profile_version: intent.profile_version.parse().unwrap_or(1),
+            profile_version: intent
+                .profile_version
+                .parse()
+                .ok()
+                .filter(|version| *version > 0)
+                .ok_or_else(|| {
+                    ApplicationError::Invalid(
+                        "close profile version must be a positive integer".into(),
+                    )
+                })?,
             summary_id: intent.summary_id.clone(),
             at: stamp(now),
             request_digest: close_request_digest(
@@ -1064,7 +1125,7 @@ impl WorkApplication<'_> {
             actor_id: actor_id.to_owned(),
             session_id: session_id.map(str::to_owned),
             expected_project_revision,
-            close_intent_id: format!("close:{}", intent.attempt_id),
+            close_intent_id: close_candidate_id(intent),
             work_id: intent.work_id.as_str().to_owned(),
             attempt_id: intent.attempt_id.as_str().to_owned(),
             fence: intent.fence.get(),
@@ -1072,7 +1133,16 @@ impl WorkApplication<'_> {
             source_version_id: Some(intent.source_snapshot_hash.as_str().to_owned()),
             config_identity: intent.config_identity.as_str().to_owned(),
             profile_id: intent.profile_id.as_str().to_owned(),
-            profile_version: intent.profile_version.parse().unwrap_or(1),
+            profile_version: intent
+                .profile_version
+                .parse()
+                .ok()
+                .filter(|version| *version > 0)
+                .ok_or_else(|| {
+                    ApplicationError::Invalid(
+                        "close profile version must be a positive integer".into(),
+                    )
+                })?,
             summary_id: intent.summary_id.clone(),
             at: stamp(now),
             request_digest: close_request_digest(
@@ -1507,16 +1577,19 @@ mod tests {
     use super::*;
     use crate::CommandSpec;
     use boreal_domain::{
-        AcceptanceProfile, ConfigIdentity, DispatchPolicy, PersistedLifecycle, ProjectId, WorkId,
-        WorkItem, WorkKind,
+        AcceptanceProfile, ActorRole, ConfigIdentity, DispatchPolicy, PersistedLifecycle,
+        ProjectId, WorkId, WorkItem, WorkKind,
     };
     use boreal_store::{
         identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
+        principals::{PrincipalGrantRequest, PrincipalRevocationRequest},
         EvidenceExecutionState,
     };
 
     const FIXTURE_SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
     const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
+    const VERIFIER_SESSION: &str = "verifier-session";
+    const VERIFIER_OPERATOR_SESSION: &str = "verifier-operator-session";
 
     fn verifier_work(project_id: &ProjectId) -> WorkItem {
         WorkItem {
@@ -1538,6 +1611,7 @@ mod tests {
         EvidenceRunRequest {
             receipt_id: ReceiptId::new(format!("receipt-{operation_id}")),
             operation_id: boreal_domain::OperationId::new(operation_id),
+            gate_policy_identity: format!("sha256:{}", "2".repeat(64)),
             expectation: ReceiptExpectation {
                 work_id: WorkId::new("verifier-work"),
                 attempt_id: AttemptId::new("verifier-attempt"),
@@ -1622,15 +1696,6 @@ mod tests {
         store
             .create_project(project.as_str(), "unix-ms:0")
             .expect("create production project");
-        store
-            .ensure_actor(
-                "agent-one",
-                "agent",
-                "credential",
-                "Verifier agent",
-                "unix-ms:0",
-            )
-            .expect("create verifier actor");
         IdentityStore::new(&store)
             .install(
                 &DatabaseIdentity::new("verifier-database", 1).expect("database identity"),
@@ -1649,11 +1714,76 @@ mod tests {
                 "unix-ms:1",
             )
             .expect("bind production project");
+        store
+            .bootstrap_project_principal(&PrincipalGrantRequest {
+                project_id: project.as_str().to_owned(),
+                actor_id: "verifier-operator".to_owned(),
+                session_id: None,
+                principal_actor_id: "verifier-operator".to_owned(),
+                role: ActorRole::Operator,
+                independent: true,
+                credential: format!("bwrk1_{}", "a".repeat(64)),
+                expires_at_ms: None,
+                display_name: "Verifier operator".to_owned(),
+                reason: "bootstrap production verifier test principal".to_owned(),
+                expected_revision: store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+                operation_id: "op-verifier-bootstrap".to_owned(),
+                at: "unix-ms:2".to_owned(),
+            })
+            .expect("bootstrap verifier operator");
+        store
+            .grant_principal(&PrincipalGrantRequest {
+                project_id: project.as_str().to_owned(),
+                actor_id: "verifier-operator".to_owned(),
+                session_id: None,
+                principal_actor_id: "agent-one".to_owned(),
+                role: ActorRole::Agent,
+                independent: false,
+                credential: format!("bwrk1_{}", "b".repeat(64)),
+                expires_at_ms: None,
+                display_name: "Verifier agent".to_owned(),
+                reason: "grant test execution principal".to_owned(),
+                expected_revision: store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+                operation_id: "op-verifier-agent-grant".to_owned(),
+                at: "unix-ms:2".to_owned(),
+            })
+            .expect("grant verifier agent");
         let app = WorkApplication::new(&store);
-        app.create_work_as(
-            &verifier_work(&project),
+        app.register_session_as(
+            &project,
             "agent-one",
-            "unix-ms:2",
+            "verifier-harness",
+            VERIFIER_SESSION,
+            "unix-ms:3",
+            "op-verifier-session",
+        )
+        .expect("register verifier session");
+        app.register_session_as(
+            &project,
+            "verifier-operator",
+            "verifier-harness",
+            VERIFIER_OPERATOR_SESSION,
+            "unix-ms:3",
+            "op-verifier-operator-session",
+        )
+        .expect("register verifier operator session");
+        app.create_work_as_session_checked(
+            &verifier_work(&project),
+            "verifier-operator",
+            VERIFIER_OPERATOR_SESSION,
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            "unix-ms:4",
             "op-verifier-production-work",
         )
         .expect("create production verifier work");
@@ -1673,7 +1803,7 @@ mod tests {
             "verifier-work",
             "agent-one",
             "verifier-harness",
-            None,
+            Some(VERIFIER_SESSION),
             "verifier-attempt",
             "op-verifier-production-claim",
             "sha256:verifier-production-claim",
@@ -1719,7 +1849,7 @@ mod tests {
         let admission = app
             .admit_witnessed_execution(
                 "agent-one",
-                None,
+                Some(VERIFIER_SESSION),
                 &request,
                 artifact_ref,
                 TimestampMs::from_millis(1100),
@@ -1759,6 +1889,61 @@ mod tests {
             application.identity_context("project-without-database-identity"),
             Err(ApplicationError::Store(StoreError::Conflict(message)))
                 if message.contains("canonical production verifier requires database identity")
+        ));
+    }
+
+    #[test]
+    fn canonical_status_fails_closed_for_a_revoked_project_principal() {
+        let (store, project) = production_verifier_setup();
+        store
+            .revoke_principal(&PrincipalRevocationRequest {
+                project_id: project.as_str().to_owned(),
+                actor_id: "verifier-operator".to_owned(),
+                session_id: Some(VERIFIER_OPERATOR_SESSION.to_owned()),
+                principal_actor_id: "agent-one".to_owned(),
+                credential_id: None,
+                reason: "test that revoked callers cannot supply decision authority".to_owned(),
+                expected_revision: store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+                operation_id: "op-verifier-agent-revoke".to_owned(),
+                at: "unix-ms:4".to_owned(),
+            })
+            .expect("revoke agent principal");
+
+        assert!(matches!(
+            store.read_project_status_for_session(
+                project.as_str(),
+                "agent-one",
+                Some(VERIFIER_SESSION),
+                TimestampMs::from_millis(1_500),
+            ),
+            Err(StoreError::Conflict(message))
+                if message.contains("principal or its delegator is not active in this project")
+        ));
+    }
+
+    #[test]
+    fn canonical_status_fails_closed_for_an_unenrolled_project_actor() {
+        let (store, project) = production_verifier_setup();
+        store
+            .execute_batch(
+                "INSERT INTO actor(actor_id,role,credential_ref,display_name,created_at)
+                 VALUES ('unregistered-agent','agent','credential-unregistered-agent',
+                         'Unregistered agent','unix-ms:3');",
+            )
+            .expect("fixture has a global actor record without project enrollment");
+
+        assert!(matches!(
+            store.read_project_status_for_session(
+                project.as_str(),
+                "unregistered-agent",
+                None,
+                TimestampMs::from_millis(1_500),
+            ),
+            Err(StoreError::Conflict(message))
+                if message.contains("principal or its delegator is not active in this project")
         ));
     }
 
@@ -1831,7 +2016,7 @@ mod tests {
         let first = app
             .admit_witnessed_execution(
                 "agent-one",
-                None,
+                Some(VERIFIER_SESSION),
                 &request,
                 "artifact://verifier-output",
                 TimestampMs::from_millis(1_100),
@@ -1860,7 +2045,7 @@ mod tests {
         let repaired_job = app
             .admit_witnessed_execution(
                 "agent-one",
-                None,
+                Some(VERIFIER_SESSION),
                 &request,
                 "artifact://verifier-output",
                 TimestampMs::from_millis(1_100),
@@ -1887,7 +2072,7 @@ mod tests {
         let repaired_execution = app
             .admit_witnessed_execution(
                 "agent-one",
-                None,
+                Some(VERIFIER_SESSION),
                 &request,
                 "artifact://verifier-output",
                 TimestampMs::from_millis(1_100),
@@ -1916,7 +2101,7 @@ mod tests {
 
         app.admit_witnessed_execution(
             "agent-one",
-            None,
+            Some(VERIFIER_SESSION),
             &request,
             "artifact://verifier-unknown-readback",
             TimestampMs::from_millis(1_100),
@@ -1967,7 +2152,7 @@ mod tests {
 
         let error = app.record_witnessed_execution(
             "agent-one",
-            None,
+            Some(VERIFIER_SESSION),
             &request,
             &result,
             None,
@@ -2002,6 +2187,48 @@ mod tests {
     }
 
     #[test]
+    fn verifier_outcome_cannot_disagree_with_the_receipt_result() {
+        let (store, project) = production_verifier_setup();
+        let (app, request, mut result) =
+            finished_production_execution(&store, &project, "op-verifier-outcome-mismatch");
+        result.outcome = crate::EvidenceExecutionOutcome::Failed;
+
+        let error = app.record_witnessed_execution(
+            "agent-one",
+            Some(VERIFIER_SESSION),
+            &request,
+            &result,
+            None,
+            TimestampMs::from_millis(1_400),
+        );
+        assert!(matches!(
+            error,
+            Err(ApplicationError::Evidence(error))
+                if error.code() == EvidenceErrorCode::ExecutionResultInvalid
+        ));
+        assert!(store
+            .receipt(request.receipt_id.as_str())
+            .expect("read mismatched verifier receipt")
+            .is_none());
+
+        let identity = IdentityStore::new(&store)
+            .context(project.as_str())
+            .expect("read production identity");
+        let execution = store
+            .evidence_execution(request.operation_id.as_str())
+            .expect("read verifier execution")
+            .expect("execution remains durable");
+        let readback = ExternalEffectAdapter::new_with_identity(&store, &identity)
+            .readback(
+                project.as_str(),
+                &verifier_operation_id(request.operation_id.as_str()),
+                &execution.request_digest,
+            )
+            .expect("read verifier job after mismatch rejection");
+        assert_eq!(readback.record().stage, "readback_required");
+    }
+
+    #[test]
     fn verifier_revision_conflict_does_not_reconcile_before_receipt_persistence() {
         let (store, project) = production_verifier_setup();
         let (app, request, result) =
@@ -2013,7 +2240,7 @@ mod tests {
 
         let error = app.record_witnessed_execution(
             "agent-one",
-            None,
+            Some(VERIFIER_SESSION),
             &request,
             &result,
             Some(expected + 1),
@@ -2046,7 +2273,7 @@ mod tests {
         let recorded = app
             .record_witnessed_execution(
                 "agent-one",
-                None,
+                Some(VERIFIER_SESSION),
                 &request,
                 &result,
                 None,
@@ -2084,7 +2311,7 @@ mod tests {
         first_app
             .record_witnessed_execution(
                 "agent-one",
-                None,
+                Some(VERIFIER_SESSION),
                 &first_request,
                 &first_result,
                 None,
@@ -2105,7 +2332,7 @@ mod tests {
         assert!(second_app
             .record_witnessed_execution(
                 "agent-one",
-                None,
+                Some(VERIFIER_SESSION),
                 &second_request,
                 &second_result,
                 None,
@@ -2124,4 +2351,21 @@ mod tests {
             .expect("read failed receipt operation")
             .is_none());
     }
+}
+
+/// New summary/proof candidates have new close intent identities. A rejected
+/// candidate and its operation result remain immutable and readable.
+fn close_candidate_id(intent: &CloseIntent) -> String {
+    format!(
+        "close:{}",
+        canonical_request_digest(
+            "close.candidate/v1",
+            json!({
+                "work_id":intent.work_id.as_str(),"attempt_id":intent.attempt_id.as_str(),
+                "fence":intent.fence.get(),"source":intent.source_snapshot_hash.as_str(),
+                "configuration":intent.config_identity.as_str(),"profile":intent.profile_id.as_str(),
+                "profile_version":intent.profile_version,"summary_id":intent.summary_id,
+            })
+        )
+    )
 }

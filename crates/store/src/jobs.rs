@@ -469,7 +469,7 @@ impl SqliteStore {
     }
 }
 
-fn register_external_job_row(
+pub(crate) fn register_external_job_row(
     store: &SqliteStore,
     input: &ExternalJobInput,
 ) -> Result<ExternalJobRegistration, StoreError> {
@@ -520,10 +520,11 @@ fn register_external_job_row(
     })
 }
 
-fn advance_external_job_row(
+pub(crate) fn advance_external_job_row(
     store: &SqliteStore,
     input: &ExternalJobTransitionInput,
 ) -> Result<ExternalJobRecord, StoreError> {
+    validate_transition_input(input)?;
     let current = store
         .external_job_row(&input.project_id, &input.job_id)?
         .ok_or_else(|| StoreError::NotFound {
@@ -845,7 +846,11 @@ fn valid_transition(from: &str, to: &str) -> bool {
                 "side_effect_finished",
                 "committed" | "readback_required" | "failed"
             )
-            | ("readback_required", "reconciled" | "failed")
+            // Once an operation is explicitly marked unknown, only an
+            // attributable readback may resolve it. A free-form failure
+            // transition here would erase the uncertainty without proving
+            // whether the external side effect committed.
+            | ("readback_required", "reconciled")
             | ("cancel_requested", "reconciled" | "failed")
     )
 }

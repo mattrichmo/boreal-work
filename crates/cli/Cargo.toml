@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 boreal-application = { path = "../application" }
 boreal-domain = { path = "../domain" }
+boreal-migration = { path = "../migration" }
 boreal-protocol = { path = "../protocol" }
 boreal-service = { path = "../service" }
 boreal-source = { path = "../source" }

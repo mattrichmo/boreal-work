@@ -9,9 +9,10 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use crate::work_model_v3::WorkSchedule;
 use crate::{
-    ActorId, ActorRole, AttemptId, AttemptPhase, ConfigIdentity, DependencyPolicy, GateId,
-    GateKind, GateState, PersistedLifecycle, ProfileId, ProjectId, Revision, SessionId,
+    ActorId, ActorRole, AttemptId, AttemptPhase, ConfigIdentity, DependencyPolicy, DispatchPolicy,
+    GateId, GateKind, GateState, PersistedLifecycle, ProfileId, ProjectId, Revision, SessionId,
     SourceVersionId, TimestampMs, WorkId,
 };
 
@@ -153,8 +154,10 @@ pub struct ProofIdentity {
     pub entity: EntityIdentity,
     pub proof_revision: ProofRevision,
     pub attempt: Option<AttemptIdentity>,
-    pub source_snapshot: SourceVersionId,
-    pub configuration: ConfigIdentity,
+    /// Unbound only on pre-execution requirements. Evidence, submissions and
+    /// reviews always require both identities; absence is never a proof.
+    pub source_snapshot: Option<SourceVersionId>,
+    pub configuration: Option<ConfigIdentity>,
     pub profile: ProfileIdentity,
     pub policy_version: String,
 }
@@ -174,11 +177,42 @@ impl ProofIdentity {
             entity,
             proof_revision,
             attempt,
-            source_snapshot,
-            configuration,
+            source_snapshot: Some(source_snapshot),
+            configuration: Some(configuration),
             profile,
             policy_version: policy_version.into(),
         }
+    }
+}
+
+impl ProofIdentity {
+    /// A pinned requirement generation is real before execution has selected
+    /// its source/configuration. This constructor cannot produce evidence.
+    pub fn planning(
+        entity: EntityIdentity,
+        proof_revision: ProofRevision,
+        profile: ProfileIdentity,
+        policy_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            entity,
+            proof_revision,
+            attempt: None,
+            source_snapshot: None,
+            configuration: None,
+            profile,
+            policy_version: policy_version.into(),
+        }
+    }
+
+    pub fn is_bound(&self) -> bool {
+        self.source_snapshot
+            .as_ref()
+            .is_some_and(|id| !id.as_str().is_empty())
+            && self
+                .configuration
+                .as_ref()
+                .is_some_and(|id| !id.as_str().is_empty())
     }
 }
 
@@ -187,6 +221,8 @@ impl ProofIdentity {
 pub struct EvaluationClock {
     pub evaluated_at: TimestampMs,
     pub next_change_at: Option<TimestampMs>,
+    /// Availability constraints read from the same canonical snapshot.
+    pub timing: StatusTimingInput,
 }
 
 impl EvaluationClock {
@@ -194,11 +230,17 @@ impl EvaluationClock {
         Self {
             evaluated_at,
             next_change_at: None,
+            timing: StatusTimingInput::empty(),
         }
     }
 
     pub const fn with_next_change_at(mut self, next_change_at: TimestampMs) -> Self {
         self.next_change_at = Some(next_change_at);
+        self
+    }
+
+    pub const fn with_status_timing(mut self, timing: StatusTimingInput) -> Self {
+        self.timing = timing;
         self
     }
 }
@@ -447,6 +489,8 @@ pub enum PrincipalBinding {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActorAuthorityInput {
+    /// Immutable, credential-backed root; a delegated sibling is not independent.
+    pub authority_root: ActorId,
     pub project_id: ProjectId,
     pub role: ActorRole,
     pub principal: PrincipalBinding,
@@ -477,12 +521,44 @@ pub enum ReviewRequirementPolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedRequirement {
+    /// A disposition of a failed fact; raw state and receipt remain unchanged.
+    pub exception: Option<RequirementExceptionInput>,
     pub id: RequirementId,
     pub gate_id: GateId,
     pub kind: GateKind,
     pub required: bool,
     pub state: GateState,
     pub verifier_policy: VerifierPolicy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequirementExceptionInput {
+    pub id: DecisionId,
+    pub reason: crate::acceptance::ExceptionReason,
+    pub comment: String,
+    pub actor_role: ActorRole,
+    pub entity_revision: EntityRevision,
+    pub proof_revision: ProofRevision,
+    pub expires_at: Option<TimestampMs>,
+    pub revoked: bool,
+}
+
+impl RequirementExceptionInput {
+    pub fn applies(
+        &self,
+        raw: GateState,
+        entity: EntityRevision,
+        proof: ProofRevision,
+        at: TimestampMs,
+    ) -> bool {
+        raw == GateState::Failed
+            && self.actor_role == ActorRole::Operator
+            && !self.comment.trim().is_empty()
+            && !self.revoked
+            && self.entity_revision == entity
+            && self.proof_revision == proof
+            && self.expires_at.is_none_or(|expiry| expiry > at)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -658,6 +734,9 @@ pub enum SubmissionState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmissionInput {
+    pub actor_id: ActorId,
+    pub session_id: SessionId,
+    pub authority_root: ActorId,
     pub id: SubmissionId,
     pub proof: ProofIdentity,
     pub summary_digest: ContentDigest,
@@ -675,6 +754,8 @@ pub enum ReviewOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewInput {
+    pub reviewer_authority_root: ActorId,
+    pub attempt_authority_root: ActorId,
     pub id: ReviewId,
     pub submission_id: SubmissionId,
     pub proof: ProofIdentity,
@@ -782,6 +863,26 @@ pub struct HoldsInput {
     pub holds: Vec<HoldInput>,
 }
 
+/// Canonical availability timing read from the same snapshot as the other
+/// decision facts. These values must agree with the legacy status context;
+/// otherwise that context could omit a scheduling or retry barrier.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StatusTimingInput {
+    pub schedule: Option<WorkSchedule>,
+    pub cycle_activation_at: Option<TimestampMs>,
+    pub retry_not_before: Option<TimestampMs>,
+}
+
+impl StatusTimingInput {
+    pub const fn empty() -> Self {
+        Self {
+            schedule: None,
+            cycle_activation_at: None,
+            retry_not_before: None,
+        }
+    }
+}
+
 /// The complete pure-decision input envelope.  It contains no transport
 /// handles and no implicit clock or current-process lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -790,6 +891,9 @@ pub struct DecisionInputs {
     pub snapshot_revision: Revision,
     pub clock: EvaluationClock,
     pub availability: Availability,
+    /// Canonical dispatch policy used by status and claim authorization.
+    /// It must not be inferred from a presentation reason.
+    pub dispatch_policy: DispatchPolicy,
     pub lifecycle: Fact<LifecycleInput>,
     pub authority: Fact<ActorAuthorityInput>,
     pub requirements: Fact<PinnedRequirementsInput>,
@@ -1030,7 +1134,12 @@ impl DecisionInputs {
                         code: ContradictionCode::WaiverMissing,
                     });
                 }
-                if edge.outcome != DependencyOutcome::Waived && edge.waiver.is_some() {
+                // An exception is an additional decision, not an outcome
+                // rewrite. Preserve Open/Failed/Cancelled beside its waiver.
+                if edge.waiver.as_ref().is_some_and(|waiver| {
+                    waiver.decision_id.as_str().is_empty()
+                        || waiver.edge_revision != edge.successor.revision
+                }) {
                     diagnostics.push(DecisionDiagnostic::Contradictory {
                         fact: FactKind::DependencyOutcomes,
                         subject: subject.clone(),
@@ -1102,7 +1211,8 @@ impl DecisionInputs {
                     code: ContradictionCode::DeadlineBeforeClaim,
                 });
             }
-            self.check_authority_actor(&mut diagnostics, &execution.actor_id);
+            // Execution ownership and the authenticated reader are different
+            // facts. Action policy enforces ownership only for owner actions.
             self.check_proof_revision(&mut diagnostics, &execution.proof);
         }
 
@@ -1138,7 +1248,9 @@ impl DecisionInputs {
             );
             self.check_proof_identity(&mut diagnostics, FactKind::Review, &subject, &review.proof);
             self.check_proof_revision(&mut diagnostics, &review.proof);
-            if review.reviewer_id == review.attempt_actor_id {
+            if review.reviewer_id == review.attempt_actor_id
+                || review.reviewer_authority_root == review.attempt_authority_root
+            {
                 diagnostics.push(DecisionDiagnostic::Contradictory {
                     fact: FactKind::Review,
                     subject,
@@ -1166,13 +1278,6 @@ impl DecisionInputs {
                 self.subject.work_id.clone(),
                 FactTarget::Recovery(recovery.id.clone()),
             );
-            if recovery.unresolved && recovery.resource == ResourceDisposition::ConfirmedStopped {
-                diagnostics.push(DecisionDiagnostic::Contradictory {
-                    fact: FactKind::Recovery,
-                    subject: subject.clone(),
-                    code: ContradictionCode::RecoveryDispositionMismatch,
-                });
-            }
             if !recovery.unresolved && recovery.resource == ResourceDisposition::Unknown {
                 diagnostics.push(DecisionDiagnostic::Contradictory {
                     fact: FactKind::Recovery,
@@ -1232,7 +1337,12 @@ impl DecisionInputs {
         subject: &FactSubject,
         proof: &ProofIdentity,
     ) {
-        if proof.entity != self.subject {
+        // Immutable proof may precede a harmless entity edit. Its independent
+        // proof generation, not the current presentation revision, invalidates it.
+        if proof.entity.project_id != self.subject.project_id
+            || proof.entity.work_id != self.subject.work_id
+            || proof.entity.revision > self.subject.revision
+        {
             diagnostics.push(DecisionDiagnostic::IdentityMismatch {
                 fact,
                 subject: subject.clone(),
@@ -1240,8 +1350,24 @@ impl DecisionInputs {
                 observed: proof.entity.clone(),
             });
         }
-        if proof.source_snapshot.as_str().is_empty()
-            || proof.configuration.as_str().is_empty()
+        let planning_only = fact == FactKind::PinnedRequirements
+            && self.submission.as_present().is_none()
+            && self.review.as_present().is_none()
+            && self.execution.as_present().is_none_or(|execution| {
+                matches!(
+                    execution.phase,
+                    AttemptPhase::Claimed | AttemptPhase::Accepted
+                )
+            });
+        let ownership_only = fact == FactKind::Execution
+            && self.execution.as_present().is_some_and(|execution| {
+                matches!(
+                    execution.phase,
+                    AttemptPhase::Claimed | AttemptPhase::Accepted
+                )
+            });
+        if (!planning_only && !ownership_only && !proof.is_bound())
+            || proof.proof_revision.get() == 0
             || proof.profile.profile_id.as_str().is_empty()
             || proof.profile.version.is_empty()
             || proof.profile.digest.as_str().is_empty()
@@ -1261,7 +1387,12 @@ impl DecisionInputs {
         proof: &ProofIdentity,
     ) {
         if let Some(requirements) = self.requirements.as_present() {
-            if proof.proof_revision != requirements.proof.proof_revision {
+            if proof.proof_revision != requirements.proof.proof_revision
+                || proof.profile != requirements.proof.profile
+                || (requirements.proof.is_bound()
+                    && (proof.source_snapshot != requirements.proof.source_snapshot
+                        || proof.configuration != requirements.proof.configuration))
+            {
                 diagnostics.push(DecisionDiagnostic::Contradictory {
                     fact: FactKind::PinnedRequirements,
                     subject: FactSubject::work(
@@ -1269,22 +1400,6 @@ impl DecisionInputs {
                         self.subject.work_id.clone(),
                     ),
                     code: ContradictionCode::ProofRevisionMismatch,
-                });
-            }
-        }
-    }
-
-    fn check_authority_actor(&self, diagnostics: &mut Vec<DecisionDiagnostic>, actor_id: &ActorId) {
-        if let Some(authority) = self.authority.as_present() {
-            if authority.actor_id() != actor_id {
-                diagnostics.push(DecisionDiagnostic::Contradictory {
-                    fact: FactKind::ActorAuthority,
-                    subject: FactSubject::target(
-                        self.subject.project_id.clone(),
-                        self.subject.work_id.clone(),
-                        FactTarget::Actor(actor_id.clone()),
-                    ),
-                    code: ContradictionCode::AttemptBindingMismatch,
                 });
             }
         }

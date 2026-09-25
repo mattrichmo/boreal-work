@@ -347,6 +347,32 @@ impl GateRequirementDeclaration {
     }
 }
 
+fn declared_gate_requirements(
+    profile: &ProfileVersion,
+) -> Result<Vec<GateRequirementDeclaration>, StoreError> {
+    let document: Value = serde_json::from_str(profile.definition_json())
+        .map_err(|_| StoreError::Invalid("acceptance profile definition is not JSON".to_owned()))?;
+    let gates = document
+        .get("gates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            StoreError::Invalid("acceptance profile definition has no gates array".to_owned())
+        })?;
+    let mut declarations = Vec::with_capacity(gates.len());
+    let mut ids = BTreeSet::new();
+    for (index, gate) in gates.iter().enumerate() {
+        let declaration = GateRequirementDeclaration::from_json(gate, &document, index)?;
+        if !ids.insert(declaration.requirement_id.clone()) {
+            return Err(StoreError::Conflict(format!(
+                "duplicate acceptance requirement {}",
+                declaration.requirement_id
+            )));
+        }
+        declarations.push(declaration);
+    }
+    Ok(declarations)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedRequirements {
     pub project_id: String,
@@ -374,30 +400,7 @@ impl PinnedRequirements {
                 "pinned requirements proof revision must be positive".to_owned(),
             ));
         }
-        let document: Value = serde_json::from_str(&profile.definition_json).map_err(|_| {
-            StoreError::Invalid("acceptance profile definition is not JSON".to_owned())
-        })?;
-        let profile_object = document.as_object().ok_or_else(|| {
-            StoreError::Invalid("acceptance profile definition must be an object".to_owned())
-        })?;
-        let gates = profile_object
-            .get("gates")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                StoreError::Invalid("acceptance profile definition has no gates array".to_owned())
-            })?;
-        let mut declarations = Vec::with_capacity(gates.len());
-        let mut ids = BTreeSet::new();
-        for (index, gate) in gates.iter().enumerate() {
-            let declaration = GateRequirementDeclaration::from_json(gate, &document, index)?;
-            if !ids.insert(declaration.requirement_id.clone()) {
-                return Err(StoreError::Conflict(format!(
-                    "duplicate acceptance requirement {}",
-                    declaration.requirement_id
-                )));
-            }
-            declarations.push(declaration);
-        }
+        let declarations = declared_gate_requirements(profile)?;
         let project_id = project_id.into();
         let work_id = work_id.into();
         if project_id.trim().is_empty() || work_id.trim().is_empty() {
@@ -456,6 +459,13 @@ impl PinnedRequirements {
         })))
     }
 
+    /// Recomputes the content digest for this pinned declaration snapshot.
+    /// This is useful to validate or construct immutable snapshots without
+    /// treating observed gate rows as the source of requirements.
+    pub fn computed_digest(&self) -> Result<String, StoreError> {
+        Ok(checksum(self.canonical_json()?.as_bytes()))
+    }
+
     pub fn required_ids(&self) -> BTreeSet<String> {
         self.declarations
             .iter()
@@ -482,6 +492,26 @@ impl PinnedRequirements {
     pub fn requires_kind(&self, kind: &str) -> bool {
         self.required_declarations()
             .any(|declaration| declaration.kind == kind)
+    }
+
+    fn validate_against_profile_definition(
+        &self,
+        profile: &ProfileVersion,
+    ) -> Result<(), StoreError> {
+        if !profile.identity().matches(&self.profile) {
+            return Err(StoreError::Conflict(
+                "pinned requirements profile identity differs from its immutable definition"
+                    .to_owned(),
+            ));
+        }
+        let expected = declared_gate_requirements(profile)?;
+        if self.declarations != expected {
+            return Err(StoreError::Conflict(format!(
+                "pinned requirement declarations differ from immutable profile {}/{}",
+                profile.profile_id, profile.version
+            )));
+        }
+        Ok(())
     }
 
     fn validate_for_persistence(&self) -> Result<(), StoreError> {
@@ -531,8 +561,7 @@ impl PinnedRequirements {
                 )));
             }
         }
-        let canonical = self.canonical_json()?;
-        let computed = checksum(canonical.as_bytes());
+        let computed = self.computed_digest()?;
         if self.resolved_digest != computed {
             return Err(StoreError::Conflict(format!(
                 "pinned requirements digest drift: stored {}, computed {computed}",
@@ -976,8 +1005,8 @@ impl<'a> ProfileStore<'a> {
                 requirements.project_id, requirements.work_id, requirements.proof_revision
             )));
         }
-        self.validate_persisted_profile(&requirements.profile)?;
-
+        let profile = self.validate_persisted_profile(&requirements.profile)?;
+        requirements.validate_against_profile_definition(&profile)?;
         let mut header = self.store.prepare(
             "INSERT INTO boreal_pinned_requirement
                  (project_id, work_id, proof_revision, subject_kind, profile_id,
@@ -1119,12 +1148,22 @@ impl<'a> ProfileStore<'a> {
             statement.column_text(8)?,
             statement.column_text(9)?,
         )?;
-        self.validate_persisted_profile(&requirements.profile)?;
+        let profile = self.validate_persisted_profile(&requirements.profile)?;
+        requirements
+            .validate_against_profile_definition(&profile)
+            .map_err(|error| {
+                StoreError::Corrupt(format!(
+                    "pinned requirements disagree with immutable profile definition: {error}"
+                ))
+            })?;
         self.validate_pinned_requirement_children(&requirements)?;
         Ok(Some(requirements))
     }
 
-    fn validate_persisted_profile(&self, identity: &ProfileIdentity) -> Result<(), StoreError> {
+    fn validate_persisted_profile(
+        &self,
+        identity: &ProfileIdentity,
+    ) -> Result<ProfileVersion, StoreError> {
         let mut statement = self.store.prepare(
             "SELECT policy_digest, definition_json
              FROM acceptance_profile
@@ -1171,7 +1210,7 @@ impl<'a> ProfileStore<'a> {
                 profile.policy_digest
             )));
         }
-        Ok(())
+        Ok(profile)
     }
 
     fn validate_pinned_requirement_children(

@@ -1,13 +1,124 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.0.0",
+  "asset_version": "1.1.0",
   "ref": "boreal.workflow.memory.v1",
   "kind": "memory",
   "title": "Ingest, triage, cite, review, and publish project memory",
-  "refs": {"route": "boreal.workflow.route.v1", "context": "boreal.workflow.context.v1", "health": "boreal.workflow.health.v1"},
-  "allowed_commands": ["bwrk raw add --json", "bwrk raw list --json", "bwrk raw show <raw_id> --json", "bwrk raw triage <raw_id> --json", "bwrk source add --json", "bwrk source list --json", "bwrk source show <source_id> --json", "bwrk wiki create --json", "bwrk wiki list --json", "bwrk wiki show <wiki_id> --json", "bwrk decision create --json", "bwrk decision list --json", "bwrk decision show <decision_id> --json", "bwrk decision supersede <decision_id> --json", "bwrk context search --json", "bwrk context rebuild --json", "bwrk search query --json", "bwrk search index --json", "bwrk sync refresh --json"],
-  "typed_inputs": [{"name": "project_id", "type": "project_id", "required": true, "source": "session", "validation": "project_scope"}, {"name": "source_version_id", "type": "source_version_id", "required": true, "source": "source_engine", "validation": "immutable_digest"}, {"name": "raw_id", "type": "nullable_raw_id", "required": false, "source": "intake", "validation": "project_bound"}, {"name": "memory_entry_id", "type": "memory_entry_id", "required": true, "source": "draft", "validation": "stable_id"}, {"name": "citation_refs", "type": "source_location_array", "required": true, "source": "draft", "validation": "exact_source_version"}, {"name": "review_operation_id", "type": "operation_id", "required": true, "source": "review", "validation": "authorized_and_idempotent"}, {"name": "publication_revision", "type": "git_revision", "required": false, "source": "publication_job", "validation": "named_commit"}],
-  "finish_criteria": [{"id": "memory.source", "type": "immutable_source_captured", "required": true}, {"id": "memory.triage", "type": "raw_disposition_or_promotion_is_explicit", "required": true}, {"id": "memory.citation", "type": "exact_project_scoped_citations", "required": true}, {"id": "memory.review", "type": "authorized_review_recorded", "required": true}, {"id": "memory.publication", "type": "deterministic_git_manifest_and_commit", "required": true}, {"id": "memory.index", "type": "published_revision_indexed", "required": true}],
-  "next_refs": ["boreal.workflow.context.v1", "boreal.workflow.health.v1"],
-  "state_transition_owner": "boreal.application.v2"
+  "refs": {
+    "route": "boreal.workflow.route.v1",
+    "context": "boreal.workflow.context.v1",
+    "health": "boreal.workflow.health.v1"
+  },
+  "allowed_commands": [
+    "bwrk source list --json",
+    "bwrk source show <source_id> --json",
+    "bwrk memory draft --input <input_path> --expected-revision <revision> --yes --json",
+    "bwrk memory review --input <input_path> --expected-revision <revision> --yes --json",
+    "bwrk memory publish --input <input_path> --expected-revision <revision> --yes --json",
+    "bwrk memory search --json",
+    "bwrk memory readback <operation_id> --json"
+  ],
+  "typed_inputs": [
+    {
+      "name": "project_id",
+      "type": "project_id",
+      "required": true,
+      "source": "session",
+      "validation": "project_scope"
+    },
+    {
+      "name": "source_version_id",
+      "type": "source_version_id",
+      "required": true,
+      "source": "source_engine",
+      "validation": "immutable_digest"
+    },
+    {
+      "name": "raw_id",
+      "type": "nullable_raw_id",
+      "required": false,
+      "source": "intake",
+      "validation": "project_bound"
+    },
+    {
+      "name": "memory_entry_id",
+      "type": "memory_entry_id",
+      "required": true,
+      "source": "draft",
+      "validation": "stable_id"
+    },
+    {
+      "name": "citation_refs",
+      "type": "source_location_array",
+      "required": true,
+      "source": "draft",
+      "validation": "exact_source_version"
+    },
+    {
+      "name": "review_operation_id",
+      "type": "operation_id",
+      "required": true,
+      "source": "review",
+      "validation": "authorized_and_idempotent"
+    },
+    {
+      "name": "publication_revision",
+      "type": "git_revision",
+      "required": false,
+      "source": "publication_job",
+      "validation": "named_commit"
+    },
+    {
+      "name": "server_action",
+      "type": "action_descriptor",
+      "required": true,
+      "source": "canonical_status_or_command_response",
+      "validation": "target_project_actor_session_revisions_confirmation_and_denials_must_match; guidance_is_not_authority"
+    }
+  ],
+  "finish_criteria": [
+    {
+      "id": "memory.source",
+      "type": "immutable_source_captured",
+      "required": true
+    },
+    {
+      "id": "memory.triage",
+      "type": "raw_disposition_or_promotion_is_explicit",
+      "required": true
+    },
+    {
+      "id": "memory.citation",
+      "type": "exact_project_scoped_citations",
+      "required": true
+    },
+    {
+      "id": "memory.review",
+      "type": "authorized_review_recorded",
+      "required": true
+    },
+    {
+      "id": "memory.publication",
+      "type": "deterministic_git_manifest_and_commit",
+      "required": true
+    },
+    {
+      "id": "memory.index",
+      "type": "published_revision_indexed",
+      "required": true
+    },
+    {
+      "id": "memory.authority",
+      "type": "mutation_authorized_again_inside_canonical_transaction",
+      "required": true
+    }
+  ],
+  "next_refs": [
+    "boreal.workflow.context.v1",
+    "boreal.workflow.health.v1"
+  ],
+  "state_transition_owner": "boreal.application.v2",
+  "required_server_actions": [
+    "memory_publication"
+  ]
 }

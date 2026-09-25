@@ -1,15 +1,16 @@
 use boreal_application::{
     canonical_request_digest, KnowledgeApplication, KnowledgeDurability, MemoryDraftInput,
-    MemoryPublishInput, MemoryReviewInput, MemorySearchInput, MigrationApplyState,
-    SourceCaptureInput, SourceRegistrationState,
+    MemoryReviewInput, MemorySearchInput, MigrationApplyState, SourceCaptureInput,
+    SourceRegistrationState, WorkApplication,
 };
-use boreal_memory::{publication_identity, Citation as MemoryCitation, MemoryRoot, Publisher};
+use boreal_domain::ActorRole;
+use boreal_memory::Citation as MemoryCitation;
 use boreal_migration::{MigrationDocument, ProjectRecord, FORMAT, FORMAT_VERSION};
 use boreal_source::{Availability, SourceCatalog};
 use boreal_store::{
     identity::{DatabaseIdentity, IdentityContext, IdentityStore, WorkspaceBinding},
-    operations::{OperationBundle, OperationJournal},
-    AuditEventRecord, OperationOutcome, OperationRecord, SqliteStore,
+    principals::PrincipalGrantRequest,
+    SqliteStore, V3MutationContext,
 };
 use serde_json::json;
 use std::{
@@ -32,69 +33,120 @@ fn test_root(name: &str) -> PathBuf {
     path
 }
 
-fn publication_store(operation_id: &str, request_digest: &str) -> (SqliteStore, IdentityContext) {
-    let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).unwrap();
+fn publication_store(workspace: &std::path::Path) -> (SqliteStore, IdentityContext) {
+    let store = SqliteStore::open(workspace.join("project.sqlite"), PRODUCTION_SCHEMA).unwrap();
     store.create_project("project-a", "unix-ms:0").unwrap();
-    store
-        .ensure_actor("agent-1", "agent", "credential", "Agent 1", "unix-ms:0")
-        .unwrap();
     let identities = IdentityStore::new(&store);
-    identities
-        .install(
-            &DatabaseIdentity::new("database-knowledge-publication", 1).unwrap(),
-            "unix-ms:1",
-        )
-        .unwrap();
+    let database_identity = identities
+        .database_identity()
+        .unwrap_or_else(|_| DatabaseIdentity::new("database-knowledge-publication", 1).unwrap());
+    identities.install(&database_identity, "unix-ms:1").unwrap();
+    let canonical_workspace = workspace.canonicalize().unwrap();
     let context = identities
         .bind_project(
             "project-a",
             &WorkspaceBinding::new(
-                "/tmp/boreal-knowledge-publication",
-                "/tmp/boreal-knowledge-publication",
+                canonical_workspace.to_string_lossy(),
+                canonical_workspace.to_string_lossy(),
                 "sha256:knowledge-publication",
             )
             .unwrap(),
             "unix-ms:1",
         )
         .unwrap();
-    let operation = OperationRecord {
-        operation_id: operation_id.to_owned(),
-        project_id: "project-a".to_owned(),
-        command: "memory.publish".to_owned(),
-        actor_id: "agent-1".to_owned(),
-        session_id: None,
-        expected_revision: None,
-        attempt_id: None,
-        fence: None,
-        request_digest: request_digest.to_owned(),
-        outcome: OperationOutcome::Changed,
-        result_json: "{}".to_owned(),
-        revision: 1,
-        created_at: "unix-ms:3".to_owned(),
-        completed_at: Some("unix-ms:3".to_owned()),
-    };
-    let audit = AuditEventRecord {
-        project_id: "project-a".to_owned(),
-        revision: 1,
-        operation_id: operation_id.to_owned(),
-        event_type: "repair.correction".to_owned(),
-        subject_type: "project".to_owned(),
-        subject_id: "project-a".to_owned(),
-        actor_id: "agent-1".to_owned(),
-        session_id: None,
-        fence: None,
-        as_of: "unix-ms:3".to_owned(),
-        payload_json: "{}".to_owned(),
-    };
-    store.execute_batch("BEGIN IMMEDIATE").unwrap();
-    OperationJournal::new(&store)
-        .append_in_transaction_with_identity(
-            &context,
-            &OperationBundle::new(operation, Some(audit)),
+    store
+        .bootstrap_project_principal(&PrincipalGrantRequest {
+            project_id: "project-a".to_owned(),
+            actor_id: "memory-operator".to_owned(),
+            session_id: None,
+            principal_actor_id: "memory-operator".to_owned(),
+            role: ActorRole::Operator,
+            independent: true,
+            credential: format!("bwrk1_{}", "a".repeat(64)),
+            expires_at_ms: None,
+            display_name: "Memory operator".to_owned(),
+            reason: "bootstrap memory publication test".to_owned(),
+            expected_revision: store.project_revision("project-a").unwrap().0,
+            operation_id: "memory-operator-bootstrap".to_owned(),
+            at: "unix-ms:2".to_owned(),
+        })
+        .unwrap();
+    for (actor_id, role, independent, credential) in [
+        ("agent-1", ActorRole::Agent, false, 'b'),
+        ("reviewer-a", ActorRole::Reviewer, true, 'c'),
+    ] {
+        store
+            .grant_principal(&PrincipalGrantRequest {
+                project_id: "project-a".to_owned(),
+                actor_id: "memory-operator".to_owned(),
+                session_id: None,
+                principal_actor_id: actor_id.to_owned(),
+                role,
+                independent,
+                credential: format!("bwrk1_{}", credential.to_string().repeat(64)),
+                expires_at_ms: None,
+                display_name: actor_id.to_owned(),
+                reason: format!("grant {actor_id} for memory publication test"),
+                expected_revision: store.project_revision("project-a").unwrap().0,
+                operation_id: format!("memory-grant-{actor_id}"),
+                at: "unix-ms:2".to_owned(),
+            })
+            .unwrap();
+    }
+    let work = WorkApplication::new(&store);
+    let project_id = boreal_domain::ProjectId::new("project-a");
+    for (actor_id, session_id, operation_id) in [
+        ("agent-1", "memory-agent-session", "memory-agent-session-op"),
+        (
+            "reviewer-a",
+            "memory-reviewer-session",
+            "memory-reviewer-session-op",
+        ),
+        (
+            "memory-operator",
+            "memory-operator-session",
+            "memory-operator-session-op",
+        ),
+    ] {
+        work.register_session_as(
+            &project_id,
+            actor_id,
+            "memory-test-harness",
+            session_id,
+            "unix-ms:3",
+            operation_id,
         )
         .unwrap();
-    store.execute_batch("COMMIT").unwrap();
+    }
     (store, context)
+}
+
+fn mutation_context(
+    store: &SqliteStore,
+    actor_id: &str,
+    session_id: &str,
+    operation_id: &str,
+    now: &str,
+) -> V3MutationContext {
+    let expected_revision = store.project_revision("project-a").unwrap().0;
+    V3MutationContext {
+        project_id: "project-a".to_owned(),
+        actor_id: actor_id.to_owned(),
+        session_id: Some(session_id.to_owned()),
+        operation_id: operation_id.to_owned(),
+        request_digest: canonical_request_digest(
+            "knowledge.test-context/v1",
+            json!({
+                "project_id":"project-a",
+                "actor_id":actor_id,
+                "session_id":session_id,
+                "operation_id":operation_id,
+                "expected_revision":expected_revision,
+            }),
+        ),
+        expected_revision: Some(expected_revision),
+        now: now.to_owned(),
+    }
 }
 
 #[test]
@@ -205,63 +257,134 @@ fn memory_draft_review_publish_and_search_preserve_provenance() {
         )
         .unwrap();
 
-    let root = test_root("memory").join(".boreal-memory");
-    let publisher = Publisher::new(MemoryRoot::new(&root).unwrap()).unwrap();
-    let expected_identity = publication_identity(&reviewed.draft, "memory-publish-1").unwrap();
-    let memory_root_identity = publisher.root().path().to_string_lossy().into_owned();
-    let request_digest = canonical_request_digest(
-        "memory.publish/v2",
-        json!({
-            "project_id": reviewed.draft.project_id,
-            "entry_id": reviewed.draft.entry_id,
-            "content_digest": expected_identity.content_digest,
-            "manifest_identity": expected_identity.manifest_identity,
-            "memory_root_identity": memory_root_identity,
-            "expected_manifest_identity": Some(String::new()),
-            "review_operation_id": reviewed.operation.operation_id,
-            "actor_id": "agent-1",
-            "session_id": Option::<String>::None,
-            "deadline": Option::<String>::None,
-            "created_at": "unix-ms:3",
-            "started_at": "unix-ms:4",
-            "observed_at": "unix-ms:5",
-            "source_identity": Option::<String>::None,
-            "config_identity": Option::<String>::None,
-        }),
-    );
-    let (store, identity) = publication_store("memory-publish-1", &request_digest);
-    let publish_input = MemoryPublishInput {
-        operation_id: "memory-publish-1".to_owned(),
-        expected_manifest_identity: Some(String::new()),
-        actor_id: "agent-1".to_owned(),
-        session_id: None,
-        deadline: None,
-        created_at: "unix-ms:3".to_owned(),
-        started_at: "unix-ms:4".to_owned(),
-        observed_at: "unix-ms:5".to_owned(),
-        source_identity: None,
-        config_identity: None,
-    };
-    let publication = app
-        .publish_memory(
+    let workspace = test_root("memory").canonicalize().unwrap();
+    let root = workspace.join("memory");
+    let (store, identity) = publication_store(&workspace);
+    app.register_captured_source(
+        &store,
+        &source.source,
+        &source.operation,
+        "agent-1",
+        "unix-ms:4",
+    )
+    .unwrap();
+    app.persist_memory_draft(
+        &store,
+        &mutation_context(
             &store,
-            &identity,
-            &publisher,
-            &reviewed,
-            publish_input.clone(),
+            "agent-1",
+            "memory-agent-session",
+            "memory-draft-persist",
+            "unix-ms:5",
+        ),
+        "memory-draft-1",
+        MemoryDraftInput {
+            operation_id: "memory-draft-persist".to_owned(),
+            project_id: "project-a".to_owned(),
+            entry_id: reviewed.draft.entry_id.clone(),
+            title: reviewed.draft.title.clone(),
+            body: reviewed.draft.body.clone(),
+            citations: reviewed.draft.citations.clone(),
+        },
+    )
+    .unwrap();
+    app.review_durable_memory(
+        &store,
+        &mutation_context(
+            &store,
+            "reviewer-a",
+            "memory-reviewer-session",
+            "memory-review-1",
+            "unix-ms:6",
+        ),
+        "memory-draft-1",
+        "approved",
+        "Independent review approved the cited release guidance",
+    )
+    .unwrap();
+    let publish_context = mutation_context(
+        &store,
+        "memory-operator",
+        "memory-operator-session",
+        "memory-publish-1",
+        "unix-ms:7",
+    );
+    store
+        .execute_batch(
+            r#"CREATE TRIGGER fail_memory_publication_ack
+               BEFORE UPDATE ON boreal_external_job
+               WHEN OLD.operation_id='memory-publish-1' AND NEW.stage='reconciled'
+               BEGIN
+                 SELECT RAISE(ABORT, 'simulated interruption before database acknowledgement');
+               END;"#,
         )
         .unwrap();
-    assert_eq!(
-        publication.operation.durability,
-        KnowledgeDurability::GitCommit
+    let interrupted = app.publish_durable_memory(
+        &store,
+        &identity,
+        &publish_context,
+        &root,
+        "memory-review-1",
+        "",
     );
-    assert_eq!(
-        publication.provenance.memory_entry_id.as_deref(),
-        Some("release-review")
+    assert!(
+        interrupted.is_err(),
+        "the injected database acknowledgement failure must reach the caller"
     );
-    assert!(publication.provenance.git_revision.is_some());
+    let pending_job = store
+        .external_job_by_operation_with_identity(&identity, "memory-publish-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending_job.stage, "readback_required");
 
-    let search = app
+    // Simulate process restart: preserve the SQLite job and Git worktree, drop
+    // the application/store handles, and reopen the database from disk.
+    drop(store);
+    let store = SqliteStore::open(workspace.join("project.sqlite"), PRODUCTION_SCHEMA).unwrap();
+    let restarted_app = KnowledgeApplication::new(&catalog);
+    let interrupted_readback = restarted_app
+        .read_memory_publication(&store, &identity, &root, "memory-publish-1")
+        .unwrap();
+    assert_eq!(interrupted_readback["database_state"], "readback_required");
+    assert_eq!(
+        interrupted_readback["database_reconciliation_state"],
+        "required"
+    );
+    assert_eq!(interrupted_readback["git_state"], "verified_commit");
+    assert_eq!(
+        interrupted_readback["reconciliation_state"],
+        "git_committed_db_pending"
+    );
+    assert_eq!(interrupted_readback["git_verified"], true);
+    assert_eq!(interrupted_readback["readback_required"], true);
+
+    store
+        .execute_batch("DROP TRIGGER fail_memory_publication_ack")
+        .unwrap();
+    restarted_app
+        .reconcile_memory_publication(
+            &store,
+            &identity,
+            &mutation_context(
+                &store,
+                "memory-operator",
+                "memory-operator-session",
+                "memory-reconcile-1",
+                "unix-ms:8",
+            ),
+            &root,
+            "memory-publish-1",
+        )
+        .unwrap();
+    let reconciled_readback = restarted_app
+        .read_memory_publication(&store, &identity, &root, "memory-publish-1")
+        .unwrap();
+    assert_eq!(reconciled_readback["database_state"], "reconciled");
+    assert_eq!(reconciled_readback["git_state"], "verified_commit");
+    assert_eq!(reconciled_readback["reconciliation_state"], "reconciled");
+    assert_eq!(reconciled_readback["readback_required"], false);
+
+    let search = restarted_app
         .search_memory(
             &root,
             MemorySearchInput {
@@ -275,18 +398,121 @@ fn memory_draft_review_publish_and_search_preserve_provenance() {
     assert_eq!(search.response.hits[0].entry_id, "release-review");
     assert_eq!(
         search.provenance.git_revision,
-        Some(publication.receipt.as_ref().unwrap().git_revision.clone(),)
+        reconciled_readback["verified_git_revision"]
+            .as_str()
+            .map(str::to_owned)
     );
 
-    let retry = app
-        .publish_memory(&store, &identity, &publisher, &reviewed, publish_input)
+    let retry = restarted_app
+        .publish_durable_memory(
+            &store,
+            &identity,
+            &publish_context,
+            &root,
+            "memory-review-1",
+            "",
+        )
         .unwrap();
     assert_eq!(
         retry.state,
         boreal_application::MemoryPublicationState::Reconciled
     );
+    assert_eq!(retry.operation.durability, KnowledgeDurability::GitCommit);
+    assert_eq!(
+        retry.provenance.memory_entry_id.as_deref(),
+        Some("release-review")
+    );
     assert!(retry.receipt.as_ref().unwrap().duplicate);
-    fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    assert_eq!(
+        retry.receipt.as_ref().unwrap().git_revision.as_str(),
+        reconciled_readback["verified_git_revision"]
+            .as_str()
+            .unwrap()
+    );
+
+    // A terminal SQLite job is not reconciled if its stored commit reference
+    // or content digest disagrees with the independently verified Git result.
+    let verified_revision = reconciled_readback["verified_git_revision"]
+        .as_str()
+        .unwrap();
+    let expected_side_effect_ref = format!("git:{verified_revision}");
+    let (_, expected_content_digest) = store
+        .memory_publication_plan(&identity.project_id, "memory-publish-1")
+        .unwrap()
+        .unwrap();
+    let terminal_job = store
+        .external_job_by_operation_with_identity(&identity, "memory-publish-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal_job.side_effect_ref.as_deref(),
+        Some(expected_side_effect_ref.as_str())
+    );
+    assert_eq!(
+        terminal_job.result_digest.as_deref(),
+        Some(expected_content_digest.as_str())
+    );
+
+    store
+        .execute_batch(
+            "UPDATE boreal_external_job SET side_effect_ref='git:wrong-commit' \
+             WHERE operation_id='memory-publish-1'",
+        )
+        .unwrap();
+    let mismatched_commit = restarted_app
+        .read_memory_publication(&store, &identity, &root, "memory-publish-1")
+        .unwrap();
+    assert_eq!(
+        mismatched_commit["reconciliation_state"],
+        "database_git_conflict"
+    );
+    assert_eq!(mismatched_commit["git_verified"], true);
+    assert_eq!(mismatched_commit["database_effect_matches"], false);
+    assert_eq!(mismatched_commit["readback_required"], true);
+    let unchanged_after_commit_readback = store
+        .external_job_by_operation_with_identity(&identity, "memory-publish-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unchanged_after_commit_readback.side_effect_ref.as_deref(),
+        Some("git:wrong-commit")
+    );
+    assert_eq!(
+        unchanged_after_commit_readback.result_digest.as_deref(),
+        Some(expected_content_digest.as_str())
+    );
+
+    store
+        .execute_batch(&format!(
+            "UPDATE boreal_external_job \
+             SET side_effect_ref='{expected_side_effect_ref}', \
+                 result_digest='sha256:wrong-content' \
+             WHERE operation_id='memory-publish-1'"
+        ))
+        .unwrap();
+    let mismatched_digest = restarted_app
+        .read_memory_publication(&store, &identity, &root, "memory-publish-1")
+        .unwrap();
+    assert_eq!(
+        mismatched_digest["reconciliation_state"],
+        "database_git_conflict"
+    );
+    assert_eq!(mismatched_digest["database_effect_matches"], false);
+    assert_eq!(mismatched_digest["readback_required"], true);
+    let unchanged_after_digest_readback = store
+        .external_job_by_operation_with_identity(&identity, "memory-publish-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unchanged_after_digest_readback.side_effect_ref.as_deref(),
+        Some(expected_side_effect_ref.as_str())
+    );
+    assert_eq!(
+        unchanged_after_digest_readback.result_digest.as_deref(),
+        Some("sha256:wrong-content")
+    );
+    drop(store);
+    fs::remove_dir_all(workspace).unwrap();
 }
 
 #[test]

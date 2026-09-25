@@ -1,4 +1,4 @@
-import type { ActionResult, CreateWorkDraftInput, MountedView, TuiAction } from "./client.js";
+import type { ActionResult, CreateWorkDraftInput, Envelope, MountedView, TuiAction, WorkspaceViewKind } from "./client.js";
 import type { LineShellController } from "./line-shell.js";
 import { safeText } from "./ui/cells.js";
 import { FrameWriter, type Theme } from "./ui/screen.js";
@@ -38,15 +38,16 @@ type Confirm = Extract<Modal, {
 }>;
 type ExtendedController = LineShellController & {
     readback?: (operation_id: string) => Promise<unknown>;
+    readWorkspaceView?: (kind: WorkspaceViewKind) => Promise<Envelope<unknown>>;
 };
 function attemptIdentity(view: MountedView, id?: string): string | null {
     const a = view.monitoring?.items.find(i => i.work_id === id)?.attempt;
-    return a ? `${a.attempt_id}@${a.fence}` : null;
+    return a ? `${a.attempt_id} · generation ${a.fence}` : null;
 }
 function resultMessage(action: TuiAction, result: ActionResult<unknown>): string {
     if (result.ok)
         return `${ACTION_NAMES[action]}: ${result.envelope.outcome} · revision ${result.envelope.revision ?? "unknown"}`;
-    return `${ACTION_NAMES[action]}: ${result.error.message} · ${result.error.code}${result.envelope.outcome === "unknown" ? ` · outcome unknown; u reads operation ${result.envelope.operation_id} before any retry` : ""}`;
+    return `${ACTION_NAMES[action]}: ${result.error.message}${result.envelope.outcome === "unknown" ? ` · the result is unclear; press u to read operation ${result.envelope.operation_id} before retrying` : ""}`;
 }
 /** Human interaction only. All durable writes stay behind MountedWorkflowController. */
 export async function runFullScreen(controller: ExtendedController, terminal: FullScreenTerminal, options: FullScreenOptions = {}): Promise<void> {
@@ -197,8 +198,8 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             message("Use bwrk init for project initialization.");
             return;
         }
-        if (["create_work", "evidence", "finish", "release"].includes(action)) {
-            state.modal = actionForm(action as "create_work" | "evidence" | "finish" | "release", state.selectedId);
+        if (["create_work", "claim", "evidence", "finish", "release"].includes(action)) {
+            state.modal = actionForm(action as "create_work" | "claim" | "evidence" | "finish" | "release", state.selectedId);
             return;
         }
         confirm(action, {}, action === "claim" ? "Claim this work for the current operator session." : "Accept this claim and begin work.");
@@ -228,6 +229,26 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             const input: CreateWorkDraftInput = { work_id: values.work_id, kind: values.kind as CreateWorkDraftInput["kind"], title: values.title,
                 parent_id: values.parent_id || null, priority, ...(values.description ? { description: values.description } : {}) };
             confirm("create_work", input, `Create ${input.kind}: ${input.title}`, [`Identifier: ${input.work_id}`, `Parent: ${input.parent_id ?? "none"}`, `Priority: ${priority}`]);
+        }
+        else if (form.action === "claim") {
+            const sourceVersionId = values.source_version_id;
+            const configIdentity = values.config_identity;
+            if (!sourceVersionId || /^unknown$/iu.test(sourceVersionId)) {
+                form.index = 0;
+                form.error = "Enter a real registered source version ID; no source has been selected.";
+                return;
+            }
+            if (!configIdentity || /^(?:unknown|n\/a|none|null|undefined|todo|tbd)$/iu.test(configIdentity)) {
+                form.index = 1;
+                form.error = "Enter a meaningful execution configuration identity, not a placeholder.";
+                return;
+            }
+            const payload = { source_version_id: sourceVersionId, config_identity: configIdentity };
+            confirm("claim", payload, "Claim this work for the current operator session.", [
+                `Registered source version: ${sourceVersionId}`,
+                `Execution configuration: ${configIdentity}`,
+                "The service verifies project/source binding and the start contract.",
+            ], form.workId);
         }
         else if (form.action === "evidence") {
             try {
@@ -264,22 +285,22 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         switch (pending.action) {
             case "create_work":
                 result = await controller.createWork(pending.payload as CreateWorkDraftInput);
-                break;
+                return;
             case "claim":
-                result = await controller.claim(pending.workId!);
-                break;
+                result = await controller.claim(pending.workId!, pending.payload as { source_version_id: string; config_identity: string });
+                return;
             case "accept_start":
                 result = await controller.acceptStart(pending.workId!);
-                break;
+                return;
             case "evidence":
                 result = await controller.addEvidence(pending.workId!, pending.payload);
-                break;
+                return;
             case "finish":
                 result = await controller.finish(pending.workId!, pending.payload as string);
-                break;
+                return;
             case "release":
                 result = await controller.release(pending.workId!, pending.payload as string);
-                break;
+                return;
             default: throw new Error("Unsupported interactive action");
         }
         message(resultMessage(pending.action, result), !result.ok);
@@ -343,6 +364,45 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         if (id.startsWith("action:")) {
             stage(id.slice(7) as TuiAction);
             return;
+        }
+        if (id.startsWith("workspace:")) {
+            const viewKind = id.slice("workspace:".length);
+            const current = controller.view();
+            if (viewKind === "project") {
+                const projectId = current.route.project_id ?? "unknown project";
+                const monitoring = current.monitoring;
+                state.modal = { kind: "message", title: "PROJECT OVERVIEW", text: JSON.stringify({ project_id: projectId, revision: monitoring?.revision ?? null, total_work_items: monitoring?.total ?? 0, displayed_work_items: monitoring?.items.length ?? 0, page_offset: monitoring?.offset ?? 0, has_more: monitoring?.has_more ?? false, notice: current.notice?.message ?? null }, null, 2), offset: 0 };
+                return;
+            }
+            if (viewKind === "pending") {
+                const pending = current.pending_operations;
+                state.modal = { kind: "message", title: "PENDING OPERATIONS", text: pending.length ? JSON.stringify(pending.map(operation => ({ operation_id: operation.operation_id, action: operation.action, work_id: operation.work_id })), null, 2) : "No operations are awaiting readback.", offset: 0 };
+                return;
+            }
+            if (viewKind === "unavailable") {
+                const capabilities = (current.capabilities ?? []).map(capability => ({ route: capability.route, label: capability.label, status: capability.status, reason: capability.reason }));
+                state.modal = { kind: "message", title: "UNAVAILABLE ROUTES", text: `${current.notice ? `Connection notice: ${current.notice.message}\n\n` : ""}${JSON.stringify(capabilities, null, 2)}`, offset: 0 };
+                return;
+            }
+            if (["cycles", "reviews", "memory", "recovery"].includes(viewKind)) {
+                if (!controller.readWorkspaceView) {
+                    state.modal = { kind: "message", title: `${viewKind.toUpperCase()} UNAVAILABLE`, text: "This service connection does not provide this project view.", offset: 0 };
+                    return;
+                }
+                const kind = viewKind as WorkspaceViewKind;
+                enqueue(`Loading ${kind}`, async () => {
+                    try {
+                        const result = await controller.readWorkspaceView!(kind);
+                        state.modal = { kind: "message", title: kind.toUpperCase(), text: JSON.stringify({ project_id: controller.view().route.project_id, revision: result.revision, as_of: result.as_of, data: result.data }, null, 2) ?? "No data returned.", offset: 0 };
+                        message(`${kind} view loaded from the project service.`);
+                    }
+                    catch (error) {
+                        state.modal = { kind: "message", title: `${kind.toUpperCase()} UNAVAILABLE`, text: error instanceof Error ? error.message : String(error), offset: 0 };
+                        message(`${kind} view is unavailable.`, true);
+                    }
+                });
+                return;
+            }
         }
         switch (id) {
             case "views":

@@ -1153,17 +1153,65 @@ fn operation_result(result: AttemptMutation) -> OperationResult<AttemptMutation>
 mod tests {
     use super::*;
     use boreal_domain::{
-        AcceptanceProfile, AttemptPhase, DispatchPolicy, Fence, PersistedLifecycle, WorkItem,
-        WorkKind,
+        AcceptanceProfile, ActorRole, AttemptPhase, DispatchPolicy, Fence, PersistedLifecycle,
+        WorkItem, WorkKind,
     };
     use boreal_store::{
         identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
-        recovery::RecoveryObligationInput,
+        principals::PrincipalGrantRequest,
         SqliteStore,
     };
     use std::cell::RefCell;
 
     const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
+    const RUNTIME_SESSION: &str = "runtime-agent-session";
+    const RUNTIME_OPERATOR_SESSION: &str = "runtime-operator-session";
+
+    fn bootstrap_operator(store: &SqliteStore, project_id: &str, actor_id: &str) {
+        store
+            .bootstrap_project_principal(&PrincipalGrantRequest {
+                project_id: project_id.to_owned(),
+                actor_id: actor_id.to_owned(),
+                session_id: None,
+                principal_actor_id: actor_id.to_owned(),
+                role: ActorRole::Operator,
+                independent: true,
+                credential: format!("bwrk1_{}", "c".repeat(64)),
+                expires_at_ms: None,
+                display_name: "Runtime test operator".to_owned(),
+                reason: "bootstrap runtime test principal".to_owned(),
+                expected_revision: store
+                    .project_revision(project_id)
+                    .expect("project revision")
+                    .0,
+                operation_id: format!("op-{actor_id}-bootstrap"),
+                at: "unix-ms:2".to_owned(),
+            })
+            .expect("bootstrap test operator");
+    }
+
+    fn grant_agent(store: &SqliteStore, project_id: &str, operator_id: &str, agent_id: &str) {
+        store
+            .grant_principal(&PrincipalGrantRequest {
+                project_id: project_id.to_owned(),
+                actor_id: operator_id.to_owned(),
+                session_id: None,
+                principal_actor_id: agent_id.to_owned(),
+                role: ActorRole::Agent,
+                independent: false,
+                credential: format!("bwrk1_{}", "d".repeat(64)),
+                expires_at_ms: None,
+                display_name: "Runtime test agent".to_owned(),
+                reason: "grant runtime test agent".to_owned(),
+                expected_revision: store
+                    .project_revision(project_id)
+                    .expect("project revision")
+                    .0,
+                operation_id: format!("op-{agent_id}-grant"),
+                at: "unix-ms:2".to_owned(),
+            })
+            .expect("grant test agent");
+    }
 
     fn snapshot(phase: AttemptPhase) -> AttemptSnapshot {
         AttemptSnapshot {
@@ -1364,18 +1412,19 @@ mod tests {
         store
             .create_project(project.as_str(), "unix-ms:1")
             .expect("project creates");
-        store
-            .ensure_actor(
-                "runtime-actor",
-                "agent",
-                "credential-runtime",
-                "Runtime actor",
-                "unix-ms:1",
-            )
-            .expect("actor creates");
         let identity = test_identity(&store, project.as_str());
+        bootstrap_operator(&store, project.as_str(), "runtime-operator");
         let app = WorkApplication::new(&store);
-        app.create_work_as(
+        app.register_session_as(
+            &project,
+            "runtime-operator",
+            "runtime-harness",
+            RUNTIME_OPERATOR_SESSION,
+            "unix-ms:3",
+            "op-runtime-operator-session",
+        )
+        .expect("operator session registers");
+        app.create_work_as_session_checked(
             &WorkItem {
                 id: WorkId::new("runtime-recovery-work"),
                 project_id: project.clone(),
@@ -1389,25 +1438,29 @@ mod tests {
                 hard_holds: Vec::new(),
                 acceptance_profile: AcceptanceProfile::focused(),
             },
-            "runtime-actor",
-            "unix-ms:3",
+            "runtime-operator",
+            RUNTIME_OPERATOR_SESSION,
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            "unix-ms:4",
             "op-runtime-recovery-work",
         )
         .expect("work creates");
         store
-            .create_recovery_obligation(&RecoveryObligationInput {
-                obligation_id: "op-runtime-recovery:recovery:expired".to_owned(),
-                project_id: project.as_str().to_owned(),
-                work_id: "runtime-recovery-work".to_owned(),
-                attempt_id: None,
-                fence: None,
-                reason: "expired".to_owned(),
-                resource_state: "unknown".to_owned(),
-                owner_actor_id: Some("runtime-actor".to_owned()),
-                next_action: "read back the stopped runtime".to_owned(),
-                created_at: "unix-ms:4".to_owned(),
-            })
-            .expect("recovery obligation creates");
+            .execute_batch(
+                "INSERT INTO boreal_recovery_obligation
+                 (obligation_id, project_id, work_id, attempt_id, fence, reason,
+                  state, resource_state, owner_actor_id, next_action, created_at)
+                 VALUES ('op-runtime-recovery:recovery:expired',
+                         'runtime-recovery-project', 'runtime-recovery-work',
+                         NULL, NULL, 'expired', 'unresolved', 'unknown',
+                         'runtime-operator', 'read back the stopped runtime', 'unix-ms:4');",
+            )
+            .expect("fixture seeds the pending obligation to exercise identity-bound resolution");
 
         let request = RecoveryResolveRequest {
             project_id: project.as_str().to_owned(),
@@ -1415,13 +1468,13 @@ mod tests {
             operation_id: "op-runtime-recovery-resolve".to_owned(),
             request_digest: "sha256:op-runtime-recovery-resolve".to_owned(),
             resolution_id: "runtime-recovery-resolution".to_owned(),
-            actor_id: "runtime-actor".to_owned(),
+            actor_id: "runtime-operator".to_owned(),
             outcome: "runtime_stopped".to_owned(),
             reason: "the expired runtime was observed stopped".to_owned(),
             resource_state: "unknown".to_owned(),
             at: "unix-ms:5".to_owned(),
             expected_project_revision: None,
-            session_id: None,
+            session_id: Some(RUNTIME_OPERATOR_SESSION.to_owned()),
         };
         let input = IdentityBoundRecoveryResolutionInput {
             context: identity.clone(),
@@ -1477,17 +1530,33 @@ mod tests {
         store
             .create_project(project.as_str(), "unix-ms:1")
             .expect("project creates");
-        store
-            .ensure_actor(
-                "runtime-owner",
-                "agent",
-                "credential-owner",
-                "Runtime owner",
-                "unix-ms:1",
-            )
-            .expect("actor creates");
         let identity = test_identity(&store, project.as_str());
-        app.create_work_as(
+        bootstrap_operator(&store, project.as_str(), "runtime-operator");
+        grant_agent(
+            &store,
+            project.as_str(),
+            "runtime-operator",
+            "runtime-owner",
+        );
+        app.register_session_as(
+            &project,
+            "runtime-owner",
+            "runtime-harness",
+            RUNTIME_SESSION,
+            "unix-ms:3",
+            "op-runtime-agent-session",
+        )
+        .expect("agent session registers");
+        app.register_session_as(
+            &project,
+            "runtime-operator",
+            "runtime-harness",
+            RUNTIME_OPERATOR_SESSION,
+            "unix-ms:3",
+            "op-runtime-operator-session",
+        )
+        .expect("operator session registers");
+        app.create_work_as_session_checked(
             &WorkItem {
                 id: WorkId::new("runtime-resource-work"),
                 project_id: project.clone(),
@@ -1501,8 +1570,15 @@ mod tests {
                 hard_holds: Vec::new(),
                 acceptance_profile: AcceptanceProfile::focused(),
             },
-            "runtime-owner",
-            "unix-ms:2",
+            "runtime-operator",
+            RUNTIME_OPERATOR_SESSION,
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            "unix-ms:4",
             "op-runtime-resource-work",
         )
         .expect("work creates");
@@ -1511,7 +1587,7 @@ mod tests {
             "runtime-resource-work",
             "runtime-owner",
             "runtime-harness",
-            None,
+            Some(RUNTIME_SESSION),
             "runtime-resource-attempt",
             "op-runtime-resource-claim",
             "sha256:op-runtime-resource-claim",
@@ -1547,7 +1623,7 @@ mod tests {
             "active"
         );
 
-        store
+        let direct_release_error = store
             .request_resource_release(
                 &release_request.project_id,
                 &release_request.reservation_id,
@@ -1556,7 +1632,19 @@ mod tests {
                 &release_request.evidence_ref,
                 &release_request.at,
             )
-            .expect("test prepares the pending canonical obligation");
+            .expect_err("direct compatibility release route fails closed for canonical projects");
+        assert!(matches!(
+            direct_release_error,
+            StoreError::Conflict(message) if message.contains("canonical")
+        ));
+        assert_eq!(
+            store
+                .resource_reservation(project.as_str(), &release_request.reservation_id)
+                .expect("resource reads")
+                .expect("claimed resource remains present")
+                .state,
+            "active"
+        );
 
         let acknowledgement = ResourceReleaseRequest {
             event_id: "runtime-resource-release-ack".to_owned(),
@@ -1574,9 +1662,9 @@ mod tests {
             store
                 .resource_reservation(project.as_str(), &acknowledgement.reservation_id)
                 .expect("resource reads")
-                .expect("pending resource exists")
+                .expect("claimed resource remains present")
                 .state,
-            "release_pending"
+            "active"
         );
     }
 

@@ -42,6 +42,7 @@ pub struct WorkflowAsset {
     pub kind: String,
     pub title: String,
     pub allowed_commands: Vec<String>,
+    pub required_server_actions: Vec<String>,
     pub typed_inputs: Vec<WorkflowInput>,
     pub finish_criteria: Vec<WorkflowCriterion>,
     pub next_refs: Vec<String>,
@@ -53,6 +54,7 @@ pub struct WorkflowRegistry {
     package_id: String,
     package_version: String,
     asset_identity: String,
+    trusted: bool,
     assets: Vec<WorkflowAsset>,
 }
 
@@ -87,7 +89,31 @@ impl std::error::Error for WorkflowAssetError {}
 
 impl WorkflowRegistry {
     pub fn embedded() -> Result<Self, WorkflowAssetError> {
-        Self::from_package_and_assets(PACKAGE, EMBEDDED_ASSETS)
+        let mut registry = Self::from_package_and_assets(PACKAGE, EMBEDDED_ASSETS)?;
+        let package: Value = serde_json::from_str(PACKAGE)
+            .map_err(|error| WorkflowAssetError::InvalidJson(error.to_string()))?;
+        let metadata = package
+            .get("assets")
+            .and_then(Value::as_array)
+            .ok_or(WorkflowAssetError::MissingField("assets"))?;
+        let mut bytes = Vec::new();
+        for (entry, asset) in metadata.iter().zip(EMBEDDED_ASSETS) {
+            let path = entry
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or(WorkflowAssetError::MissingField("path"))?;
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(asset.as_bytes());
+            bytes.push(0);
+        }
+        if crate::sha256_content_digest(&bytes) != registry.asset_identity {
+            return Err(WorkflowAssetError::InvalidField(
+                "embedded workflow asset digest mismatch".into(),
+            ));
+        }
+        registry.trusted = true;
+        Ok(registry)
     }
 
     pub fn from_package_json(package_json: &str) -> Result<Self, WorkflowAssetError> {
@@ -168,6 +194,7 @@ impl WorkflowRegistry {
             package_id,
             package_version,
             asset_identity,
+            trusted: false,
             assets,
         };
         registry.validate_references()?;
@@ -188,6 +215,11 @@ impl WorkflowRegistry {
 
     pub fn asset_identity(&self) -> &str {
         &self.asset_identity
+    }
+
+    /// Only package bytes embedded and digest-checked by this binary are trusted guidance.
+    pub fn trusted(&self) -> bool {
+        self.trusted
     }
 
     pub fn assets(&self) -> &[WorkflowAsset] {
@@ -237,6 +269,7 @@ fn parse_asset(value: &Value) -> Result<WorkflowAsset, WorkflowAssetError> {
     let kind = require_string(object, "kind")?;
     let title = require_string(object, "title")?;
     let allowed_commands = string_array(object, "allowed_commands")?;
+    let required_server_actions = string_array(object, "required_server_actions")?;
     if allowed_commands
         .iter()
         .any(|command| command.trim().is_empty())
@@ -298,6 +331,7 @@ fn parse_asset(value: &Value) -> Result<WorkflowAsset, WorkflowAssetError> {
         kind,
         title,
         allowed_commands,
+        required_server_actions,
         typed_inputs,
         finish_criteria,
         next_refs,
@@ -344,7 +378,7 @@ mod tests {
     fn embedded_package_is_versioned_and_resolves_all_assets() {
         let registry = WorkflowRegistry::embedded().unwrap();
         assert_eq!(registry.package_id(), "boreal.core-workflows");
-        assert_eq!(registry.package_version(), "1.0.0");
+        assert_eq!(registry.package_version(), "1.1.0");
         assert_eq!(registry.assets().len(), 10);
         let claim = registry.get("boreal.workflow.claim.v1").unwrap();
         assert!(claim
@@ -364,7 +398,7 @@ mod tests {
           "state_authority":"boreal.application.v2",
           "assets":[{
             "ref":"boreal.workflow.one.v1","kind":"test","title":"Test",
-            "allowed_commands":["bwrk next --json"],"typed_inputs":[{"name":"x","type":"id","source":"request","validation":"bounded"}],
+            "allowed_commands":["bwrk next --json"],"required_server_actions":[],"typed_inputs":[{"name":"x","type":"id","source":"request","validation":"bounded"}],
             "finish_criteria":[{"id":"done","type":"proof","required":true}],"next_refs":["boreal.workflow.missing.v1"]
           }]
         }"#;
@@ -381,7 +415,7 @@ mod tests {
           "package_id":"test","package_version":"1","asset_identity":"sha256:test",
           "state_authority":"boreal.application.v2",
           "assets":[{"ref":"boreal.workflow.one.v1","kind":"test","title":"Test",
-            "allowed_commands":["bwrk next --json"],"typed_inputs":[],
+            "allowed_commands":["bwrk next --json"],"required_server_actions":[],"typed_inputs":[],
             "finish_criteria":[{"id":"done","type":"proof"}],"next_refs":[]}]
         }"#;
         assert!(WorkflowRegistry::from_package_json(package).is_err());

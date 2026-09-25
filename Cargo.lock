@@ -21,6 +21,7 @@ version = "0.2.0"
 dependencies = [
  "boreal-application",
  "boreal-domain",
+ "boreal-migration",
  "boreal-protocol",
  "boreal-service",
  "boreal-source",

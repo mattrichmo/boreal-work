@@ -1,13 +1,18 @@
 //! Canonical snapshot decoding shared by status reads and claim authorization.
-//! All status policy remains in boreal_domain::evaluate_status. No SQL WHERE
+//! Status and action policy remain in the domain decision API. No SQL WHERE
 //! clause, adapter, or persisted display field decides eligibility here.
 use super::*;
-use boreal_domain::work_model_v3::WorkSchedule;
+use boreal_domain::work_model_v3::{DecompositionKind, ExecutionMode, WorkNode, WorkSchedule};
 use boreal_domain::{
     evaluate_status, ActorContext, ActorId, ActorRole, Attempt, DeadlineSource, Fence, Revision,
     StatusContext, StatusDecision, TimestampMs,
 };
 use std::convert::TryFrom;
+
+struct WorkPolicyProjection {
+    status: StatusDecision,
+    actions: Option<boreal_domain::actions::ActionDecision>,
+}
 
 type PlanningFactsResult = Result<(Option<WorkSchedule>, Option<TimestampMs>), StoreError>;
 type ProjectPlanningFacts = BTreeMap<String, PlanningFactsResult>;
@@ -80,7 +85,22 @@ impl SqliteStore {
         &self,
         project_id: &str,
     ) -> Result<ProjectPlanningFacts, StoreError> {
-        if !self.table_exists("cycle_assignment_v3")? || !self.table_exists("cycle_v3")? {
+        let mut schema = self.prepare(
+            "SELECT EXISTS (
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'table' AND name = 'cycle_assignment_v3'
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'table' AND name = 'cycle_v3'
+                   )",
+        )?;
+        if schema.step()? != SQLITE_ROW {
+            return Err(StoreError::Corrupt(
+                "cycle planning schema probe returned no row".to_owned(),
+            ));
+        }
+        if !schema.column_bool(0)? {
             return Ok(BTreeMap::new());
         }
 
@@ -105,17 +125,19 @@ impl SqliteStore {
         let mut facts = BTreeMap::new();
         while statement.step()? == SQLITE_ROW {
             let work_id = statement.column_text(0)?;
-            let activation = match statement.column_optional_signed_i64(1)? {
-                Some(value) => u64::try_from(value)
-                    .map(TimestampMs)
-                    .map(Some)
-                    .map_err(|_| {
-                        StoreError::Corrupt(format!(
+            let activation = (|| -> Result<Option<TimestampMs>, StoreError> {
+                match statement.column_optional_signed_i64(1)? {
+                    Some(value) => u64::try_from(value)
+                        .map(TimestampMs)
+                        .map(Some)
+                        .map_err(|_| {
+                            StoreError::Corrupt(format!(
                             "negative planning activation timestamp for work {work_id}: {value}"
                         ))
-                    }),
-                None => Ok(None),
-            };
+                        }),
+                    None => Ok(None),
+                }
+            })();
             facts.insert(
                 work_id,
                 activation.map(|activation_at| (None, activation_at)),
@@ -223,12 +245,28 @@ impl SqliteStore {
         &self,
         project_id: &str,
         actor_id: &str,
+        as_of: TimestampMs,
+    ) -> Result<(ProjectStatusRead, ActorContext), StoreError> {
+        self.read_project_status_for_session(project_id, actor_id, None, as_of)
+    }
+
+    pub fn read_project_status_for_session(
+        &self,
+        project_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
     ) -> Result<(ProjectStatusRead, ActorContext), StoreError> {
         self.execute_batch("BEGIN")?;
         let result = (|| {
-            let actor = self.actor_context(actor_id)?;
+            let actor = self.project_actor_context(project_id, actor_id)?;
             let mut snapshot = self.read_project_status_in_transaction(project_id)?;
-            self.populate_status_action_facts(&mut snapshot, actor_id)?;
+            self.populate_status_action_facts_for_session(
+                &mut snapshot,
+                actor_id,
+                session_id,
+                as_of,
+            )?;
             Ok((snapshot, actor))
         })();
         finish_transaction(self, result)
@@ -237,113 +275,100 @@ impl SqliteStore {
     /// Attach the non-derived facts needed by the action projection while the
     /// status snapshot's read transaction is still open. Missing facts remain
     /// explicit; this method never invents a proof, session, or revision.
-    fn populate_status_action_facts(
+    pub(crate) fn populate_status_action_facts(
         &self,
         snapshot: &mut ProjectStatusRead,
         actor_id: &str,
+        as_of: TimestampMs,
     ) -> Result<(), StoreError> {
-        let session_id = self.status_session_for_actor(snapshot.project_id.as_str(), actor_id)?;
-        let has_entity_revisions = self.table_exists("boreal_entity_revision")?;
-        let has_pinned_requirements = self.table_exists("boreal_pinned_requirement")?;
-        for row in &mut snapshot.works {
-            let mut facts = StatusActionFacts {
-                entity_revision: None,
-                proof_revision: None,
-                authenticated_session_id: session_id.clone(),
-                source_version_id: row
-                    .current_attempt
-                    .as_ref()
-                    .and_then(|attempt| attempt.source_version_id.clone()),
-                config_identity: row
-                    .current_attempt
-                    .as_ref()
-                    .map(|attempt| attempt.config_identity.clone()),
-                integrity: StatusIntegrity::Valid,
-                missing_facts: Vec::new(),
-            };
-
-            if has_entity_revisions {
-                let mut entity = self.prepare(
-                    "SELECT entity_revision, proof_revision
-                     FROM boreal_entity_revision
-                     WHERE project_id = ?1 AND work_id = ?2",
-                )?;
-                entity.bind_text(1, snapshot.project_id.as_str())?;
-                entity.bind_text(2, row.work.id.as_str())?;
-                if entity.step()? == SQLITE_ROW {
-                    facts.entity_revision = Some(entity.column_u64(0)?);
-                    facts.proof_revision = Some(entity.column_u64(1)?);
-                }
-            }
-            if facts.entity_revision.is_none() {
-                facts.missing_facts.push("entity_revision".to_owned());
-            }
-            if has_pinned_requirements && facts.proof_revision.is_none() {
-                let mut proof = self.prepare(
-                    "SELECT MAX(proof_revision)
-                     FROM boreal_pinned_requirement
-                     WHERE project_id = ?1 AND work_id = ?2",
-                )?;
-                proof.bind_text(1, snapshot.project_id.as_str())?;
-                proof.bind_text(2, row.work.id.as_str())?;
-                if proof.step()? == SQLITE_ROW {
-                    facts.proof_revision = proof.column_optional_i64(0)?;
-                }
-            }
-            if facts.proof_revision.is_none() {
-                facts.missing_facts.push("proof_revision".to_owned());
-            }
-            if facts.authenticated_session_id.is_none() {
-                facts.missing_facts.push("authenticated_session".to_owned());
-            }
-            if row.current_attempt.is_some()
-                && (facts.source_version_id.is_none() || facts.config_identity.is_none())
-            {
-                facts.missing_facts.push("proof_identity".to_owned());
-            }
-            if snapshot
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.work_id == row.work.id.as_str())
-            {
-                facts.integrity = StatusIntegrity::Quarantined;
-                facts.missing_facts.push("integrity".to_owned());
-            }
-            facts.missing_facts.sort();
-            facts.missing_facts.dedup();
-            row.action_facts = facts;
-        }
-        Ok(())
+        self.populate_status_action_facts_for_session(snapshot, actor_id, None, as_of)
     }
 
-    fn status_session_for_actor(
+    pub(crate) fn populate_status_action_facts_for_session(
         &self,
-        project_id: &str,
+        snapshot: &mut ProjectStatusRead,
         actor_id: &str,
-    ) -> Result<Option<String>, StoreError> {
-        let mut statement = self.prepare(
-            "SELECT DISTINCT session.session_id
-             FROM session
-             JOIN operation registration
-               ON registration.session_id = session.session_id
-              AND registration.command = 'session.register'
-              AND registration.project_id = ?1
-             WHERE session.actor_id = ?2 AND session.state = 'active'
-             ORDER BY session.session_id",
-        )?;
-        statement.bind_text(1, project_id)?;
-        statement.bind_text(2, actor_id)?;
-        let mut selected = None;
-        while statement.step()? == SQLITE_ROW {
-            let value = statement.column_text(0)?;
-            if selected.is_some() {
-                return Err(StoreError::Conflict(
-                    "status action context has multiple active authenticated sessions".to_owned(),
-                ));
+        requested_session: Option<&str>,
+        as_of: TimestampMs,
+    ) -> Result<(), StoreError> {
+        // Schema-v2 compatibility projections do not have the authenticated
+        // project/session boundary required by the paired action contract.
+        // Mark their action facts as an explicit compatibility origin so the
+        // application can use its status-only discovery hint without
+        // manufacturing v3 descriptors for a schema with no session model.
+        if !self.is_canonical_production() {
+            for row in &mut snapshot.works {
+                row.action_facts = StatusActionFacts::legacy_compatibility();
             }
-            selected = Some(value);
+            return Ok(());
         }
-        Ok(selected)
+        let actor = self.project_actor_context(snapshot.project_id.as_str(), actor_id)?;
+        // Invalid/ended sessions remove mutation authority, not read access to healthy siblings.
+        let session_id = requested_session
+            .filter(|session| {
+                self.validate_project_session(snapshot.project_id.as_str(), actor_id, session)
+                    .is_ok()
+            })
+            .map(str::to_owned);
+        snapshot.caller_session_id = session_id.clone();
+        for row in &mut snapshot.works {
+            row.action_facts.integrity = if snapshot
+                .diagnostics
+                .iter()
+                .any(|d| d.work_id == row.work.id.as_str())
+            {
+                StatusIntegrity::Quarantined
+            } else {
+                StatusIntegrity::Valid
+            };
+            match self.canonical_decision_inputs(
+                snapshot.project_id.as_str(),
+                Revision(snapshot.revision.0),
+                row,
+                &actor,
+                session_id.as_deref(),
+                as_of,
+            ) {
+                Ok(inputs) => {
+                    let proof = inputs.requirements.as_present().map(|r| &r.proof);
+                    let mut missing_facts = Vec::new();
+                    if session_id.is_none() {
+                        missing_facts.push("authenticated_session".to_owned());
+                    }
+                    if !inputs.is_decidable() {
+                        missing_facts.push("decision_inputs".to_owned());
+                    }
+                    row.action_facts = StatusActionFacts {
+                        origin: StatusActionFactsOrigin::Canonical,
+                        entity_revision: Some(inputs.subject.revision.get()),
+                        proof_revision: proof.map(|p| p.proof_revision.get()),
+                        authenticated_session_id: session_id.clone(),
+                        source_version_id: proof
+                            .and_then(|p| p.source_snapshot.as_ref())
+                            .map(ToString::to_string),
+                        config_identity: proof
+                            .and_then(|p| p.configuration.as_ref())
+                            .map(ToString::to_string),
+                        integrity: row.action_facts.integrity,
+                        missing_facts,
+                        canonical_inputs: Some(inputs),
+                    };
+                }
+                Err(error) => {
+                    row.action_facts = StatusActionFacts::unavailable();
+                    row.work
+                        .hard_holds
+                        .push(ReasonCode::HardHold("integrity_quarantined".into()));
+                    snapshot.diagnostics.push(StatusRecordDiagnostic {
+                        work_id: row.work.id.to_string(),
+                        title: Some(row.work.title.clone()),
+                        code: "decision_facts_corrupt".into(),
+                        detail: error.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Caller must hold the write transaction. This does not open a nested
@@ -355,8 +380,59 @@ impl SqliteStore {
         actor_id: &str,
         as_of: TimestampMs,
     ) -> Result<StatusDecision, StoreError> {
-        let actor = self.actor_context(actor_id)?;
-        let snapshot = self.read_project_status_in_transaction(project_id)?;
+        self.work_policy_in_transaction(project_id, work_id, actor_id, None, as_of)
+            .map(|projection| projection.status)
+    }
+    /// Re-evaluate the same domain action policy used by status, under the
+    /// caller's write lock. Displayed descriptors are never bearer tokens.
+    pub(crate) fn authorize_work_action_in_transaction(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
+        action: boreal_domain::actions::ActionKind,
+    ) -> Result<boreal_domain::actions::ActionDescriptor, StoreError> {
+        self.principal_authority(project_id, actor_id)?;
+        self.validate_project_session(
+            project_id,
+            actor_id,
+            session_id.ok_or_else(|| {
+                StoreError::Invalid("canonical action requires a project session".into())
+            })?,
+        )?;
+        let projection =
+            self.work_policy_in_transaction(project_id, work_id, actor_id, session_id, as_of)?;
+        let actions = projection.actions.ok_or_else(|| {
+            StoreError::Corrupt("canonical status/action facts unavailable".into())
+        })?;
+        if let Some(descriptor) = actions
+            .allowed
+            .into_iter()
+            .find(|descriptor| descriptor.action == action)
+        {
+            return Ok(descriptor);
+        }
+        let reason = actions
+            .denied
+            .iter()
+            .find(|denied| denied.descriptor.action == action)
+            .map(|denied| denied.reason.stable_code())
+            .unwrap_or("action_not_applicable");
+        Err(StoreError::Conflict(format!("action_denied:{reason}")))
+    }
+    fn work_policy_in_transaction(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
+    ) -> Result<WorkPolicyProjection, StoreError> {
+        let actor = self.project_actor_context(project_id, actor_id)?;
+        let mut snapshot = self.read_project_status_in_transaction(project_id)?;
+        self.populate_status_action_facts_for_session(&mut snapshot, actor_id, session_id, as_of)?;
         let row = snapshot
             .works
             .iter()
@@ -385,7 +461,7 @@ impl SqliteStore {
             .map(|edge| edge.dependent_id.clone())
             .collect::<Vec<_>>();
         let attempt = row.status_attempt()?;
-        Ok(evaluate_status(StatusContext {
+        let context = StatusContext {
             work: &row.work,
             prerequisites: &prerequisites,
             current_attempt: attempt.as_ref(),
@@ -397,7 +473,41 @@ impl SqliteStore {
             schedule: row.schedule,
             activation_at: row.activation_at,
             affected_dependents: &dependents,
-        }))
+        };
+        let projection = match row.action_facts.canonical_inputs.as_ref() {
+            Some(facts) if self.canonical_production => {
+                let paired =
+                    boreal_domain::evaluate_decision_actions(context, facts).map_err(|error| {
+                        StoreError::Corrupt(format!(
+                            "canonical status/action context validation failed: {error}"
+                        ))
+                    })?;
+                WorkPolicyProjection {
+                    status: paired.status,
+                    actions: Some(paired.actions),
+                }
+            }
+            _ if !self.canonical_production => WorkPolicyProjection {
+                // Explicit schema-v2 compatibility path: older snapshots may
+                // not have the immutable canonical fact tables, authenticated
+                // sessions, or production action context. Keep their historical
+                // status projection; canonical production mutations always use
+                // the paired status/action decision below.
+                status: evaluate_status(context),
+                actions: None,
+            },
+            Some(_) => {
+                return Err(StoreError::Corrupt(
+                    "canonical status/action facts were not evaluated".into(),
+                ))
+            }
+            None => {
+                return Err(StoreError::Corrupt(
+                    "canonical status/action facts unavailable".into(),
+                ))
+            }
+        };
+        Ok(projection)
     }
 }
 
@@ -405,7 +515,10 @@ impl SqliteStore {
 /// Broken endpoints are hard reasons on their dependent, never a dropped edge
 /// that accidentally makes the dependent ready. This function never persists
 /// a repair, a replacement record, or a display status.
-pub(crate) fn diagnose_status_integrity(snapshot: &mut ProjectStatusRead) {
+pub(crate) fn diagnose_status_integrity(
+    snapshot: &mut ProjectStatusRead,
+    v3_nodes: Option<&[WorkNodeV3Record]>,
+) {
     let mut valid = Vec::with_capacity(snapshot.works.len());
     for mut row in std::mem::take(&mut snapshot.works) {
         let clocks = row
@@ -443,19 +556,44 @@ pub(crate) fn diagnose_status_integrity(snapshot: &mut ProjectStatusRead) {
         .iter()
         .map(|row| (row.work.id.clone(), row.work.clone()))
         .collect::<BTreeMap<_, _>>();
+    let (v3_ids, v3_issues) = v3_nodes
+        .map(|nodes| v3_hierarchy_issues(snapshot.project_id.as_str(), &items, nodes))
+        .unwrap_or_default();
+    for (work_id, detail) in &v3_issues {
+        if !items.contains_key(&WorkId::new(work_id.clone())) {
+            snapshot.diagnostics.push(StatusRecordDiagnostic {
+                work_id: work_id.clone(),
+                title: None,
+                code: "invalid_work_model_v3_hierarchy".to_owned(),
+                detail: detail.clone(),
+            });
+        }
+    }
     for row in &mut valid {
         let parent = row.work.parent_id.as_ref().and_then(|id| items.get(id));
         let missing_parent = row.work.parent_id.is_some() && parent.is_none();
-        if missing_parent || boreal_domain::validate_parent(&row.work, parent).is_err() {
+        let v3_issue = v3_issues.get(row.work.id.as_str());
+        let invalid_parent = if v3_ids.contains(row.work.id.as_str()) {
+            v3_issue.is_some()
+        } else {
+            missing_parent || boreal_domain::validate_parent(&row.work, parent).is_err()
+        };
+        if invalid_parent {
             row.work
                 .hard_holds
                 .push(ReasonCode::HardHold("invalid_parent".to_owned()));
             snapshot.diagnostics.push(StatusRecordDiagnostic {
                 work_id: row.work.id.to_string(),
                 title: Some(row.work.title.clone()),
-                code: "invalid_parent".to_owned(),
-                detail: "parent is absent, foreign, corrupt, or has an incompatible kind"
-                    .to_owned(),
+                code: if v3_ids.contains(row.work.id.as_str()) {
+                    "invalid_work_model_v3_hierarchy".to_owned()
+                } else {
+                    "invalid_parent".to_owned()
+                },
+                detail: v3_issue.map_or_else(
+                    || "parent is absent, foreign, corrupt, or has an incompatible kind".to_owned(),
+                    Clone::clone,
+                ),
             });
         }
         for edge in snapshot
@@ -481,4 +619,188 @@ pub(crate) fn diagnose_status_integrity(snapshot: &mut ProjectStatusRead) {
         }
     }
     snapshot.works = valid;
+}
+
+/// Validate version-3 containment without broadening the schema-2 validator.
+/// Bad nodes are removed one at a time from the candidate forest so unrelated
+/// valid branches remain available in the dashboard snapshot.
+fn v3_hierarchy_issues(
+    project_id: &str,
+    items: &BTreeMap<WorkId, WorkItem>,
+    records: &[WorkNodeV3Record],
+) -> (BTreeSet<String>, BTreeMap<String, String>) {
+    let ids = records
+        .iter()
+        .map(|record| record.work_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut issues = BTreeMap::new();
+    let mut nodes = Vec::new();
+
+    for record in records {
+        let issue = if record.project_id != project_id {
+            Some("work node belongs to a different project".to_owned())
+        } else if let Some(item) = items.get(&WorkId::new(record.work_id.clone())) {
+            let expected_kind = match record.decomposition_kind.as_str() {
+                "milestone" => Some((WorkKind::Milestone, DecompositionKind::Milestone)),
+                "task" => Some((WorkKind::Task, DecompositionKind::Task)),
+                _ => None,
+            };
+            let mode = match record.execution_mode.as_str() {
+                "direct" => Some(ExecutionMode::Direct),
+                "container" => Some(ExecutionMode::Container),
+                _ => None,
+            };
+            let item_parent = match item.parent_id.as_ref() {
+                Some(parent_id) => match items.get(parent_id) {
+                    Some(parent) if parent.kind == WorkKind::Sprint => {
+                        parent.parent_id.as_ref().map(ToString::to_string)
+                    }
+                    Some(parent) => Some(parent.id.to_string()),
+                    None => Some(parent_id.to_string()),
+                },
+                None => None,
+            };
+            match (expected_kind, mode) {
+                (Some((item_kind, _)), Some(_))
+                    if item.kind != item_kind || item_parent != record.parent_id =>
+                {
+                    Some("version-3 hierarchy identity disagrees with its work record".to_owned())
+                }
+                (Some((_, kind)), Some(execution_mode)) => {
+                    nodes.push(WorkNode {
+                        id: WorkId::new(record.work_id.clone()),
+                        project_id: snapshot_project_id(project_id),
+                        kind,
+                        execution_mode,
+                        parent_id: record.parent_id.clone().map(WorkId::new),
+                        title: item.title.clone(),
+                    });
+                    None
+                }
+                _ => Some(
+                    "version-3 hierarchy contains an unknown kind or execution mode".to_owned(),
+                ),
+            }
+        } else {
+            Some("version-3 hierarchy node has no corresponding work record".to_owned())
+        };
+        if let Some(issue) = issue {
+            issues.insert(record.work_id.clone(), issue);
+        }
+    }
+
+    while let Err(error) = boreal_domain::work_model_v3::validate_decomposition(&nodes) {
+        let affected = match &error {
+            boreal_domain::work_model_v3::ModelError::MissingParent(id)
+            | boreal_domain::work_model_v3::ModelError::MilestoneMustBeContainer(id)
+            | boreal_domain::work_model_v3::ModelError::DirectTaskHasChildren(id)
+            | boreal_domain::work_model_v3::ModelError::DecompositionCycle(id) => {
+                Some(id.to_string())
+            }
+            boreal_domain::work_model_v3::ModelError::CrossProjectReference { from, .. } => {
+                Some(from.to_string())
+            }
+            boreal_domain::work_model_v3::ModelError::InvalidParentShape { child, .. } => {
+                Some(child.to_string())
+            }
+            boreal_domain::work_model_v3::ModelError::DuplicateIdentifier(id) => Some(id.clone()),
+            _ => None,
+        };
+        let Some(affected) = affected else { break };
+        if issues.contains_key(&affected) {
+            break;
+        }
+        issues.insert(
+            affected.clone(),
+            format!("invalid version-3 work hierarchy: {error:?}"),
+        );
+        let before = nodes.len();
+        nodes.retain(|node| node.id.as_str() != affected);
+        if nodes.len() == before {
+            break;
+        }
+    }
+
+    (ids, issues)
+}
+
+fn snapshot_project_id(project_id: &str) -> boreal_domain::ProjectId {
+    boreal_domain::ProjectId::new(project_id)
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+
+    fn item(id: &str, kind: WorkKind, parent_id: Option<&str>) -> WorkItem {
+        WorkItem::new(
+            boreal_domain::ProjectId::new("project"),
+            WorkId::new(id),
+            kind,
+            parent_id.map(WorkId::new),
+            id,
+        )
+        .open()
+    }
+
+    fn node(
+        work_id: &str,
+        decomposition_kind: &str,
+        execution_mode: &str,
+        parent_id: Option<&str>,
+    ) -> WorkNodeV3Record {
+        WorkNodeV3Record {
+            project_id: "project".to_owned(),
+            work_id: work_id.to_owned(),
+            decomposition_kind: decomposition_kind.to_owned(),
+            execution_mode: execution_mode.to_owned(),
+            parent_id: parent_id.map(str::to_owned),
+            created_at: "t0".to_owned(),
+            updated_at: "t0".to_owned(),
+        }
+    }
+
+    #[test]
+    fn status_integrity_accepts_versioned_container_hierarchy() {
+        let items = [
+            item("milestone", WorkKind::Milestone, None),
+            item("sprint", WorkKind::Sprint, Some("milestone")),
+            item("leaf", WorkKind::Task, Some("sprint")),
+        ]
+        .into_iter()
+        .map(|item| (item.id.clone(), item))
+        .collect();
+        let nodes = [
+            node("milestone", "milestone", "container", None),
+            node("leaf", "task", "direct", Some("milestone")),
+        ];
+
+        let (ids, issues) = v3_hierarchy_issues("project", &items, &nodes);
+
+        assert_eq!(ids.len(), 2);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn status_integrity_quarantines_invalid_v3_child_without_healthy_siblings() {
+        let items = [
+            item("direct", WorkKind::Task, None),
+            item("invalid-child", WorkKind::Task, Some("direct")),
+            item("healthy", WorkKind::Task, None),
+        ]
+        .into_iter()
+        .map(|item| (item.id.clone(), item))
+        .collect();
+        let nodes = [
+            node("direct", "task", "direct", None),
+            node("invalid-child", "task", "direct", Some("direct")),
+            node("healthy", "task", "direct", None),
+        ];
+
+        let (_, issues) = v3_hierarchy_issues("project", &items, &nodes);
+
+        assert!(issues.contains_key("invalid-child"));
+        assert!(!issues.contains_key("direct"));
+        assert!(!issues.contains_key("healthy"));
+    }
 }

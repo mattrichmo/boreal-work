@@ -61,6 +61,25 @@ impl SqliteStore {
         &self,
         input: &SourceVersionRegistrationInput,
     ) -> Result<SourceVersionRegistrationResult, StoreError> {
+        self.register_source_version_inner(input, None)
+    }
+
+    /// Registers source metadata only if the project still has the revision
+    /// observed before the immutable blob was captured. The check is repeated
+    /// inside the same transaction as the source row and audit record.
+    pub fn register_source_version_at_revision(
+        &self,
+        input: &SourceVersionRegistrationInput,
+        expected_revision: u64,
+    ) -> Result<SourceVersionRegistrationResult, StoreError> {
+        self.register_source_version_inner(input, Some(expected_revision))
+    }
+
+    fn register_source_version_inner(
+        &self,
+        input: &SourceVersionRegistrationInput,
+        expected_revision: Option<u64>,
+    ) -> Result<SourceVersionRegistrationResult, StoreError> {
         validate_registration(input)?;
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
@@ -75,7 +94,7 @@ impl SqliteStore {
                 "source.register",
                 &input.actor_id,
                 None,
-                None,
+                expected_revision,
                 None,
                 None,
                 &input.request_digest,
@@ -99,6 +118,13 @@ impl SqliteStore {
                     },
                     source,
                 });
+            }
+
+            if let Some(expected) = expected_revision {
+                let actual = self.project_revision(&input.project_id)?.0;
+                if actual != expected {
+                    return Err(StoreError::StaleRevision { expected, actual });
+                }
             }
 
             let (source, inserted) = if let Some(existing) =
@@ -150,7 +176,7 @@ impl SqliteStore {
                 command: "source.register".to_owned(),
                 actor_id: input.actor_id.clone(),
                 session_id: None,
-                expected_revision: None,
+                expected_revision,
                 attempt_id: None,
                 fence: None,
                 request_digest: input.request_digest.clone(),
@@ -345,7 +371,9 @@ fn ensure_same_source(
 mod tests {
     use super::{SourceVersionRegistrationInput, SqliteStore};
     use crate::identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding};
+    use crate::principals::{credential_digest, PrincipalGrantRequest};
     use crate::StoreError;
+    use boreal_domain::ActorRole;
 
     const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 
@@ -355,11 +383,14 @@ mod tests {
         store
             .create_project("knowledge-project", "unix-ms:0")
             .expect("project creates");
+        let agent_credential = format!("bwrk1_{}", "b".repeat(64));
+        let agent_credential_ref =
+            credential_digest("knowledge-project", &agent_credential).expect("credential hashes");
         store
             .ensure_actor(
                 "knowledge-agent",
                 "agent",
-                "credential-knowledge",
+                &agent_credential_ref,
                 "Knowledge Agent",
                 "unix-ms:0",
             )
@@ -407,6 +438,41 @@ mod tests {
     #[test]
     fn source_registration_uses_identity_bound_audit_replay_boundary() {
         let store = bound_store();
+        let bootstrap = store
+            .bootstrap_project_principal(&PrincipalGrantRequest {
+                project_id: "knowledge-project".to_owned(),
+                actor_id: "knowledge-operator".to_owned(),
+                session_id: None,
+                principal_actor_id: "knowledge-operator".to_owned(),
+                role: ActorRole::Operator,
+                independent: true,
+                credential: format!("bwrk1_{}", "a".repeat(64)),
+                expires_at_ms: None,
+                display_name: "Knowledge Operator".to_owned(),
+                reason: "bootstrap source registration test authority".to_owned(),
+                expected_revision: store.project_revision("knowledge-project").unwrap().0,
+                operation_id: "knowledge-operator-bootstrap".to_owned(),
+                at: "unix-ms:2".to_owned(),
+            })
+            .expect("independent operator principal bootstraps");
+        store
+            .grant_principal(&PrincipalGrantRequest {
+                project_id: "knowledge-project".to_owned(),
+                actor_id: "knowledge-operator".to_owned(),
+                session_id: None,
+                principal_actor_id: "knowledge-agent".to_owned(),
+                role: ActorRole::Agent,
+                independent: false,
+                credential: format!("bwrk1_{}", "b".repeat(64)),
+                expires_at_ms: None,
+                display_name: "Knowledge Agent".to_owned(),
+                reason: "grant source registration test authority".to_owned(),
+                expected_revision: bootstrap.revision,
+                operation_id: "knowledge-agent-grant".to_owned(),
+                at: "unix-ms:3".to_owned(),
+            })
+            .expect("agent principal is granted");
+        let revision_before_source = store.project_revision("knowledge-project").unwrap().0;
         let request = input("source-knowledge-op", "sha256:knowledge-request");
 
         let first = store
@@ -430,7 +496,10 @@ mod tests {
             .expect("exact retry replays");
         assert!(replay.mutation.replayed);
         assert_eq!(replay.mutation.revision, first.mutation.revision);
-        assert_eq!(store.project_revision(&request.project_id).unwrap().0, 1);
+        assert_eq!(
+            store.project_revision(&request.project_id).unwrap().0,
+            revision_before_source + 1
+        );
 
         let mut changed = request.clone();
         changed.request_digest = "sha256:changed-request".to_owned();

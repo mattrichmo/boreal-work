@@ -801,7 +801,13 @@ pub fn evaluate_cycle_rollup(input: &CycleRollupInput) -> CycleRollup {
                     CycleRollupState::Active
                 }
             }
-            super::work_model_v3::CycleLifecycle::Completed => CycleRollupState::Completed,
+            super::work_model_v3::CycleLifecycle::Completed => {
+                if scope_reconciled && gate_review_gaps.is_empty() && !integration_blocks {
+                    CycleRollupState::Completed
+                } else {
+                    CycleRollupState::Attention
+                }
+            }
             super::work_model_v3::CycleLifecycle::Cancelled => CycleRollupState::Cancelled,
         }
     };

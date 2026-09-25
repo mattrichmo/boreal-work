@@ -379,10 +379,7 @@ fn actor_roles_change_claimability_not_display_readiness() {
             None,
         );
         assert_eq!(result.display_status, DerivedStatus::Ready);
-        assert_eq!(
-            result.claimable_for_actor,
-            matches!(role, ActorRole::Agent | ActorRole::Operator)
-        );
+        assert_eq!(result.claimable_for_actor, role == ActorRole::Agent);
     }
     work.dispatch_policy = DispatchPolicy::OperatorOnly;
     for role in [

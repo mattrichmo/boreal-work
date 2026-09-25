@@ -6,11 +6,18 @@
 //! transactional store methods are not available yet.
 
 use boreal_domain::work_model_v3::{
-    ActivationPolicy, CycleAssignment, CycleAssignmentState, CycleInstance, CycleLifecycle,
+    ActivationPolicy, Cycle, CycleAssignment, CycleAssignmentState, CycleId, CycleInstance, CycleLifecycle,
     CycleSeries, CycleSeriesLifecycle, CycleTemplate, DispositionKind, FoldPolicy, GapPolicy,
-    IntakeBucket, IntakeItem, IntakeKind, IntakeLifecycle, IntakePromotion, PromotionTargetKind,
+    ExecutionMode, IntakeBucket, IntakeItem, IntakeKind, IntakeLifecycle, IntakePromotion,
+    PromotionTargetKind,
 };
-use boreal_domain::{ProjectId, SessionId};
+use boreal_domain::decision_inputs::{ContentDigest, EntityIdentity, EntityRevision, ProofRevision};
+use boreal_domain::rollups::{
+    evaluate_container_rollup, evaluate_cycle_rollup, AcceptedOutcome, ContainerRollup,
+    ContainerRollupInput, CycleAssignmentRollupInput, CycleRollup, CycleRollupInput,
+    DescendantIntegrity, RollupBlocker, RollupScope, ScopeDisposition, TaskRollupInput,
+};
+use boreal_domain::{ProjectId, SessionId, TimestampMs, WorkId};
 use boreal_store::{
     AttemptRecord, ContainerDispositionV3Input, CycleAssignmentV3Input, CycleSeriesV3Input,
     CycleTemplateV3Input, CycleV3Input, IntakeBucketV3Input, IntakeItemV3Input, IntakeItemV3Record,
@@ -47,14 +54,27 @@ pub struct DependencyEdgeView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CycleBoardView {
+    pub diagnostics: Vec<boreal_store::StatusRecordDiagnostic>,
     pub project_id: ProjectId,
     pub revision: u64,
     pub cycle: boreal_store::CycleV3Record,
     pub assignments: Vec<CycleBoardAssignment>,
+    pub rollup: CycleRollup,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContainerRollupView {
+    pub diagnostics: Vec<boreal_store::StatusRecordDiagnostic>,
+    pub project_id: ProjectId,
+    pub revision: u64,
+    pub container: boreal_store::WorkNodeV3Record,
+    pub rollup: ContainerRollup,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CycleBoardAssignment {
+    pub accepted_closed: bool,
+    pub accepted_outcome: Option<boreal_store::acceptance::AcceptedOutcomeRecord>,
     pub assignment: boreal_store::CycleAssignmentV3Record,
     pub work_title: Option<String>,
     pub work_kind: Option<String>,
@@ -106,32 +126,97 @@ impl WorkApplication<'_> {
         &self,
         project_id: &ProjectId,
         cycle_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
     ) -> Result<CycleBoardView, ApplicationError> {
         if !self.store_ref().work_model_v3_enabled()? {
             return Err(ApplicationError::Invalid(
                 "cycle board requires work-model/3 to be enabled".to_owned(),
             ));
         }
-        let cycle = self
-            .store_ref()
-            .cycle_v3(project_id.as_str(), cycle_id)?
-            .ok_or_else(|| boreal_store::StoreError::NotFound {
-                entity: "cycle_v3",
-                id: cycle_id.to_owned(),
-            })?;
-        let status = self.store_ref().read_project_status(project_id.as_str())?;
-        let work = status
+        let snapshot = self.store_ref().cycle_board_snapshot_v3(
+            project_id.as_str(),
+            cycle_id,
+            actor_id,
+            session_id,
+            as_of,
+        )?;
+        let revision = snapshot.status.revision.0;
+        let mut diagnostics = snapshot.status.diagnostics.clone();
+        diagnostics.extend(snapshot.assignment_diagnostics.iter().cloned());
+        let mut inputs = Vec::with_capacity(snapshot.status.works.len());
+        for row in &snapshot.status.works {
+            match crate::status::status_input_from_store_row(row) {
+                Ok(input) => inputs.push(input),
+                Err(detail) => diagnostics.push(boreal_store::StatusRecordDiagnostic {
+                    work_id: row.work.id.to_string(),
+                    title: Some(row.work.title.clone()),
+                    code: "rollup_facts_unreadable".to_owned(),
+                    detail,
+                }),
+            }
+        }
+        let known = inputs
+            .iter()
+            .map(|input| input.work.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut dependencies = Vec::new();
+        for edge in &snapshot.status.dependencies {
+            if known.contains(&edge.prerequisite_id) && known.contains(&edge.dependent_id) {
+                dependencies.push(crate::status::DependencyInput {
+                    prerequisite_id: edge.prerequisite_id.clone(),
+                    dependent_id: edge.dependent_id.clone(),
+                    policy: edge.policy,
+                });
+            } else {
+                diagnostics.push(boreal_store::StatusRecordDiagnostic {
+                    work_id: edge.dependent_id.to_string(),
+                    title: None,
+                    code: "rollup_dependency_unreadable".to_owned(),
+                    detail: format!("dependency prerequisite {} is unreadable", edge.prerequisite_id),
+                });
+            }
+        }
+        let total = inputs.len() as u64;
+        let mut projected = BTreeMap::new();
+        let mut offset = 0;
+        while offset < total || (total == 0 && offset == 0) {
+            let limit = total.saturating_sub(offset).min(crate::status::MAX_STATUS_ROWS).max(1);
+            let page = crate::status::project_status(
+                project_id,
+                &snapshot.actor,
+                as_of,
+                boreal_domain::Revision(revision),
+                &inputs,
+                &dependencies,
+                limit,
+                offset,
+            )
+            .map_err(|error| ApplicationError::Invalid(error.to_string()))?;
+            let returned = page.items.len() as u64;
+            for item in page.items {
+                projected.insert(item.work.id.to_string(), item);
+            }
+            if total == 0 || returned == 0 {
+                break;
+            }
+            offset += returned;
+        }
+        let work = snapshot.status
             .works
-            .into_iter()
-            .map(|row| (row.work.id.to_string(), row.work))
+            .iter()
+            .map(|row| (row.work.id.to_string(), row.work.clone()))
             .collect::<BTreeMap<_, _>>();
-        let assignments = self
-            .store_ref()
-            .cycle_assignments_v3(project_id.as_str(), cycle_id)?
-            .into_iter()
+        let assignments = snapshot.assignments
+            .iter()
+            .cloned()
             .map(|assignment| {
                 let item = work.get(&assignment.work_id);
+                let accepted_outcome = snapshot.accepted_outcomes.get(&assignment.work_id).cloned();
                 CycleBoardAssignment {
+                    accepted_closed: accepted_outcome.is_some(),
+                    accepted_outcome,
                     work_title: item.map(|value| value.title.clone()),
                     work_kind: item.map(|value| format!("{:?}", value.kind).to_ascii_lowercase()),
                     work_lifecycle: item
@@ -140,11 +225,455 @@ impl WorkApplication<'_> {
                 }
             })
             .collect();
+        let cycle = cycle_model(&snapshot.cycle)?;
+        let node_by_work = snapshot.work_nodes.iter().map(|node| (node.work_id.as_str(), node)).collect::<BTreeMap<_, _>>();
+        let input_by_work = inputs.iter().map(|input| (input.work.id.as_str(), input)).collect::<BTreeMap<_, _>>();
+        let mut rollup_assignments = Vec::new();
+        for assignment in &snapshot.assignments {
+            let id = assignment.work_id.as_str();
+            let Some(item) = projected.get(id) else {
+                let source_row = snapshot.status.works.iter().find(|row| row.work.id.as_str() == id);
+                diagnostics.push(boreal_store::StatusRecordDiagnostic {
+                    work_id: id.to_owned(),
+                    title: work.get(id).map(|work| work.title.clone()),
+                    code: "rollup_work_unavailable".to_owned(),
+                    detail: "assigned work is missing from the canonical status snapshot".to_owned(),
+                });
+                // Keep the assignment in the rollup denominator even when its
+                // decision facts cannot be projected. The corrupt integrity
+                // marker prevents this fallback from ever counting as accepted.
+                let Some(row) = source_row else {
+                    diagnostics.push(boreal_store::StatusRecordDiagnostic {
+                        work_id: id.to_owned(),
+                        title: None,
+                        code: "rollup_identity_unavailable".to_owned(),
+                        detail: "assignment has no decodable work identity".to_owned(),
+                    });
+                    continue;
+                };
+                let outcome = snapshot.accepted_outcomes.get(id);
+                let identity = EntityIdentity::new(
+                    project_id.clone(),
+                    WorkId::new(id),
+                    EntityRevision::new(row.action_facts.entity_revision.unwrap_or(0)),
+                );
+                let accepted_outcome = outcome.map(|outcome| AcceptedOutcome::new(
+                    EntityIdentity::new(
+                        ProjectId::new(outcome.project_id.clone()),
+                        WorkId::new(outcome.work_id.clone()),
+                        EntityRevision::new(outcome.entity_revision),
+                    ),
+                    ProofRevision::new(outcome.proof_revision),
+                    ContentDigest::new(outcome.summary_digest.clone()),
+                ));
+                let disposition = match assignment.state.as_str() {
+                    "completed" => outcome.map(|outcome| boreal_domain::rollups::ScopeDisposition::AcceptedClosed {
+                        entity_revision: EntityRevision::new(outcome.entity_revision),
+                        outcome_digest: ContentDigest::new(outcome.summary_digest.clone()),
+                    }),
+                    "removed" | "carried_over" => snapshot.assignment_reasons.get(&assignment.assignment_id)
+                        .map(|reason| boreal_domain::rollups::ScopeDisposition::deferred(reason.clone())),
+                    _ => None,
+                };
+                let mut task = TaskRollupInput::new(
+                    identity,
+                    ExecutionMode::Direct,
+                    row.work.lifecycle,
+                    match row.work.lifecycle {
+                        boreal_domain::PersistedLifecycle::Draft => boreal_domain::DerivedStatus::Draft,
+                        boreal_domain::PersistedLifecycle::Open => boreal_domain::DerivedStatus::Ready,
+                        boreal_domain::PersistedLifecycle::Closed => boreal_domain::DerivedStatus::Closed,
+                        boreal_domain::PersistedLifecycle::Cancelled => boreal_domain::DerivedStatus::Cancelled,
+                    },
+                );
+                task.accepted_outcome = accepted_outcome;
+                task.disposition = disposition;
+                task.requires_reconciliation = true;
+                task.integrity = DescendantIntegrity::Corrupt {
+                    code: "status_projection_unavailable".to_owned(),
+                };
+                let (assignment_model, assignment_errors) = cycle_assignment_model(assignment);
+                for error in &assignment_errors {
+                    diagnostics.push(boreal_store::StatusRecordDiagnostic {
+                        work_id: id.to_owned(),
+                        title: work.get(id).map(|work| work.title.clone()),
+                        code: "cycle_assignment_corrupt".to_owned(),
+                        detail: error.clone(),
+                    });
+                }
+                if !assignment_errors.is_empty() {
+                    task.integrity = DescendantIntegrity::Corrupt {
+                        code: "cycle_assignment_corrupt".to_owned(),
+                    };
+                }
+                rollup_assignments.push(CycleAssignmentRollupInput {
+                    assignment: assignment_model,
+                    task,
+                });
+                continue;
+            };
+            let source_input = input_by_work.get(id).copied();
+            let node = node_by_work.get(id).copied();
+            let (execution_mode, node_integrity) = match node.map(|node| node.execution_mode.as_str()) {
+                Some("container") => (ExecutionMode::Container, None),
+                Some("direct") => (ExecutionMode::Direct, None),
+                Some(value) => (ExecutionMode::Direct, Some(format!("invalid_execution_mode:{value}"))),
+                None => (ExecutionMode::Direct, Some("work_node_missing".to_owned())),
+            };
+            let identity = item.canonical_inputs.as_ref().map(|facts| facts.subject.clone()).or_else(|| {
+                source_input.and_then(|input| input.action_facts.as_ref()?.entity_revision.map(|entity_revision| {
+                    EntityIdentity::new(project_id.clone(), WorkId::new(id), EntityRevision::new(entity_revision))
+                }))
+            }).unwrap_or_else(|| EntityIdentity::new(
+                project_id.clone(),
+                WorkId::new(id),
+                EntityRevision::new(0),
+            ));
+            let stored_outcome = snapshot.accepted_outcomes.get(id);
+            let accepted_outcome = stored_outcome.map(|outcome| AcceptedOutcome::new(
+                EntityIdentity::new(
+                    ProjectId::new(outcome.project_id.clone()),
+                    WorkId::new(outcome.work_id.clone()),
+                    EntityRevision::new(outcome.entity_revision),
+                ),
+                ProofRevision::new(outcome.proof_revision),
+                ContentDigest::new(outcome.summary_digest.clone()),
+            ));
+            let disposition = match assignment.state.as_str() {
+                "completed" => stored_outcome.map(|outcome| boreal_domain::rollups::ScopeDisposition::AcceptedClosed {
+                    entity_revision: EntityRevision::new(outcome.entity_revision),
+                    outcome_digest: ContentDigest::new(outcome.summary_digest.clone()),
+                }),
+                "removed" | "carried_over" => snapshot.assignment_reasons.get(&assignment.assignment_id)
+                    .map(|reason| boreal_domain::rollups::ScopeDisposition::deferred(reason.clone())),
+                _ => None,
+            };
+            let canonical_integrity = item.canonical_inputs.as_ref().map(|facts| facts.integrity.level);
+            let integrity = if let Some(code) = node_integrity {
+                DescendantIntegrity::Corrupt { code }
+            } else {
+                match canonical_integrity {
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Valid) => DescendantIntegrity::Valid,
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Degraded) => DescendantIntegrity::Degraded { code: "decision_facts_degraded".into() },
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Quarantined) | None => DescendantIntegrity::Corrupt { code: "decision_facts_unavailable".into() },
+                }
+            };
+            let gate_gaps = item.gates.missing.iter().map(|gate| gate.clone().into()).collect();
+            let overdue = source_input.and_then(|input| input.schedule).and_then(|schedule| schedule.due_at).is_some_and(|due| as_of >= due);
+            let blockers = item.decision.reason_codes.iter().filter_map(|reason| match reason {
+                boreal_domain::ReasonCode::HardHold(_)
+                | boreal_domain::ReasonCode::PrerequisiteOpen(_)
+                | boreal_domain::ReasonCode::AttemptActive
+                | boreal_domain::ReasonCode::NotPublished
+                | boreal_domain::ReasonCode::GateFailed(_)
+                | boreal_domain::ReasonCode::GateMissing(_)
+                | boreal_domain::ReasonCode::GateInvalid(_)
+                | boreal_domain::ReasonCode::ReviewRejected(_)
+                | boreal_domain::ReasonCode::ExpiryReviewRequired
+                | boreal_domain::ReasonCode::VerificationRequired
+                | boreal_domain::ReasonCode::ReviewRequired
+                | boreal_domain::ReasonCode::CloseoutPending
+                | boreal_domain::ReasonCode::LeaseElapsed
+                | boreal_domain::ReasonCode::HardBudgetElapsed => Some(RollupBlocker::new(WorkId::new(id), reason.stable_code())),
+                _ => None,
+            }).collect();
+            let mut task = TaskRollupInput::new(
+                identity,
+                execution_mode,
+                item.work.lifecycle,
+                item.decision.display_status,
+            );
+            task.claimable_for_actor = item.claimable_for_actor();
+            task.active_execution = item.attempt.is_some();
+            task.accepted_outcome = accepted_outcome;
+            task.disposition = disposition;
+            task.requires_reconciliation = true;
+            task.gate_gaps = gate_gaps;
+            task.overdue = overdue;
+            task.blockers = blockers;
+            task.integrity = integrity;
+            let (assignment_model, assignment_errors) = cycle_assignment_model(assignment);
+            for error in &assignment_errors {
+                diagnostics.push(boreal_store::StatusRecordDiagnostic {
+                    work_id: id.to_owned(),
+                    title: work.get(id).map(|work| work.title.clone()),
+                    code: "cycle_assignment_corrupt".to_owned(),
+                    detail: error.clone(),
+                });
+            }
+            if !assignment_errors.is_empty() {
+                task.integrity = DescendantIntegrity::Corrupt {
+                    code: "cycle_assignment_corrupt".to_owned(),
+                };
+            }
+            rollup_assignments.push(CycleAssignmentRollupInput {
+                assignment: assignment_model,
+                task,
+            });
+        }
+        let rollup = evaluate_cycle_rollup(&CycleRollupInput {
+            scope: RollupScope::cycle(project_id.clone(), cycle.id.clone(), EntityRevision::new(revision)),
+            cycle,
+            assignments: rollup_assignments,
+            gate_gaps: Vec::new(),
+            overdue: false,
+            blockers: Vec::new(),
+            integration_closeout: None,
+        });
         Ok(CycleBoardView {
             project_id: project_id.clone(),
-            revision: self.store_ref().project_revision(project_id.as_str())?.0,
-            cycle,
+            revision,
+            diagnostics,
+            cycle: snapshot.cycle,
             assignments,
+            rollup,
+        })
+    }
+
+    /// Evaluate a container from one transaction-bound project snapshot. A
+    /// malformed descendant remains in the rollup as corrupt work, while
+    /// independently usable descendants retain their own readiness facts.
+    pub fn container_rollup_v3(
+        &self,
+        project_id: &ProjectId,
+        container_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
+    ) -> Result<ContainerRollupView, ApplicationError> {
+        if !self.store_ref().work_model_v3_enabled()? {
+            return Err(ApplicationError::Invalid(
+                "container rollup requires work-model/3 to be enabled".to_owned(),
+            ));
+        }
+        let snapshot = self.store_ref().container_rollup_snapshot_v3(
+            project_id.as_str(),
+            container_id,
+            actor_id,
+            session_id,
+            as_of,
+        )?;
+        let revision = snapshot.status.revision.0;
+        let mut diagnostics = snapshot.status.diagnostics.clone();
+        let mut inputs = Vec::with_capacity(snapshot.status.works.len());
+        for row in &snapshot.status.works {
+            match crate::status::status_input_from_store_row(row) {
+                Ok(input) => inputs.push(input),
+                Err(detail) => diagnostics.push(boreal_store::StatusRecordDiagnostic {
+                    work_id: row.work.id.to_string(),
+                    title: Some(row.work.title.clone()),
+                    code: "rollup_facts_unreadable".to_owned(),
+                    detail,
+                }),
+            }
+        }
+        let known = inputs
+            .iter()
+            .map(|input| input.work.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut dependencies = Vec::new();
+        for edge in &snapshot.status.dependencies {
+            if known.contains(&edge.prerequisite_id) && known.contains(&edge.dependent_id) {
+                dependencies.push(crate::status::DependencyInput {
+                    prerequisite_id: edge.prerequisite_id.clone(),
+                    dependent_id: edge.dependent_id.clone(),
+                    policy: edge.policy,
+                });
+            }
+        }
+        let total = inputs.len() as u64;
+        let mut projected = BTreeMap::new();
+        let mut offset = 0;
+        loop {
+            let limit = total
+                .saturating_sub(offset)
+                .min(crate::status::MAX_STATUS_ROWS)
+                .max(1);
+            let page = crate::status::project_status(
+                project_id,
+                &snapshot.actor,
+                as_of,
+                boreal_domain::Revision(revision),
+                &inputs,
+                &dependencies,
+                limit,
+                offset,
+            )
+            .map_err(|error| ApplicationError::Invalid(error.to_string()))?;
+            let returned = page.items.len() as u64;
+            for item in page.items {
+                projected.insert(item.work.id.to_string(), item);
+            }
+            if total == 0 || returned == 0 {
+                break;
+            }
+            offset += returned;
+            if offset >= total {
+                break;
+            }
+        }
+        let node_by_work = snapshot
+            .work_nodes
+            .iter()
+            .map(|node| (node.work_id.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+        let mut descendant_ids = BTreeSet::new();
+        let mut frontier = BTreeSet::from([container_id.to_owned()]);
+        while !frontier.is_empty() {
+            let parents = frontier;
+            frontier = BTreeSet::new();
+            for node in &snapshot.work_nodes {
+                if node.parent_id.as_ref().is_some_and(|parent| parents.contains(parent))
+                    && descendant_ids.insert(node.work_id.clone())
+                {
+                    frontier.insert(node.work_id.clone());
+                }
+            }
+            for row in &snapshot.status.works {
+                if row
+                    .work
+                    .parent_id
+                    .as_ref()
+                    .is_some_and(|parent| parents.contains(parent.as_str()))
+                    && descendant_ids.insert(row.work.id.to_string())
+                {
+                    frontier.insert(row.work.id.to_string());
+                }
+            }
+        }
+        let work_by_id = snapshot
+            .status
+            .works
+            .iter()
+            .map(|row| (row.work.id.as_str(), row))
+            .collect::<BTreeMap<_, _>>();
+        let mut descendants = Vec::with_capacity(descendant_ids.len());
+        for id in descendant_ids {
+            let source = work_by_id.get(id.as_str()).copied();
+            let projected_item = projected.get(&id);
+            let node = node_by_work.get(id.as_str()).copied();
+            let work = source.map(|row| &row.work);
+            let lifecycle = work.map_or(
+                boreal_domain::PersistedLifecycle::Open,
+                |work| work.lifecycle,
+            );
+            let revision_for_work = source
+                .and_then(|row| row.action_facts.entity_revision)
+                .unwrap_or(0);
+            let identity = projected_item
+                .and_then(|item| item.canonical_inputs.as_ref())
+                .map(|facts| facts.subject.clone())
+                .unwrap_or_else(|| {
+                    EntityIdentity::new(
+                        project_id.clone(),
+                        WorkId::new(id.clone()),
+                        EntityRevision::new(revision_for_work),
+                    )
+                });
+            let (execution_mode, invalid_mode) = match node.map(|node| node.execution_mode.as_str()) {
+                Some("container") => (ExecutionMode::Container, None),
+                Some("direct") => (ExecutionMode::Direct, None),
+                Some(value) => (ExecutionMode::Direct, Some(format!("invalid_execution_mode:{value}"))),
+                None => (ExecutionMode::Direct, Some("work_node_missing".to_owned())),
+            };
+            let status = projected_item.map_or(boreal_domain::DerivedStatus::Blocked, |item| item.decision.display_status);
+            let mut task = TaskRollupInput::new(identity.clone(), execution_mode, lifecycle, status);
+            task.requires_reconciliation = true;
+            task.claimable_for_actor = projected_item.is_some_and(|item| item.claimable_for_actor());
+            task.active_execution = projected_item.is_some_and(|item| item.attempt.is_some());
+            task.accepted_outcome = snapshot.accepted_outcomes.get(&id).map(|outcome| {
+                AcceptedOutcome::new(
+                    EntityIdentity::new(
+                        ProjectId::new(outcome.project_id.clone()),
+                        WorkId::new(outcome.work_id.clone()),
+                        EntityRevision::new(outcome.entity_revision),
+                    ),
+                    ProofRevision::new(outcome.proof_revision),
+                    ContentDigest::new(outcome.summary_digest.clone()),
+                )
+            });
+            task.disposition = snapshot.dispositions.get(&id).and_then(|disposition| {
+                let reason = disposition.reason.clone().unwrap_or_default();
+                match disposition.kind.as_str() {
+                    "accepted_closed" => Some(ScopeDisposition::AcceptedClosed {
+                        entity_revision: EntityRevision::new(disposition.descendant_revision),
+                        outcome_digest: ContentDigest::new(disposition.descendant_outcome_digest.clone()),
+                    }),
+                    "accepted_cancelled" => Some(ScopeDisposition::AcceptedCancelled {
+                        entity_revision: EntityRevision::new(disposition.descendant_revision),
+                        outcome_digest: ContentDigest::new(disposition.descendant_outcome_digest.clone()),
+                    }),
+                    "deferred" => Some(ScopeDisposition::deferred(reason)),
+                    "replaced" => disposition.replacement_work_id.as_ref().map(|replacement| {
+                        ScopeDisposition::replaced(WorkId::new(replacement.clone()), reason)
+                    }),
+                    _ => None,
+                }
+            });
+            if let Some(item) = projected_item {
+                task.gate_gaps = item.gates.missing.iter().cloned().map(Into::into).collect();
+                task.overdue = source
+                    .and_then(|row| row.schedule)
+                    .and_then(|schedule| schedule.due_at)
+                    .is_some_and(|due| as_of >= due);
+                task.blockers = item.decision.reason_codes.iter().filter_map(|reason| match reason {
+                    boreal_domain::ReasonCode::HardHold(_)
+                    | boreal_domain::ReasonCode::PrerequisiteOpen(_)
+                    | boreal_domain::ReasonCode::AttemptActive
+                    | boreal_domain::ReasonCode::NotPublished
+                    | boreal_domain::ReasonCode::GateFailed(_)
+                    | boreal_domain::ReasonCode::GateMissing(_)
+                    | boreal_domain::ReasonCode::GateInvalid(_)
+                    | boreal_domain::ReasonCode::ReviewRejected(_)
+                    | boreal_domain::ReasonCode::ExpiryReviewRequired
+                    | boreal_domain::ReasonCode::VerificationRequired
+                    | boreal_domain::ReasonCode::ReviewRequired
+                    | boreal_domain::ReasonCode::CloseoutPending
+                    | boreal_domain::ReasonCode::LeaseElapsed
+                    | boreal_domain::ReasonCode::HardBudgetElapsed => Some(RollupBlocker::new(WorkId::new(id.clone()), reason.stable_code())),
+                    _ => None,
+                }).collect();
+                task.integrity = match item.canonical_inputs.as_ref().map(|facts| facts.integrity.level) {
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Valid) if invalid_mode.is_none() => DescendantIntegrity::Valid,
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Degraded) => DescendantIntegrity::Degraded { code: "decision_facts_degraded".into() },
+                    _ => DescendantIntegrity::Corrupt { code: invalid_mode.unwrap_or_else(|| "decision_facts_unavailable".into()) },
+                };
+            } else {
+                task.integrity = DescendantIntegrity::Corrupt {
+                    code: invalid_mode.unwrap_or_else(|| "status_projection_unavailable".to_owned()),
+                };
+                diagnostics.push(boreal_store::StatusRecordDiagnostic {
+                    work_id: id.clone(),
+                    title: work.map(|work| work.title.clone()),
+                    code: "container_descendant_unreadable".to_owned(),
+                    detail: "descendant is absent from the canonical status projection".to_owned(),
+                });
+            }
+            descendants.push(task);
+        }
+        let container_row = work_by_id.get(container_id).copied();
+        let entity_revision = container_row
+            .and_then(|row| row.action_facts.entity_revision)
+            .unwrap_or(0);
+        let mut input = ContainerRollupInput::new(
+            RollupScope::container(
+                project_id.clone(),
+                WorkId::new(container_id),
+                EntityRevision::new(entity_revision),
+            ),
+            descendants,
+        );
+        if let Some(row) = container_row {
+            input.lifecycle = row.work.lifecycle;
+            input.summary_present = !row.work.description.trim().is_empty();
+        }
+        let rollup = evaluate_container_rollup(&input);
+        Ok(ContainerRollupView {
+            diagnostics,
+            project_id: project_id.clone(),
+            revision,
+            container: snapshot.container,
+            rollup,
         })
     }
 
@@ -157,10 +686,11 @@ impl WorkApplication<'_> {
                 "intake requires work-model/3 to be enabled".to_owned(),
             ));
         }
+        let (revision, items) = self.store_ref().intake_snapshot_v3(project_id.as_str())?;
         Ok(IntakeItemsView {
             project_id: project_id.clone(),
-            revision: self.store_ref().project_revision(project_id.as_str())?.0,
-            items: self.store_ref().intake_items_v3(project_id.as_str())?,
+            revision,
+            items,
         })
     }
 
@@ -795,6 +1325,76 @@ impl WorkApplication<'_> {
     }
 }
 
+fn cycle_model(record: &boreal_store::CycleV3Record) -> Result<Cycle, ApplicationError> {
+    let mut cycle = Cycle::new(
+        ProjectId::new(record.project_id.clone()),
+        CycleId::new(record.cycle_id.clone()),
+        record.name.clone(),
+    );
+    cycle.goal = record.goal.clone();
+    cycle.lifecycle = match record.lifecycle.as_str() {
+        "planned" => CycleLifecycle::Planned,
+        "active" => CycleLifecycle::Active,
+        "completed" => CycleLifecycle::Completed,
+        "cancelled" => CycleLifecycle::Cancelled,
+        value => return Err(ApplicationError::Invalid(format!("unknown cycle lifecycle {value}"))),
+    };
+    let timestamp = |value: i64| -> Result<TimestampMs, ApplicationError> {
+        u64::try_from(value)
+            .map(TimestampMs::from_millis)
+            .map_err(|_| ApplicationError::Invalid("cycle schedule timestamp is negative".into()))
+    };
+    cycle.scheduled_start_at = Some(timestamp(record.scheduled_start_utc_ms)?);
+    cycle.scheduled_end_at = record.scheduled_end_utc_ms.map(timestamp).transpose()?;
+    Ok(cycle)
+}
+
+fn cycle_assignment_model(
+    record: &boreal_store::CycleAssignmentV3Record,
+) -> (CycleAssignment, Vec<String>) {
+    let mut diagnostics = Vec::new();
+    let state = match record.state.as_str() {
+        "planned" => CycleAssignmentState::Planned,
+        "committed" => CycleAssignmentState::Committed,
+        "removed" => CycleAssignmentState::Removed,
+        "completed" => CycleAssignmentState::Completed,
+        "carried_over" => CycleAssignmentState::CarriedOver,
+        value => {
+            diagnostics.push(format!("unknown assignment state {value}"));
+            CycleAssignmentState::Planned
+        }
+    };
+    let activation_policy = match record.activation_policy.as_str() {
+        "at_cycle_start" => ActivationPolicy::AtCycleStart,
+        "immediate" => ActivationPolicy::Immediate,
+        "explicit_not_before" => ActivationPolicy::ExplicitNotBefore,
+        value => {
+            diagnostics.push(format!("unknown activation policy {value}"));
+            ActivationPolicy::AtCycleStart
+        }
+    };
+    let activation_at = record.activation_at_utc_ms.and_then(|value| {
+        match u64::try_from(value) {
+            Ok(value) => Some(TimestampMs::from_millis(value)),
+            Err(_) => {
+                diagnostics.push("assignment activation timestamp is negative".to_owned());
+                None
+            }
+        }
+    });
+    (CycleAssignment {
+        id: record.assignment_id.clone(),
+        cycle_id: CycleId::new(record.cycle_id.clone()),
+        work_id: WorkId::new(record.work_id.clone()),
+        project_id: ProjectId::new(record.project_id.clone()),
+        state,
+        activation_policy,
+        activation_at,
+        predecessor_id: record.predecessor_id.clone(),
+        successor_id: record.successor_id.clone(),
+    }, diagnostics)
+}
+
 fn find_dependency_cycles(edges: &[DependencyEdgeView]) -> Vec<Vec<String>> {
     let mut adjacency = BTreeMap::<String, Vec<String>>::new();
     let mut nodes = BTreeSet::new();
@@ -881,25 +1481,6 @@ fn ensure_mutation_scope(
     scope: &PlanningScope,
 ) -> Result<(), ApplicationError> {
     scope.validate().map_err(ApplicationError::from)?;
-    if let Some(session_id) = scope.session_id.as_deref() {
-        let session = store
-            .session(scope.project_id.as_str(), session_id)?
-            .ok_or_else(|| boreal_store::StoreError::NotFound {
-                entity: "session",
-                id: session_id.to_owned(),
-            })?;
-        if session.actor_id != scope.actor_id {
-            return Err(ApplicationError::Planning(PlanningError::ScopeConflict {
-                expected: session.actor_id,
-                actual: scope.actor_id.clone(),
-            }));
-        }
-        if session.state != SessionState::Active {
-            return Err(ApplicationError::Invalid(format!(
-                "session {session_id} is not active"
-            )));
-        }
-    }
     // The v3 store mutation owns the replay-first, transactional expected
     // revision check.  Do not perform a read-before-write revision check here:
     // a retry must be able to replay after the project revision has advanced.
@@ -921,6 +1502,7 @@ fn v3_context(
     V3MutationContext {
         project_id: scope.project_id.to_string(),
         actor_id: scope.actor_id.clone(),
+        session_id: scope.session_id.clone(),
         operation_id: operation_id.to_owned(),
         request_digest: canonical_request_digest(
             command,

@@ -2,9 +2,11 @@ import {
   ActionResult,
   CreateProjectDraftInput,
   CreateWorkDraftInput,
+  Envelope,
   MountedView,
   Route,
   WorkKind,
+  WorkspaceViewKind,
 } from "./client.js";
 import { renderMountedView } from "./terminal.js";
 
@@ -14,18 +16,21 @@ export interface LineShellController {
   navigate(route: Route): MountedView;
   createProject(input: CreateProjectDraftInput): Promise<ActionResult<unknown>>;
   createWork(input: CreateWorkDraftInput): Promise<ActionResult<unknown>>;
-  claim(work_id: string): Promise<ActionResult<unknown>>;
+  claim(work_id: string, execution: { source_version_id: string; config_identity: string }): Promise<ActionResult<unknown>>;
   acceptStart(work_id: string): Promise<ActionResult<unknown>>;
   addEvidence(work_id: string, evidence: unknown): Promise<ActionResult<unknown>>;
   finish(work_id: string, summary?: string): Promise<ActionResult<unknown>>;
   release(work_id: string, reason?: string): Promise<ActionResult<unknown>>;
   nextPage?(): Promise<MountedView>;
+  readWorkspaceView?(kind: WorkspaceViewKind): Promise<Envelope<unknown>>;
 }
+
+type LineWorkspaceViewKind = WorkspaceViewKind | "project" | "pending" | "unavailable";
 
 export type MutationLineCommand =
   | { kind: "mutation"; action: "create_project"; input: CreateProjectDraftInput }
   | { kind: "mutation"; action: "create_work"; input: CreateWorkDraftInput }
-  | { kind: "mutation"; action: "claim" }
+  | { kind: "mutation"; action: "claim"; source_version_id: string; config_identity: string }
   | { kind: "mutation"; action: "accept_start" }
   | { kind: "mutation"; action: "evidence"; evidence: unknown }
   | { kind: "mutation"; action: "finish"; summary?: string }
@@ -34,6 +39,7 @@ export type MutationLineCommand =
 export type LineCommand =
   | { kind: "help" }
   | { kind: "refresh" }
+  | { kind: "workspace_view"; view: LineWorkspaceViewKind }
   | { kind: "select"; work_id: string }
   | { kind: "quit" }
   | { kind: "confirm" }
@@ -81,6 +87,10 @@ export function parseLineCommand(input: string): LineCommand {
   const [command, ...args] = value.split(/\s+/);
   if (command === "help") return { kind: "help" };
   if (command === "refresh") return { kind: "refresh" };
+  if (command === "workspace") {
+    if (args.length !== 1 || !["project", "cycles", "reviews", "memory", "recovery", "pending", "unavailable"].includes(args[0])) return invalid(value, "usage: workspace project|cycles|reviews|memory|recovery|pending|unavailable");
+    return { kind: "workspace_view", view: args[0] as LineWorkspaceViewKind };
+  }
   if (command === "quit" || command === "exit") return { kind: "quit" };
   if ((command === "select" || command === "show") && args.length === 1 && args[0]) return { kind: "select", work_id: args[0] };
   if (command === "confirm" && args.length === 0) return { kind: "confirm" };
@@ -127,8 +137,13 @@ export function parseLineCommand(input: string): LineCommand {
     };
   }
   if (command === "claim") {
-    if (args.length !== 0) return invalid(value, "usage: claim");
-    return { kind: "mutation", action: "claim" };
+    const parsed = parseOptions(value, args, new Set(["--source-version", "--config-identity"]));
+    if ("kind" in parsed) return parsed;
+    if (parsed.positional.length || !parsed.values["--source-version"] || !parsed.values["--config-identity"])
+      return invalid(value, "usage: claim --source-version SOURCE_VERSION_ID --config-identity CONFIG_IDENTITY (get a real ID with `bwrk source list PROJECT`; capture one with `bwrk source add PROJECT --input PATH --origin ORIGIN`)");
+    if (/^unknown$/iu.test(parsed.values["--source-version"])) return invalid(value, "claim needs a real registered source version ID, not 'unknown'");
+    if (/^(?:unknown|n\/a|none|null|undefined|todo|tbd)$/iu.test(parsed.values["--config-identity"])) return invalid(value, "claim needs a meaningful config identity, not a placeholder");
+    return { kind: "mutation", action: "claim", source_version_id: parsed.values["--source-version"], config_identity: parsed.values["--config-identity"] };
   }
   if (command === "accept-start" || command === "start") {
     if (args.length !== 0) return invalid(value, "usage: accept-start");
@@ -154,7 +169,7 @@ export function parseLineCommand(input: string): LineCommand {
 }
 
 export function lineShellHelp(): string {
-  return "commands: help | refresh | select WORK_ID | create-project PROJECT_ID | create-work WORK_ID KIND TITLE [--parent ID] | claim | accept-start | evidence RECEIPT_JSON | finish | release [REASON] | confirm | cancel | quit\n";
+  return "commands: help | refresh | workspace project|cycles|reviews|memory|recovery|pending|unavailable | select WORK_ID | create-project PROJECT_ID | create-work WORK_ID KIND TITLE [--parent ID] | claim --source-version SOURCE_VERSION_ID --config-identity CONFIG_IDENTITY | accept-start | evidence RECEIPT_JSON | finish | release [REASON] | confirm | cancel | quit\nClaim requires a real registered source version (`bwrk source list PROJECT`; add one with `bwrk source add PROJECT --input PATH --origin ORIGIN`) and a meaningful, non-secret execution configuration identity.\n";
 }
 
 interface PendingMutation {
@@ -178,8 +193,11 @@ function mutationEffect(command: MutationLineCommand): string {
 function confirmationPrompt(view: MountedView, pending: PendingMutation): string {
   const revision = view.monitoring?.revision ?? null;
   const attempt = view.selected_work?.attempt;
-  const fence = attempt ? `${attempt.attempt_id}@${attempt.fence}` : "none";
-  return `tui: confirm ${pending.command.action} target=${pending.target} effect=${mutationEffect(pending.command)} expected_revision=${revision ?? "none"} attempt_fence=${fence}; enter confirm or cancel\n`;
+  const attemptSummary = attempt ? `${attempt.attempt_id}, generation ${attempt.fence}` : "none";
+  const binding = pending.command.action === "claim"
+    ? ` source_version_id=${pending.command.source_version_id} config_identity=${pending.command.config_identity}`
+    : "";
+  return `tui: confirm ${pending.command.action} target=${pending.target} effect=${mutationEffect(pending.command)}${binding} expected_revision=${revision ?? "none"} attempt ${attemptSummary}; enter confirm or cancel\n`;
 }
 
 function resultLine(pending: PendingMutation, result: ActionResult<unknown>): string {
@@ -187,14 +205,14 @@ function resultLine(pending: PendingMutation, result: ActionResult<unknown>): st
   const prefix = `tui: ${pending.command.action} target=${pending.target} operation=${envelope.operation_id} revision=${envelope.revision ?? "none"} outcome=${envelope.outcome}`;
   if (result.ok) return `${prefix}\n`;
   const retry = envelope.outcome === "unknown" ? "; operation readback is required before retrying" : "";
-  return `${prefix} failed code=${result.error.code}: ${result.error.message}${retry}\n`;
+  return `${prefix} failed: ${result.error.message}${retry}\n`;
 }
 
 async function executeMutation(controller: LineShellController, pending: PendingMutation): Promise<ActionResult<unknown>> {
   switch (pending.command.action) {
     case "create_project": return controller.createProject(pending.command.input);
     case "create_work": return controller.createWork(pending.command.input);
-    case "claim": return controller.claim(pending.work_id!);
+    case "claim": return controller.claim(pending.work_id!, { source_version_id: pending.command.source_version_id, config_identity: pending.command.config_identity });
     case "accept_start": return controller.acceptStart(pending.work_id!);
     case "evidence": return controller.addEvidence(pending.work_id!, pending.command.evidence);
     case "finish": return controller.finish(pending.work_id!, pending.command.summary);
@@ -262,6 +280,33 @@ export async function runLineShell(
             write(renderMountedView(await controller.refresh()));
           } catch (error) {
             write(`tui: refresh failed: ${error instanceof Error ? error.message : String(error)}\n`);
+          }
+          break;
+        case "workspace_view":
+          if (command.view === "project") {
+            const view = controller.view();
+            write(`PROJECT\n${JSON.stringify({ project_id: view.route.project_id, revision: view.monitoring?.revision ?? null, total_work_items: view.monitoring?.total ?? 0, displayed_work_items: view.monitoring?.items.length ?? 0, page_offset: view.monitoring?.offset ?? 0, has_more: view.monitoring?.has_more ?? false, notice: view.notice?.message ?? null }, null, 2)}\n`);
+            break;
+          }
+          if (command.view === "pending") {
+            const operations = controller.view().pending_operations;
+            write(`PENDING OPERATIONS\n${operations.length ? JSON.stringify(operations, null, 2) : "No operations are awaiting readback."}\n`);
+            break;
+          }
+          if (command.view === "unavailable") {
+            const view = controller.view();
+            write(`UNAVAILABLE ROUTES\n${view.notice ? `Connection notice: ${view.notice.message}\n\n` : ""}${JSON.stringify((view.capabilities ?? []).filter(capability => capability.status === "unavailable"), null, 2)}\n`);
+            break;
+          }
+          if (!controller.readWorkspaceView) {
+            write(`tui: ${command.view} view is unavailable from this service connection\n`);
+            break;
+          }
+          try {
+            const result = await controller.readWorkspaceView(command.view);
+            write(`${command.view.toUpperCase()}\n${JSON.stringify({ project_id: controller.view().route.project_id, revision: result.revision, as_of: result.as_of, data: result.data }, null, 2)}\n`);
+          } catch (error) {
+            write(`tui: ${command.view} view failed: ${error instanceof Error ? error.message : String(error)}\n`);
           }
           break;
         case "select": {

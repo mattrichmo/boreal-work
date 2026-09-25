@@ -207,10 +207,13 @@ fn unreadable_prerequisite_does_not_disappear_from_eligibility() {
             "unix-ms:2",
         )
         .unwrap();
-    // Deliberate damaged-row fixture, not a production mutation route.
+    // Deliberate raw corruption in this isolated test database, not a
+    // production mutation route. Disable the row check and drop only the
+    // retype guard so the dependency endpoint becomes unreadable.
     store
         .execute_batch(
             "PRAGMA ignore_check_constraints = ON;
+        DROP TRIGGER work_parent_retype_guard;
         UPDATE work_item SET kind = 'broken-kind' WHERE work_id = 'upstream';
         PRAGMA ignore_check_constraints = OFF;",
         )

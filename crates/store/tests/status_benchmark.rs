@@ -21,9 +21,6 @@ fn seed_project(store: &SqliteStore) {
 }
 
 fn seed_work(store: &SqliteStore, count: usize) {
-    store
-        .execute_batch("DELETE FROM work_item")
-        .expect("clear benchmark work");
     let mut sql = String::with_capacity(count.saturating_mul(190));
     for index in 0..count {
         sql.push_str(&format!(
@@ -42,13 +39,16 @@ fn seed_work(store: &SqliteStore, count: usize) {
 
 #[test]
 fn emits_status_read_scaling_baseline() {
-    let store = SqliteStore::open_in_memory(SCHEMA).expect("schema opens");
-    seed_project(&store);
-    let runtime = store.sqlite_runtime_identity();
     let sizes = [100_usize, 1_000, 10_000];
     let mut measurements = Vec::new();
+    let mut runtime = None;
 
     for count in sizes {
+        let store = SqliteStore::open_in_memory(SCHEMA).expect("schema opens");
+        seed_project(&store);
+        if runtime.is_none() {
+            runtime = Some(store.sqlite_runtime_identity());
+        }
         seed_work(&store, count);
         store.reset_query_metrics();
         let started = Instant::now();
@@ -77,7 +77,7 @@ fn emits_status_read_scaling_baseline() {
             "result_version": "boreal.status-read-baseline/1",
             "schema_version": 2,
             "status_contract_version": "boreal.work-status/2",
-            "runtime": runtime.as_json(),
+            "runtime": runtime.expect("benchmark sizes include a runtime").as_json(),
             "measurements": measurements,
             "limitations": [
                 "This is one process and one in-memory SQLite connection.",

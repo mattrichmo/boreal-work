@@ -2,10 +2,9 @@
 //!
 //! These tests deliberately stop at the pure-domain boundary.  They model the
 //! adapter handoff that the application, service, and TUI must use, but do not
-//! pretend to prove that those consumers already call this policy.  The
-//! ignored operator vector is a retained executable witness for PF-S03-R7:
-//! the current status evaluator and action role table disagree for ordinary
-//! operator claimability.
+//! pretend to prove that those consumers already call this policy. The
+//! role/policy vectors ensure status and action descriptors agree when both
+//! are evaluated from the same typed fact snapshot.
 
 use std::collections::BTreeSet;
 
@@ -15,10 +14,11 @@ use boreal_domain::actions::{
 };
 use boreal_domain::decision_inputs::*;
 use boreal_domain::{
-    evaluate_status, ActorContext, ActorId, ActorRole, AttemptId, AttemptPhase, ConfigIdentity,
-    DerivedStatus, GateId, GateKind, GateState, PersistedLifecycle, ProfileId, ProjectId,
-    ReasonCode, Revision, SessionId, SourceVersionId, StatusContext, TimestampMs, WorkId, WorkItem,
-    WorkKind,
+    evaluate_decision_actions, reject_derived_status_write, AcceptanceProfile, ActorContext,
+    ActorId, ActorRole, AttemptId, AttemptPhase, ConfigIdentity, DecisionActionView,
+    DecisionApiError, DecisionContextMismatch, DerivedStatus, DispatchPolicy, DomainError, GateId,
+    GateKind, GateRequirement, GateState, PersistedLifecycle, ProfileId, ProjectId, ReasonCode,
+    Revision, SessionId, SourceVersionId, StatusContext, TimestampMs, WorkId, WorkItem, WorkKind,
 };
 
 fn subject() -> EntityIdentity {
@@ -72,6 +72,7 @@ fn facts(role: ActorRole, principal: PrincipalBinding) -> DecisionInputs {
         snapshot_revision: Revision(42),
         clock: EvaluationClock::at(TimestampMs::from_millis(1_000)),
         availability: Availability::Live,
+        dispatch_policy: DispatchPolicy::Automatic,
         lifecycle: Fact::present(LifecycleInput {
             identity: subject(),
             lifecycle: PersistedLifecycle::Open,
@@ -79,6 +80,10 @@ fn facts(role: ActorRole, principal: PrincipalBinding) -> DecisionInputs {
         }),
         authority: Fact::present(ActorAuthorityInput {
             project_id: ProjectId::new("project-1"),
+            authority_root: match &principal {
+                PrincipalBinding::Authenticated { actor_id } => actor_id.clone(),
+                PrincipalBinding::Delegated { delegator_id, .. } => delegator_id.clone(),
+            },
             role,
             principal,
             session_id: Some(SessionId::new("session-1")),
@@ -86,6 +91,7 @@ fn facts(role: ActorRole, principal: PrincipalBinding) -> DecisionInputs {
         requirements: Fact::present(PinnedRequirementsInput {
             proof: proof(None),
             requirements: vec![PinnedRequirement {
+                exception: None,
                 id: RequirementId::new("requirement-1"),
                 gate_id: GateId::new("verification"),
                 kind: GateKind::Verification,
@@ -123,6 +129,92 @@ fn facts(role: ActorRole, principal: PrincipalBinding) -> DecisionInputs {
         },
         permitted_actions: permitted(),
     }
+}
+
+fn canonical_decision(
+    facts: &DecisionInputs,
+    dispatch_policy: DispatchPolicy,
+) -> Result<DecisionActionView, DecisionApiError> {
+    let (work, prerequisites, gates, actor) = context_parts(facts, dispatch_policy);
+    evaluate_decision_actions(
+        StatusContext::new(
+            &work,
+            &prerequisites,
+            None,
+            &gates,
+            &actor,
+            facts.clock.evaluated_at,
+            facts.snapshot_revision,
+        ),
+        facts,
+    )
+}
+
+fn context_parts(
+    facts: &DecisionInputs,
+    dispatch_policy: DispatchPolicy,
+) -> (WorkItem, Vec<WorkItem>, Vec<GateRequirement>, ActorContext) {
+    let requirements = facts
+        .requirements
+        .as_present()
+        .expect("canonical fixture has pinned requirements");
+    let gates = requirements
+        .requirements
+        .iter()
+        .map(|requirement| GateRequirement {
+            id: requirement.gate_id.clone(),
+            kind: requirement.kind,
+            required: requirement.required,
+            state: requirement.state,
+        })
+        .collect::<Vec<_>>();
+    let mut work = WorkItem::new(
+        facts.subject.project_id.clone(),
+        facts.subject.work_id.clone(),
+        WorkKind::Task,
+        None,
+        "canonical API fixture",
+    )
+    .open();
+    work.dispatch_policy = dispatch_policy;
+    work.acceptance_profile = AcceptanceProfile {
+        id: requirements.proof.profile.profile_id.clone(),
+        version: requirements.proof.profile.version.clone(),
+        gates: gates.clone(),
+    };
+    let authority = facts
+        .authority
+        .as_present()
+        .expect("canonical fixture has actor authority");
+    let actor = ActorContext {
+        actor_id: authority.actor_id().clone(),
+        role: authority.role,
+    };
+    (work, Vec::new(), gates, actor)
+}
+
+fn evaluate_parts<'a>(
+    facts: &DecisionInputs,
+    work: &'a WorkItem,
+    prerequisites: &'a [WorkItem],
+    current_attempt: Option<&'a boreal_domain::Attempt>,
+    gates: &'a [GateRequirement],
+    actor: &'a ActorContext,
+    as_of: TimestampMs,
+    revision: Revision,
+) -> Result<DecisionActionView, DecisionApiError> {
+    evaluate_decision_actions(
+        StatusContext::new(
+            work,
+            prerequisites,
+            current_attempt,
+            gates,
+            actor,
+            as_of,
+            revision,
+        ),
+        facts,
+    )
 }
 
 fn running_facts() -> DecisionInputs {
@@ -228,13 +320,14 @@ fn every_descriptor_round_trips_without_losing_authority_context() {
 }
 
 #[test]
-fn status_reason_changes_authority_without_rewriting_product_status() {
-    let facts = facts(
+fn canonical_dispatch_policy_changes_authority_without_rewriting_product_status() {
+    let mut facts = facts(
         ActorRole::Agent,
         PrincipalBinding::Authenticated {
             actor_id: ActorId::new("agent-1"),
         },
     );
+    facts.dispatch_policy = DispatchPolicy::OperatorOnly;
     let reasons = [ReasonCode::OperatorOnly];
     let input = ActionEvaluationInput::new(&facts, DerivedStatus::Ready, &reasons);
     let decision = evaluate_actions(&input);
@@ -339,18 +432,20 @@ fn quarantined_integrity_exposes_repair_but_denies_forward_progress() {
             actor_id: ActorId::new("operator-1"),
         },
     );
+    facts.dispatch_policy = DispatchPolicy::OperatorOnly;
     facts.integrity.level = IntegrityLevel::Quarantined;
     facts.integrity.diagnostics.push(IntegrityDiagnostic {
         scope: IntegrityScope::work(ProjectId::new("project-1"), WorkId::new("work-1")),
         code: IntegrityDiagnosticCode::Corrupt,
     });
-    let reasons = [ReasonCode::HardHold("integrity_quarantined".to_owned())];
-    let input = ActionEvaluationInput::new(&facts, DerivedStatus::Blocked, &reasons);
-    let decision = evaluate_actions(&input);
+    let decision = canonical_decision(&facts, DispatchPolicy::OperatorOnly)
+        .expect("quarantined facts remain diagnosable through the paired API");
 
-    assert!(decision.allows(ActionKind::Repair));
+    assert_eq!(decision.status.display_status, DerivedStatus::Blocked);
+    assert!(decision.actions.allows(ActionKind::Repair));
     assert!(matches!(
         decision
+            .actions
             .denial(ActionKind::Claim)
             .expect("claim denial")
             .reason,
@@ -359,47 +454,396 @@ fn quarantined_integrity_exposes_repair_but_denies_forward_progress() {
 }
 
 #[test]
-#[ignore = "PF-S03-R7: coordinator must reconcile ordinary Operator claim semantics"]
-fn ordinary_operator_status_and_action_claimability_are_one_contract() {
-    let work = WorkItem::new(
-        ProjectId::new("project-1"),
-        WorkId::new("work-1"),
-        WorkKind::Task,
-        None,
-        "task",
-    )
-    .open();
-    let prerequisites = Vec::new();
-    let gates = work.acceptance_profile.gates.clone();
-    let actor = ActorContext {
-        actor_id: ActorId::new("operator-1"),
-        role: ActorRole::Operator,
-    };
-    let status = evaluate_status(StatusContext::new(
-        &work,
-        &prerequisites,
-        None,
-        &gates,
-        &actor,
-        TimestampMs::from_millis(1_000),
-        Revision(42),
+fn paired_api_keeps_ready_status_when_degraded_integrity_denies_claim() {
+    let mut facts = facts(
+        ActorRole::Agent,
+        PrincipalBinding::Authenticated {
+            actor_id: ActorId::new("agent-1"),
+        },
+    );
+    facts.integrity.level = IntegrityLevel::Degraded;
+    facts.integrity.diagnostics.push(IntegrityDiagnostic {
+        scope: IntegrityScope::work(ProjectId::new("project-1"), WorkId::new("work-1")),
+        code: IntegrityDiagnosticCode::Stale,
+    });
+
+    let decision = canonical_decision(&facts, DispatchPolicy::Automatic)
+        .expect("degraded facts still return a paired read decision");
+    assert_eq!(decision.status.display_status, DerivedStatus::Ready);
+    assert!(!decision.status.claimable_for_actor);
+    assert!(matches!(
+        decision
+            .actions
+            .denial(ActionKind::Claim)
+            .map(|denied| &denied.reason),
+        Some(ActionDenialReason::IntegrityDegraded)
     ));
-    let facts = facts(
+}
+
+#[test]
+fn paired_api_keeps_repair_descriptor_when_integrity_facts_contradict() {
+    let mut facts = facts(
         ActorRole::Operator,
         PrincipalBinding::Authenticated {
             actor_id: ActorId::new("operator-1"),
         },
     );
-    let actions = evaluate_actions(&ActionEvaluationInput::new(
-        &facts,
-        status.display_status,
-        &status.reason_codes,
+    // A valid level with a diagnostic is structurally inconsistent and must
+    // remain visible as a repairable blocked decision, not erase recovery UI.
+    facts.integrity.diagnostics.push(IntegrityDiagnostic {
+        scope: IntegrityScope::work(ProjectId::new("project-1"), WorkId::new("work-1")),
+        code: IntegrityDiagnosticCode::Corrupt,
+    });
+
+    let decision = canonical_decision(&facts, DispatchPolicy::Automatic)
+        .expect("structural corruption still produces a safe paired view");
+    assert_eq!(decision.status.display_status, DerivedStatus::Blocked);
+    assert!(decision.actions.allows(ActionKind::Repair));
+    assert!(matches!(
+        decision
+            .actions
+            .denial(ActionKind::Claim)
+            .map(|denied| &denied.reason),
+        Some(ActionDenialReason::InvalidFacts)
+    ));
+}
+
+#[test]
+fn canonical_status_and_action_claimability_agree_for_roles_and_policies() {
+    let roles = [
+        (ActorRole::Agent, "agent-1"),
+        (ActorRole::Operator, "operator-1"),
+        (ActorRole::Reviewer, "reviewer-1"),
+        (ActorRole::Publisher, "publisher-1"),
+    ];
+
+    for dispatch_policy in [DispatchPolicy::Automatic, DispatchPolicy::OperatorOnly] {
+        for (role, actor_id) in roles {
+            let mut facts = facts(
+                role,
+                PrincipalBinding::Authenticated {
+                    actor_id: ActorId::new(actor_id),
+                },
+            );
+            facts.dispatch_policy = dispatch_policy;
+            let decision = canonical_decision(&facts, dispatch_policy)
+                .expect("one canonical status/action view evaluates");
+            let status = decision.status;
+            let actions = decision.actions;
+            let expected_claimability = match dispatch_policy {
+                DispatchPolicy::Automatic => role == ActorRole::Agent,
+                DispatchPolicy::OperatorOnly => role == ActorRole::Operator,
+                DispatchPolicy::Paused => unreachable!("not exercised by this contract vector"),
+            };
+            let expected_required_role = match dispatch_policy {
+                DispatchPolicy::Automatic => ActorRole::Agent,
+                DispatchPolicy::OperatorOnly => ActorRole::Operator,
+                DispatchPolicy::Paused => unreachable!("not exercised by this contract vector"),
+            };
+
+            assert_eq!(status.display_status, DerivedStatus::Ready);
+            assert_eq!(status.claimable_for_actor, expected_claimability);
+            assert_eq!(
+                status.claimable_for_actor,
+                actions.allows(ActionKind::Claim),
+                "status and action decisions must agree for {role:?} under {dispatch_policy:?}"
+            );
+            if expected_claimability {
+                assert!(actions.denial(ActionKind::Claim).is_none());
+            } else {
+                assert!(matches!(
+                    actions.denial(ActionKind::Claim).map(|denied| &denied.reason),
+                    Some(ActionDenialReason::RoleDenied { required, observed })
+                        if required == &[expected_required_role] && *observed == role
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn paired_api_rejects_mismatched_subject_revision_clock_lifecycle_and_actor() {
+    let facts = facts(
+        ActorRole::Agent,
+        PrincipalBinding::Authenticated {
+            actor_id: ActorId::new("agent-1"),
+        },
+    );
+    let (work, prerequisites, gates, actor) = context_parts(&facts, DispatchPolicy::Automatic);
+    let evaluated_at = TimestampMs::from_millis(1_000);
+    let revision = Revision(42);
+
+    let mut wrong_subject = work.clone();
+    wrong_subject.project_id = ProjectId::new("project-2");
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &wrong_subject,
+            &prerequisites,
+            None,
+            &gates,
+            &actor,
+            evaluated_at,
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::Subject
+        ))
     ));
 
-    assert_eq!(status.display_status, DerivedStatus::Ready);
-    assert_eq!(
-        status.claimable_for_actor,
-        actions.allows(ActionKind::Claim),
-        "status and action projections must agree for the same actor and facts"
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &work,
+            &prerequisites,
+            None,
+            &gates,
+            &actor,
+            evaluated_at,
+            Revision(43),
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::ProjectRevision
+        ))
+    ));
+
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &work,
+            &prerequisites,
+            None,
+            &gates,
+            &actor,
+            TimestampMs::from_millis(1_001),
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::Clock
+        ))
+    ));
+
+    let mut wrong_lifecycle = work.clone();
+    wrong_lifecycle.lifecycle = PersistedLifecycle::Draft;
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &wrong_lifecycle,
+            &prerequisites,
+            None,
+            &gates,
+            &actor,
+            evaluated_at,
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::Lifecycle
+        ))
+    ));
+
+    let mut wrong_dispatch_policy = work.clone();
+    wrong_dispatch_policy.dispatch_policy = DispatchPolicy::OperatorOnly;
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &wrong_dispatch_policy,
+            &prerequisites,
+            None,
+            &gates,
+            &actor,
+            evaluated_at,
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::DispatchPolicy
+        ))
+    ));
+
+    let wrong_actor = ActorContext {
+        actor_id: ActorId::new("agent-2"),
+        role: ActorRole::Agent,
+    };
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &work,
+            &prerequisites,
+            None,
+            &gates,
+            &wrong_actor,
+            evaluated_at,
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::Actor
+        ))
+    ));
+}
+
+#[test]
+fn paired_api_rejects_context_omitting_future_timing_constraints() {
+    let base = facts(
+        ActorRole::Agent,
+        PrincipalBinding::Authenticated {
+            actor_id: ActorId::new("agent-1"),
+        },
     );
+    let future = TimestampMs::from_millis(2_000);
+    let timing_cases = [
+        StatusTimingInput {
+            schedule: Some(boreal_domain::work_model_v3::WorkSchedule {
+                not_before_at: Some(future),
+                due_at: None,
+                target_start_at: None,
+                target_end_at: None,
+            }),
+            ..StatusTimingInput::default()
+        },
+        StatusTimingInput {
+            cycle_activation_at: Some(future),
+            ..StatusTimingInput::default()
+        },
+        StatusTimingInput {
+            retry_not_before: Some(future),
+            ..StatusTimingInput::default()
+        },
+    ];
+
+    for timing in timing_cases {
+        let mut facts = base.clone();
+        facts.clock = facts.clock.with_status_timing(timing);
+
+        assert!(matches!(
+            canonical_decision(&facts, DispatchPolicy::Automatic),
+            Err(DecisionApiError::ContextMismatch(
+                DecisionContextMismatch::Timing
+            ))
+        ));
+    }
+}
+
+#[test]
+fn paired_api_rejects_mismatched_profile_gates_dependencies_and_execution() {
+    let facts = facts(
+        ActorRole::Agent,
+        PrincipalBinding::Authenticated {
+            actor_id: ActorId::new("agent-1"),
+        },
+    );
+    let (work, prerequisites, gates, actor) = context_parts(&facts, DispatchPolicy::Automatic);
+    let evaluated_at = TimestampMs::from_millis(1_000);
+    let revision = Revision(42);
+
+    let mut wrong_profile = work.clone();
+    wrong_profile.acceptance_profile.id = ProfileId::new("other-profile");
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &wrong_profile,
+            &prerequisites,
+            None,
+            &gates,
+            &actor,
+            evaluated_at,
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::AcceptanceProfile
+        ))
+    ));
+
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &work,
+            &prerequisites,
+            None,
+            &[],
+            &actor,
+            evaluated_at,
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::GateRequirements
+        ))
+    ));
+
+    let extra_prerequisite = WorkItem::new(
+        ProjectId::new("project-1"),
+        WorkId::new("unbound-prerequisite"),
+        WorkKind::Task,
+        None,
+        "unbound prerequisite",
+    )
+    .open();
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &work,
+            &[extra_prerequisite],
+            None,
+            &gates,
+            &actor,
+            evaluated_at,
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::Dependencies
+        ))
+    ));
+
+    let unexpected_attempt = boreal_domain::Attempt::claim(
+        WorkId::new("work-1"),
+        AttemptId::new("attempt-1"),
+        ActorId::new("agent-1"),
+        boreal_domain::Fence::new(1),
+        TimestampMs::from_millis(10),
+        Some(100),
+        Some(200),
+    )
+    .expect("fixture attempt");
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &work,
+            &prerequisites,
+            Some(&unexpected_attempt),
+            &gates,
+            &actor,
+            evaluated_at,
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::Execution
+        ))
+    ));
+}
+
+#[test]
+fn every_derived_status_is_rejected_by_the_public_persistence_guard() {
+    let statuses = [
+        DerivedStatus::Draft,
+        DerivedStatus::Queued,
+        DerivedStatus::Ready,
+        DerivedStatus::Claimed,
+        DerivedStatus::InProgress,
+        DerivedStatus::NeedsVerification,
+        DerivedStatus::AwaitingReview,
+        DerivedStatus::Complete,
+        DerivedStatus::Closed,
+        DerivedStatus::Blocked,
+        DerivedStatus::Paused,
+        DerivedStatus::RetryWait,
+        DerivedStatus::Scheduled,
+        DerivedStatus::ExpiredReview,
+        DerivedStatus::Cancelled,
+    ];
+
+    for status in statuses {
+        assert_eq!(
+            reject_derived_status_write(status),
+            Err(DomainError::DerivedStatusReadOnly { status }),
+            "derived status {status:?} must not be persisted as lifecycle state"
+        );
+    }
 }

@@ -203,6 +203,7 @@ fn store_v3_mutations_use_revisions_audit_and_typed_replay() {
     let context = |operation_id: &str, request_digest: &str| V3MutationContext {
         project_id: "p1".to_owned(),
         actor_id: "agent-1".to_owned(),
+        session_id: None,
         operation_id: operation_id.to_owned(),
         request_digest: request_digest.to_owned(),
         expected_revision: None,
@@ -329,6 +330,32 @@ fn store_v3_mutations_use_revisions_audit_and_typed_replay() {
         1
     );
 
+    let forged_carry_over = CycleAssignmentV3Input {
+        project_id: "p1".to_owned(),
+        assignment_id: "assignment-forged-carry-over".to_owned(),
+        cycle_id: "cycle-api".to_owned(),
+        work_id: "direct-a".to_owned(),
+        state: "carried_over".to_owned(),
+        activation_policy: "at_cycle_start".to_owned(),
+        activation_at_utc_ms: None,
+        predecessor_id: Some("missing-predecessor".to_owned()),
+        successor_id: Some("missing-successor".to_owned()),
+        created_at: "t2".to_owned(),
+        updated_at: "t2".to_owned(),
+    };
+    assert!(matches!(
+        store.assign_cycle_work_v3(
+            &context("op-forged-carry-over", "sha256:forged-carry-over"),
+            &forged_carry_over,
+        ),
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(
+        store.cycle_assignments_v3("p1", "cycle-api").unwrap().len(),
+        1,
+        "invalid carry-over creation must not leave a row"
+    );
+
     store
         .create_intake_bucket_v3(
             &context("op-bucket", "sha256:bucket"),
@@ -427,14 +454,16 @@ fn v3_replay_requires_actor_session_subject_and_revision_identity() {
         })
         .expect("authenticated session registers");
 
-    let context = |actor_id: &str, expected_revision: Option<u64>| V3MutationContext {
-        project_id: "p1".to_owned(),
-        actor_id: actor_id.to_owned(),
-        operation_id: "op-identity".to_owned(),
-        request_digest: "sha256:identity".to_owned(),
-        expected_revision,
-        now: "t2".to_owned(),
-    };
+    let context =
+        |actor_id: &str, session_id: &str, expected_revision: Option<u64>| V3MutationContext {
+            project_id: "p1".to_owned(),
+            actor_id: actor_id.to_owned(),
+            session_id: Some(session_id.to_owned()),
+            operation_id: "op-identity".to_owned(),
+            request_digest: "sha256:identity".to_owned(),
+            expected_revision,
+            now: "t2".to_owned(),
+        };
     let series = CycleSeriesV3Input {
         project_id: "p1".to_owned(),
         series_id: "series-identity".to_owned(),
@@ -447,11 +476,11 @@ fn v3_replay_requires_actor_session_subject_and_revision_identity() {
     };
 
     let first = store
-        .create_cycle_series_v3(&context("agent-1", Some(1)), &series)
+        .create_cycle_series_v3(&context("agent-1", "session-1", Some(1)), &series)
         .expect("initial v3 mutation commits");
     assert!(!first.replayed);
     let replay = store
-        .create_cycle_series_v3(&context("agent-1", Some(1)), &series)
+        .create_cycle_series_v3(&context("agent-1", "session-1", Some(1)), &series)
         .expect("exact v3 identity replays");
     assert!(replay.replayed);
     assert_eq!(replay.revision, first.revision);
@@ -470,15 +499,18 @@ fn v3_replay_requires_actor_session_subject_and_revision_identity() {
     );
     assert_eq!(store.project_revision("p1").unwrap().0, first.revision);
 
-    let actor_drift = store.create_cycle_series_v3(&context("agent-2", Some(1)), &series);
+    let actor_drift =
+        store.create_cycle_series_v3(&context("agent-2", "session-1", Some(1)), &series);
     assert!(matches!(actor_drift, Err(StoreError::WrongOwner { .. })));
 
-    let revision_drift = store.create_cycle_series_v3(&context("agent-1", Some(0)), &series);
+    let revision_drift =
+        store.create_cycle_series_v3(&context("agent-1", "session-1", Some(0)), &series);
     assert!(matches!(revision_drift, Err(StoreError::Conflict(_))));
 
     let mut target_drift = series.clone();
     target_drift.series_id = "series-other".to_owned();
-    let target_drift = store.create_cycle_series_v3(&context("agent-1", Some(1)), &target_drift);
+    let target_drift =
+        store.create_cycle_series_v3(&context("agent-1", "session-1", Some(1)), &target_drift);
     assert!(matches!(target_drift, Err(StoreError::WrongSubject { .. })));
 
     store
@@ -504,7 +536,8 @@ fn v3_replay_requires_actor_session_subject_and_revision_identity() {
             started_at: "t4".to_owned(),
         })
         .expect("replacement session registers");
-    let session_drift = store.create_cycle_series_v3(&context("agent-1", Some(1)), &series);
+    let session_drift =
+        store.create_cycle_series_v3(&context("agent-1", "session-2", Some(1)), &series);
     assert!(matches!(session_drift, Err(StoreError::Conflict(_))));
 }
 

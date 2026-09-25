@@ -232,10 +232,7 @@ fn checked_work_creation_rejects_stale_revision_without_writing() {
     let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
     seed_project(&store);
     store
-        .execute_batch(
-            "INSERT INTO actor VALUES ('agent-1', 'agent', 'cred-1', 'Agent', 't0');
-             INSERT INTO acceptance_profile VALUES ('focused', 1, 'sha256:policy', '{}', 't0');",
-        )
+        .execute_batch("INSERT INTO actor VALUES ('agent-1', 'agent', 'cred-1', 'Agent', 't0');")
         .unwrap();
     let first = work("w-first", 0, Vec::new());
     store
@@ -286,6 +283,28 @@ fn status_gate_queries_are_batched_for_large_projects() {
         "status prepared {} statements; expected fixed-size relation reads",
         metrics.statements_prepared
     );
+}
+
+#[test]
+fn work_model_status_cache_revalidates_after_schema_changes() {
+    let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+    assert!(store.work_model_v3_enabled().unwrap());
+
+    store
+        .execute_batch("DROP TRIGGER work_node_v3_kind_guard;")
+        .unwrap();
+
+    assert!(!store.work_model_v3_enabled().unwrap());
+}
+
+#[test]
+fn work_model_status_cache_rejects_a_changed_database_version() {
+    let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+    assert!(store.work_model_v3_enabled().unwrap());
+
+    store.execute_batch("PRAGMA user_version = 2;").unwrap();
+
+    assert!(!store.work_model_v3_enabled().unwrap());
 }
 
 #[test]
@@ -439,7 +458,7 @@ fn dependency_cycles_and_invalid_parent_retyping_are_rejected() {
         Err(StoreError::Constraint {
             message,
             ..
-        }) if message.contains("invalid_parent_kind")
+        }) if message.contains("retype_requires_explicit_proof_generation")
     ));
 }
 

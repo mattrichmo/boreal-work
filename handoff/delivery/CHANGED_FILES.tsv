@@ -1,0 +1,156 @@
+status	path	summary
+modified	Cargo.lock	"boreal-migration",
+modified	apps/tui/README.md	Claim requires an exact `source_version_id` registered to the mounted project
+modified	apps/tui/installer/wizard.cjs	? { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[34;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m",
+modified	apps/tui/src/client.ts	export interface ProjectPlanningAction {
+modified	apps/tui/src/entrypoint.ts	readonly credential_ref?: string;
+modified	apps/tui/src/full-screen.ts	import type { ActionResult, CreateWorkDraftInput, Envelope, MountedView, TuiAction, WorkspaceViewKind } from "./client.j
+modified	apps/tui/src/line-shell.ts	Envelope,
+modified	apps/tui/src/terminal.ts	function readable(value: string): string {
+modified	apps/tui/src/test.ts	const temporaryDirectory = (process.env.TMPDIR || "/tmp").replace(/\/+$/u, "");
+modified	apps/tui/src/ui/dashboard.ts	import { ACTION_NAMES, FILTERS, itemStatus, paletteCommands, selectedAttentionQueue, visibleItems, type DashboardState,
+modified	apps/tui/src/ui/model.ts	{ id: "expired", label: "Expired work", key: "5" }, { id: "closed", label: "Closed", key: "6" },
+modified	apps/tui/src/ui/screen.ts	export type Tone = "text" | "muted" | "accent" | "good" | "warn" | "danger" | "selected" | "selected_danger" | "heading"
+modified	apps/tui/tests/fixtures.mjs	// Explicit mock-server actions, not client-side fallback policy.
+modified	apps/tui/tests/premium.test.mjs	t.send('c');
+modified	apps/tui/tests/responsive.test.mjs	const forms=[actionForm('create_work'),actionForm('claim'),actionForm('evidence')];
+added	crates/application/src/completion.rs	use crate::{ApplicationError, WorkApplication};
+added	crates/application/src/cycle_runtime.rs	use crate::{canonical_request_digest, ApplicationError, PlanningScope, WorkApplication};
+added	crates/application/src/decision_wire.rs	use boreal_domain::decision_inputs::*;
+modified	crates/application/src/evidence.rs	/// Digest of the exact trusted gate declaration used to prepare this run.
+modified	crates/application/src/evidence_store.rs	let valid_policy_identity = request
+modified	crates/application/src/guidance.rs	/// Return a selected work item and its authoritative revision. Paginated reads
+modified	crates/application/src/hierarchy.rs	ActivationPolicy, Cycle, CycleAssignment, CycleAssignmentState, CycleId, CycleInstance, CycleLifecycle,
+modified	crates/application/src/knowledge.rs	//! * migration preserves the original import as an immutable source, then
+modified	crates/application/src/lib.rs	#![recursion_limit = "512"]
+modified	crates/application/src/runtime.rs	AcceptanceProfile, ActorRole, AttemptPhase, DispatchPolicy, Fence, PersistedLifecycle,
+modified	crates/application/src/status.rs	DecisionApiError, DependencyPolicy, DerivedStatus, GateId, GateKind, GateRequirement,
+modified	crates/application/src/workflow_assets.rs	pub required_server_actions: Vec<String>,
+added	crates/application/tests/cycle_readiness.rs	use boreal_application::{cycle_runtime::CycleCreateInput, PlanningScope, WorkApplication};
+modified	crates/application/tests/knowledge.rs	MemoryReviewInput, MemorySearchInput, MigrationApplyState, SourceCaptureInput,
+modified	crates/application/tests/m02_status_authority.rs	assert!(
+modified	crates/application/tests/production_external_jobs.rs	AcceptanceProfile, ActorId, ActorRole, AttemptId, AttemptPhase, DispatchPolicy, Fence,
+modified	crates/application/tests/workflow_queries.rs	assert_eq!(registry.package_version(), "1.1.0");
+modified	crates/cli/Cargo.toml	boreal-migration = { path = "../migration" }
+added	crates/cli/src/authority.rs	use super::*;
+modified	crates/cli/src/command_registry.rs	CommandSpec { path: "recovery list", syntax: "bwrk recovery list --project PROJECT [AFTER_ID] [--limit N] [--json]", act
+added	crates/cli/src/completion_commands.rs	use super::*;
+added	crates/cli/src/credentials.rs	use super::*;
+added	crates/cli/src/cycle_commands.rs	use super::*;
+modified	crates/cli/src/dashboard.rs	let local = super::project_context::resolve(parsed)?;
+modified	crates/cli/src/main.rs	canonical_request_digest, sha256_content_digest, AcceptanceGateDefinition, ApplicationError,
+added	crates/cli/src/memory_commands.rs	use super::*;
+added	crates/cli/src/project_context.rs	use super::*;
+added	crates/cli/src/recovery_commands.rs	use super::*;
+modified	crates/cli/src/service.rs	if super::memory_commands::supported(path) {
+modified	crates/cli/src/setup.rs	let database = super::project_context::confined_path(&project_root, &database, true)?;
+modified	crates/cli/tests/command_registry.rs	fn command_syntax(envelope: &serde_json::Value, path: &str) -> String {
+modified	crates/cli/tests/dashboard_launcher.rs	assert!(message.contains("not bound to this directory"), "{message}");
+modified	crates/cli/tests/evidence_executor_regressions.rs	//! Project sources are captured and registered through `bwrk source add`, and
+modified	crates/cli/tests/evidence_runner_hardening.rs	io::{Read, Write},
+modified	crates/cli/tests/hierarchy_public.rs	"--actor",
+modified	crates/cli/tests/operation_readback_contract.rs	.args([
+modified	crates/cli/tests/outcome_exit.rs	os::unix::fs::{OpenOptionsExt, PermissionsExt},
+modified	crates/cli/tests/production_backup_restore.rs	"command failed: {}\nstdout: {}\nstderr: {}",
+modified	crates/cli/tests/release_acceptance.rs	.args([
+modified	crates/cli/tests/service_signal_recovery.rs	io::{Read, Write},
+modified	crates/cli/tests/service_workflow_discovery.rs	let socket = temp.path().join("s.sock");
+added	crates/cli/tests/session_claim.rs	use serde_json::Value;
+added	crates/cli/tests/source_service.rs	use boreal_store::SqliteStore;
+modified	crates/domain/src/actions.rs	PrincipalBinding, ProofRevision, ReviewOutcome, SubmissionState,
+added	crates/domain/src/completion.rs	use crate::acceptance::ExceptionReason;
+added	crates/domain/src/decision_api.rs	use crate::{
+modified	crates/domain/src/decision_inputs.rs	use crate::work_model_v3::WorkSchedule;
+modified	crates/domain/src/lib.rs	pub mod completion;
+added	crates/domain/src/maintenance.rs	use crate::ActorRole;
+modified	crates/domain/src/rollups.rs	super::work_model_v3::CycleLifecycle::Completed => {
+modified	crates/domain/src/status_evaluator.rs	evaluate_status_inner(context, None)
+modified	crates/domain/src/work_model_v3.rs	let assignments_by_id = assignments
+modified	crates/domain/tests/generate_production_oracle_manifest.py	import os
+modified	crates/domain/tests/m02_status.rs	assert_eq!(result.claimable_for_actor, role == ActorRole::Agent);
+modified	crates/domain/tests/production_action_policy.rs	dispatch_policy: boreal_domain::DispatchPolicy::Automatic,
+modified	crates/domain/tests/production_decision_inputs.rs	dispatch_policy: boreal_domain::DispatchPolicy::Automatic,
+modified	crates/domain/tests/production_domain_api.rs	//! pretend to prove that those consumers already call this policy. The
+modified	crates/domain/tests/production_properties.rs	assert_eq!(first.display_status, DerivedStatus::Blocked);
+modified	crates/domain/tests/production_rollup_policy.rs	#[test]
+modified	crates/domain/tests/production_t10_oracle.rs	dispatch_policy: DispatchPolicy::Automatic,
+modified	crates/domain/tests/work_model_v3.rs	#[test]
+modified	crates/memory/src/lib.rs	/// Construct a read-only/deferred handle. Filesystem preparation belongs to
+modified	crates/migration/src/lib.rs	let historical_status =
+modified	crates/migration/tests/format.rs	#[test]
+modified	crates/protocol/src/models.rs	#[serde(default)]
+modified	crates/source/src/lib.rs	pub mod workspace_snapshot;
+added	crates/source/src/workspace_snapshot.rs	use std::{
+modified	crates/store/src/acceptance.rs	//! Canonical acceptance persistence and immutable submission binding.
+added	crates/store/src/completion.rs	use super::*;
+added	crates/store/src/completion_migrations.rs	const COMPLETION_MIGRATIONS: &[(u64, &str)] = &[
+added	crates/store/src/cycle_commands.rs	use super::*;
+modified	crates/store/src/jobs.rs	pub(crate) fn register_external_job_row(
+modified	crates/store/src/knowledge.rs	) -> Result<SourceVersionRegistrationResult, StoreError> {
+modified	crates/store/src/lib.rs	use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+modified	crates/store/src/maintenance.rs	CREATE TABLE IF NOT EXISTS boreal_maintenance_transition (
+added	crates/store/src/memory.rs	use super::*;
+added	crates/store/src/principals.rs	use super::status_evaluation::canonical_status_timestamp as timestamp_ms;
+modified	crates/store/src/profiles.rs	fn declared_gate_requirements(
+modified	crates/store/src/recovery.rs	ensure_legacy_recovery_compatibility(self, &input.project_id)?;
+modified	crates/store/src/status_evaluation.rs	//! Status and action policy remain in the domain decision API. No SQL WHERE
+added	crates/store/src/status_facts.rs	use super::*;
+modified	crates/store/src/work_model_v3.rs	StatusRecordDiagnostic, StoreError, SQLITE_ROW,
+modified	crates/store/tests/m02_claim.rs	// Deliberate raw corruption in this isolated test database, not a
+modified	crates/store/tests/production_backup_restore.rs	#[test]
+added	crates/store/tests/production_completion_commands.rs	use boreal_domain::{
+modified	crates/store/tests/production_identity_revisions.rs	// Keep the schema semantically identical while avoiding the exact canonical
+modified	crates/store/tests/production_integration.rs	"DROP TRIGGER boreal_profile_strict_immutable_update;
+modified	crates/store/tests/production_profile_requirements.rs	#[test]
+modified	crates/store/tests/production_recovery_records.rs	#[test]
+modified	crates/store/tests/schema_v3.rs	session_id: None,
+modified	crates/store/tests/status_benchmark.rs	let mut runtime = None;
+modified	crates/store/tests/status_snapshot.rs	use boreal_store::identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding};
+modified	crates/store/tests/storage_remediation.rs	.execute_batch("INSERT INTO actor VALUES ('agent-1', 'agent', 'cred-1', 'Agent', 't0');")
+modified	crates/store/tests/store_contracts.rs	fn cross_project_parent_and_dependency_are_rejected() {
+modified	docs/EVIDENCE_RUNNER.md	`bwrk evidence run` runs a gate against an immutable workspace snapshot and a
+added	handoff/delivery/CHANGED_FILES.tsv	status path summary
+added	handoff/delivery/IMPLEMENTATION_REPORT.md	The active 8-sprint queue is complete: **48/48 task implementation and handoff items are checked, with 0 open and 8/8 sp
+added	handoff/delivery/MINI_GIT_LOG.md	No implementation commits were created for this pass. Current branch: codex/apply-responsive-terminal-overlay; dirty-wor
+added	handoff/delivery/OVERLAY_MANIFEST.json	{
+added	handoff/delivery/boreal-v2-changed-source-overlay.zip	Source archive.
+added	handoff/delivery/boreal-v2-reference-20260925T151846780Z.zip	Source archive.
+modified	install.sh	? { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[34;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m",
+modified	project/CLI_COMMANDS.md	| `bwrk gate policy publish` | New | Operator-authorized, revision-bound publication of an immutable gate policy tied to
+added	project/build-plan/production-completion/BWRK_IMPLEMENTATION_HANDOFF.md	This is the implementation plan for the next engineering pass over the supplied
+added	project/build-plan/production-completion/FINAL_REMAINING_PLAN.md	all 8 sprints are integrated in the combined source tree. Workspace compilation
+added	project/build-plan/production-completion/MODEL_IMPLEMENTATION_PROMPT.md	You are receiving a current Boreal v2 source archive. Read
+modified	project/build-plan/production-completion/README.md	For the current implementation pass, start with the [lean implementation
+modified	project/spec/gates/checkpoint.json	"policy_revision": 1,
+modified	project/spec/gates/summary.json	"policy_revision": 1,
+modified	project/spec/gates/verification.json	"policy_revision": 1,
+added	project/spec/schema-completion-v1.sql	-- Ordered additive completion contract. The historical v2/v3 schema checksums
+added	project/spec/schema-completion-v2.sql	-- Additive principal and transition history. Never auto-promote an OS UID,
+added	project/spec/schema-completion-v3.sql	-- Acceptance retains the exact exceptional dispositions used at closeout.
+added	project/spec/schema-completion-v4.sql	-- Canonical planning: containment is not cycle membership. Historical sprint
+added	project/spec/schema-completion-v5.sql	-- Durable cited memory is distinct from accepted work and genuine Git publication.
+added	project/spec/schema-completion-v6.sql	-- Add a typed progress event without changing existing historical audit rows.
+modified	project/spec/workflows/audit.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/claim.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/context.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/finish.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/handoff.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/health.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/memory.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/package.json	"package_version": "1.1.0",
+modified	project/spec/workflows/plan.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/review.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/route.json	"asset_version": "1.1.0",
+modified	project/spec/workflows/validator.py	"required_server_actions",
+modified	project/validation/production/domain/PF-S03-T08-ORACLE-SOURCE.md	source_binding: `external-generated-git-and-worktree-snapshot`
+modified	project/validation/production/domain/api-handoff.md	**Disposition:** bounded domain contract work is ready for coordinator
+added	project/validation/production/tasks/PF-S02-T04/attempt-3/retry-3/COMMANDS.md	Repository: `/Users/cybertron/Code/boreal-work`
+added	project/validation/production/tasks/PF-S02-T04/attempt-3/retry-3/EVIDENCE.md	- Input HEAD: `abf87bb528b55632499bb246c10aeb902680a582`.
+added	project/validation/production/tasks/PF-S02-T04/attempt-3/retry-3/HANDOFF.md	the remaining profile-to-pinned-declaration integrity check and leaves all
+added	project/validation/production/tasks/PF-S02-T04/attempt-3/retry-3/START.md	- Task / retry: `PF-S02-T04` / retry `3`.
+added	project/validation/production/tasks/PF-S02-T06/attempt-3/COORDINATOR-INTEGRATION-REQUEST.md	No changes are requested to `crates/store/src/lib.rs`, schema manifests, or
+added	project/validation/production/tasks/PF-S02-T06/attempt-3/COORDINATOR-RETRY-ADDENDUM.md	Bounded store implementation and focused checks are complete for this retry.
+modified	scripts/release/build_release.py	TUI_UI_MODULES = ("cells", "dashboard", "input", "keys", "layout", "model", "screen", "terminal-size")
+modified	scripts/release/package-smoke.sh	python3 "$root/scripts/release/two-project-smoke.py" --prefix "$scratch/prefix"
+added	scripts/release/two-project-smoke.py	"""Exercise an ACTUALLY installed prefix, never an ambient bwrk or dummy binary.
+added	scripts/validation/run_production_oracles.py	"""Run the source-bound pure-domain oracle targets for this checkout.

@@ -16,6 +16,25 @@ type PrimaryDecision = (DerivedStatus, bool, Option<DomainAction>, ReasonCode);
 /// still reports its open prerequisites, and an expired attempt stays in
 /// expiry review while retaining both elapsed clocks and any hard hold.
 pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
+    evaluate_status_inner(context, None)
+}
+
+/// Production entry point: durable submission/recovery and accepted dependency
+/// outcomes survive execution ownership. Legacy callers retain the v2 wrapper.
+pub fn evaluate_canonical_status(
+    context: StatusContext<'_>,
+    facts: &crate::decision_inputs::DecisionInputs,
+) -> StatusDecision {
+    evaluate_status_inner(context, Some(facts))
+}
+
+fn evaluate_status_inner(
+    context: StatusContext<'_>,
+    facts: Option<&crate::decision_inputs::DecisionInputs>,
+) -> StatusDecision {
+    use crate::decision_inputs::{
+        DependencyOutcome, RecoveryReason, ReviewOutcome, SubmissionState,
+    };
     let work = context.work;
     // Failed/released/cancelled attempts are historical facts, not current
     // eligibility inputs. Expiry-pending/expired remain visible because they
@@ -28,12 +47,24 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
     });
     let live_attempt = attempt.filter(|current| !current.phase.is_terminal());
     let expiry = live_attempt.and_then(|current| current.expiry_reason(context.as_of));
-    let expiry_pending = expiry.is_some()
+    let durable_recovery = facts
+        .and_then(|facts| facts.recovery.as_present())
+        .filter(|recovery| recovery.unresolved);
+    let submitted = facts
+        .and_then(|facts| facts.submission.as_present())
+        .is_some_and(|submission| submission.state == SubmissionState::Sealed);
+    // `review_required_after_expiry` is retained for old schemas, whose DDL
+    // defaulted it to true even on newly claimed, unexpired attempts. It is
+    // not itself proof that the deadline elapsed. Expiry is established by
+    // the clock, an explicit expiry phase, or the durable recovery record.
+    let expiry_pending = durable_recovery
+        .is_some_and(|recovery| recovery.reason == RecoveryReason::Expired)
+        || expiry.is_some()
         || attempt.is_some_and(|current| {
             matches!(
                 current.phase,
                 AttemptPhase::ExpiryPending | AttemptPhase::Expired
-            ) || current.review_required_after_expiry
+            )
         });
     let retry_at = context.retry_not_before.filter(|at| *at > context.as_of);
 
@@ -70,18 +101,74 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
         .and_then(|result| result.as_ref().ok())
         .and_then(|decision| decision.next_change_at);
 
+    let exception_satisfies = |gate_id: &crate::GateId| {
+        facts.is_some_and(|facts| {
+            facts.requirements.as_present().is_some_and(|requirements| {
+                requirements
+                    .requirements
+                    .iter()
+                    .find(|gate| &gate.gate_id == gate_id)
+                    .is_some_and(|gate| {
+                        gate.exception.as_ref().is_some_and(|exception| {
+                            exception.applies(
+                                gate.state,
+                                facts.subject.revision,
+                                requirements.proof.proof_revision,
+                                context.as_of,
+                            )
+                        })
+                    })
+            })
+        })
+    };
     let mut reasons = Vec::new();
     let mut hard_reasons = work.hard_holds.clone();
+    if facts.is_some_and(|facts| facts.validate().is_err()) {
+        hard_reasons.push(ReasonCode::HardHold("integrity_quarantined".into()));
+    }
+    if let Some(recovery) = durable_recovery {
+        if recovery.reason != RecoveryReason::Expired {
+            hard_reasons.push(ReasonCode::HardHold("recovery_required".into()));
+        }
+    }
+    if let Some(review) = facts.and_then(|facts| facts.review.as_present()) {
+        if matches!(
+            review.outcome,
+            ReviewOutcome::Rejected | ReviewOutcome::Returned | ReviewOutcome::Revoked
+        ) && context.gates.iter().any(|gate| {
+            gate.required
+                && gate.kind == GateKind::Review
+                && gate.state == GateState::Failed
+                && !exception_satisfies(&gate.id)
+        }) {
+            hard_reasons.push(ReasonCode::HardHold(format!(
+                "review_{}",
+                match review.outcome {
+                    ReviewOutcome::Rejected => "rejected",
+                    ReviewOutcome::Returned => "returned",
+                    _ => "revoked",
+                }
+            )));
+        }
+    }
     if schedule_invalid {
         hard_reasons.push(ReasonCode::HardHold("schedule_invalid".into()));
     }
 
-    let mut prerequisites = context
-        .prerequisites
-        .iter()
-        .filter(|item| item.lifecycle != PersistedLifecycle::Closed)
-        .map(|item| ReasonCode::PrerequisiteOpen(item.id.clone()))
-        .collect::<Vec<_>>();
+    let mut prerequisites = match facts.and_then(|facts| facts.dependencies.as_present()) {
+        Some(dependencies) => dependencies
+            .edges
+            .iter()
+            .filter(|edge| edge.outcome != DependencyOutcome::Closed && edge.waiver.is_none())
+            .map(|edge| ReasonCode::PrerequisiteOpen(edge.predecessor.work_id.clone()))
+            .collect::<Vec<_>>(),
+        None => context
+            .prerequisites
+            .iter()
+            .filter(|item| item.lifecycle != PersistedLifecycle::Closed)
+            .map(|item| ReasonCode::PrerequisiteOpen(item.id.clone()))
+            .collect::<Vec<_>>(),
+    };
     sort_reasons(&mut prerequisites);
 
     if attempt.is_some_and(|current| current.work_id != work.id || work.kind != WorkKind::Task) {
@@ -116,7 +203,9 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
     let mut gaps = context
         .gates
         .iter()
-        .filter(|gate| gate.required && gate.state != GateState::Satisfied)
+        .filter(|gate| {
+            gate.required && gate.state != GateState::Satisfied && !exception_satisfies(&gate.id)
+        })
         .map(|gate| gate.id.clone())
         .collect::<Vec<_>>();
     gaps.extend(
@@ -134,18 +223,21 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
     // they remain authoritative after execution ownership is released. A
     // failed technical gate remains a verification gap. A failed review is a
     // hard reconciliation obligation and can never be relabeled proof-missing.
-    let proof_phase = attempt.is_some_and(|current| {
-        matches!(
-            current.phase,
-            AttemptPhase::Verifying | AttemptPhase::Completed
-        )
-    });
+    let proof_phase = submitted
+        || attempt.is_some_and(|current| {
+            matches!(
+                current.phase,
+                AttemptPhase::Verifying | AttemptPhase::Completed
+            )
+        });
     for gate in context.gates.iter().filter(|gate| gate.required) {
         match gate.state {
             GateState::Open if proof_phase => {
                 reasons.push(ReasonCode::GateOpen(gate.id.clone()));
             }
-            GateState::Failed if gate.kind == GateKind::Review => {
+            GateState::Failed
+                if gate.kind == GateKind::Review && !exception_satisfies(&gate.id) =>
+            {
                 hard_reasons.push(ReasonCode::ReviewRejected(gate.id.clone()));
             }
             GateState::Failed => reasons.push(ReasonCode::GateFailed(gate.id.clone())),
@@ -282,6 +374,8 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
                     ReasonCode::ExpiryReviewRequired,
                 ),
             }
+        } else if submitted {
+            proof_decision(context.gates, &gaps)
         } else if context.gates.iter().any(|gate| {
             gate.required && gate.state == GateState::Failed && gate.kind != GateKind::Review
         }) {
@@ -418,13 +512,17 @@ fn eligibility(work: &WorkItem, actor: &ActorContext) -> PrimaryDecision {
             ReasonCode::OperatorOnly,
         );
     }
-    if matches!(actor.role, ActorRole::Agent | ActorRole::Operator) {
+    if actor.role == ActorRole::Agent {
         (
             DerivedStatus::Ready,
             true,
             Some(DomainAction::Claim),
             ReasonCode::Eligible,
         )
+    } else if actor.role == ActorRole::Operator {
+        // Operator authority is for explicit operator-only dispatch and
+        // recovery/policy actions, not ordinary agent execution.
+        pending(DerivedStatus::Ready, None, ReasonCode::RoleDenied)
     } else {
         pending(
             DerivedStatus::Ready,

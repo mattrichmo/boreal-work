@@ -295,6 +295,83 @@ fn cycles_assign_tasks_without_reparenting_and_enforce_one_live_slot() {
 }
 
 #[test]
+fn carry_over_requires_reciprocal_same_work_lineage_across_cycles() {
+    let prior_cycle = Cycle::new(project(), CycleId::new("cycle-prior"), "Prior");
+    let next_cycle = Cycle::new(project(), CycleId::new("cycle-next"), "Next");
+    let nodes = vec![
+        WorkNode::task(project(), work("task"), ExecutionMode::Direct, None, "Task"),
+        WorkNode::task(
+            project(),
+            work("other"),
+            ExecutionMode::Direct,
+            None,
+            "Other",
+        ),
+    ];
+    let prior_assignment = CycleAssignment {
+        id: "assignment-prior".into(),
+        cycle_id: prior_cycle.id.clone(),
+        work_id: work("task"),
+        project_id: project(),
+        state: CycleAssignmentState::CarriedOver,
+        activation_policy: ActivationPolicy::AtCycleStart,
+        activation_at: None,
+        predecessor_id: None,
+        successor_id: Some("assignment-next".into()),
+    };
+    let next_assignment = CycleAssignment {
+        id: "assignment-next".into(),
+        cycle_id: next_cycle.id.clone(),
+        work_id: work("task"),
+        project_id: project(),
+        state: CycleAssignmentState::Planned,
+        activation_policy: ActivationPolicy::AtCycleStart,
+        activation_at: None,
+        predecessor_id: Some("assignment-prior".into()),
+        successor_id: None,
+    };
+    let cycles = [prior_cycle.clone(), next_cycle.clone()];
+    let valid = [prior_assignment.clone(), next_assignment.clone()];
+
+    assert!(validate_cycle_assignments(&cycles, &nodes, &valid).is_ok());
+
+    let mut dangling = valid.clone();
+    dangling[0].successor_id = Some("missing-assignment".into());
+    assert!(validate_cycle_assignments(&cycles, &nodes, &dangling).is_err());
+
+    let mut asymmetric = valid.clone();
+    asymmetric[1].predecessor_id = None;
+    assert!(validate_cycle_assignments(&cycles, &nodes, &asymmetric).is_err());
+
+    let mut same_cycle = valid.clone();
+    same_cycle[1].cycle_id = prior_cycle.id.clone();
+    assert!(validate_cycle_assignments(&cycles, &nodes, &same_cycle).is_err());
+
+    let mut different_work = valid.clone();
+    different_work[1].work_id = work("other");
+    assert!(validate_cycle_assignments(&cycles, &nodes, &different_work).is_err());
+
+    let mut wrong_state = valid.clone();
+    wrong_state[0].state = CycleAssignmentState::Completed;
+    assert!(validate_cycle_assignments(&cycles, &nodes, &wrong_state).is_err());
+
+    let mut no_successor = valid.clone();
+    no_successor[0].successor_id = None;
+    assert!(validate_cycle_assignments(&cycles, &nodes, &no_successor).is_err());
+
+    let third_cycle = Cycle::new(project(), CycleId::new("cycle-third"), "Third");
+    let mut cycle = valid.to_vec();
+    cycle[0].predecessor_id = Some("assignment-next".into());
+    cycle[1].state = CycleAssignmentState::CarriedOver;
+    cycle[1].successor_id = Some("assignment-prior".into());
+    cycle[1].cycle_id = third_cycle.id.clone();
+    assert!(
+        validate_cycle_assignments(&[prior_cycle, next_cycle, third_cycle], &nodes, &cycle)
+            .is_err()
+    );
+}
+
+#[test]
 fn weekly_recurrence_has_stable_local_slots_and_explicit_resolution_facts() {
     let recurrence = WeeklyRecurrence {
         anchor_local_start: LocalDateTime::new(

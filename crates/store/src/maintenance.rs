@@ -22,6 +22,22 @@ CREATE TABLE IF NOT EXISTS boreal_maintenance_job (
 );
 CREATE INDEX IF NOT EXISTS boreal_maintenance_job_stage
   ON boreal_maintenance_job(stage, operation_id);
+CREATE TABLE IF NOT EXISTS boreal_maintenance_transition (
+  transition_id INTEGER PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES boreal_maintenance_job(operation_id),
+  prior_stage TEXT, next_stage TEXT NOT NULL, result_json TEXT, error_message TEXT, observed_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS boreal_maintenance_registered AFTER INSERT ON boreal_maintenance_job
+BEGIN INSERT INTO boreal_maintenance_transition(operation_id,prior_stage,next_stage,result_json,error_message,observed_at)
+VALUES(NEW.operation_id,NULL,NEW.stage,NEW.result_json,NEW.error_message,NEW.updated_at); END;
+CREATE TRIGGER IF NOT EXISTS boreal_maintenance_advanced AFTER UPDATE OF stage ON boreal_maintenance_job
+BEGIN INSERT INTO boreal_maintenance_transition(operation_id,prior_stage,next_stage,result_json,error_message,observed_at)
+VALUES(NEW.operation_id,OLD.stage,NEW.stage,NEW.result_json,NEW.error_message,NEW.updated_at); END;
+CREATE TRIGGER IF NOT EXISTS boreal_maintenance_history_no_update BEFORE UPDATE ON boreal_maintenance_transition
+BEGIN SELECT RAISE(ABORT,'maintenance_history_is_immutable'); END;
+CREATE TRIGGER IF NOT EXISTS boreal_maintenance_history_no_delete BEFORE DELETE ON boreal_maintenance_transition
+BEGIN SELECT RAISE(ABORT,'maintenance_history_is_immutable'); END;
+CREATE TRIGGER IF NOT EXISTS boreal_maintenance_terminal BEFORE UPDATE ON boreal_maintenance_job
+WHEN OLD.stage IN('committed','rejected') BEGIN SELECT RAISE(ABORT,'maintenance_terminal_is_immutable'); END;
 "#;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,6 +175,24 @@ impl SqliteStore {
                     "maintenance stage changed from {} to {}",
                     transition.expected_stage, current.stage
                 )));
+            }
+            if !boreal_domain::maintenance::transition_allowed(
+                &current.stage,
+                &transition.next_stage,
+            ) {
+                return Err(StoreError::Conflict(
+                    "maintenance transition would rerun or rewrite a terminal effect".into(),
+                ));
+            }
+            if transition.next_stage == "committed" && transition.result_json.is_none() {
+                return Err(StoreError::Invalid(
+                    "committed maintenance requires verified readback JSON".into(),
+                ));
+            }
+            if let Some(value) = &transition.result_json {
+                serde_json::from_str::<serde_json::Value>(value).map_err(|_| {
+                    StoreError::Invalid("maintenance readback must be valid JSON".into())
+                })?;
             }
             let mut statement = self.prepare(
                 "UPDATE boreal_maintenance_job

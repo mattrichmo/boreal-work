@@ -966,6 +966,8 @@ fn status_precedence_retains_secondary_facts_and_terminal_reopen_is_explicit() {
         10,
         Some(20),
     );
+    assert_eq!(first.display_status, DerivedStatus::Blocked);
+    assert_ne!(first.primary_reason, ReasonCode::ExpiryReviewRequired);
     let mut reversed_prerequisites = prerequisites;
     reversed_prerequisites.reverse();
     let second = status_fixture(
@@ -982,7 +984,6 @@ fn status_precedence_retains_secondary_facts_and_terminal_reopen_is_explicit() {
         Some(20),
     );
     assert_eq!(first, second);
-    assert_eq!(first.primary_reason, ReasonCode::ExpiryReviewRequired);
     assert!(first
         .reason_codes
         .iter()
@@ -990,7 +991,7 @@ fn status_precedence_retains_secondary_facts_and_terminal_reopen_is_explicit() {
     assert!(first.reason_codes.iter().any(
         |reason| matches!(reason, ReasonCode::PrerequisiteOpen(id) if id.as_str() == "upstream-z")
     ));
-    assert_eq!(first.next_status_change_at, None);
+    assert_eq!(first.next_status_change_at, Some(TimestampMs(20)));
     assert!(first.reason_codes[1..]
         .windows(2)
         .all(|pair| pair[0].stable_code() < pair[1].stable_code()));
@@ -1086,12 +1087,20 @@ fn oracle_identity_and_minimal_counterexample_replay_are_explicit() {
     let manifest = validation_manifest();
     assert_eq!(
         manifest_field(&manifest, "schema:"),
-        "boreal.production-oracle-source-manifest/1"
+        "boreal.production-oracle-source-manifest/2"
     );
     assert_eq!(
         manifest_field(&manifest, "binding:"),
-        "external-generated-validation-input"
+        "external-generated-git-and-worktree-snapshot"
     );
+    let source_tree_digest = manifest_field(&manifest, "source_tree_sha256:");
+    assert_eq!(source_tree_digest.len(), 64);
+    assert!(source_tree_digest
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit()));
+    assert!(manifest_field(&manifest, "source_file_count:")
+        .parse::<usize>()
+        .is_ok_and(|count| count > 0));
     assert_eq!(
         current_git_head(),
         manifest_field(&manifest, "source_revision:")
@@ -1136,37 +1145,37 @@ fn oracle_identity_and_minimal_counterexample_replay_are_explicit() {
         "project/validation/production/domain/PF-S03-T10-ORACLE-SOURCE.md",
         include_bytes!("../../../project/validation/production/domain/PF-S03-T10-ORACLE-SOURCE.md"),
     );
-    assert_bound_artifact(
+    assert_manifest_artifact_digest(
         &manifest,
         "crates/domain/src/lib.rs",
         include_bytes!("../src/lib.rs"),
     );
-    assert_bound_artifact(
+    assert_manifest_artifact_digest(
         &manifest,
         "crates/domain/src/status_evaluator.rs",
         include_bytes!("../src/status_evaluator.rs"),
     );
-    assert_bound_artifact(
+    assert_manifest_artifact_digest(
         &manifest,
         "crates/domain/src/actions.rs",
         include_bytes!("../src/actions.rs"),
     );
-    assert_bound_artifact(
+    assert_manifest_artifact_digest(
         &manifest,
         "crates/domain/src/decision_inputs.rs",
         include_bytes!("../src/decision_inputs.rs"),
     );
-    assert_bound_artifact(
+    assert_manifest_artifact_digest(
         &manifest,
         "crates/domain/src/dependencies.rs",
         include_bytes!("../src/dependencies.rs"),
     );
-    assert_bound_artifact(
+    assert_manifest_artifact_digest(
         &manifest,
         "crates/domain/src/time_policy.rs",
         include_bytes!("../src/time_policy.rs"),
     );
-    assert_bound_artifact(
+    assert_manifest_artifact_digest(
         &manifest,
         "crates/domain/tests/production_properties.rs",
         include_bytes!("production_properties.rs"),
@@ -1889,12 +1898,14 @@ fn action_facts(role: ActorRole) -> DecisionInputs {
         snapshot_revision: Revision(12),
         clock: boreal_domain::decision_inputs::EvaluationClock::at(TimestampMs(100)),
         availability: Availability::Live,
+        dispatch_policy: DispatchPolicy::Automatic,
         lifecycle: Fact::present(boreal_domain::decision_inputs::LifecycleInput {
             identity: subject.clone(),
             lifecycle: PersistedLifecycle::Open,
             terminal_decision: None,
         }),
         authority: Fact::present(ActorAuthorityInput {
+            authority_root: "actor".into(),
             project_id: "project".into(),
             role,
             principal: PrincipalBinding::Authenticated {
@@ -1905,6 +1916,7 @@ fn action_facts(role: ActorRole) -> DecisionInputs {
         requirements: Fact::present(PinnedRequirementsInput {
             proof,
             requirements: vec![PinnedRequirement {
+                exception: None,
                 id: RequirementId::new("verification-requirement"),
                 gate_id: GateId::new("verification"),
                 kind: GateKind::Verification,
@@ -1986,6 +1998,9 @@ fn action_facts_with_submission(role: ActorRole, state: SubmissionState) -> Deci
     let mut facts = action_facts(role);
     let proof = facts.requirements.as_present().unwrap().proof.clone();
     facts.submission = Fact::present(SubmissionInput {
+        actor_id: ActorId::new("actor"),
+        session_id: SessionId::new("session"),
+        authority_root: ActorId::new("actor"),
         id: SubmissionId::new("submission"),
         proof,
         summary_digest: ContentDigest::new("sha256:summary"),
@@ -2073,7 +2088,16 @@ fn every_public_action_has_a_positive_normative_vector() {
         &[ReasonCode::ReviewRequired],
         ActionKind::RequestReview,
     );
-    let reviewer = action_facts_with_submission(ActorRole::Reviewer, SubmissionState::Sealed);
+    let mut reviewer = action_facts_with_submission(ActorRole::Reviewer, SubmissionState::Sealed);
+    reviewer.authority = Fact::present(ActorAuthorityInput {
+        authority_root: ActorId::new("reviewer"),
+        project_id: "project".into(),
+        role: ActorRole::Reviewer,
+        principal: PrincipalBinding::Authenticated {
+            actor_id: "reviewer".into(),
+        },
+        session_id: Some(SessionId::new("review-session")),
+    });
     assert_action_allowed(
         &reviewer,
         DerivedStatus::AwaitingReview,
@@ -2234,9 +2258,11 @@ fn action_status_matrix_and_typed_stale_denials_are_explicit() {
             observed: ActorRole::Reviewer,
         }
     );
+    let mut operator_only_facts = action_facts(ActorRole::Reviewer);
+    operator_only_facts.dispatch_policy = DispatchPolicy::OperatorOnly;
     assert_eq!(
         action_denial_for(
-            &action_facts(ActorRole::Reviewer),
+            &operator_only_facts,
             DerivedStatus::Ready,
             &[ReasonCode::OperatorOnly],
             ActionKind::Claim,
@@ -2350,6 +2376,8 @@ fn historical_submission_and_review_states_do_not_change_claim_authority() {
         .proof
         .clone();
     rejected_review.review = Fact::present(ReviewInput {
+        reviewer_authority_root: ActorId::new("reviewer"),
+        attempt_authority_root: ActorId::new("actor"),
         id: ReviewId::new("historical-review"),
         submission_id: SubmissionId::new("submission"),
         proof,
@@ -2445,12 +2473,17 @@ fn malformed_facts_fail_closed_and_retain_typed_diagnostics() {
     let mut self_review = action_facts(ActorRole::Reviewer);
     let proof = self_review.requirements.as_present().unwrap().proof.clone();
     self_review.submission = Fact::present(SubmissionInput {
+        actor_id: ActorId::new("actor"),
+        session_id: SessionId::new("session"),
+        authority_root: ActorId::new("actor"),
         id: SubmissionId::new("submission"),
         proof: proof.clone(),
         summary_digest: ContentDigest::new("sha256:summary"),
         state: SubmissionState::Sealed,
     });
     self_review.review = Fact::present(ReviewInput {
+        reviewer_authority_root: ActorId::new("actor"),
+        attempt_authority_root: ActorId::new("actor"),
         id: ReviewId::new("review"),
         submission_id: SubmissionId::new("submission"),
         proof,
@@ -2774,6 +2807,7 @@ fn availability_and_integrity_dimensions_have_typed_safe_action_policy() {
         let operator = {
             let mut operator = facts.clone();
             operator.authority = Fact::present(ActorAuthorityInput {
+                authority_root: "operator".into(),
                 project_id: "project".into(),
                 role: ActorRole::Operator,
                 principal: PrincipalBinding::Authenticated {

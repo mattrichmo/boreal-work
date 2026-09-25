@@ -1,13 +1,91 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.0.0",
+  "asset_version": "1.1.0",
   "ref": "boreal.workflow.health.v1",
   "kind": "health",
   "title": "Diagnose and recover service, sync, index, and memory health",
-  "refs": {"route": "boreal.workflow.route.v1", "context": "boreal.workflow.context.v1", "handoff": "boreal.workflow.handoff.v1"},
-  "allowed_commands": ["bwrk doctor --json", "bwrk doctor skills --json", "bwrk sync status --json", "bwrk sync refresh --json", "bwrk context rebuild --json", "bwrk search index --json", "bwrk operation show <operation_id> --json", "bwrk dashboard --json"],
-  "typed_inputs": [{"name": "project_id", "type": "project_id", "required": true, "source": "session", "validation": "project_scope"}, {"name": "diagnostic_scope", "type": "enum:service|database|index|memory|all", "required": true, "source": "typed_request", "validation": "allowlist"}, {"name": "observed_revision", "type": "revision", "required": true, "source": "snapshot", "validation": "monotonic"}, {"name": "operation_id", "type": "nullable_operation_id", "required": false, "source": "failure", "validation": "readback_before_retry"}],
-  "finish_criteria": [{"id": "health.observed", "type": "bounded_diagnostics", "required": true}, {"id": "health.integrity", "type": "current_corruption_separated_from_history", "required": true}, {"id": "health.recovery", "type": "typed_recovery_or_no_action", "required": true}, {"id": "health.retry", "type": "uncertain_mutations_resolved_by_operation_id", "required": true}],
-  "next_refs": ["boreal.workflow.route.v1", "boreal.workflow.handoff.v1"],
-  "state_transition_owner": "boreal.application.v2"
+  "refs": {
+    "route": "boreal.workflow.route.v1",
+    "context": "boreal.workflow.context.v1",
+    "handoff": "boreal.workflow.handoff.v1"
+  },
+  "allowed_commands": [
+    "bwrk doctor --json",
+    "bwrk status --json",
+    "bwrk operation show <operation_id> --json",
+    "bwrk memory readback <operation_id> --json",
+    "bwrk memory reconcile <operation_id> --expected-revision <revision> --yes --json"
+  ],
+  "typed_inputs": [
+    {
+      "name": "project_id",
+      "type": "project_id",
+      "required": true,
+      "source": "session",
+      "validation": "project_scope"
+    },
+    {
+      "name": "diagnostic_scope",
+      "type": "enum:service|database|index|memory|all",
+      "required": true,
+      "source": "typed_request",
+      "validation": "allowlist"
+    },
+    {
+      "name": "observed_revision",
+      "type": "revision",
+      "required": true,
+      "source": "snapshot",
+      "validation": "monotonic"
+    },
+    {
+      "name": "operation_id",
+      "type": "nullable_operation_id",
+      "required": false,
+      "source": "failure",
+      "validation": "readback_before_retry"
+    },
+    {
+      "name": "server_action",
+      "type": "action_descriptor",
+      "required": true,
+      "source": "canonical_status_or_command_response",
+      "validation": "target_project_actor_session_revisions_confirmation_and_denials_must_match; guidance_is_not_authority"
+    }
+  ],
+  "finish_criteria": [
+    {
+      "id": "health.observed",
+      "type": "bounded_diagnostics",
+      "required": true
+    },
+    {
+      "id": "health.integrity",
+      "type": "current_corruption_separated_from_history",
+      "required": true
+    },
+    {
+      "id": "health.recovery",
+      "type": "typed_recovery_or_no_action",
+      "required": true
+    },
+    {
+      "id": "health.retry",
+      "type": "uncertain_mutations_resolved_by_operation_id",
+      "required": true
+    },
+    {
+      "id": "health.authority",
+      "type": "mutation_authorized_again_inside_canonical_transaction",
+      "required": true
+    }
+  ],
+  "next_refs": [
+    "boreal.workflow.route.v1",
+    "boreal.workflow.handoff.v1"
+  ],
+  "state_transition_owner": "boreal.application.v2",
+  "required_server_actions": [
+    "recover"
+  ]
 }

@@ -261,6 +261,7 @@ impl SqliteStore {
         &self,
         input: &RecoveryObligationInput,
     ) -> Result<RecoveryObligationRecord, StoreError> {
+        ensure_legacy_recovery_compatibility(self, &input.project_id)?;
         validate_obligation_input(input)?;
         let expected_project = self.project_for_work(&input.work_id)?;
         if expected_project != input.project_id {
@@ -402,6 +403,7 @@ impl SqliteStore {
         &self,
         input: &RecoveryResolutionInput,
     ) -> Result<RecoveryObligationRecord, StoreError> {
+        ensure_legacy_recovery_compatibility(self, &input.project_id)?;
         for value in [
             input.resolution_id.as_str(),
             input.actor_id.as_str(),
@@ -760,6 +762,7 @@ impl SqliteStore {
         &self,
         input: &ResourceReservationInput,
     ) -> Result<ResourceReservationRecord, StoreError> {
+        ensure_legacy_recovery_compatibility(self, &input.project_id)?;
         validate_resource_reservation_subject(self, input)?;
         with_transaction(self, || self.reserve_resource_in_transaction(input))
     }
@@ -823,6 +826,7 @@ impl SqliteStore {
         evidence_ref: &str,
         at: &str,
     ) -> Result<ResourceReservationRecord, StoreError> {
+        ensure_legacy_recovery_compatibility(self, project_id)?;
         for (value, label) in [
             (event_id, "release event"),
             (actor_id, "release actor"),
@@ -915,6 +919,7 @@ impl SqliteStore {
         evidence_ref: &str,
         at: &str,
     ) -> Result<ResourceReservationRecord, StoreError> {
+        ensure_legacy_recovery_compatibility(self, project_id)?;
         for (value, label) in [
             (ack_id, "release acknowledgement"),
             (actor_id, "release actor"),
@@ -1106,6 +1111,25 @@ struct ResourceReleaseEventInput<'a> {
     actor_id: &'a str,
     evidence_ref: &'a str,
     at: &'a str,
+}
+
+/// The unbound recovery/resource methods are retained for pre-identity store
+/// fixtures only. Production lifecycle writers use the transaction-scoped
+/// helpers after authenticating their operation; recovery disposition uses
+/// `resolve_recovery_obligation_with_identity`. Do not let a project-bound
+/// store bypass those boundaries by supplying a caller-chosen actor string.
+fn ensure_legacy_recovery_compatibility(
+    store: &SqliteStore,
+    project_id: &str,
+) -> Result<(), StoreError> {
+    if store.canonical_production
+        || (store.identity_tables_installed()? && store.project_identity_is_bound(project_id)?)
+    {
+        return Err(StoreError::Conflict(
+            "recovery mutation requires authenticated operation identity; use the canonical lifecycle transaction or identity-bound recovery resolution".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn with_transaction<T>(

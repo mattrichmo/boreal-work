@@ -163,6 +163,79 @@ fn deferred_cycle_separates_accepted_and_reconciled_scope() {
 }
 
 #[test]
+fn persisted_completed_cycle_with_unresolved_scope_reports_attention() {
+    let cycle_id = CycleId::new("cycle-unresolved");
+    let mut cycle = Cycle::new(project(), cycle_id.clone(), "Unresolved cycle");
+    cycle.start(TimestampMs::from_millis(10)).unwrap();
+    cycle.complete(TimestampMs::from_millis(20), 0).unwrap();
+
+    let mut unresolved = task(
+        "unresolved",
+        PersistedLifecycle::Open,
+        DerivedStatus::Queued,
+    );
+    unresolved.requires_reconciliation = true;
+    let rollup = evaluate_cycle_rollup(&CycleRollupInput {
+        scope: RollupScope::cycle(project(), cycle_id.clone(), revision(43)),
+        cycle,
+        assignments: vec![CycleAssignmentRollupInput {
+            assignment: assignment(
+                "a-unresolved",
+                &cycle_id,
+                &work("unresolved"),
+                CycleAssignmentState::Removed,
+            ),
+            task: unresolved,
+        }],
+        gate_gaps: Vec::new(),
+        overdue: false,
+        blockers: Vec::new(),
+        integration_closeout: None,
+    });
+
+    assert_eq!(rollup.state, CycleRollupState::Attention);
+    assert!(!rollup.scope_reconciled);
+    assert_eq!(rollup.totals.unresolved_scope, 1);
+}
+
+#[test]
+fn persisted_completed_cycle_with_gate_or_integration_gaps_reports_attention() {
+    let cycle_id = CycleId::new("cycle-closeout-gaps");
+    let mut cycle = Cycle::new(project(), cycle_id.clone(), "Closeout gaps");
+    cycle.start(TimestampMs::from_millis(10)).unwrap();
+    cycle.complete(TimestampMs::from_millis(20), 0).unwrap();
+
+    let rollup = evaluate_cycle_rollup(&CycleRollupInput {
+        scope: RollupScope::cycle(project(), cycle_id.clone(), revision(44)),
+        cycle,
+        assignments: vec![CycleAssignmentRollupInput {
+            assignment: assignment(
+                "a-accepted",
+                &cycle_id,
+                &work("accepted"),
+                CycleAssignmentState::Completed,
+            ),
+            task: accepted_task("accepted"),
+        }],
+        gate_gaps: vec![GateId::new("review")],
+        overdue: false,
+        blockers: Vec::new(),
+        integration_closeout: Some(IntegrationCloseoutSpec {
+            work_id: work("missing-integration-closeout"),
+            required: true,
+        }),
+    });
+
+    assert_eq!(rollup.state, CycleRollupState::Attention);
+    assert!(rollup.scope_reconciled);
+    assert_eq!(rollup.gate_review_gaps, vec![GateId::new("review")]);
+    assert_eq!(
+        rollup.integration_closeout.unwrap().state,
+        IntegrationCloseoutState::Missing
+    );
+}
+
+#[test]
 fn queued_container_work_is_nonclaimable_and_not_a_hard_block() {
     let mut queued = task("queued", PersistedLifecycle::Open, DerivedStatus::Queued);
     queued.requires_reconciliation = true;

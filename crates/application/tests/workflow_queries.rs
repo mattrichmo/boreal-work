@@ -6,7 +6,7 @@ fn embedded_workflow_package_is_bounded_and_resolves_audit() {
 
     assert_eq!(registry.schema_version(), "boreal.workflow_package.v1");
     assert_eq!(registry.package_id(), "boreal.core-workflows");
-    assert_eq!(registry.package_version(), "1.0.0");
+    assert_eq!(registry.package_version(), "1.1.0");
     assert_eq!(registry.assets().len(), 10);
     let audit = registry
         .get("boreal.workflow.audit.v1")
@@ -30,5 +30,23 @@ fn unknown_workflow_reference_is_typed_and_read_only() {
         registry.get("boreal.workflow.missing.v1"),
         Err(WorkflowAssetError::UnknownReference(reference))
             if reference == "boreal.workflow.missing.v1"
+    ));
+}
+
+#[test]
+fn workflow_package_rejects_missing_server_action_contract() {
+    let package = r#"{
+      "schema_version":"boreal.workflow_package.v1",
+      "package_id":"test","package_version":"1","asset_identity":"sha256:test",
+      "state_authority":"boreal.application.v2",
+      "assets":[{"ref":"boreal.workflow.one.v1","kind":"test","title":"Test",
+        "allowed_commands":["bwrk next --json"],
+        "typed_inputs":[{"name":"x","type":"id","source":"request","validation":"bounded"}],
+        "finish_criteria":[{"id":"done","type":"proof","required":true}],"next_refs":[] }]
+    }"#;
+
+    assert!(matches!(
+        WorkflowRegistry::from_package_json(package),
+        Err(WorkflowAssetError::MissingField("required_server_actions"))
     ));
 }

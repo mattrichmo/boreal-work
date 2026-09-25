@@ -3,9 +3,36 @@ import { clip, fit, wrap, wrapWords, cellWidth } from "./cells.js";
 import { Screen, type Rect, type Tone } from "./screen.js";
 import { inputDisplay } from "./input.js";
 import { resolveViewport, chromeFor, paneViewport, dialogViewport, adaptiveHint, windowStart, type Density, type Chrome } from "./layout.js";
-import { ACTION_NAMES, FILTERS, itemStatus, paletteCommands, visibleItems, type DashboardState, type Modal } from "./model.js";
-const LABELS: Record<string, string> = { in_progress: "In progress", needs_verification: "Verification", awaiting_review: "Awaiting review", expired_review: "Review needed", retry_wait: "Retry wait", corrupt: "Unreadable" };
-const label = (s: string) => LABELS[s] ?? s.replaceAll("_", " ").replace(/^./, c => c.toUpperCase());
+import { ACTION_NAMES, FILTERS, itemStatus, paletteCommands, selectedAttentionQueue, visibleItems, type DashboardState, type Modal } from "./model.js";
+const LABELS: Record<string, string> = {
+    in_progress: "In progress",
+    needs_verification: "Verification needed",
+    awaiting_review: "Awaiting review",
+    expired_review: "Review overdue",
+    retry_wait: "Waiting to retry",
+    closeout_pending: "Closeout in progress",
+    accepted_closed: "Accepted and closed",
+    corrupt: "Unreadable",
+    no_safe_action: "No safe action available",
+};
+const label = (s: string) => {
+    if (LABELS[s]) return LABELS[s];
+    const parameterized = /^(prerequisite_open|gate_open|gate_failed|gate_missing|gate_invalid|review_rejected)\((.*)\)$/u.exec(s);
+    if (parameterized) {
+        const names: Record<string, string> = {
+            prerequisite_open: "Waiting for prerequisite",
+            gate_open: "Gate still open",
+            gate_failed: "Gate failed",
+            gate_missing: "Required gate missing",
+            gate_invalid: "Gate needs attention",
+            review_rejected: "Review rejected",
+        };
+        return `${names[parameterized[1]!] ?? parameterized[1]} · ${parameterized[2]}`;
+    }
+    const time = /^(retry_not_before|scheduled_start)\((.*)\)$/u.exec(s);
+    if (time) return `${time[1] === "retry_not_before" ? "Retry available" : "Starts"} ${time[2]}`;
+    return s.replaceAll("_", " ").replace(/^./, c => c.toUpperCase());
+};
 const tone = (s: string): Tone => s === "ready" || s === "closed" ? "good" : ["blocked", "expired_review", "cancelled", "corrupt"].includes(s) ? "danger" : ["queued", "needs_verification", "awaiting_review"].includes(s) ? "warn" : "accent";
 export interface DashboardLayout {
     rail?: Rect; queue: Rect; inspector?: Rect; body: Rect; visibleRows: number;
@@ -88,10 +115,14 @@ function rail(screen: Screen, r: Rect, state: DashboardState): void {
 }
 function queue(screen: Screen, r: Rect, view: MountedView, state: DashboardState, chrome: Chrome): void {
     const items = visibleItems(view, state), index = Math.max(0, items.findIndex(i => i.work_id === state.selectedId));
+    const attentionQueue = selectedAttentionQueue(view, state.filter);
+    const queueTotal = attentionQueue?.total ?? items.length;
+    const queueHasMore = attentionQueue?.has_more ?? view.monitoring?.has_more;
     const p = paneViewport(r, chrome), start = windowStart(index, items.length, p.height);
-    const position = `${items.length ? index + 1 : 0}/${items.length}${view.monitoring?.has_more ? " ]" : ""}`;
+    const more = queueHasMore ? attentionQueue ? " +" : " ]" : "";
+    const position = `${items.length ? index + 1 : 0}/${items.length}${queueTotal !== items.length ? ` of ${queueTotal}` : ""}${more}`;
     if (p.boxed) {
-        screen.box(r, `WORK QUEUE (${items.length})`, state.focus === "queue", state.ascii);
+        screen.box(r, `WORK QUEUE (${queueTotal})`, state.focus === "queue", state.ascii);
         screen.text(r.x + 2, r.y + r.height - 1, clip(` ${position} · ${state.query ? `search: ${state.query}` : `${state.sort} order`} `, r.width - 4), "muted", r.width - 4);
     } else if (r.height > 1) leftRight(screen, r.y, `WORK QUEUE${state.query ? ` / ${state.query}` : ""}`, position, state.focus === "queue" ? "accent" : "heading", "muted", r.x, r.width);
     const sw = p.width >= 58 ? 15 : p.width >= 34 ? 11 : p.width >= 22 ? 7 : 0;
@@ -102,14 +133,14 @@ function queue(screen: Screen, r: Rect, view: MountedView, state: DashboardState
     if (p.boxed) screen.text(p.x, r.y + 1, "  " + fit("WORK", tw + gap) + fit("STATE", sw) + fit("ID", iw) + fit("PRI", pw) + fit("KIND", kw) + fit("OWNER", ow), "muted", p.width);
     if (!items.length) {
         screen.text(p.x, p.y, clip(state.query ? "No search matches" : "No work in this view", p.width), "heading", p.width);
-        if (p.height > 1) screen.text(p.x, p.y + 1, clip(view.monitoring?.has_more ? "] next page · v views" : "n new work · v views", p.width), "muted", p.width);
+        if (p.height > 1) screen.text(p.x, p.y + 1, clip(queueHasMore ? attentionQueue ? `More items exist (${queueTotal} total)` : "] next page · v views" : "n new work · v views", p.width), "muted", p.width);
     }
     items.slice(start, start + p.height).forEach((item, i) => {
-        const selected = item.work_id === state.selectedId, rt: Tone = selected ? "selected" : "text", y = p.y + i;
+        const selected = item.work_id === state.selectedId, rt: Tone = item.diagnostic ? (selected ? "selected_danger" : "danger") : selected ? "selected" : "text", y = p.y + i;
         screen.text(p.x, y, fit(`${selected ? "> " : "  "}${clip(item.title ?? item.work_id, tw)}`, p.width), rt, p.width);
-        const stateLabel = sw < 10 ? ({ in_progress: "Active", needs_verification: "Verify", expired_review: "Review", awaiting_review: "Review" }[itemStatus(item)] ?? label(itemStatus(item))) : label(itemStatus(item));
+        const stateLabel = item.diagnostic ? (sw < 10 ? "Damaged" : "Quarantined") : sw < 10 ? ({ in_progress: "Active", needs_verification: "Verify", expired_review: "Review", awaiting_review: "Review" }[itemStatus(item)] ?? label(itemStatus(item))) : label(itemStatus(item));
         let x = p.x + 2 + tw + gap;
-        screen.text(x, y, fit(stateLabel, sw), selected ? "selected" : tone(itemStatus(item)), sw); x += sw;
+        screen.text(x, y, fit(stateLabel, sw), item.diagnostic ? rt : selected ? "selected" : tone(itemStatus(item)), sw); x += sw;
         screen.text(x, y, fit(item.work_id, iw), selected ? "selected" : "muted", iw); x += iw;
         screen.text(x, y, fit(item.priority ?? "—", pw), selected ? "selected" : "muted", pw); x += pw;
         screen.text(x, y, fit(item.kind ?? "work", kw), selected ? "selected" : "muted", kw); x += kw;

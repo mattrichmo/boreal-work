@@ -47,7 +47,7 @@ for (const [w,h] of SIZES) test(`operable content across dashboard, sheets, and 
     let screen=renderDashboard(v,s,w,h); bounded(screen,w,h);
     assert.match(screen.plain().join('\n'), /> Complete/);
     assert.ok(screen.plain().at(-1).includes('q'), 'quit remains discoverable');
-    const forms=[actionForm('create_work'),actionForm('evidence')];
+    const forms=[actionForm('create_work'),actionForm('claim'),actionForm('evidence')];
     for (const form of forms) {
         for(let i=0;i<form.fields.length;i++) {
             form.index=i; if(!form.fields[i].choices) form.fields[i].value='visible-input';
@@ -129,7 +129,7 @@ test('focused inspector survives shrink and returns to the split layout after gr
     });
 });
 test('command views remain accessible without a rail, including the last choice',async()=>{
-    await session(24,6,async(c,t)=>{t.send('v\x1b[F');assert.match(visible(t),/> Tasks/);t.send('\r');assert.match(visible(t),/Tasks/);assert.equal(c.calls.length,0);});
+    await session(24,6,async(c,t)=>{t.send('v\x1b[F');assert.match(visible(t),/> Damaged/);t.send('\r');assert.match(visible(t),/Damaged/);assert.equal(c.calls.length,0);});
 });
 test('density and focus toggles never strand keyboard focus in a hidden rail',async()=>{
     await session(160,40,async(c,t)=>{t.send('\x1b[Zd');t.send('\x1b[B');assert.equal(c.data.route.work_id,'tui-101');t.send('z');assert.doesNotMatch(visible(t),/INSPECTOR/);t.send('z');assert.match(visible(t),/INSPECTOR/);});
@@ -143,16 +143,16 @@ test('search text and a form draft survive resize with in-place cursor editing',
 });
 test('small confirmation pages first and submits only the reviewed work once',async()=>{
     await session(32,6,async(c,t)=>{
-        t.send('c');assert.match(visible(t),/Enter next page|Enter more/);
+        t.send('c');t.send('source-real-version\rconfig-real/v1\r');assert.match(visible(t),/Enter next page|Enter more/);
         t.send('\r');await tick();assert.equal(c.calls.length,0);
-        t.send('\x1b[F\r\r');await tick();assert.deepEqual(c.calls,[['claim','tui-104']]);
+        t.send('\x1b[F\r\r');await tick();assert.deepEqual(c.calls,[['claim','tui-104',{source_version_id:'source-real-version',config_identity:'config-real/v1'}]]);
     });
 });
 test('confirmation cannot submit in an unreadable two-row panel; growing preserves the draft',async()=>{
-    await session(80,2,async(c,t)=>{t.send('c\r\r\r');await tick();assert.equal(c.calls.length,0);t.resize(60,12);t.send('\x1b[F\r');await tick();assert.deepEqual(c.calls,[['claim','tui-104']]);});
+    await session(80,2,async(c,t)=>{t.send('c');t.send('source-real-version\rconfig-real/v1\r');t.send('\r\r');await tick();assert.equal(c.calls.length,0);t.resize(60,12);t.send('\x1b[F\r');await tick();assert.deepEqual(c.calls,[['claim','tui-104',{source_version_id:'source-real-version',config_identity:'config-real/v1'}]]);});
 });
 test('stale confirmation remains blocked after resizing and scrolling',async()=>{
-    await session(40,8,async(c,t)=>{t.send('c');t.resize(120,12);c.data.monitoring.revision++;t.send('\x1b[F\r');await tick();assert.equal(c.calls.length,0);});
+    await session(40,8,async(c,t)=>{t.send('c');t.send('source-real-version\rconfig-real/v1\r');t.resize(120,12);c.data.monitoring.revision++;t.send('\x1b[F\r');await tick();assert.equal(c.calls.length,0);});
 });
 test('full status is scrollable, including the end of a long service error',async()=>{
     await session(32,8,async(c,t)=>{c.data.notice={kind:'error',message:'Transport detail. '.repeat(30)+'FINAL RECOVERY STEP'};t.send('!\x1b[F');assert.match(visible(t),/FINAL\s+RECOVERY STEP/);assert.equal(c.calls.length,0);});

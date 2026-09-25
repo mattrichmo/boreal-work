@@ -1,0 +1,23 @@
+{
+  "schema_version": "boreal.implementation-handoff.v1",
+  "generated_on": "2026-09-25",
+  "workspace": "/Users/cybertron/Code/boreal-work",
+  "branch": "codex/apply-responsive-terminal-overlay",
+  "base_commit": "abf87bb528b55632499bb246c10aeb902680a582",
+  "task_items_checked_from_source_review": 48,
+  "task_items_open": 0,
+  "fully_integrated_sprints": "8/8",
+  "remaining_implementation_gap": null,
+  "changed_path_count": 155,
+  "changed_files_inventory": "CHANGED_FILES.tsv",
+  "changed_source_overlay": "boreal-v2-changed-source-overlay.zip",
+  "changed_source_overlay_sha256": "81e2c56470f8b6c6bde34d8cda342b159ebc46c9d22027f9a4fa62f7045bd484",
+  "changed_source_overlay_file_count": 143,
+  "source_archive": "boreal-v2-reference-20260925T151846780Z.zip",
+  "source_archive_sha256": "ba6aaee4d67c1376e474d1a003637d01d977dca8443b784469080c0eb3aebbcb",
+  "source_archive_file_count": 1816,
+  "overlay_scope": "Changed text source/configuration files from the shared worktree; excludes delivery artifacts, validation task runtime data, generated TUI cache, build output, dependencies, binary files, and ZIP archives.",
+  "source_archive_scope": "Text-only review snapshot from create-zips.mjs; excludes generated output, dependencies, runtime state, binary assets, and handoff/delivery files.",
+  "publication": "not published; package smoke used a disposable temporary prefix only",
+  "validation": "cargo check --workspace, TUI typecheck, targeted receipt readback test, package smoke, and git diff --check passed. Full TUI tests were blocked by sandbox Unix socket EPERM and did not block source task completion."
+}

@@ -5,15 +5,14 @@ use boreal_application::{
     ExternalEffectResolution, SqliteAttemptAdapter, WorkApplication,
 };
 use boreal_domain::{
-    AcceptanceProfile, ActorId, AttemptId, AttemptPhase, DispatchPolicy, Fence, HarnessId,
-    OperationId, PersistedLifecycle, ProjectId, TimestampMs, WorkId, WorkItem, WorkKind,
+    AcceptanceProfile, ActorId, ActorRole, AttemptId, AttemptPhase, DispatchPolicy, Fence,
+    HarnessId, OperationId, PersistedLifecycle, ProjectId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
 use boreal_store::{
     identity::{DatabaseIdentity, IdentityContext, IdentityStore, WorkspaceBinding},
     operations::{OperationBundle, OperationJournal},
-    recovery::{
-        IdentityBoundRecoveryResolutionInput, RecoveryObligationInput, RecoveryResolutionInput,
-    },
+    principals::PrincipalGrantRequest,
+    recovery::{IdentityBoundRecoveryResolutionInput, RecoveryResolutionInput},
     AuditEventRecord, OperationOutcome, OperationRecord, SqliteStore, StoreError,
 };
 use std::{
@@ -43,6 +42,48 @@ fn work(project_id: &ProjectId) -> WorkItem {
         hard_holds: Vec::new(),
         acceptance_profile: AcceptanceProfile::focused(),
     }
+}
+
+fn bootstrap_operator_and_agent(
+    store: &SqliteStore,
+    project_id: &ProjectId,
+    operator_id: &str,
+    agent_id: &str,
+) {
+    store
+        .bootstrap_project_principal(&PrincipalGrantRequest {
+            project_id: project_id.as_str().to_owned(),
+            actor_id: operator_id.to_owned(),
+            session_id: None,
+            principal_actor_id: operator_id.to_owned(),
+            role: ActorRole::Operator,
+            independent: true,
+            credential: format!("bwrk1_{}", "c".repeat(64)),
+            expires_at_ms: None,
+            display_name: operator_id.to_owned(),
+            reason: "bootstrap external-job test operator".to_owned(),
+            expected_revision: store.project_revision(project_id.as_str()).unwrap().0,
+            operation_id: format!("op-{operator_id}-bootstrap"),
+            at: "unix-ms:2".to_owned(),
+        })
+        .unwrap();
+    store
+        .grant_principal(&PrincipalGrantRequest {
+            project_id: project_id.as_str().to_owned(),
+            actor_id: operator_id.to_owned(),
+            session_id: None,
+            principal_actor_id: agent_id.to_owned(),
+            role: ActorRole::Agent,
+            independent: false,
+            credential: format!("bwrk1_{}", "d".repeat(64)),
+            expires_at_ms: None,
+            display_name: agent_id.to_owned(),
+            reason: "grant external-job test agent".to_owned(),
+            expected_revision: store.project_revision(project_id.as_str()).unwrap().0,
+            operation_id: format!("op-{agent_id}-grant"),
+            at: "unix-ms:2".to_owned(),
+        })
+        .unwrap();
 }
 
 fn setup() -> (SqliteStore, ProjectId) {
@@ -467,9 +508,6 @@ fn terminal_release_uses_canonical_identity_bound_recovery() {
     store
         .create_project(project.as_str(), "unix-ms:0")
         .expect("terminal project creates");
-    store
-        .ensure_actor("agent-1", "agent", "credential", "Agent 1", "unix-ms:0")
-        .expect("terminal actor creates");
     let identities = IdentityStore::new(&store);
     identities
         .install(
@@ -491,10 +529,31 @@ fn terminal_release_uses_canonical_identity_bound_recovery() {
         )
         .expect("terminal project binds");
     let app = WorkApplication::new(&store);
-    app.create_work_as(
-        &work(&project),
+    bootstrap_operator_and_agent(&store, &project, "terminal-operator", "agent-1");
+    app.register_session_as(
+        &project,
+        "terminal-operator",
+        "harness-terminal",
+        "terminal-operator-session",
+        "unix-ms:3",
+        "op-terminal-operator-session",
+    )
+    .expect("operator session registers");
+    app.register_session_as(
+        &project,
         "agent-1",
-        "unix-ms:2",
+        "harness-terminal",
+        "terminal-agent-session",
+        "unix-ms:3",
+        "op-terminal-agent-session",
+    )
+    .expect("agent session registers");
+    app.create_work_as_session_checked(
+        &work(&project),
+        "terminal-operator",
+        "terminal-operator-session",
+        Some(store.project_revision(project.as_str()).unwrap().0),
+        "unix-ms:4",
         "op-create-terminal-release",
     )
     .expect("create terminal-release work");
@@ -503,7 +562,7 @@ fn terminal_release_uses_canonical_identity_bound_recovery() {
         "work-external-job",
         "agent-1",
         "harness-terminal",
-        None,
+        Some("terminal-agent-session"),
         "attempt-terminal-release",
         "op-claim-terminal-release",
         "sha256:claim-terminal-release",
@@ -525,7 +584,7 @@ fn terminal_release_uses_canonical_identity_bound_recovery() {
                     AttemptId::new("attempt-terminal-release"),
                     ActorId::new("agent-1"),
                     Some(HarnessId::new("harness-terminal")),
-                    None,
+                    Some(boreal_domain::SessionId::new("terminal-agent-session")),
                     Fence::new(1),
                     OperationId::new("op-terminal-release"),
                     "sha256:terminal-release",
@@ -557,7 +616,7 @@ fn terminal_release_uses_canonical_identity_bound_recovery() {
         operation_id: "op-resolve-terminal-release".to_owned(),
         request_digest: "sha256:resolve-terminal-release".to_owned(),
         expected_project_revision: None,
-        session_id: None,
+        session_id: Some("terminal-agent-session".to_owned()),
         resolution: RecoveryResolutionInput {
             project_id: project.to_string(),
             obligation_id: "op-terminal-release:recovery:resource-unknown".to_owned(),
@@ -604,9 +663,6 @@ fn terminal_release_fallback_fails_closed_without_canonical_store_mutation() {
     store
         .create_project(project.as_str(), "unix-ms:0")
         .expect("fallback project creates");
-    store
-        .ensure_actor("agent-1", "agent", "credential", "Agent 1", "unix-ms:0")
-        .expect("fallback actor creates");
     IdentityStore::new(&store)
         .install(
             &DatabaseIdentity::new("database-terminal-fallback", 1)
@@ -627,10 +683,31 @@ fn terminal_release_fallback_fails_closed_without_canonical_store_mutation() {
         )
         .expect("fallback project binds");
     let app = WorkApplication::new(&store);
-    app.create_work_as(
-        &work(&project),
+    bootstrap_operator_and_agent(&store, &project, "fallback-operator", "agent-1");
+    app.register_session_as(
+        &project,
+        "fallback-operator",
+        "harness-terminal",
+        "fallback-operator-session",
+        "unix-ms:3",
+        "op-fallback-operator-session",
+    )
+    .expect("operator session registers");
+    app.register_session_as(
+        &project,
         "agent-1",
-        "unix-ms:2",
+        "harness-terminal",
+        "fallback-agent-session",
+        "unix-ms:3",
+        "op-fallback-agent-session",
+    )
+    .expect("agent session registers");
+    app.create_work_as_session_checked(
+        &work(&project),
+        "fallback-operator",
+        "fallback-operator-session",
+        Some(store.project_revision(project.as_str()).unwrap().0),
+        "unix-ms:4",
         "op-create-terminal-fallback",
     )
     .expect("create fallback work");
@@ -639,7 +716,7 @@ fn terminal_release_fallback_fails_closed_without_canonical_store_mutation() {
         "work-external-job",
         "agent-1",
         "harness-terminal",
-        None,
+        Some("fallback-agent-session"),
         "attempt-terminal-fallback",
         "op-claim-terminal-fallback",
         "sha256:claim-terminal-fallback",
@@ -650,19 +727,17 @@ fn terminal_release_fallback_fails_closed_without_canonical_store_mutation() {
     )
     .expect("claim fallback attempt");
     store
-        .create_recovery_obligation(&RecoveryObligationInput {
-            obligation_id: "op-terminal-fallback:recovery:resource-unknown".to_owned(),
-            project_id: project.as_str().to_owned(),
-            work_id: "work-external-job".to_owned(),
-            attempt_id: Some("attempt-terminal-fallback".to_owned()),
-            fence: Some(1),
-            reason: "resource_unknown".to_owned(),
-            resource_state: "unknown".to_owned(),
-            owner_actor_id: Some("agent-1".to_owned()),
-            next_action: "acknowledge terminal resource release".to_owned(),
-            created_at: "unix-ms:2000".to_owned(),
-        })
-        .expect("fallback recovery obligation creates");
+        .execute_batch(
+            "INSERT INTO boreal_recovery_obligation
+             (obligation_id, project_id, work_id, attempt_id, fence, reason,
+              state, resource_state, owner_actor_id, next_action, created_at)
+             VALUES ('op-terminal-fallback:recovery:resource-unknown',
+                     'project-terminal-fallback', 'work-external-job',
+                     'attempt-terminal-fallback', 1, 'resource_unknown',
+                     'unresolved', 'unknown', 'agent-1',
+                     'acknowledge terminal resource release', 'unix-ms:2000');",
+        )
+        .expect("fixture seeds an unresolved recovery obligation");
 
     let adapter = TerminalAdapter {
         snapshot: AttemptSnapshot {
@@ -671,7 +746,7 @@ fn terminal_release_fallback_fails_closed_without_canonical_store_mutation() {
             attempt_id: AttemptId::new("attempt-terminal-fallback"),
             actor_id: ActorId::new("agent-1"),
             harness_id: Some(HarnessId::new("harness-terminal")),
-            session_id: None,
+            session_id: Some(boreal_domain::SessionId::new("fallback-agent-session")),
             fence: Fence::new(1),
             phase: AttemptPhase::Running,
             claimed_at: TimestampMs(1000),
@@ -690,7 +765,7 @@ fn terminal_release_fallback_fails_closed_without_canonical_store_mutation() {
                 AttemptId::new("attempt-terminal-fallback"),
                 ActorId::new("agent-1"),
                 Some(HarnessId::new("harness-terminal")),
-                None,
+                Some(boreal_domain::SessionId::new("fallback-agent-session")),
                 Fence::new(1),
                 OperationId::new("op-terminal-fallback"),
                 "sha256:terminal-fallback",

@@ -104,6 +104,74 @@ fn production_package_round_trip_advances_epoch_and_retains_previous_database() 
 }
 
 #[test]
+fn restore_fails_closed_when_another_connection_holds_a_read_transaction() {
+    let source_path = temp_path("active-reader-source.sqlite");
+    let target_path = temp_path("active-reader-target.sqlite");
+    let package_path = temp_path("active-reader-package");
+    remove_sqlite_files(&source_path);
+    remove_sqlite_files(&target_path);
+    let _ = fs::remove_dir_all(&package_path);
+
+    let source = initialize(&source_path, "replacement-project");
+    let source_package = source
+        .backup_package_to(&package_path)
+        .expect("source backup package succeeds");
+    assert!(source_package.restore_supported);
+    drop(source);
+
+    let target = initialize(&target_path, "original-project");
+    let original_identity = IdentityStore::new(&target)
+        .database_identity()
+        .expect("original target identity");
+
+    let reader =
+        SqliteStore::open(&target_path, PRODUCTION_SCHEMA).expect("second target connection opens");
+    reader
+        .execute_batch("BEGIN; SELECT project_id FROM project;")
+        .expect("reader transaction reads the original project");
+
+    let error = SqliteStore::restore_package_to(&package_path, &target_path)
+        .expect_err("restore must fail while another connection holds a read transaction");
+    assert!(
+        matches!(error, StoreError::Busy(_)),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        target_path.exists(),
+        "original target file must remain present"
+    );
+    let destination_after_failure = SqliteStore::open(&target_path, PRODUCTION_SCHEMA)
+        .expect("destination path still opens after rejected restore");
+    assert_eq!(
+        destination_after_failure
+            .list_project_ids()
+            .expect("original target remains readable"),
+        vec!["original-project"]
+    );
+    let identity_after_failure = IdentityStore::new(&destination_after_failure)
+        .database_identity()
+        .expect("identity at destination path remains readable");
+    assert_eq!(
+        identity_after_failure.database_instance_id, original_identity.database_instance_id,
+        "failed restore must not replace the destination database"
+    );
+    assert_eq!(
+        identity_after_failure.restore_epoch, original_identity.restore_epoch,
+        "failed restore must not advance the restore epoch"
+    );
+
+    drop(destination_after_failure);
+    reader
+        .execute_batch("ROLLBACK")
+        .expect("reader transaction closes");
+    drop(reader);
+    drop(target);
+    let _ = fs::remove_dir_all(&package_path);
+    remove_sqlite_files(&source_path);
+    remove_sqlite_files(&target_path);
+}
+
+#[test]
 fn incompatible_manifest_is_rejected_before_destination_creation() {
     let source_path = temp_path("incompatible-source.sqlite");
     let package_path = temp_path("incompatible-package");

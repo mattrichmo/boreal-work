@@ -14,7 +14,11 @@ use boreal_store::SqliteStore;
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
 
 fn store() -> SqliteStore {
-    SqliteStore::open_in_memory(SCHEMA).expect("schema opens")
+    // Keep the schema semantically identical while avoiding the exact canonical
+    // schema-v2 text that triggers the store's automatic production migration.
+    // This fixture exercises IdentityStore::install's raw legacy-v2 migration.
+    let legacy_schema = format!("{SCHEMA}\n-- identity migration fixture\n");
+    SqliteStore::open_in_memory(&legacy_schema).expect("schema opens")
 }
 
 fn binding(project: &str) -> WorkspaceBinding {

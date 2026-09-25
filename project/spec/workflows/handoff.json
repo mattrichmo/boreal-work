@@ -1,13 +1,122 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.0.0",
+  "asset_version": "1.1.0",
   "ref": "boreal.workflow.handoff.v1",
   "kind": "handoff",
   "title": "Prepare a bounded resume, replacement, or session handoff capsule",
-  "refs": {"route": "boreal.workflow.route.v1", "context": "boreal.workflow.context.v1", "health": "boreal.workflow.health.v1", "memory": "boreal.workflow.memory.v1"},
-  "allowed_commands": ["bwrk agent status --json", "bwrk context show --json", "bwrk agent resume --session <session_id> --json", "bwrk session end --json", "bwrk sprint report <sprint_id> --json", "bwrk summary list <work_id> --json", "bwrk gate closeout --json", "bwrk dashboard --json"],
-  "typed_inputs": [{"name": "project_id", "type": "project_id", "required": true, "source": "session", "validation": "project_scope"}, {"name": "work_id", "type": "nullable_work_id", "required": false, "source": "attempt_or_work", "validation": "project_bound"}, {"name": "sprint_id", "type": "nullable_work_id", "required": false, "source": "request_or_rollup", "validation": "kind_sprint_and_project_bound"}, {"name": "session_id", "type": "nullable_session_id", "required": false, "source": "credential", "validation": "project_bound"}, {"name": "attempt_id", "type": "nullable_attempt_id", "required": true, "source": "attempt", "validation": "historical_or_current"}, {"name": "source_refs", "type": "bounded_source_ref_array", "required": false, "source": "context", "validation": "exact_version_citations"}, {"name": "receipt_refs", "type": "bounded_receipt_ref_array", "required": false, "source": "evidence", "validation": "digest_checked"}, {"name": "limitations", "type": "bounded_string_array", "required": true, "source": "summary", "validation": "display_data_only"}],
-  "finish_criteria": [{"id": "handoff.identity", "type": "subject_and_fence_identity", "required": true}, {"id": "handoff.evidence", "type": "retained_receipts_and_limitations", "required": true}, {"id": "handoff.boundary", "type": "session_or_replacement_boundary_is_explicit", "required": true}, {"id": "handoff.trust", "type": "authored_text_not_executable", "required": true}],
-  "next_refs": ["boreal.workflow.route.v1", "boreal.workflow.claim.v1", "boreal.workflow.finish.v1"],
-  "state_transition_owner": "boreal.application.v2"
+  "refs": {
+    "route": "boreal.workflow.route.v1",
+    "context": "boreal.workflow.context.v1",
+    "health": "boreal.workflow.health.v1",
+    "memory": "boreal.workflow.memory.v1"
+  },
+  "allowed_commands": [
+    "bwrk agent guide --json",
+    "bwrk work checkpoint --work <work_id> --input <input_path> --expected-revision <revision> --reason <reason> --yes --json",
+    "bwrk work release <work_id> --json",
+    "bwrk operation show <operation_id> --json",
+    "bwrk memory readback <operation_id> --json"
+  ],
+  "typed_inputs": [
+    {
+      "name": "project_id",
+      "type": "project_id",
+      "required": true,
+      "source": "session",
+      "validation": "project_scope"
+    },
+    {
+      "name": "work_id",
+      "type": "nullable_work_id",
+      "required": false,
+      "source": "attempt_or_work",
+      "validation": "project_bound"
+    },
+    {
+      "name": "sprint_id",
+      "type": "nullable_work_id",
+      "required": false,
+      "source": "request_or_rollup",
+      "validation": "kind_sprint_and_project_bound"
+    },
+    {
+      "name": "session_id",
+      "type": "nullable_session_id",
+      "required": false,
+      "source": "credential",
+      "validation": "project_bound"
+    },
+    {
+      "name": "attempt_id",
+      "type": "nullable_attempt_id",
+      "required": true,
+      "source": "attempt",
+      "validation": "historical_or_current"
+    },
+    {
+      "name": "source_refs",
+      "type": "bounded_source_ref_array",
+      "required": false,
+      "source": "context",
+      "validation": "exact_version_citations"
+    },
+    {
+      "name": "receipt_refs",
+      "type": "bounded_receipt_ref_array",
+      "required": false,
+      "source": "evidence",
+      "validation": "digest_checked"
+    },
+    {
+      "name": "limitations",
+      "type": "bounded_string_array",
+      "required": true,
+      "source": "summary",
+      "validation": "display_data_only"
+    },
+    {
+      "name": "server_action",
+      "type": "action_descriptor",
+      "required": true,
+      "source": "canonical_status_or_command_response",
+      "validation": "target_project_actor_session_revisions_confirmation_and_denials_must_match; guidance_is_not_authority"
+    }
+  ],
+  "finish_criteria": [
+    {
+      "id": "handoff.identity",
+      "type": "subject_and_fence_identity",
+      "required": true
+    },
+    {
+      "id": "handoff.evidence",
+      "type": "retained_receipts_and_limitations",
+      "required": true
+    },
+    {
+      "id": "handoff.boundary",
+      "type": "session_or_replacement_boundary_is_explicit",
+      "required": true
+    },
+    {
+      "id": "handoff.trust",
+      "type": "authored_text_not_executable",
+      "required": true
+    },
+    {
+      "id": "handoff.authority",
+      "type": "mutation_authorized_again_inside_canonical_transaction",
+      "required": true
+    }
+  ],
+  "next_refs": [
+    "boreal.workflow.route.v1",
+    "boreal.workflow.claim.v1",
+    "boreal.workflow.finish.v1"
+  ],
+  "state_transition_owner": "boreal.application.v2",
+  "required_server_actions": [
+    "checkpoint",
+    "release"
+  ]
 }

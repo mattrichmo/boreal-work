@@ -20,6 +20,8 @@ fn public_cli_builds_and_reads_a_typed_work_hierarchy() {
         .args([
             "init",
             "hierarchy-project",
+            "--actor",
+            "hierarchy-agent",
             "--db",
             database.to_str().unwrap(),
             "--operation-id",
@@ -30,29 +32,40 @@ fn public_cli_builds_and_reads_a_typed_work_hierarchy() {
         .unwrap();
     assert_success(&initialized, "init");
 
-    create(
+    let mut revision = start_session(
+        &root,
+        &database,
+        "hierarchy-project",
+        "hierarchy-agent",
+        "hierarchy-session",
+    );
+
+    revision = create(
         &root,
         &database,
         "milestone-1",
         "Release milestone",
         "milestone",
         None,
+        revision,
     );
-    create(
+    revision = create(
         &root,
         &database,
         "sprint-1",
         "First sprint",
         "sprint",
         Some("milestone-1"),
+        revision,
     );
-    create(
+    revision = create(
         &root,
         &database,
         "task-1",
         "Implement proof boundary",
         "task",
         Some("sprint-1"),
+        revision,
     );
 
     let shown = Command::new(binary())
@@ -62,6 +75,12 @@ fn public_cli_builds_and_reads_a_typed_work_hierarchy() {
             "show",
             "hierarchy-project",
             "task-1",
+            "--actor",
+            "hierarchy-agent",
+            "--harness",
+            "hierarchy-public-test",
+            "--session",
+            "hierarchy-session",
             "--db",
             database.to_str().unwrap(),
             "--json",
@@ -80,6 +99,12 @@ fn public_cli_builds_and_reads_a_typed_work_hierarchy() {
         .args([
             "status",
             "hierarchy-project",
+            "--actor",
+            "hierarchy-agent",
+            "--harness",
+            "hierarchy-public-test",
+            "--session",
+            "hierarchy-session",
             "--db",
             database.to_str().unwrap(),
             "--limit",
@@ -89,9 +114,51 @@ fn public_cli_builds_and_reads_a_typed_work_hierarchy() {
         .output()
         .unwrap();
     assert_success(&status, "status");
-    let status_envelope = envelope(&status);
-    let items = status_envelope["data"]["items"].as_array().unwrap();
-    assert_eq!(items.len(), 3);
+    let mut status_envelope = envelope(&status);
+    let total = status_envelope["data"]["total"].as_u64().unwrap();
+    assert_eq!(total, 3);
+    let mut items = status_envelope["data"]["items"].as_array().unwrap().clone();
+    while status_envelope["data"]["has_more"] == true {
+        let offset = status_envelope["data"]["next_offset"]
+            .as_u64()
+            .expect("status page exposes the next physical-row offset")
+            .to_string();
+        let next_page = Command::new(binary())
+            .current_dir(&root)
+            .args([
+                "status",
+                "hierarchy-project",
+                "--actor",
+                "hierarchy-agent",
+                "--harness",
+                "hierarchy-public-test",
+                "--session",
+                "hierarchy-session",
+                "--db",
+                database.to_str().unwrap(),
+                "--limit",
+                "10",
+                "--offset",
+                &offset,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_success(&next_page, "status next page");
+        status_envelope = envelope(&next_page);
+        items.extend(
+            status_envelope["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned(),
+        );
+    }
+    assert_eq!(
+        items.len(),
+        total as usize,
+        "status pagination did not return the full hierarchy: {status_envelope:?}"
+    );
     assert!(items.iter().any(|item| {
         item["work_id"] == "task-1" && item["parent_id"] == "sprint-1" && item["kind"] == "task"
     }));
@@ -106,6 +173,12 @@ fn public_cli_builds_and_reads_a_typed_work_hierarchy() {
             "Invalid root sprint",
             "--kind",
             "sprint",
+            "--actor",
+            "hierarchy-agent",
+            "--session",
+            "hierarchy-session",
+            "--expected-revision",
+            &revision.to_string(),
             "--db",
             database.to_str().unwrap(),
             "--operation-id",
@@ -148,6 +221,15 @@ fn public_cli_replays_identical_work_create_as_unchanged() {
         .unwrap();
     assert_success(&initialized, "init");
 
+    let revision = start_session(
+        &root,
+        &database,
+        "replay-project",
+        "suite-agent",
+        "replay-session",
+    );
+
+    let expected_revision_arg = revision.to_string();
     let create_args = [
         "work",
         "create",
@@ -158,6 +240,10 @@ fn public_cli_replays_identical_work_create_as_unchanged() {
         "milestone",
         "--actor",
         "suite-agent",
+        "--session",
+        "replay-session",
+        "--expected-revision",
+        &expected_revision_arg,
         "--db",
         database.to_str().unwrap(),
         "--operation-id",
@@ -196,7 +282,9 @@ fn create(
     title: &str,
     kind: &str,
     parent: Option<&str>,
-) {
+    expected_revision: u64,
+) -> u64 {
+    let expected_revision_arg = expected_revision.to_string();
     let mut args = vec![
         "work",
         "create",
@@ -205,6 +293,12 @@ fn create(
         title,
         "--kind",
         kind,
+        "--actor",
+        "hierarchy-agent",
+        "--session",
+        "hierarchy-session",
+        "--expected-revision",
+        &expected_revision_arg,
         "--db",
         database.to_str().unwrap(),
         "--operation-id",
@@ -220,6 +314,31 @@ fn create(
         .output()
         .unwrap();
     assert_success(&output, "work create");
+    envelope(&output)["revision"].as_u64().unwrap()
+}
+
+fn start_session(root: &Path, database: &Path, project: &str, actor: &str, session: &str) -> u64 {
+    let output = Command::new(binary())
+        .current_dir(root)
+        .args([
+            "session",
+            "start",
+            "--project",
+            project,
+            "--actor",
+            actor,
+            "--harness",
+            "hierarchy-public-test",
+            "--session",
+            session,
+            "--db",
+            database.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output, "session start");
+    envelope(&output)["revision"].as_u64().unwrap()
 }
 
 fn binary() -> &'static str {

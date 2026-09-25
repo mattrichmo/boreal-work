@@ -4,7 +4,9 @@ use boreal_store::SqliteStore;
 use serde_json::Value;
 use std::{
     fs,
+    io::{Read, Write},
     os::raw::c_int,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -13,6 +15,9 @@ use std::{
 };
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+const BOOTSTRAP_OPERATOR: &str = "recovery-operator";
+const RECOVERY_AGENT: &str = "recovery-agent";
+const RECOVERY_HARNESS: &str = "recovery-harness";
 const SIGINT: c_int = 2;
 const SIGTERM: c_int = 15;
 const SIGKILL: c_int = 9;
@@ -25,7 +30,7 @@ unsafe extern "C" {
 fn service_run_handles_sigterm_and_removes_socket() {
     let temp = TempDir::new("service-signal");
     let database = temp.path().join("boreal.sqlite");
-    let socket = short_socket_path("signal");
+    let socket = short_socket_path(temp.path());
     let Some(child) = start_service(temp.path(), &database, &socket) else {
         return;
     };
@@ -50,7 +55,7 @@ fn service_run_handles_sigterm_and_removes_socket() {
 fn service_run_recovers_a_stale_socket_after_sigkill_without_breaking_live_service() {
     let temp = TempDir::new("service-sigkill");
     let database = temp.path().join("boreal.sqlite");
-    let socket = short_socket_path("sigkill");
+    let socket = short_socket_path(temp.path());
     let Some(mut child) = start_service(temp.path(), &database, &socket) else {
         return;
     };
@@ -101,7 +106,7 @@ fn service_run_recovers_a_stale_socket_after_sigkill_without_breaking_live_servi
 fn direct_mutation_is_rejected_while_the_service_owns_the_database() {
     let temp = TempDir::new("service-direct-owner");
     let database = temp.path().join("boreal.sqlite");
-    let socket = short_socket_path("direct-owner");
+    let socket = short_socket_path(temp.path());
     let Some(service) = start_service(temp.path(), &database, &socket) else {
         return;
     };
@@ -112,7 +117,7 @@ fn direct_mutation_is_rejected_while_the_service_owns_the_database() {
             "init",
             "direct-owner-project",
             "--actor",
-            "direct-owner-agent",
+            "direct-owner-operator",
             "--operation-id",
             "op-direct-owner-init",
             "--db",
@@ -136,49 +141,123 @@ fn direct_mutation_is_rejected_while_the_service_owns_the_database() {
 fn recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protocol_error() {
     let temp = TempDir::new("service-recovery");
     let database = temp.path().join("boreal.sqlite");
-    let socket = short_socket_path("recovery");
+    let socket = short_socket_path(temp.path());
 
     assert_success(
         Command::new(binary())
             .current_dir(temp.path())
-            .args(["init", "recovery-project", "--db"])
-            .arg(&database)
             .args([
+                "init",
+                "recovery-project",
                 "--actor",
-                "recovery-agent",
-                "--operation-id",
-                "op-recovery-init",
-                "--json",
+                BOOTSTRAP_OPERATOR,
+                "--db",
             ])
+            .arg(&database)
+            .args(["--operation-id", "op-recovery-init", "--json"])
             .output()
             .expect("init launches"),
         "init",
     );
-    assert_success(
-        Command::new(binary())
-            .current_dir(temp.path())
-            .args([
-                "work",
-                "create",
-                "recovery-project",
-                "recovery-task",
-                "Recover evidence",
-                "--kind",
-                "task",
-                "--db",
-            ])
-            .arg(&database)
-            .args([
-                "--actor",
-                "recovery-agent",
-                "--operation-id",
-                "op-recovery-work",
-                "--json",
-            ])
-            .output()
-            .expect("work create launches"),
-        "work create",
+    let operator_session = start_session(
+        temp.path(),
+        &database,
+        "recovery-project",
+        BOOTSTRAP_OPERATOR,
+        "recovery-operator-session",
+        "recovery-operator-harness",
     );
+    let expected_revision = json(&operator_session)["revision"]
+        .as_u64()
+        .expect("Operator session start returns the project revision");
+    let work_created = Command::new(binary())
+        .current_dir(temp.path())
+        .args([
+            "work",
+            "create",
+            "recovery-project",
+            "recovery-task",
+            "Recover evidence",
+            "--kind",
+            "task",
+            "--actor",
+            BOOTSTRAP_OPERATOR,
+            "--session",
+            "recovery-operator-session",
+            "--harness",
+            "recovery-operator-harness",
+            "--expected-revision",
+        ])
+        .arg(expected_revision.to_string())
+        .args(["--db"])
+        .arg(&database)
+        .args(["--operation-id", "op-recovery-work", "--json"])
+        .output()
+        .expect("work create launches");
+    assert_success(work_created, "work create");
+    enroll_agent(
+        temp.path(),
+        &database,
+        "recovery-project",
+        BOOTSTRAP_OPERATOR,
+        "recovery-operator-session",
+        RECOVERY_AGENT,
+        "op-recovery-agent-grant",
+    );
+    start_session(
+        temp.path(),
+        &database,
+        "recovery-project",
+        RECOVERY_AGENT,
+        "recovery-session",
+        RECOVERY_HARNESS,
+    );
+    let source_input = temp.path().join("recovery-source.txt");
+    fs::write(&source_input, "source-bound recovery fixture\n")
+        .expect("source-bound recovery fixture writes");
+    let source_added = Command::new(binary())
+        .current_dir(temp.path())
+        .args(["source", "add", "recovery-project", "--input"])
+        .arg(&source_input)
+        .args([
+            "--origin",
+            "service-signal-recovery",
+            "--actor",
+            RECOVERY_AGENT,
+            "--harness",
+            RECOVERY_HARNESS,
+            "--session",
+            "recovery-session",
+            "--expected-revision",
+        ])
+        .arg(
+            SqliteStore::open(&database, SCHEMA)
+                .expect("recovery database opens")
+                .project_revision("recovery-project")
+                .expect("project revision reads")
+                .0
+                .to_string(),
+        )
+        .args(["--db"])
+        .arg(&database)
+        .args(["--json"])
+        .output()
+        .expect("source add launches");
+    assert!(
+        source_added.status.success(),
+        "source add failed: {}",
+        text(&source_added)
+    );
+    let source_added_value = json(&source_added);
+    let source_version = source_added_value["data"]["source"]["source_version_id"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "source add returns a source version id: {}",
+                serde_json::to_string(&source_added_value).unwrap()
+            )
+        })
+        .to_owned();
     assert_success(
         Command::new(binary())
             .current_dir(temp.path())
@@ -189,11 +268,15 @@ fn recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protoc
                 "--project",
                 "recovery-project",
                 "--actor",
-                "recovery-agent",
+                RECOVERY_AGENT,
+                "--source-version",
+                &source_version,
+                "--config-identity",
+                "recovery-config-v1",
                 "--harness",
-                "recovery-harness",
+                RECOVERY_HARNESS,
                 "--session",
-                "recovery-session",
+                "recovery-execution-session",
                 "--db",
             ])
             .arg(&database)
@@ -216,9 +299,9 @@ fn recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protoc
              VALUES
              ('op_recovered_evidence', 'recovery-project', 'recovery-task',
               '{}', {}, 'recovery-task:verification',
-              'recovery-agent', 'recovery-session', 'digest-recovered',
+              '{}', 'recovery-execution-session', 'digest-recovered',
               'artifact-recovered', 'admitted', 'unix-ms:1')",
-        attempt.attempt_id, attempt.fence
+        attempt.attempt_id, attempt.fence, RECOVERY_AGENT
     );
     store
         .execute_batch(&execution_sql)
@@ -240,11 +323,11 @@ fn recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protoc
             "--gate",
             "verification",
             "--actor",
-            "recovery-agent",
+            RECOVERY_AGENT,
             "--harness",
-            "recovery-harness",
+            RECOVERY_HARNESS,
             "--session",
-            "recovery-session",
+            "recovery-execution-session",
             "--operation-id",
             "op_recovered_evidence",
             "--socket",
@@ -277,7 +360,181 @@ fn recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protoc
     assert_socket_removed(&socket);
 }
 
+fn start_session(
+    root: &Path,
+    database: &Path,
+    project: &str,
+    actor: &str,
+    session: &str,
+    harness: &str,
+) -> Output {
+    let operation_id = format!("op-session-{actor}-{session}");
+    let output = Command::new(binary())
+        .current_dir(root)
+        .args([
+            "session",
+            "start",
+            "--project",
+            project,
+            "--actor",
+            actor,
+            "--harness",
+            harness,
+            "--session",
+            session,
+            "--db",
+        ])
+        .arg(database)
+        .args(["--operation-id", &operation_id, "--json"])
+        .output()
+        .expect("session start launches");
+    assert_success(output.clone(), "session start");
+    output
+}
+
+fn enroll_agent(
+    root: &Path,
+    database: &Path,
+    project: &str,
+    operator: &str,
+    operator_session: &str,
+    agent: &str,
+    operation_id: &str,
+) {
+    let credential = write_private_credential(root, project, agent);
+    let operator_credential = read_private_credential(root, project, operator);
+    let store = SqliteStore::open(database, SCHEMA).expect("fixture database opens");
+    let authenticated_operator = store
+        .authenticate_principal(
+            project,
+            &operator_credential,
+            boreal_domain::TimestampMs::from_millis(now_ms()),
+        )
+        .expect("bootstrap Operator credential authenticates");
+    assert_eq!(authenticated_operator.actor_id, operator);
+    assert_eq!(
+        authenticated_operator.role,
+        boreal_domain::ActorRole::Operator
+    );
+
+    let grant = store
+        .grant_principal(&boreal_store::principals::PrincipalGrantRequest {
+            project_id: project.to_owned(),
+            actor_id: authenticated_operator.actor_id,
+            session_id: Some(operator_session.to_owned()),
+            principal_actor_id: agent.to_owned(),
+            role: boreal_domain::ActorRole::Agent,
+            independent: false,
+            credential: credential.clone(),
+            expires_at_ms: None,
+            display_name: format!("{agent} recovery-test Agent"),
+            reason: "enroll a project-local Agent for the service integration test".to_owned(),
+            expected_revision: store
+                .project_revision(project)
+                .expect("project revision reads")
+                .0,
+            operation_id: operation_id.to_owned(),
+            at: format!("unix-ms:{}", now_ms()),
+        })
+        .expect("production principal grant API enrolls the Agent");
+    assert!(!grant.replayed);
+    let authenticated_agent = store
+        .authenticate_principal(
+            project,
+            &credential,
+            boreal_domain::TimestampMs::from_millis(now_ms()),
+        )
+        .expect("private local Agent credential authenticates");
+    assert_eq!(authenticated_agent.actor_id, agent);
+    assert_eq!(authenticated_agent.role, boreal_domain::ActorRole::Agent);
+}
+
+fn write_private_credential(root: &Path, project: &str, actor: &str) -> String {
+    let runtime = root.join(".boreal");
+    let directory = runtime.join("credentials");
+    fs::create_dir_all(&directory).expect("fixture credential directory creates");
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
+        .expect("project runtime directory is private");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .expect("credential directory is private");
+
+    let mut random = [0_u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut random))
+        .expect("operating-system randomness is available");
+    let secret = format!(
+        "bwrk1_{}",
+        random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let credential_path = directory.join(format!(
+        "{}.json",
+        boreal_store::checksum(actor.as_bytes()).replace(':', "-")
+    ));
+    let body = serde_json::json!({
+        "schema_version": "boreal.local-credential.v1",
+        "project_id": project,
+        "actor_id": actor,
+        "credential": secret,
+    });
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options
+        .open(&credential_path)
+        .expect("private Agent credential file creates exclusively");
+    file.write_all(&serde_json::to_vec(&body).expect("credential JSON serializes"))
+        .and_then(|()| file.sync_all())
+        .expect("private Agent credential is written");
+    secret
+}
+
+fn read_private_credential(root: &Path, project: &str, actor: &str) -> String {
+    let credential_path = root.join(".boreal/credentials").join(format!(
+        "{}.json",
+        boreal_store::checksum(actor.as_bytes()).replace(':', "-")
+    ));
+    let credential = serde_json::from_slice::<Value>(
+        &fs::read(credential_path).expect("bootstrap Operator credential exists"),
+    )
+    .expect("bootstrap Operator credential is valid JSON");
+    assert_eq!(credential["schema_version"], "boreal.local-credential.v1");
+    assert_eq!(credential["project_id"], project);
+    assert_eq!(credential["actor_id"], actor);
+    credential["credential"]
+        .as_str()
+        .expect("bootstrap Operator credential is present")
+        .to_owned()
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time is after Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("current Unix timestamp fits in u64 milliseconds")
+}
+
 fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
+    if !root.join(".boreal/project.json").exists() {
+        let initialized = Command::new(binary())
+            .current_dir(root)
+            .args([
+                "init",
+                "service-test-project",
+                "--actor",
+                "service-operator",
+                "--db",
+            ])
+            .arg(database)
+            .args(["--operation-id", "service-test-init", "--json"])
+            .output()
+            .expect("service test project initializes");
+        assert_success(initialized, "service test init");
+    }
+
     let mut child = Command::new(binary())
         .current_dir(root)
         .args(["service", "run", "--db"])
@@ -357,15 +614,8 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_bwrk")
 }
 
-fn short_socket_path(kind: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is after the Unix epoch")
-        .as_nanos();
-    PathBuf::from(format!(
-        "/tmp/boreal-cli-{kind}-{}-{nonce}.sock",
-        std::process::id()
-    ))
+fn short_socket_path(root: &Path) -> PathBuf {
+    root.join("bwrk.sock")
 }
 
 fn assert_success(output: Output, command: &str) {
@@ -397,7 +647,7 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
+        let path = PathBuf::from("/tmp").join(format!(
             "boreal-cli-{prefix}-{}-{nonce}",
             std::process::id()
         ));

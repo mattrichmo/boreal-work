@@ -1,12 +1,11 @@
 use boreal_application::{
-    canonical_request_digest, guide_checked, sha256_content_digest, AcceptanceGateDefinition,
-    ApplicationError, AttemptPolicy, AttemptRequest, AuthenticatedOperationJournal,
-    BoundedExecutionResult, CommandSpec, EndAttemptRequest, EvidenceExecutionOutcome,
-    EvidenceRunRequest, ExecutorAttestation, IntakeBucket, IntakeBucketId, IntakeItem,
-    IntakeItemId, IntakeKind, IntakeLifecycle, KnowledgeApplication, LivenessMetadata,
-    OperationResult, ReceiptCoverage, ReceiptExpectation, ReceiptPayload,
-    SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter, SummaryPayload,
-    WorkApplication, WorkflowRegistry,
+    canonical_request_digest, sha256_content_digest, AcceptanceGateDefinition, ApplicationError,
+    AttemptPolicy, AttemptRequest, AuthenticatedOperationJournal, BoundedExecutionResult,
+    CommandSpec, EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest,
+    ExecutorAttestation, IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind,
+    IntakeLifecycle, KnowledgeApplication, LivenessMetadata, OperationResult, ReceiptCoverage,
+    ReceiptExpectation, ReceiptPayload, SessionRegistrationRequest, SourceCaptureInput,
+    SqliteAttemptAdapter, SummaryPayload, WorkApplication, WorkflowRegistry,
 };
 use boreal_domain::{
     AcceptanceProfile, ActorId, AttemptId, AttemptPhase, ConfigIdentity, DispatchPolicy, Fence,
@@ -49,8 +48,15 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+mod authority;
 mod command_registry;
+mod completion_commands;
+mod credentials;
+mod cycle_commands;
 mod dashboard;
+mod memory_commands;
+mod project_context;
+mod recovery_commands;
 mod service;
 mod setup;
 mod update;
@@ -83,13 +89,18 @@ Usage:
   bwrk install [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk update [--json]
   bwrk upgrade --machine [--json]  (alias for update)
-  bwrk backup PACKAGE_DIR [--db PATH] [--json]
+  bwrk backup --project PROJECT PACKAGE_DIR [--socket PATH] [--json]
   bwrk restore PACKAGE_DIR [--db PATH] [--json]
+  bwrk maintenance show --project PROJECT OPERATION_ID [--input RESTORE_PACKAGE_DIR] [--socket PATH] [--json]
+  bwrk migration dry-run --project PROJECT --input PATH [--socket PATH] [--json]
+  bwrk migration verify --project PROJECT --input PATH [--socket PATH] [--json]
+  bwrk migration apply --project PROJECT --input PATH --expected-revision N --yes [--socket PATH] [--json]
   bwrk service run --db PATH --socket PATH [--max-requests N] [--dispatch-workers N] [--dispatch-capacity N] [--json]
   bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
   bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--json]
-  bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--hold CODE] [--db PATH] [--json]
+  bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--hold CODE] [--session SESSION_ID] --expected-revision N [--db PATH] [--json]
   bwrk work edit <project> <work-id> [--title TEXT] [--description TEXT] [--parent WORK_ID] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N
+  bwrk work rollup <project> <container-id> [--socket PATH] [--json]
   bwrk dep remove <project> <prerequisite-id> <dependent-id> --expected-revision N
   bwrk work hold add <project> <work-id> --reason CODE --expected-revision N
   bwrk work hold resolve <project> <work-id> <hold-id> --reason TEXT --expected-revision N
@@ -97,14 +108,14 @@ Usage:
   bwrk dep add <project> <prerequisite-id> <dependent-id> [--expected-revision N] [--db PATH] [--json]
   bwrk dep tree <project> [--db PATH] [--json]
   bwrk dep cycles <project> [--db PATH] [--json]
-  bwrk source add <project> --input PATH --origin ORIGIN [--media-type TYPE] [--db PATH] [--json]
+  bwrk source add <project> --input PATH --origin ORIGIN [--media-type TYPE] [--session ID --expected-revision N --socket PATH] [--db PATH] [--json]
   bwrk source show <project> <source-version-id> [--db PATH] [--json]
   bwrk source list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk source verify <project> <source-version-id> [--db PATH] [--json]
   bwrk doctor [--project PROJECT] [--db PATH] [--json]
   bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk work show <project> <work-id> [--db PATH] [--json]
-  bwrk work claim <project> <work-id> [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--db PATH] [--json]
+  bwrk work claim <project> <work-id> --source-version ID --config-identity ID [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--db PATH] [--json]
   bwrk work accept <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
   bwrk work heartbeat <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
   bwrk work renew <project> <work-id> --attempt ATTEMPT_ID --fence N [--lease-ttl DURATION] [--socket PATH] [--db PATH] [--json]
@@ -113,14 +124,15 @@ Usage:
   bwrk agent guide [--project PROJECT] [--work WORK_ID] [--json]
   bwrk next [--project PROJECT] [--work WORK_ID] [--json]
   bwrk agent status [--project PROJECT] [--session SESSION_ID] [--json]
-  bwrk agent start [WORK_ID] [--project PROJECT] [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--json]
+  bwrk agent start [WORK_ID] --project PROJECT [--source-version ID --config-identity ID] [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--json]
   bwrk agent resume --project PROJECT --session SESSION_ID --attempt ATTEMPT_ID [--json]
   bwrk agent heartbeat --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--socket PATH] [--json]
   bwrk agent renew --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--lease-ttl DURATION] [--socket PATH] [--json]
   bwrk agent release WORK_ID --project PROJECT --attempt ATTEMPT_ID --fence N [--socket PATH] [--reason CODE] [--json]
-  bwrk agent finish WORK_ID --close --project PROJECT --attempt ATTEMPT_ID --fence N --receipt PATH --summary PATH [--socket PATH] [--json]
-  bwrk agent finish WORK_ID --release --project PROJECT --attempt ATTEMPT_ID --fence N [--socket PATH] [--reason CODE] [--json]
+  bwrk agent finish WORK_ID --close --project PROJECT --attempt ATTEMPT_ID --fence N --receipt PATH --summary PATH [--session SESSION_ID] [--socket PATH] [--json]
+  bwrk agent finish WORK_ID --release --project PROJECT --attempt ATTEMPT_ID --fence N [--session SESSION_ID] [--socket PATH] [--reason CODE] [--json]
   bwrk evidence run --project PROJECT --work WORK_ID --gate GATE_ID [--attempt ATTEMPT_ID --fence N] [--json]
+  bwrk gate policy publish --project PROJECT --gate GATE_ID --input PATH --expected-revision N --yes [--socket PATH] [--json]
   bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]
   bwrk session start --project PROJECT --session SESSION_ID --harness HARNESS_ID [--json]
   bwrk session show --project PROJECT --session SESSION_ID [--json]
@@ -582,11 +594,127 @@ fn print_envelope(
 #[cfg(test)]
 fn run(args: &[String]) -> Result<CliResult, CliError> {
     let operation = operation_id(args);
-    run_with_operation(args, &operation)
+    let parsed = parse(args)?;
+    let fixture_root = test_fixture_project_root(&parsed);
+    let mut fixture_args = args.to_vec();
+    if setup::is_setup_command(&parsed.path) && parsed.options.setup.project_root.is_none() {
+        if let Some(root) = fixture_root.as_ref() {
+            fs::create_dir_all(root).map_err(|error| {
+                CliError::invalid(format!("cannot create test project root: {error}"))
+            })?;
+            fixture_args.extend([
+                "--project-root".to_owned(),
+                root.to_string_lossy().into_owned(),
+            ]);
+        }
+    }
+    if parsed.path == ["work", "create"] && parsed.options.expected_revision.is_none() {
+        let database = PathBuf::from(&parsed.options.db);
+        let project = parsed
+            .options
+            .project
+            .as_deref()
+            .or_else(|| parsed.options.positionals.first().map(String::as_str));
+        if let Some(project) = project {
+            let store =
+                SqliteStore::open_read_only_for_diagnostics(&database).map_err(map_store_error)?;
+            let revision = store.project_revision(project).map_err(map_store_error)?;
+            fixture_args.extend(["--expected-revision".to_owned(), revision.0.to_string()]);
+        }
+    }
+    let result = run_with_operation_at(&fixture_args, &operation, fixture_root.as_deref());
+    if result.is_ok() && parsed.path == ["init"] {
+        if let Some(project) = parsed.options.positionals.first() {
+            let database = PathBuf::from(&parsed.options.db);
+            let store = SqliteStore::open(&database, PRODUCTION_SCHEMA).map_err(map_store_error)?;
+            WorkApplication::new(&store)
+                .register_session_as(
+                    &ProjectId::new(project),
+                    DEFAULT_ACTOR,
+                    DEFAULT_HARNESS,
+                    DEFAULT_SESSION,
+                    &now(),
+                    format!(
+                        "op_cli_test_session_{}_{}",
+                        std::process::id(),
+                        now_ms_u64()
+                    ),
+                )
+                .map_err(map_application_error)?;
+        }
+    }
+    result
 }
 
 fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, CliError> {
-    let parsed = parse(args)?;
+    run_with_operation_at(args, operation, None)
+}
+
+fn run_with_operation_at(
+    args: &[String],
+    operation: &str,
+    working_directory: Option<&Path>,
+) -> Result<CliResult, CliError> {
+    let mut parsed = parse(args)?;
+    // An unavailable route is a registry result, not a project operation.
+    // Resolve it before local project context so discovery never opens or
+    // accidentally selects a database just to report that a command is not
+    // implemented.
+    if command_registry::is_unavailable_path(&parsed.path) {
+        let message = if parsed.options.socket.is_some() {
+            format!(
+                "command route is catalogued but unavailable through the selected service socket: {}; inspect `bwrk commands {}`",
+                parsed.path.join(" "),
+                parsed.path.join(" ")
+            )
+        } else {
+            format!(
+                "command route is catalogued but unavailable: {}; inspect `bwrk commands {}`",
+                parsed.path.join(" "),
+                parsed.path.join(" ")
+            )
+        };
+        return Err(CliError::with(
+            ErrorCode::UnknownCommandNamespace,
+            ApplicationOutcome::Rejected,
+            message,
+        ));
+    }
+    if parsed.options.socket.is_some()
+        && !setup::is_setup_command(&parsed.path)
+        && !command_registry::is_registry_path(&parsed.path)
+        && parsed.path.first().map(String::as_str) != Some("workflows")
+        && parsed.path != ["service", "run"]
+        && !service::supports(&parsed)
+    {
+        return Err(CliError::with(
+            ErrorCode::UnknownCommandNamespace,
+            ApplicationOutcome::Rejected,
+            "the requested command is not available through the selected service socket",
+        ));
+    }
+    if !setup::is_setup_command(&parsed.path)
+        && !command_registry::is_registry_path(&parsed.path)
+        && parsed.path.first().map(String::as_str) != Some("workflows")
+    {
+        let context = match working_directory {
+            Some(root) => project_context::resolve_from(&parsed, root)?,
+            None => project_context::resolve(&parsed)?,
+        };
+        bind_local_project(&mut parsed, &context.project_id)?;
+        parsed.options.db = context.database.to_string_lossy().into_owned();
+        if let Some(socket) = parsed.options.socket.as_deref() {
+            parsed.options.socket = Some(
+                project_context::confined_path(
+                    &context.root,
+                    Path::new(socket),
+                    parsed.path == ["service", "run"],
+                )?
+                .to_string_lossy()
+                .into_owned(),
+            );
+        }
+    }
     if parsed.path == ["service", "run"] {
         return service::run_service(&parsed, operation);
     }
@@ -598,21 +726,26 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     {
         return workflow_result(&parsed);
     }
-    if command_registry::is_unavailable_path(&parsed.path) {
-        return Err(CliError::with(
-            ErrorCode::UnknownCommandNamespace,
-            ApplicationOutcome::Rejected,
-            format!(
-                "command route is catalogued but unavailable: {}; inspect `bwrk commands {}`",
-                parsed.path.join(" "),
-                parsed.path.join(" ")
-            ),
-        ));
-    }
     if parsed.path == ["dashboard"] {
         return dashboard::run_dashboard(&parsed);
     }
+    if parsed.path == ["doctor"] && parsed.options.socket.is_none() {
+        let context = project_context::resolve(&parsed)?;
+        let store = SqliteStore::open_read_only_for_diagnostics(&context.database)
+            .map_err(map_store_error)?;
+        project_context::validate_store(&context, &store)?;
+        credentials::authenticate(&parsed, &store)?;
+        return doctor_result(&parsed, &store);
+    }
     if parsed.path.len() == 1 && matches!(parsed.path[0].as_str(), "update" | "upgrade") {
+        if parsed.options.socket.is_none() {
+            let context = project_context::resolve(&parsed)?;
+            let store = SqliteStore::open_read_only_for_diagnostics(&context.database)
+                .map_err(map_store_error)?;
+            project_context::validate_store(&context, &store)?;
+            credentials::authenticate(&parsed, &store)?;
+            require_operator(&store, &context.project_id, &parsed.options.actor)?;
+        }
         if parsed.options.socket.is_some() {
             if service::supports(&parsed) {
                 return service::request(&parsed, operation);
@@ -626,10 +759,20 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         return service::run_update(&parsed, operation);
     }
     if matches!(parsed.path.as_slice(), [path] if path == "backup" || path == "restore") {
+        if parsed.options.socket.is_some() {
+            if service::supports(&parsed) {
+                return service::request(&parsed, operation);
+            }
+            return Err(CliError::with(
+                ErrorCode::UnknownCommandNamespace,
+                ApplicationOutcome::Rejected,
+                "the requested maintenance command is not available through the selected service socket",
+            ));
+        }
         return backup_restore_result(&parsed, operation);
     }
     let setup_command = setup::is_setup_command(&parsed.path);
-    let setup_requested = setup::should_setup(&parsed);
+    let setup_requested = setup_command;
     if setup_command && parsed.options.expected_revision.is_some() {
         return Err(CliError::invalid(
             "project creation does not yet expose an atomic expected-revision store contract",
@@ -706,6 +849,7 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
             })?
         };
         let binding = workspace_binding(&binding_root)?;
+        let credential = credentials::create(&binding_root, &project, &parsed.options.actor)?;
         let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).map_err(map_store_error)?;
         let app = WorkApplication::new(&store);
         let initialized_at = now();
@@ -713,9 +857,9 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
             .init_project_with_workspace(
                 &ProjectId::new(project.clone()),
                 &parsed.options.actor,
-                "agent",
-                &service::local_credential_ref(),
-                "CLI agent",
+                "operator",
+                &credential,
+                "Project operator",
                 &binding,
                 &initialized_at,
                 operation.to_owned(),
@@ -748,30 +892,101 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         });
     }
     let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).map_err(map_store_error)?;
+    if parsed.path.first().map(String::as_str) == Some("auth") {
+        return authority::run(&parsed, operation, &store);
+    }
     if store.is_canonical_production() {
-        store
-            .authenticate_actor(&parsed.options.actor, &service::local_credential_ref())
-            .map_err(|error| {
-                CliError::with(
-                    ErrorCode::PermissionDenied,
-                    ApplicationOutcome::Rejected,
-                    error.to_string(),
-                )
-            })?;
+        credentials::authenticate(&parsed, &store)?;
     }
     let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
     dispatch(&parsed, operation, &app, &adapter, &store)
 }
 
+/// Bind a command to the selected project without changing the parser's
+/// distinction between a leading positional project and an explicitly local
+/// command. If a route was entered with its positional project, consume that
+/// argument only after confirming it matches the workspace binding.
+fn bind_local_project(parsed: &mut ParsedCommand, project_id: &str) -> Result<(), CliError> {
+    if let Some(explicit) = parsed.options.project.as_deref() {
+        if explicit != project_id {
+            return Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Rejected,
+                "--project does not match the initialized local project",
+            ));
+        }
+        return Ok(());
+    }
+
+    let mut normalized = parsed.options.clone();
+    normalized.project = Some(project_id.to_owned());
+    if validate_command(&parsed.path, &normalized).is_err() {
+        let positional_project = parsed.options.positionals.first().ok_or_else(|| {
+            CliError::invalid("command arguments do not match the selected project context")
+        })?;
+        if positional_project != project_id {
+            return Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Rejected,
+                "positional project does not match the initialized local project",
+            ));
+        }
+        normalized.positionals.remove(0);
+        validate_command(&parsed.path, &normalized)?;
+    }
+    parsed.options = normalized;
+    Ok(())
+}
+
+#[cfg(test)]
+fn test_fixture_project_root(parsed: &ParsedCommand) -> Option<PathBuf> {
+    let database = Path::new(&parsed.options.db);
+    (database
+        .file_name()
+        .is_some_and(|name| name == "boreal.sqlite")
+        && database
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == ".boreal"))
+    .then(|| {
+        database
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    })
+    .flatten()
+}
+
+fn require_operator(store: &SqliteStore, project: &str, actor: &str) -> Result<(), CliError> {
+    WorkApplication::new(store)
+        .authorize_maintenance(project, actor)
+        .map_err(map_application_error)
+}
+
 fn backup_restore_result(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, CliError> {
+    let context = project_context::resolve(parsed)?;
+    {
+        let authentication = SqliteStore::open_read_only_for_diagnostics(&context.database)
+            .map_err(map_store_error)?;
+        project_context::validate_store(&context, &authentication)?;
+        credentials::authenticate(parsed, &authentication)?;
+        require_operator(&authentication, &context.project_id, &parsed.options.actor)?;
+    }
+    if parsed.path == ["restore"] && !parsed.options.setup.yes {
+        return Err(CliError::invalid(
+            "restore replaces project state; review the package and pass --yes",
+        ));
+    }
     let package = parsed
         .options
         .positionals
         .first()
         .map(PathBuf::from)
         .ok_or_else(|| CliError::invalid("backup or restore requires a package directory"))?;
-    let database = PathBuf::from(&parsed.options.db);
+    let package =
+        project_context::confined_path(&context.root, &package, parsed.path == ["backup"])?;
+    let database = context.database;
     ensure_db_parent(&database)?;
     let _database_owner = direct_database_maintenance_owner(&database)?;
     match parsed.path.first().map(String::as_str) {
@@ -785,8 +1000,8 @@ fn backup_restore_result(parsed: &ParsedCommand, operation: &str) -> Result<CliR
             }
             let store = SqliteStore::open(&database, PRODUCTION_SCHEMA).map_err(map_store_error)?;
             let request_digest = canonical_request_digest(
-                "maintenance.backup/v1",
-                json!({
+                "maintenance.backup/v2",
+                json!({"project_id": context.project_id, "actor_id": parsed.options.actor,
                     "database_path": database,
                     "package_path": package,
                 }),
@@ -911,21 +1126,22 @@ fn backup_restore_result(parsed: &ParsedCommand, operation: &str) -> Result<CliR
             let source_store = SqliteStore::open(&maintenance_database, PRODUCTION_SCHEMA)
                 .map_err(map_store_error)?;
             let request_digest = canonical_request_digest(
-                "maintenance.restore/v1",
-                json!({
+                "maintenance.restore/v2",
+                json!({"project_id": context.project_id, "actor_id": parsed.options.actor,
                     "database_path": database,
                     "package_path": package,
                 }),
             );
+            let restore_job = MaintenanceJobInput {
+                operation_id: operation.to_owned(),
+                kind: "restore".to_owned(),
+                database_path: database.to_string_lossy().into_owned(),
+                package_path: package.to_string_lossy().into_owned(),
+                request_digest,
+                created_at: now(),
+            };
             let registration = source_store
-                .register_maintenance_job(&MaintenanceJobInput {
-                    operation_id: operation.to_owned(),
-                    kind: "restore".to_owned(),
-                    database_path: database.to_string_lossy().into_owned(),
-                    package_path: package.to_string_lossy().into_owned(),
-                    request_digest,
-                    created_at: now(),
-                })
+                .register_maintenance_job(&restore_job)
                 .map_err(map_store_error)?;
             if registration.replayed {
                 if registration.job.stage == "committed" {
@@ -950,6 +1166,42 @@ fn backup_restore_result(parsed: &ParsedCommand, operation: &str) -> Result<CliR
                         result
                     });
                 }
+                // A restore receipt is committed inside the operation's
+                // deterministic staging database before publication. Finish
+                // its rename sequence or read the published receipt after a
+                // crash, then copy that result into the package journal.
+                let published_receipt = SqliteStore::reconcile_restore_maintenance_job(
+                    &database,
+                    &restore_job,
+                )
+                .ok()
+                .flatten();
+                if let Some(receipt) = published_receipt {
+                    let data: Value = serde_json::from_str(
+                        receipt.result_json.as_deref().unwrap_or_default(),
+                    )
+                    .map_err(|error| {
+                        CliError::invalid(format!("invalid published restore receipt: {error}"))
+                    })?;
+                    source_store
+                        .transition_maintenance_job(&MaintenanceJobTransition {
+                            operation_id: operation.to_owned(),
+                            expected_stage: registration.job.stage.clone(),
+                            next_stage: "committed".to_owned(),
+                            at: now(),
+                            result_json: receipt.result_json,
+                            error_message: None,
+                        })
+                        .map_err(map_store_error)?;
+                    return bounded_result(Some(data), None).map(|mut result| {
+                        result.outcome = ApplicationOutcome::Unchanged;
+                        result.human = Some(
+                            "Restore operation was reconciled from the published database receipt."
+                                .to_owned(),
+                        );
+                        result
+                    });
+                }
                 return Err(CliError::unknown_delivery(
                     operation,
                     format!(
@@ -968,7 +1220,11 @@ fn backup_restore_result(parsed: &ParsedCommand, operation: &str) -> Result<CliR
                     error_message: None,
                 })
                 .map_err(map_store_error)?;
-            let report = match SqliteStore::restore_package_to(&package, &database) {
+            let report = match SqliteStore::restore_package_to_with_maintenance_job(
+                &package,
+                &database,
+                Some(&restore_job),
+            ) {
                 Ok(report) => report,
                 Err(error) => {
                     let _ = source_store.transition_maintenance_job(&MaintenanceJobTransition {
@@ -1096,6 +1352,7 @@ fn workflow_package_json(registry: &WorkflowRegistry) -> Value {
 
 fn workflow_asset_dto(asset: &boreal_application::WorkflowAsset) -> WorkflowAssetDto {
     WorkflowAssetDto {
+        required_server_actions: asset.required_server_actions.clone(),
         reference: asset.reference.clone(),
         kind: asset.kind.clone(),
         title: asset.title.clone(),
@@ -1125,6 +1382,7 @@ fn workflow_asset_dto(asset: &boreal_application::WorkflowAsset) -> WorkflowAsse
 
 fn workflow_package_dto(registry: &WorkflowRegistry) -> WorkflowPackageDto {
     WorkflowPackageDto {
+        trusted: registry.trusted(),
         schema_version: registry.schema_version().to_owned(),
         package_id: registry.package_id().to_owned(),
         package_version: registry.package_version().to_owned(),
@@ -1154,10 +1412,31 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
     store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let path = parsed.path.iter().map(String::as_str).collect::<Vec<_>>();
+    if recovery_commands::supported(&parsed.path) {
+        return recovery_commands::run(parsed, operation, store);
+    }
+    if memory_commands::supported(&parsed.path) {
+        return memory_commands::run(parsed, operation, store);
+    }
+    if completion_commands::kind(&parsed.path).is_some() {
+        return completion_commands::run(parsed, operation, store);
+    }
+    if cycle_commands::kind(&parsed.path).is_some() {
+        return cycle_commands::run(parsed, operation, store);
+    }
+    if cycle_commands::read_kind(&parsed.path).is_some() {
+        return cycle_commands::read(parsed, store);
+    }
     match path.as_slice() {
         [command] if *command == "status" || *command == "prime" => status_result(parsed, store),
         ["work", "list"] => list_result(parsed, app),
         ["work", "show"] => show_work_result(parsed, app, store),
+        ["work", "rollup"] => container_rollup_result(parsed, app),
+        ["migration", "dry-run"] => migration_result(parsed, store, false),
+        ["migration", "verify"] => migration_result(parsed, store, true),
+        ["migration", "apply"] => migration_apply_result(parsed, operation, store),
+        ["gate", "policy", "publish"] => gate_policy_publish_result(parsed, operation, store),
+        ["maintenance", "show"] => maintenance_show_result(parsed, store),
         ["work", "create"] => create_work_result(parsed, app, operation),
         ["work", "edit"] => work_edit_result(parsed, app, operation),
         ["work", "hold", "add"] => work_hold_add_result(parsed, app, operation),
@@ -1167,6 +1446,8 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["dep", "remove"] => dependency_remove_result(parsed, app, operation),
         ["dep", "tree"] | ["dep", "cycles"] => dependency_graph_result(parsed, app),
         ["cycle", "board"] | ["cycle", "report"] => cycle_board_result(parsed, app),
+        ["review", "list"] => review_list_result(parsed, app, store),
+        ["review", "show"] => review_show_result(parsed, app, store),
         ["intake", "list"] => intake_list_result(parsed, app),
         ["intake", "show"] => intake_show_result(parsed, app),
         ["intake", "bucket"] => intake_bucket_result(parsed, app, operation),
@@ -1174,6 +1455,7 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["source", "add"] => source_add_result(parsed, operation, store),
         ["source", "show"] => source_show_result(parsed, store),
         ["source", "list"] => source_list_result(parsed, store),
+        ["source", "search"] => source_search_result(parsed, store),
         ["source", "verify"] => source_verify_result(parsed, store),
         ["doctor"] => doctor_result(parsed, store),
         ["work", "claim"] => claim_result(parsed, app, adapter, operation, store),
@@ -1665,17 +1947,47 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["workflows", "show"] => options.positionals.len() == 1,
         ["update"] => options.positionals.is_empty() && !options.machine,
         ["upgrade"] => options.positionals.is_empty() && options.machine,
-        ["backup"] | ["restore"] => positionals == 1 && options.socket.is_none(),
+        ["backup"] => positionals == 1,
+        ["restore"] => positionals == 1 && options.socket.is_none(),
+        ["maintenance", "show"] => options.project.is_some() && positionals == 1,
+        ["migration", "dry-run"] | ["migration", "verify"] => {
+            options.project.is_some() && positionals == 0 && options.input.is_some()
+        }
+        ["migration", "apply"] => {
+            options.project.is_some()
+                && positionals == 0
+                && options.input.is_some()
+                && options.expected_revision.is_some()
+                && options.setup.yes
+        }
+        ["gate", "policy", "publish"] => {
+            options.project.is_some()
+                && positionals == 0
+                && options.gate.is_some()
+                && options.input.is_some()
+                && options.expected_revision.is_some()
+                && options.setup.yes
+        }
         ["init"] | ["setup"] | ["install"] => positionals <= 1,
         _ if matches!(path.first().copied(), Some("commands" | "help")) => {
             options.positionals.is_empty()
         }
         ["agent", "guide"] | ["agent", "resume"] | ["next"] | ["agent", "next"] => positionals == 0,
         ["doctor"] | ["session", "end"] => positionals == 0,
+        ["recovery", "list"] => {
+            positionals >= usize::from(options.project.is_none())
+                && positionals <= usize::from(options.project.is_none()) + 1
+        }
+        ["recovery", "resolve"] => {
+            positionals >= usize::from(options.project.is_none())
+                && positionals <= usize::from(options.project.is_none()) + 1
+        }
         ["dep", "add"] | ["dep", "remove"] => {
             positionals == 2 + usize::from(options.project.is_none())
         }
+        ["work", "create"] => positionals == 2 + usize::from(options.project.is_none()),
         ["work", "edit"] => positionals == 1 + usize::from(options.project.is_none()),
+        ["work", "rollup"] => positionals == 1 + usize::from(options.project.is_none()),
         ["work", "hold", "add"] | ["work", "dispatch", "set"] => {
             positionals == 1 + usize::from(options.project.is_none())
         }
@@ -1697,6 +2009,7 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
                 && options.origin.is_some()
         }
         ["source", "list"] => positionals == usize::from(options.project.is_none()),
+        ["source", "search"] => positionals == 1 + usize::from(options.project.is_none()),
         ["source", "show"] | ["source", "verify"] => {
             positionals == 1 + usize::from(options.project.is_none())
         }
@@ -2174,7 +2487,13 @@ fn cycle_board_result(
         .cloned()
         .ok_or_else(|| CliError::invalid("cycle board/report requires a cycle identifier"))?;
     let board = app
-        .cycle_board_v3(&project, &cycle_id)
+        .cycle_board_v3(
+            &project,
+            &cycle_id,
+            &parsed.options.actor,
+            (!parsed.options.session.trim().is_empty()).then_some(parsed.options.session.as_str()),
+            TimestampMs::from_millis(now_ms_u64()),
+        )
         .map_err(map_application_error)?;
     let assignments = board
         .assignments
@@ -2189,6 +2508,16 @@ fn cycle_board_result(
                 "work_title": item.work_title,
                 "work_kind": item.work_kind,
                 "work_lifecycle": item.work_lifecycle,
+                "accepted_closed": item.accepted_closed,
+                "accepted_outcome": item.accepted_outcome.as_ref().map(|outcome| json!({
+                    "outcome_id": outcome.outcome_id,
+                    "entity_revision": outcome.entity_revision,
+                    "proof_revision": outcome.proof_revision,
+                    "summary_digest": outcome.summary_digest,
+                    "accepted_at": outcome.accepted_at,
+                })),
+                "predecessor_id": item.assignment.predecessor_id,
+                "successor_id": item.assignment.successor_id,
             })
         })
         .collect::<Vec<_>>();
@@ -2217,13 +2546,467 @@ fn cycle_board_result(
                 "tzdb_identity": board.cycle.tzdb_identity,
             },
             "assignments": assignments,
+            "rollup": cycle_rollup_json(&board.rollup),
             "counts": state_counts,
+            "accepted_closed": board.assignments.iter().filter(|a|a.accepted_closed).count(),
+            "total": board.assignments.len(),
+            "diagnostics": board.diagnostics.iter().map(|d|json!({"work_id":d.work_id,"code":d.code,"detail":d.detail})).collect::<Vec<_>>(),
         })),
         Some(board.revision),
     )
     .map(|mut result| {
         result.outcome = ApplicationOutcome::Unchanged;
         result
+    })
+}
+
+fn container_rollup_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let container_index = usize::from(parsed.options.project.is_none());
+    let container_id = parsed
+        .options
+        .positionals
+        .get(container_index)
+        .ok_or_else(|| CliError::invalid("work rollup requires a container identifier"))?;
+    let view = app
+        .container_rollup_v3(
+            &project,
+            container_id,
+            &parsed.options.actor,
+            (!parsed.options.session.trim().is_empty()).then_some(parsed.options.session.as_str()),
+            TimestampMs::from_millis(now_ms_u64()),
+        )
+        .map_err(map_application_error)?;
+    bounded_result(
+        Some(json!({
+            "command": "work_rollup",
+            "project_id": view.project_id.as_str(),
+            "revision": view.revision,
+            "container": {
+                "work_id": view.container.work_id,
+                "decomposition_kind": view.container.decomposition_kind,
+                "execution_mode": view.container.execution_mode,
+                "parent_id": view.container.parent_id,
+            },
+            "rollup": container_rollup_json(&view.rollup),
+            "diagnostics": view.diagnostics.iter().map(|diagnostic| json!({
+                "work_id": diagnostic.work_id,
+                "code": diagnostic.code,
+                "detail": diagnostic.detail,
+            })).collect::<Vec<_>>(),
+        })),
+        Some(view.revision),
+    )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn container_rollup_json(rollup: &boreal_domain::rollups::ContainerRollup) -> Value {
+    let totals = &rollup.totals;
+    json!({
+        "scope_revision": rollup.scope.revision.get(),
+        "state": format!("{:?}", rollup.state).to_ascii_lowercase(),
+        "quality": format!("{:?}", rollup.quality).to_ascii_lowercase(),
+        "claimable_for_actor": rollup.claimable_for_actor,
+        "totals": {
+            "total": totals.total,
+            "accepted_closed": totals.accepted_closed,
+            "accepted_cancelled": totals.accepted_cancelled,
+            "reconciled_scope": totals.reconciled_scope,
+            "deferred": totals.deferred,
+            "replaced": totals.replaced,
+            "unresolved_scope": totals.unresolved_scope,
+            "active_work": totals.active_work,
+            "gate_review_gaps": totals.gate_review_gaps,
+            "gate_review_gap_tasks": totals.gate_review_gap_tasks,
+            "overdue_work": totals.overdue_work,
+            "blockers": totals.blockers,
+            "blocked_work": totals.blocked_work,
+            "incomplete_descendants": totals.incomplete_descendants,
+            "corrupt_descendants": totals.corrupt_descendants,
+            "accepted_percentage": totals.accepted_percentage(),
+            "reconciled_percentage": totals.reconciled_percentage(),
+        },
+        "gate_review_gaps": rollup.gate_review_gaps.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "overdue": rollup.overdue,
+        "blockers": rollup.blockers.iter().map(|blocker| json!({"work_id":blocker.work_id.as_str(),"code":blocker.code})).collect::<Vec<_>>(),
+        "diagnostics": rollup.diagnostics.iter().map(|diagnostic| format!("{diagnostic:?}").to_ascii_lowercase()).collect::<Vec<_>>(),
+        "descendants": rollup.descendants.iter().map(|task| json!({
+            "work_id": task.identity.work_id.as_str(),
+            "entity_revision": task.identity.revision.get(),
+            "status": format!("{:?}", task.status).to_ascii_lowercase(),
+            "accepted_closed": task.accepted_closed,
+            "reconciliation": format!("{:?}", task.reconciliation).to_ascii_lowercase(),
+            "quality": format!("{:?}", task.quality).to_ascii_lowercase(),
+            "active_execution": task.active_execution,
+            "gate_gaps": task.gate_gaps.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "overdue": task.overdue,
+            "blockers": task.blockers.iter().map(|blocker| blocker.code.clone()).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn cycle_rollup_json(rollup: &boreal_domain::rollups::CycleRollup) -> Value {
+    let totals = &rollup.totals;
+    json!({
+        "scope_revision": rollup.scope.revision.get(),
+        "state": format!("{:?}", rollup.state).to_ascii_lowercase(),
+        "quality": format!("{:?}", rollup.quality).to_ascii_lowercase(),
+        "scope_reconciled": rollup.scope_reconciled,
+        "claimable_for_actor": rollup.claimable_for_actor,
+        "assignment_counts": {
+            "planned": rollup.assignment_counts.planned,
+            "committed": rollup.assignment_counts.committed,
+            "removed": rollup.assignment_counts.removed,
+            "completed": rollup.assignment_counts.completed,
+            "carried_over": rollup.assignment_counts.carried_over,
+            "live": rollup.assignment_counts.live,
+        },
+        "totals": {
+            "total": totals.total,
+            "accepted_closed": totals.accepted_closed,
+            "accepted_cancelled": totals.accepted_cancelled,
+            "reconciled_scope": totals.reconciled_scope,
+            "deferred": totals.deferred,
+            "replaced": totals.replaced,
+            "unresolved_scope": totals.unresolved_scope,
+            "active_work": totals.active_work,
+            "gate_review_gaps": totals.gate_review_gaps,
+            "gate_review_gap_tasks": totals.gate_review_gap_tasks,
+            "overdue_work": totals.overdue_work,
+            "blockers": totals.blockers,
+            "blocked_work": totals.blocked_work,
+            "incomplete_descendants": totals.incomplete_descendants,
+            "corrupt_descendants": totals.corrupt_descendants,
+            "accepted_percentage": totals.accepted_percentage(),
+            "reconciled_percentage": totals.reconciled_percentage(),
+        },
+        "gate_review_gaps": rollup.gate_review_gaps.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "overdue": rollup.overdue,
+        "blockers": rollup.blockers.iter().map(|blocker| json!({"work_id":blocker.work_id.as_str(),"code":blocker.code})).collect::<Vec<_>>(),
+        "diagnostics": rollup.diagnostics.iter().map(|diagnostic| format!("{diagnostic:?}").to_ascii_lowercase()).collect::<Vec<_>>(),
+        "descendants": rollup.descendants.iter().map(|task| json!({
+            "work_id": task.identity.work_id.as_str(),
+            "entity_revision": task.identity.revision.get(),
+            "status": format!("{:?}", task.status).to_ascii_lowercase(),
+            "accepted_closed": task.accepted_closed,
+            "reconciliation": format!("{:?}", task.reconciliation).to_ascii_lowercase(),
+            "quality": format!("{:?}", task.quality).to_ascii_lowercase(),
+            "active_execution": task.active_execution,
+            "gate_gaps": task.gate_gaps.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "overdue": task.overdue,
+            "blockers": task.blockers.iter().map(|blocker| blocker.code.clone()).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn review_list_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let reviews = app
+        .review_list(
+            &project,
+            parsed.options.limit.unwrap_or(50).clamp(1, 500) as u64,
+            parsed.options.offset.unwrap_or(0) as u64,
+        )
+        .map_err(map_application_error)?;
+    let revision = store_revision(store, &project)?;
+    bounded_result(
+        Some(json!({
+            "command": "review_list",
+            "project_id": project.as_str(),
+            "items": reviews.iter().map(review_record_json).collect::<Vec<_>>(),
+        })),
+        Some(revision),
+    )
+}
+
+fn review_show_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let index = usize::from(parsed.options.project.is_none());
+    let review_id = parsed
+        .options
+        .positionals
+        .get(index)
+        .ok_or_else(|| CliError::invalid("review show requires a review identifier"))?;
+    let review = app
+        .review_show(&project, review_id)
+        .map_err(map_application_error)?;
+    let revision = store_revision(store, &project)?;
+    bounded_result(
+        Some(json!({
+            "command": "review_show",
+            "project_id": project.as_str(),
+            "review": review_record_json(&review),
+        })),
+        Some(revision),
+    )
+}
+
+fn review_record_json(review: &boreal_store::ReviewRecord) -> Value {
+    json!({
+        "review_id": review.review_id,
+        "project_id": review.project_id,
+        "work_id": review.work_id,
+        "attempt_id": review.attempt_id,
+        "fence": review.fence,
+        "gate_id": review.gate_id,
+        "reviewer_actor_id": review.reviewer_actor_id,
+        "decision": match review.decision {
+            boreal_store::ReviewDecision::Accepted => "accepted",
+            boreal_store::ReviewDecision::Rejected => "rejected",
+        },
+        "reason": review.reason,
+        "source_version_id": review.source_version_id,
+        "policy_digest": review.policy_digest,
+        "created_at": review.created_at,
+    })
+}
+
+fn migration_result(
+    parsed: &ParsedCommand,
+    store: &SqliteStore,
+    verify: bool,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let input = parsed
+        .options
+        .input
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("migration requires --input PATH"))?;
+    let context = project_context::resolve(parsed)?;
+    project_context::validate_store(&context, store)?;
+    let input_path = project_context::confined_path(&context.root, Path::new(input), false)?;
+    let bytes = fs::read(&input_path).map_err(|error| {
+        CliError::invalid(format!("cannot read migration input {}: {error}", input_path.display()))
+    })?;
+    if bytes.len() > MAX_JSON_BYTES {
+        return Err(CliError::invalid("migration input exceeds the inline bound"));
+    }
+    let source = String::from_utf8(bytes)
+        .map_err(|error| CliError::invalid(format!("migration input is not UTF-8: {error}")))?;
+    migration_source_result(parsed, store, verify, &source)
+}
+
+fn migration_source_result(
+    parsed: &ParsedCommand,
+    store: &SqliteStore,
+    verify: bool,
+    source: &str,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let context = project_context::resolve(parsed)?;
+    project_context::validate_store(&context, store)?;
+    let plan = boreal_migration::import_legacy_json(source)
+        .map_err(|error| CliError::invalid(format!("legacy import planning failed: {error}")))?;
+    let import_plan = plan.import_plan();
+    let verification = if verify {
+        match plan.verify() {
+            Ok(value) => json!({ "verified": true, "result": value }),
+            Err(error) => json!({ "verified": false, "error": error.to_string() }),
+        }
+    } else {
+        Value::Null
+    };
+    let source_project = import_plan.report.document.as_ref().map(|document| document.project.id.clone());
+    let matches_selected_project = source_project.as_deref() == Some(project.as_str());
+    let ready_for_selected_project = import_plan.ready && matches_selected_project;
+    let revision = store_revision(store, &ProjectId::new(project.clone()))?;
+    let command = if verify { "migration_verify" } else { "migration_dry_run" };
+    bounded_result(
+        Some(json!({
+            "command": command,
+            "project_id": project,
+            "project_revision": revision,
+            "source_project_id": source_project,
+            "matches_selected_project": matches_selected_project,
+            "ready": import_plan.ready,
+            "ready_for_selected_project": ready_for_selected_project,
+            "plan": import_plan,
+            "verification": verification,
+        })),
+        Some(revision),
+    )
+}
+
+fn migration_apply_result(
+    parsed: &ParsedCommand,
+    operation: &str,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    if !parsed.options.setup.yes {
+        return Err(CliError::invalid(
+            "migration apply changes project work; pass --yes after reviewing the import plan",
+        ));
+    }
+    let project = project_argument(parsed, 0)?;
+    let expected_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("migration apply requires --expected-revision"))?;
+    let input = parsed
+        .options
+        .input
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("migration apply requires --input PATH"))?;
+    let context = project_context::resolve(parsed)?;
+    project_context::validate_store(&context, store)?;
+    require_operator(store, &project, &parsed.options.actor)?;
+    let input_path = project_context::confined_path(&context.root, Path::new(input), false)?;
+    let bytes = fs::read(&input_path).map_err(|error| {
+        CliError::invalid(format!(
+            "cannot read migration input {}: {error}",
+            input_path.display()
+        ))
+    })?;
+    if bytes.len() as u64 > MAX_SOURCE_INPUT_BYTES {
+        return Err(CliError::invalid("migration input exceeds the source bound"));
+    }
+    let source = String::from_utf8(bytes)
+        .map_err(|error| CliError::invalid(format!("migration input is not UTF-8: {error}")))?;
+    migration_apply_source_result(parsed, operation, store, &source)
+}
+
+fn migration_apply_source_result(
+    parsed: &ParsedCommand,
+    operation: &str,
+    store: &SqliteStore,
+    source: &str,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let expected_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("migration apply requires --expected-revision"))?;
+    let context = project_context::resolve(parsed)?;
+    project_context::validate_store(&context, store)?;
+    require_operator(store, &project, &parsed.options.actor)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
+    let catalog = source_catalog_create(&catalog_root)?;
+    let applied = KnowledgeApplication::new(&catalog)
+        .apply_migration_to_store(
+            store,
+            &project,
+            &parsed.options.actor,
+            operation,
+            expected_revision,
+            source,
+            &now(),
+        )
+        .map_err(map_knowledge_error)?;
+    if applied.state != boreal_application::MigrationApplyState::Applied {
+        return Err(CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "migration is not ready for application; inspect its dry-run and loss ledger",
+        ));
+    }
+    let data = json!({
+        "command": "migration_apply",
+        "project_id": project,
+        "operation_id": applied.operation.operation_id,
+        "request_digest": applied.operation.request_digest,
+        "source_version_id": applied.source_version_id,
+        "source_fingerprint": applied.source.source_fingerprint,
+        "migration_source_digest": applied.provenance.migration_source_digest,
+        "revision": applied.revision,
+        "replayed": applied.replayed,
+        "imported_work_count": applied.imported_work_count,
+        "imported_dependency_count": applied.imported_dependency_count,
+        "drafted_terminal_work_ids": applied.drafted_terminal_work_ids,
+        "archived_record_counts": applied.document.as_ref().map(|document| document.counts()),
+        "loss_ledger": applied.loss_ledger,
+        "unsupported_capabilities": applied.unsupported_capabilities,
+    });
+    bounded_result(Some(data), applied.revision).map(|mut result| {
+        result.outcome = if applied.replayed {
+            ApplicationOutcome::Unchanged
+        } else {
+            ApplicationOutcome::Changed
+        };
+        result.human = Some(format!(
+            "Applied {} work item(s) and {} dependency edge(s); historical proof remains archived in source {}.",
+            applied.imported_work_count,
+            applied.imported_dependency_count,
+            applied.source_version_id.as_deref().unwrap_or("unknown")
+        ));
+        result
+    })
+}
+
+fn maintenance_show_result(
+    parsed: &ParsedCommand,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let target = parsed.options.positionals.get(usize::from(parsed.options.project.is_none()))
+        .ok_or_else(|| CliError::invalid("maintenance show requires an operation ID"))?;
+    let context = project_context::resolve(parsed)?;
+    project_context::validate_store(&context, store)?;
+    require_operator(store, &project, &parsed.options.actor)?;
+    let package = parsed.options.input.as_deref().map(|path| {
+        project_context::confined_path(&context.root, Path::new(path), false)
+    }).transpose()?;
+    let package_journal = if let Some(package) = package.as_deref() {
+        let journal_path = package.join(".boreal-maintenance.sqlite");
+        Some(SqliteStore::open_read_only_for_diagnostics(&journal_path).map_err(map_store_error)?)
+    } else { None };
+    let journal_store = package_journal.as_ref().unwrap_or(store);
+    let job = journal_store.maintenance_job(target).map_err(map_store_error)?
+        .ok_or_else(|| CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("maintenance operation {target:?} is not recorded in this project database"),
+        ))?;
+    if let Some(package) = package {
+        let recorded_database = PathBuf::from(&job.database_path).canonicalize().map_err(|error| {
+            CliError::invalid(format!("maintenance database identity is unavailable: {error}"))
+        })?;
+        let selected_database = context.database.canonicalize().map_err(|error| {
+            CliError::invalid(format!("selected project database identity is unavailable: {error}"))
+        })?;
+        let recorded_package = PathBuf::from(&job.package_path).canonicalize().map_err(|error| {
+            CliError::invalid(format!("maintenance package identity is unavailable: {error}"))
+        })?;
+        if recorded_database != selected_database || recorded_package != package {
+            return Err(CliError::with(ErrorCode::OperationConflict, ApplicationOutcome::Rejected,
+                "maintenance readback does not belong to this project and package"));
+        }
+    }
+    let result = job.result_json.as_deref().map(|value| serde_json::from_str::<Value>(value)
+        .map_err(|error| CliError::invalid(format!("maintenance readback is invalid JSON: {error}"))))
+        .transpose()?;
+    let revision = store_revision(store, &ProjectId::new(project.clone()))?;
+    bounded_result(Some(json!({
+        "project_id": project,
+        "operation_id": job.operation_id,
+        "kind": job.kind,
+        "request_digest": job.request_digest,
+        "stage": job.stage,
+        "package_path": job.package_path,
+        "result": result,
+        "error": job.error_message,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    })), Some(revision)).map(|mut output| {
+        output.outcome = ApplicationOutcome::Unchanged;
+        output
     })
 }
 
@@ -2460,7 +3243,7 @@ fn source_catalog_root(db_path: &str) -> PathBuf {
         )
 }
 
-fn source_catalog(root: &Path) -> Result<SourceCatalog, CliError> {
+fn source_catalog_create(root: &Path) -> Result<SourceCatalog, CliError> {
     fs::create_dir_all(root).map_err(|error| {
         CliError::with(
             ErrorCode::ServiceUnavailable,
@@ -2468,6 +3251,15 @@ fn source_catalog(root: &Path) -> Result<SourceCatalog, CliError> {
             format!("unable to initialize source catalog: {error}"),
         )
     })?;
+    SourceCatalog::with_persistent_filesystem(root).map_err(map_source_error)
+}
+
+fn source_catalog(root: &Path) -> Result<SourceCatalog, CliError> {
+    if !root.is_dir() {
+        return Err(CliError::invalid(
+            "project source catalog does not exist; capture a source first",
+        ));
+    }
     SourceCatalog::with_persistent_filesystem(root).map_err(map_source_error)
 }
 
@@ -2480,6 +3272,18 @@ fn source_add_result(
     // Validate the relational project before writing catalog state. If this
     // fails, the command cannot leave an orphan source capture behind.
     let revision = store_revision(store, &ProjectId::new(project.clone()))?;
+    let prior_operation = store.operation(operation).map_err(map_store_error)?;
+    if let Some(expected_revision) = parsed.options.expected_revision {
+        if prior_operation.is_none() && revision != expected_revision {
+            return Err(CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Rejected,
+                format!(
+                    "project changed before source capture (expected revision {expected_revision}, found {revision})"
+                ),
+            ));
+        }
+    }
     let input_path = parsed
         .options
         .input
@@ -2490,58 +3294,105 @@ fn source_add_result(
         .origin
         .as_deref()
         .ok_or_else(|| CliError::invalid("source add requires --origin"))?;
-    let metadata = fs::metadata(input_path).map_err(|error| {
+    if origin.starts_with("gate-policy:") {
+        return Err(CliError::with(
+            ErrorCode::PermissionDenied,
+            ApplicationOutcome::Rejected,
+            "gate policy sources must be published through `gate policy publish`",
+        ));
+    }
+    let context = project_context::resolve(parsed)?;
+    let input_path = project_context::confined_path(&context.root, Path::new(input_path), false)?;
+    let metadata = fs::metadata(&input_path).map_err(|error| {
         CliError::with(
             ErrorCode::NotFound,
             ApplicationOutcome::Rejected,
             format!("source input is not readable: {error}"),
         )
     })?;
-    if !metadata.is_file() {
-        return Err(CliError::invalid("source --input must name a regular file"));
-    }
-    if metadata.len() > MAX_SOURCE_INPUT_BYTES {
-        return Err(CliError::invalid(format!(
-            "source input exceeds the {} byte bound",
-            MAX_SOURCE_INPUT_BYTES
-        )));
-    }
-    let file = fs::File::open(input_path).map_err(|error| {
-        CliError::with(
-            ErrorCode::NotFound,
-            ApplicationOutcome::Rejected,
-            format!("source input is not readable: {error}"),
+        let (bytes, media_type) = if metadata.is_dir() {
+        require_operator(store, &project, &parsed.options.actor)?;
+        let bytes = boreal_source::workspace_snapshot::pack(
+            &input_path,
+            boreal_source::workspace_snapshot::DEFAULT_MAX_SNAPSHOT_BYTES,
         )
-    })?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_SOURCE_INPUT_BYTES + 1)
-        .read_to_end(&mut bytes)
         .map_err(|error| {
             CliError::with(
-                ErrorCode::ServiceUnavailable,
-                ApplicationOutcome::Failed,
-                format!("unable to read source input: {error}"),
+                ErrorCode::InvalidArgument,
+                ApplicationOutcome::Rejected,
+                format!("unable to capture bounded workspace snapshot: {error}"),
             )
         })?;
-    if bytes.len() as u64 > MAX_SOURCE_INPUT_BYTES {
-        return Err(CliError::invalid(format!(
-            "source input exceeds the {} byte bound",
-            MAX_SOURCE_INPUT_BYTES
-        )));
-    }
-    let catalog_root = source_catalog_root(&parsed.options.db);
-    let catalog = source_catalog(&catalog_root)?;
+        (
+            bytes,
+            "application/vnd.boreal.workspace-snapshot.v1".to_owned(),
+        )
+    } else if metadata.is_file() {
+        if parsed.options.media_type.as_deref()
+            == Some("application/vnd.boreal.workspace-snapshot.v1")
+        {
+            return Err(CliError::with(
+                ErrorCode::PermissionDenied,
+                ApplicationOutcome::Rejected,
+                "workspace snapshot media type is reserved for Operator-authorized directory capture",
+            ));
+        }
+        if metadata.len() > MAX_SOURCE_INPUT_BYTES {
+            return Err(CliError::invalid(format!(
+                "source input exceeds the {} byte bound",
+                MAX_SOURCE_INPUT_BYTES
+            )));
+        }
+        let file = fs::File::open(&input_path).map_err(|error| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("source input is not readable: {error}"),
+            )
+        })?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(MAX_SOURCE_INPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    format!("unable to read source input: {error}"),
+                )
+            })?;
+        if bytes.len() as u64 > MAX_SOURCE_INPUT_BYTES {
+            return Err(CliError::invalid(format!(
+                "source input exceeds the {} byte bound",
+                MAX_SOURCE_INPUT_BYTES
+            )));
+        }
+        (
+            bytes,
+            parsed
+                .options
+                .media_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_owned()),
+        )
+    } else {
+        return Err(CliError::invalid(
+            "source --input must name a regular file or workspace directory",
+        ));
+    };
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
+    let catalog = source_catalog_create(&catalog_root)?;
     let app = KnowledgeApplication::new(&catalog);
     let mut result = app
         .capture_source(SourceCaptureInput {
             operation_id: operation.to_owned(),
             project_id: project.clone(),
             origin: origin.to_owned(),
-            media_type: parsed
-                .options
-                .media_type
-                .clone()
-                .unwrap_or_else(|| "application/octet-stream".to_owned()),
+            media_type,
             bytes,
         })
         .map_err(map_knowledge_error)?;
@@ -2553,15 +3404,24 @@ fn source_add_result(
         .source_version(&project, &result.source.source_version_id)
         .map_err(map_store_error)?
         .map_or_else(now, |record| record.captured_at);
-    let registration = app
-        .register_captured_source(
+    let registration = match (parsed.options.expected_revision, prior_operation.is_none()) {
+        (Some(expected_revision), true) => app.register_captured_source_at_revision(
             store,
             &result.source,
             &result.operation,
             &parsed.options.actor,
             &captured_at,
-        )
-        .map_err(map_knowledge_error)?;
+            expected_revision,
+        ),
+        _ => app.register_captured_source(
+            store,
+            &result.source,
+            &result.operation,
+            &parsed.options.actor,
+            &captured_at,
+        ),
+    }
+    .map_err(map_knowledge_error)?;
     result.registration = boreal_application::SourceRegistrationState::StoreCommitted {
         revision: registration.revision,
         replayed: registration.replayed,
@@ -2603,7 +3463,12 @@ fn source_show_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<Cli
         .ok_or_else(|| CliError::invalid("source show requires a source version identifier"))?;
     let project_id = ProjectId::new(project.clone());
     let revision = store_revision(store, &project_id)?;
-    let catalog_root = source_catalog_root(&parsed.options.db);
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
     let catalog = source_catalog(&catalog_root)?;
     let app = KnowledgeApplication::new(&catalog);
     let source = app
@@ -2627,7 +3492,12 @@ fn source_list_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<Cli
     let project = project_argument(parsed, 0)?;
     let project_id = ProjectId::new(project.clone());
     let revision = store_revision(store, &project_id)?;
-    let catalog_root = source_catalog_root(&parsed.options.db);
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
     let catalog = source_catalog(&catalog_root)?;
     let app = KnowledgeApplication::new(&catalog);
     let all = app
@@ -2656,6 +3526,55 @@ fn source_list_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<Cli
     )
 }
 
+fn source_search_result(
+    parsed: &ParsedCommand,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let query_index = usize::from(parsed.options.project.is_none());
+    let query = parsed
+        .options
+        .positionals
+        .get(query_index)
+        .ok_or_else(|| CliError::invalid("source search requires a query"))?;
+    let limit = parsed.options.limit.unwrap_or(20).clamp(1, 100) as usize;
+    let revision = store_revision(store, &ProjectId::new(project.clone()))?;
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
+    let catalog = source_catalog(&catalog_root)?;
+    let response = KnowledgeApplication::new(&catalog)
+        .search_sources(boreal_source::RetrievalRequest {
+            project_id: project.clone(),
+            query: query.clone(),
+            limit,
+            max_excerpt_bytes: 1024,
+        })
+        .map_err(map_knowledge_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": response.project_id,
+            "query": response.query,
+            "source_revision": response.source_revision,
+            "index_revision": response.index_revision,
+            "index_lag": response.lag,
+            "items": response.hits.into_iter().map(|hit| json!({
+                "source_version_id": hit.source_version_id,
+                "origin": hit.origin,
+                "location": hit.location,
+                "excerpt": hit.excerpt,
+                "excerpt_digest": hit.excerpt_digest,
+                "score": hit.score,
+                "index_revision": hit.index_revision,
+            })).collect::<Vec<_>>(),
+        })),
+        Some(revision),
+    )
+}
+
 fn source_verify_result(
     parsed: &ParsedCommand,
     store: &SqliteStore,
@@ -2667,7 +3586,12 @@ fn source_verify_result(
             CliError::invalid("source verify requires a source version identifier")
         })?;
     let revision = store_revision(store, &ProjectId::new(project.clone()))?;
-    let catalog_root = source_catalog_root(&parsed.options.db);
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
     let catalog = source_catalog(&catalog_root)?;
     let app = KnowledgeApplication::new(&catalog);
     let result = app
@@ -2762,6 +3686,7 @@ fn doctor_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
                 "schema_version": schema_version,
                 "work_model_v3": if v3_enabled { "enabled" } else { "not_enabled" },
                 "sqlite_runtime": store.sqlite_runtime_identity().as_json(),
+                "integrity": store.diagnostic_checks().map_err(map_store_error)?,
             },
             "repair": {
                 "available": false,
@@ -2769,7 +3694,7 @@ fn doctor_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
             }
         })),
         revision,
-    )
+    ).map(|mut result| { result.outcome = ApplicationOutcome::Unchanged; result })
 }
 
 /// The direct status/prime view is the same derived projection exposed by the
@@ -2778,13 +3703,14 @@ fn doctor_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
 /// and clock decisions from one coherent snapshot.
 fn status_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
-    let snapshot = boreal_application::project_status_from_store(
+    let snapshot = boreal_application::project_status_from_store_for_session(
         store,
         &project,
         &boreal_domain::ActorContext {
             actor_id: ActorId::new(parsed.options.actor.clone()),
             role: boreal_domain::ActorRole::Agent,
         },
+        Some(parsed.options.session.as_str()),
         TimestampMs::from_millis(now_ms_u64()),
         parsed.options.limit.unwrap_or(100),
         parsed.options.offset.unwrap_or(0),
@@ -2811,7 +3737,7 @@ fn status_snapshot_json(
     recovery: Option<Value>,
 ) -> Value {
     let counts = &snapshot.counts;
-    json!({
+    let mut result = json!({
         "command": "status",
         "contract_version": snapshot.contract_version,
         "project_id": snapshot.project_id.as_str(),
@@ -2824,13 +3750,19 @@ fn status_snapshot_json(
         "total": snapshot.total,
         "has_more": snapshot.has_more(),
         "next_offset": snapshot.next_offset(),
-        "diagnostics": snapshot.diagnostics.iter().map(|diagnostic| json!({
-            "work_id": diagnostic.work_id,
-            "title": diagnostic.title,
-            "code": diagnostic.code,
-            "detail": diagnostic.detail,
-            "display_status": "corrupt",
+        "returned_rows": snapshot.page_count,
+        "project_diagnostics": snapshot.project_diagnostics.iter().map(|diagnostic| json!({
+            "code": diagnostic.code, "detail": diagnostic.detail, "subject": diagnostic.work_id,
         })).collect::<Vec<_>>(),
+        "diagnostics": [],
+        "attention_queues": {
+            "review": attention_queue_json(&snapshot.attention_queues.review),
+            "rejected_review": attention_queue_json(&snapshot.attention_queues.rejected_review),
+            "expiry": attention_queue_json(&snapshot.attention_queues.expiry),
+            "failed_execution": attention_queue_json(&snapshot.attention_queues.failed_execution),
+            "operator_holds": attention_queue_json(&snapshot.attention_queues.operator_holds),
+            "damaged_planning": attention_queue_json(&snapshot.attention_queues.damaged_planning),
+        },
         "counts": {
             "matched": snapshot.total,
             "total": snapshot.total,
@@ -2848,9 +3780,16 @@ fn status_snapshot_json(
             "retry_wait": counts.retry_wait,
             "expired_review": counts.expired_review,
             "cancelled": counts.cancelled,
-            "degraded": snapshot.diagnostics.len(),
+            "degraded": snapshot.quarantined_count,
+            "scheduled": counts.scheduled,
         },
-        "items": snapshot.items.iter().map(status_item_json).collect::<Vec<_>>(),
+        "items": [],
+        "project_actions": snapshot.project_actions.iter().map(|action|json!({
+            "action":action.action,"target":{"project_id":action.project_id.as_str()},
+            "caller":{"actor_id":action.actor_id.as_str(),"session_id":action.session_id.as_ref().map(|id|id.as_str())},
+            "expected_project_revision":action.expected_project_revision.0,"allowed":action.allowed,
+            "denial_reason":action.denial_reason,"confirmation":action.confirmation
+        })).collect::<Vec<_>>(),
         "timing": {
             "as_of": stamp(snapshot.as_of.as_millis()),
             "next_status_change_at": snapshot.next_status_change_at.map(|value| stamp(value.as_millis())),
@@ -2859,6 +3798,59 @@ fn status_snapshot_json(
             "readback_required": false,
             "service_state": "ready",
         })),
+    });
+    let bound = MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET + 2048);
+    let mut consumed = 0u64;
+    for id in &snapshot.page_work_ids {
+        let previous = result.clone();
+        if let Some(item) = snapshot
+            .items
+            .iter()
+            .find(|item| item.work.id.as_str() == id)
+        {
+            result["items"]
+                .as_array_mut()
+                .expect("array created above")
+                .push(status_item_json(item));
+        }
+        for diagnostic in snapshot.diagnostics.iter().filter(|d| &d.work_id == id) {
+            result["diagnostics"]
+                .as_array_mut()
+                .expect("array created above")
+                .push(json!({
+                "work_id":diagnostic.work_id,"title":diagnostic.title,"code":diagnostic.code,
+                "detail":diagnostic.detail,"display_status":"corrupt"}));
+        }
+        // A single oversized row produces a bounded protocol error; never silently
+        // truncate its proof or skip it and report a misleading successful page.
+        if consumed > 0 && serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > bound) {
+            result = previous;
+            break;
+        }
+        consumed += 1;
+    }
+    let next = snapshot.offset.saturating_add(consumed);
+    result["returned_rows"] = json!(consumed);
+    result["has_more"] = json!(next < snapshot.total);
+    result["next_offset"] = if next < snapshot.total {
+        json!(next)
+    } else {
+        Value::Null
+    };
+    result
+}
+
+fn attention_queue_json(queue: &boreal_application::AttentionQueue) -> Value {
+    json!({
+        "total": queue.total,
+        "returned": queue.items.len(),
+        "has_more": queue.total > queue.items.len() as u64,
+        "items": queue.items.iter().map(|item| json!({
+            "work_id": item.work_id,
+            "title": item.title,
+            "display_status": status_name(item.display_status),
+            "reason_codes": item.reason_codes,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -2893,12 +3885,8 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
             "hard_deadline": stamp(attempt.max_attempt_deadline.as_millis()),
         })
     });
-    // A compatibility status row does not yet carry the v3 identity/proof
-    // facts required to make action descriptors authoritative.  Do not send
-    // synthetic denied descriptors here: they would override the legacy
-    // discovery hint in clients while still claiming that the row is
-    // selectable.  Once the store supplies a complete action context, the
-    // same response includes the canonical descriptor set.
+    // The same canonical snapshot supplies decisions and their input facts.
+    // No client-specific action vocabulary is filtered out of the contract.
     let actions = item
         .actions
         .as_ref()
@@ -2937,7 +3925,7 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         // status/3 value in `display_status` so newer clients can render
         // expiry as its own recovery state without breaking older clients.
         "status": status2_name(item.display_status()),
-        "display_status": status_name(item.display_status()),
+        "display_status": status_name(item.status3_display_status()),
         // Compatibility status rows predate the v3 identity/proof read model.
         // Keep their legacy readiness hint for discovery, but keep the
         // server-derived action set alongside it; mutating commands still
@@ -2950,6 +3938,8 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
         "attempt": attempt,
         "actions": actions,
+        "canonical_facts": item.canonical_inputs.as_ref().map(boreal_application::canonical_decision_facts_json),
+        "action_contract_version": "boreal.work-actions.v1",
         "action_context": action_context,
         "gates": { "open": open, "satisfied": satisfied },
         "dependencies": item.dependency_blockers.iter().map(|blocker| json!({
@@ -2975,56 +3965,8 @@ fn action_decision_json(
     decision: &boreal_domain::actions::ActionDecision,
     context_available: bool,
 ) -> Value {
-    json!({
-        "allowed": decision
-            .allowed
-            .iter()
-            .filter(|descriptor| inline_status_action(descriptor.action))
-            .map(|descriptor| action_descriptor_json(descriptor, context_available))
-            .collect::<Vec<_>>(),
-        "denied": decision
-            .denied
-            .iter()
-            .filter(|denied| inline_status_action(denied.descriptor.action))
-            .map(|denied| {
-                json!({
-                    "descriptor": action_descriptor_json(&denied.descriptor, context_available),
-                    "reason": {
-                        "code": action_denial_code(&denied.reason),
-                        "detail": format!("{:?}", denied.reason),
-                    },
-                    "reason_code": action_denial_code(&denied.reason),
-                    "recovery": denied
-                        .recovery
-                        .iter()
-                        .map(|action| action_kind_name(*action))
-                        .collect::<Vec<_>>(),
-                })
-            })
-            .collect::<Vec<_>>(),
-    })
+    boreal_application::action_decision_json(decision, context_available)
 }
-
-/// The status envelope carries the action vocabulary consumed by the current
-/// terminal client. The domain still evaluates the complete action set; the
-/// remaining descriptors are available through the dedicated action/readback
-/// routes rather than making a normal paginated status page exceed its inline
-/// protocol bound.
-fn inline_status_action(action: boreal_domain::actions::ActionKind) -> bool {
-    use boreal_domain::actions::ActionKind;
-    matches!(
-        action,
-        ActionKind::Inspect
-            | ActionKind::Claim
-            | ActionKind::AcceptAttempt
-            | ActionKind::StartAttempt
-            | ActionKind::AttachEvidence
-            | ActionKind::FinishClose
-            | ActionKind::Release
-            | ActionKind::Recover
-    )
-}
-
 /// Select a candidate for discovery without turning a compatibility status
 /// hint into authorization. Once the store supplies v3 identity/proof facts,
 /// this is exactly the server-derived Claim decision. Until then, the real
@@ -3033,130 +3975,9 @@ fn status_item_selection_eligible(item: &boreal_application::StatusWork) -> bool
     item.claimable_for_actor()
 }
 
-fn action_descriptor_json(
-    descriptor: &boreal_domain::actions::ActionDescriptor,
-    context_available: bool,
-) -> Value {
-    json!({
-        "action": action_kind_name(descriptor.action),
-        "target": {
-            "project_id": descriptor.target.project_id.as_str(),
-            "work_id": descriptor.target.work_id.as_str(),
-            "entity_revision": context_available.then_some(descriptor.target.revision.get()),
-        },
-        "expected_project_revision": descriptor.expected_project_revision.0,
-        "expected_entity_revision": context_available.then_some(descriptor.expected_entity_revision.get()),
-        "expected_proof_revision": context_available.then(|| descriptor.expected_proof_revision.map(|revision| revision.get())).flatten(),
-        "attempt": context_available.then(|| descriptor.attempt.as_ref().map(|attempt| json!({
-            "attempt_id": attempt.attempt_id.as_str(),
-            "fence": attempt.fence.get(),
-        }))).flatten(),
-        "required_roles": descriptor
-            .required_roles
-            .iter()
-            .map(|role| actor_role_name(*role))
-            .collect::<Vec<_>>(),
-        "required_inputs": descriptor
-            .required_inputs
-            .iter()
-            .map(|input| action_input_name(*input))
-            .collect::<Vec<_>>(),
-        "confirmation": descriptor.confirmation,
-        "read_only": descriptor.read_only,
-        "recovery": descriptor.recovery,
-    })
-}
-
-fn action_kind_name(value: boreal_domain::actions::ActionKind) -> &'static str {
-    use boreal_domain::actions::ActionKind::*;
-    match value {
-        Inspect => "inspect",
-        ReadHistory => "read_history",
-        ReadOperation => "read_operation",
-        Export => "export",
-        Publish => "publish",
-        Claim => "claim",
-        AcceptAttempt => "accept_attempt",
-        StartAttempt => "start_attempt",
-        Checkpoint => "checkpoint",
-        AttachEvidence => "attach_evidence",
-        Submit => "submit",
-        RequestReview => "request_review",
-        Review => "review",
-        FinishClose => "finish_close",
-        Close => "close",
-        Stop => "stop",
-        Release => "release",
-        PausePolicy => "pause_policy",
-        ResumePolicy => "resume_policy",
-        Cancel => "cancel",
-        Reopen => "reopen",
-        ResolveHold => "resolve_hold",
-        WaiveDependency => "waive_dependency",
-        ForceGate => "force_gate",
-        Recover => "recover",
-        ReconcileResource => "reconcile_resource",
-        Repair => "repair",
-    }
-}
-
-fn action_input_name(value: boreal_domain::actions::ActionInputKind) -> &'static str {
-    use boreal_domain::actions::ActionInputKind::*;
-    match value {
-        ExpectedProjectRevision => "expected_project_revision",
-        ExpectedEntityRevision => "expected_entity_revision",
-        ExpectedProofRevision => "expected_proof_revision",
-        AttemptId => "attempt_id",
-        Fence => "fence",
-        SessionId => "session_id",
-        OperationId => "operation_id",
-        Confirmation => "confirmation",
-        Reason => "reason",
-        Comment => "comment",
-        Evidence => "evidence",
-        Summary => "summary",
-        ReviewDecision => "review_decision",
-        RecoveryDisposition => "recovery_disposition",
-    }
-}
-
-fn actor_role_name(value: boreal_domain::ActorRole) -> &'static str {
-    match value {
-        boreal_domain::ActorRole::Agent => "agent",
-        boreal_domain::ActorRole::Reviewer => "reviewer",
-        boreal_domain::ActorRole::Operator => "operator",
-        boreal_domain::ActorRole::Publisher => "publisher",
-    }
-}
-
-fn action_denial_code(value: &boreal_domain::actions::ActionDenialReason) -> &'static str {
-    use boreal_domain::actions::ActionDenialReason::*;
-    match value {
-        Unauthenticated => "unauthenticated",
-        ScopeMismatch => "scope_mismatch",
-        InvalidFacts => "invalid_facts",
-        AvailabilityUnavailable(_) => "availability_unavailable",
-        IntegrityQuarantined => "integrity_quarantined",
-        IntegrityDegraded => "integrity_degraded",
-        RoleDenied { .. } => "role_denied",
-        DelegationInvalid => "delegation_invalid",
-        PolicyDenied => "policy_denied",
-        StatusDenied(_) => "status_denied",
-        HoldActive(_) => "hold_active",
-        StaleSnapshot { .. } => "stale_snapshot",
-        StaleEntity { .. } => "stale_entity",
-        StaleProof { .. } => "stale_proof",
-        MissingAttempt => "attempt_missing",
-        StaleFence { .. } => "stale_fence",
-        AttemptOwnerMismatch => "attempt_owner_mismatch",
-        AttemptPhaseDenied(_) => "attempt_phase_denied",
-        MissingSubmission => "submission_missing",
-        ReviewNotIndependent => "review_not_independent",
-        RecoveryRequired => "recovery_required",
-        NoActiveHold => "hold_missing",
-        ActionNotApplicable => "action_not_applicable",
-    }
-}
+use boreal_application::{
+    action_denial_code, action_input_name, action_kind_name, actor_role_name,
+};
 
 fn lifecycle_name(value: PersistedLifecycle) -> &'static str {
     match value {
@@ -3312,12 +4133,42 @@ fn operation_show_result(
     let execution = store
         .evidence_execution(operation_id)
         .map_err(map_store_error)?;
-    if operation.is_none() && execution.is_none() {
+    let identity = match boreal_store::identity::IdentityStore::new(store).context(&project) {
+        Ok(identity) => Some(identity),
+        Err(boreal_store::identity::IdentityError::Invalid { field, message })
+            if field == "database_identity" && message == "database identity is not installed" =>
+        {
+            None
+        }
+        Err(boreal_store::identity::IdentityError::Store(
+            boreal_store::StoreError::Unavailable(message),
+        )) if message.contains("no such table: boreal_database_identity") => None,
+        Err(error) => {
+            return Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Rejected,
+                format!("project operation identity is unavailable: {error}"),
+            ));
+        }
+    };
+    let external_job = identity
+        .as_ref()
+        .map(|identity| store.external_job_by_operation_with_identity(identity, operation_id))
+        .transpose()
+        .map_err(map_store_error)?
+        .flatten();
+    let recovery_obligations = store
+        .list_unresolved_recovery_obligations(&project, None, 500)
+        .map_err(map_store_error)?
+        .into_iter()
+        .filter(|obligation| obligation.obligation_id.starts_with(&format!("{operation_id}:")))
+        .collect::<Vec<_>>();
+    if operation.is_none() && execution.is_none() && external_job.is_none() {
         if let Some(partial) = finish_parent_readback(store, &project, operation_id)? {
             return Ok(partial);
         }
     }
-    if operation.is_none() && execution.is_none() {
+    if operation.is_none() && execution.is_none() && external_job.is_none() {
         return Err(CliError::with(
             ErrorCode::NotFound,
             ApplicationOutcome::Rejected,
@@ -3352,6 +4203,37 @@ fn operation_show_result(
             ));
         }
     }
+    let external_job_json = external_job.as_ref().map(|job| json!({
+        "job_id": job.job_id,
+        "operation_id": job.operation_id,
+        "project_id": job.project_id,
+        "subject_type": job.subject_type,
+        "subject_id": job.subject_id,
+        "kind": job.kind,
+        "request_digest": job.request_digest,
+        "stage": job.stage,
+        "side_effect_ref": job.side_effect_ref,
+        "source_identity": job.source_identity,
+        "config_identity": job.config_identity,
+        "started_at": job.started_at,
+        "deadline": job.deadline,
+        "result_digest": job.result_digest,
+        "reconciliation_state": job.reconciliation_state,
+        "error_message": job.error_message,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }));
+    let recovery_json = recovery_obligations.iter().map(|obligation| json!({
+        "obligation_id": obligation.obligation_id,
+        "work_id": obligation.work_id,
+        "attempt_id": obligation.attempt_id,
+        "fence": obligation.fence,
+        "reason": obligation.reason,
+        "state": obligation.state,
+        "resource_state": obligation.resource_state,
+        "next_action": obligation.next_action,
+        "created_at": obligation.created_at,
+    })).collect::<Vec<_>>();
     let receipt_id = execution
         .as_ref()
         .and_then(|value| value.receipt_id.clone())
@@ -3441,9 +4323,15 @@ fn operation_show_result(
         Some(json!({
             "operation": operation_json,
             "execution": execution_json,
+            "external_job": external_job_json,
+            "recovery_obligations": recovery_json,
             "receipt_id": receipt.as_ref().map(|value| value.receipt_id.as_str()),
             "receipt": receipt.as_ref().map(receipt_record_json),
-            "readback_required": outcome == ApplicationOutcome::Unknown,
+            "readback_required": outcome == ApplicationOutcome::Unknown
+                || external_job.as_ref().is_some_and(|job| matches!(
+                    job.stage.as_str(), "side_effect_started" | "side_effect_finished"
+                        | "readback_required" | "cancel_requested"
+                )),
         })),
         operation.as_ref().map(|value| value.revision),
     )
@@ -3732,17 +4620,16 @@ fn create_work_result(
             .collect(),
         acceptance_profile: AcceptanceProfile::focused(),
     };
-    let result = match parsed.options.expected_revision {
-        Some(expected_revision) => app.create_work_as_checked(
+    let result = app
+        .create_work_as_session_checked(
             &work,
             &parsed.options.actor,
-            Some(expected_revision),
+            &parsed.options.session,
+            parsed.options.expected_revision,
             &now(),
             operation.to_owned(),
-        ),
-        None => app.create_work_as(&work, &parsed.options.actor, &now(), operation.to_owned()),
-    }
-    .map_err(map_application_error)?;
+        )
+        .map_err(map_application_error)?;
     bounded_result(
         Some(json!({
             "project_id": result.value.project_id,
@@ -3796,6 +4683,12 @@ fn claim_result<A: boreal_application::AttemptLifecycleAdapter>(
     // transaction itself, before it can insert a session row.
     app.show_work(&project, &work_id)
         .map_err(map_application_error)?;
+    validate_bound_execution_context(
+        store,
+        &project,
+        parsed.options.source_version.as_deref(),
+        parsed.options.config_identity.as_deref(),
+    )?;
     let _ = store
         .project_revision(project.as_str())
         .map_err(map_store_error)?;
@@ -3829,7 +4722,7 @@ fn claim_result<A: boreal_application::AttemptLifecycleAdapter>(
             Some(parsed.options.session.as_str()),
             &attempt_id,
             operation,
-            &request_digest(operation, &project, &work_id, &attempt_id),
+            &cli_claim_request_digest(parsed, &project, &work_id, &attempt_id),
             expected_revision,
             &stamp(claimed_at.as_millis()),
             &stamp(deadlines.lease_deadline.as_millis()),
@@ -3882,7 +4775,7 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
             &parsed.options.actor,
             &parsed.options.session,
         )?)
-        .or(select_claimable_work(
+        .or(select_claimable_candidate(
             store,
             &project,
             &parsed.options.actor,
@@ -3915,6 +4808,17 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
         let snapshot = adapter
             .current_attempt(&project, &attempt_id)
             .map_err(|error| map_application_error(ApplicationError::from(error)))?;
+        if matches!(
+            snapshot.phase,
+            AttemptPhase::Claimed | AttemptPhase::Accepted
+        ) {
+            validate_bound_execution_context(
+                store,
+                &project,
+                current.source_version_id.as_deref(),
+                Some(current.config_identity.as_str()),
+            )?;
+        }
         let request = attempt_request(
             &project,
             &work_id,
@@ -3987,6 +4891,7 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
             .map_err(|error| map_application_error(ApplicationError::from(error)))?;
         return attempt_result(result, &updated, store, &project);
     }
+    validate_start_context(parsed, store, &project)?;
     let mut selected = parsed.clone();
     selected.options.work = Some(work_id.clone());
     let result = claim_result(&selected, app, adapter, operation, store)?;
@@ -4052,6 +4957,67 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
         value.outcome = outcome;
         value
     })
+}
+
+fn validate_start_context(
+    parsed: &ParsedCommand,
+    store: &SqliteStore,
+    project: &ProjectId,
+) -> Result<(), CliError> {
+    validate_bound_execution_context(
+        store,
+        project,
+        parsed.options.source_version.as_deref(),
+        parsed.options.config_identity.as_deref(),
+    )
+}
+
+fn validate_bound_execution_context(
+    store: &SqliteStore,
+    project: &ProjectId,
+    source_version: Option<&str>,
+    config_identity: Option<&str>,
+) -> Result<(), CliError> {
+    let source_version = source_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CliError::invalid(
+                "starting work requires --source-version and --config-identity; inspect registered sources with `bwrk source list <project> --json`",
+            )
+        })?;
+    config_identity
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
+        .ok_or_else(|| {
+            CliError::invalid(
+                "starting work requires a meaningful --config-identity (`unknown` is not accepted)",
+            )
+        })?;
+    let source = store
+        .source_version(project.as_str(), source_version)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!(
+                    "source version {source_version:?} is not registered in project {:?}; inspect sources with `bwrk source list <project> --json`",
+                    project.as_str()
+                ),
+            )
+        })?;
+    if source.availability != "available" {
+        return Err(CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            format!(
+                "source version {source_version:?} is {}; choose an available source before starting",
+                source.availability
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn resume_result(
@@ -4148,13 +5114,14 @@ fn next_result(
         })?;
         return next_from_guide(parsed, result.revision, guide);
     }
-    let snapshot = boreal_application::project_status_from_store(
+    let snapshot = boreal_application::project_status_from_store_for_session(
         store,
         &project,
         &boreal_domain::ActorContext {
             actor_id: ActorId::new(parsed.options.actor.clone()),
             role: boreal_domain::ActorRole::Agent,
         },
+        Some(parsed.options.session.as_str()),
         TimestampMs::from_millis(now_ms_u64()),
         1_000,
         0,
@@ -4198,7 +5165,8 @@ fn next_result(
                 &project,
                 &work_id,
                 snapshot.project_revision.0,
-            )),
+                store,
+            )?),
             context_refs: vec![ContextRefDto {
                 reference_type: "work".to_owned(),
                 id: work_id,
@@ -4247,15 +5215,70 @@ fn guide_for_work(
     work_id: &str,
     resume: bool,
 ) -> Result<CliResult, CliError> {
-    let work = app
-        .show_work(project, work_id)
-        .map_err(map_application_error)?;
-    let revision = store_revision(store, project)?;
-    let current = store
-        .current_attempt_for_work(project.as_str(), work_id)
-        .map_err(map_store_error)?;
-    let (display_status, state, attempt_id, fence, reason_codes, next_action) =
-        guide_state(parsed, project, &work, current.as_ref(), revision, resume)?;
+    let _ = (app, resume);
+    let (revision, item) = boreal_application::guidance_subject(
+        store,
+        project,
+        &boreal_domain::ActorContext {
+            actor_id: ActorId::new(parsed.options.actor.clone()),
+            role: boreal_domain::ActorRole::Agent,
+        },
+        Some(parsed.options.session.as_str()),
+        TimestampMs::from_millis(now_ms_u64()),
+        work_id,
+    )
+    .map_err(|error| {
+        CliError::with(
+            ErrorCode::GuidanceUnavailable,
+            ApplicationOutcome::Rejected,
+            error,
+        )
+    })?;
+    let revision = revision.0;
+    let display_status = status_name(item.status3_display_status()).to_owned();
+    let state = display_status.clone();
+    let attempt_id = item
+        .attempt
+        .as_ref()
+        .map(|attempt| attempt.attempt_id.to_string());
+    let fence = item.attempt.as_ref().map(|attempt| attempt.fence.get());
+    let reason_codes = item
+        .decision
+        .reason_codes
+        .iter()
+        .map(|reason| reason.stable_code().to_owned())
+        .collect::<Vec<_>>();
+    let selected = boreal_application::guided_action(&item);
+    let next_action = if let Some(kind) = selected {
+        if kind == boreal_domain::actions::ActionKind::Claim {
+            Some(start_action(
+                &parsed.options,
+                project,
+                work_id,
+                revision,
+                store,
+            )?)
+        } else {
+            // Non-claim actions require structured proof/decision inputs. Explain the
+            // exact server descriptor via a read rather than manufacturing an argv.
+            Some(NextActionDto {
+                directive_id: format!("guidance.{}@v1", action_kind_name(kind)),
+                severity: "advisory".into(),
+                title: format!("Inspect the {} action", action_kind_name(kind)),
+                instruction: "Load the current server descriptor, bind its required inputs and confirmation, then submit that action. Guidance itself is not permission.".into(),
+                subject: SubjectDto { subject_type: "work".into(), id: work_id.into() },
+                safe_argv: vec!["bwrk".into(), "work".into(), "show".into(), work_id.into(), "--project".into(), project.to_string(), "--json".into()],
+                cwd: ".".into(), runner: "boreal_cli".into(), shell: false,
+            })
+        }
+    } else {
+        None
+    };
+    let bound_proof = item
+        .canonical_inputs
+        .as_ref()
+        .and_then(|facts| facts.requirements.as_present())
+        .map(|requirements| &requirements.proof);
     let dto = AgentGuideDto {
         kind: "agent_guide".to_owned(),
         guide_schema_version: schema::GUIDANCE.to_owned(),
@@ -4299,8 +5322,14 @@ fn guide_for_work(
         provenance: GuidanceProvenanceDto {
             registry_version: "directives.v1".to_owned(),
             registry_path: "boreal.agent.directive.registry.v1".to_owned(),
-            source_snapshot_hash: "sha256:unknown".to_owned(),
-            config_identity: "sha256:unknown".to_owned(),
+            source_snapshot_hash: bound_proof
+                .and_then(|proof| proof.source_snapshot.as_ref())
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_else(|| "unbound".into()),
+            config_identity: bound_proof
+                .and_then(|proof| proof.configuration.as_ref())
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_else(|| "unbound".into()),
             gap_codes: reason_codes,
             workflow_refs: vec![
                 "boreal.workflow.claim.v1".to_owned(),
@@ -4310,112 +5339,6 @@ fn guide_for_work(
         selection_key: format!("{}|{}|agent.guide@v1", work_id, revision),
     };
     typed_result(ApplicationOutcome::Unchanged, Some(revision), dto)
-}
-
-type GuideState = (
-    String,
-    String,
-    Option<String>,
-    Option<u64>,
-    Vec<String>,
-    Option<NextActionDto>,
-);
-
-fn guide_state(
-    parsed: &ParsedCommand,
-    project: &ProjectId,
-    work: &boreal_store::WorkRecord,
-    current: Option<&AttemptRecord>,
-    revision: u64,
-    _resume: bool,
-) -> Result<GuideState, CliError> {
-    if let Some(attempt) = current {
-        let expired = attempt.phase == AttemptPhase::ExpiryPending
-            || now_ms_u64() >= parse_stamp_ms(&attempt.lease_deadline).unwrap_or(u64::MAX);
-        return Ok((
-            phase_status(attempt.phase).to_owned(),
-            if expired {
-                "expired_review"
-            } else {
-                "active_attempt"
-            }
-            .to_owned(),
-            Some(attempt.attempt_id.clone()),
-            Some(attempt.fence),
-            vec![if expired {
-                "expired_review"
-            } else {
-                "attempt.active"
-            }
-            .to_owned()],
-            (!expired).then(|| resume_action(&parsed.options, project, &attempt.work_id, attempt)),
-        ));
-    }
-    let derived = if work.lifecycle == "closed" {
-        boreal_domain::DerivedStatus::Closed
-    } else if work.dispatch_policy == "automatic" && work.lifecycle == "open" {
-        boreal_domain::DerivedStatus::Ready
-    } else {
-        boreal_domain::DerivedStatus::Blocked
-    };
-    let reasons = if derived == boreal_domain::DerivedStatus::Ready {
-        Vec::new()
-    } else {
-        vec!["blocked_work".to_owned()]
-    };
-    let directive = guide_checked(boreal_application::GuidanceContext {
-        work_id: work.work_id.as_str(),
-        status: derived,
-        reason_codes: &reasons,
-        has_goal: true,
-    })
-    .map_err(|error| {
-        CliError::with(
-            ErrorCode::GuidanceUnavailable,
-            ApplicationOutcome::Failed,
-            error.to_string(),
-        )
-    })?;
-    let action = if derived == boreal_domain::DerivedStatus::Ready {
-        Some(start_action(
-            &parsed.options,
-            project,
-            &work.work_id,
-            revision,
-        ))
-    } else {
-        Some(NextActionDto {
-            directive_id: directive.registry_id.to_owned(),
-            severity: "blocking".to_owned(),
-            title: directive.explanation.to_owned(),
-            instruction: directive.explanation.to_owned(),
-            subject: SubjectDto {
-                subject_type: "work".to_owned(),
-                id: work.work_id.clone(),
-            },
-            safe_argv: directive
-                .safe_argv
-                .iter()
-                .map(|value| value.to_string())
-                .collect(),
-            cwd: ".".to_owned(),
-            runner: "boreal_cli".to_owned(),
-            shell: false,
-        })
-    };
-    Ok((
-        format!("{derived:?}").to_ascii_lowercase(),
-        if derived == boreal_domain::DerivedStatus::Ready {
-            "ready"
-        } else {
-            "blocked"
-        }
-        .to_owned(),
-        None,
-        None,
-        reasons,
-        action,
-    ))
 }
 
 fn guide_idle(
@@ -4765,14 +5688,21 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         }
         Err(error) => return Err(map_application_error(error)),
     };
-    let submitted = attempt_mutation_result(
-        parsed,
-        app,
-        adapter,
-        &sub_operation(operation, "submit"),
-        store,
-        AttemptOperation::Submit,
-    )?;
+    let submitted = app
+        .prepare_finish(
+            adapter,
+            attempt_request(
+                &ProjectId::new(project.clone()),
+                &work_id,
+                &AttemptId::new(expected_attempt),
+                &parsed.options,
+                Fence::new(expected_fence),
+                &sub_operation(operation, "submit"),
+                AttemptOperation::Submit.command_identity(),
+                parsed.options.reason.as_deref(),
+            )?,
+        )
+        .map_err(map_application_error)?;
     let summary_result = app
         .record_summary(
             &parsed.options.actor,
@@ -4819,7 +5749,7 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         ApplicationOutcome::Changed
     };
     let close_data = json!({
-        "attempt": submitted.data,
+        "attempt": submitted.as_ref().map(|result| attempt_json_with_current(&result.value, true)),
         "receipt_id": receipt.receipt_id.as_str(),
         "receipt_replayed": receipt_replayed,
         "summary_id": summary.summary_id,
@@ -4887,8 +5817,11 @@ fn evidence_add_result(
 #[derive(Clone, Debug, Deserialize)]
 struct GateDeclaration {
     gate_id: String,
+    #[serde(default)]
+    policy_revision: u64,
     kind: String,
     executable: String,
+    verifier_digest: String,
     argv: Vec<String>,
     #[serde(default = "default_gate_cwd")]
     cwd: String,
@@ -4908,6 +5841,258 @@ struct GateDeclaration {
     /// it is never used as a substitute for the durable gate policy identity.
     #[serde(skip)]
     policy_identity: String,
+}
+
+fn gate_policy_publish_result(
+    parsed: &ParsedCommand,
+    operation: &str,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let gate_id = parsed
+        .options
+        .gate
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("gate policy publish requires --gate"))?;
+    if gate_id.is_empty()
+        || !gate_id
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || value == '_' || value == '-')
+    {
+        return Err(CliError::invalid("gate identifier is not a safe policy name"));
+    }
+    let expected_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("gate policy publish requires --expected-revision"))?;
+    if !parsed.options.setup.yes {
+        return Err(CliError::invalid(
+            "gate policy publish requires explicit --yes confirmation",
+        ));
+    }
+    require_operator(store, project.as_str(), &parsed.options.actor)?;
+    let current_revision = store_revision(store, &project)?;
+    let prior_operation = store.operation(operation).map_err(map_store_error)?;
+    if let Some(existing) = &prior_operation {
+        if existing.command != "source.register" {
+            return Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Conflict,
+                "operation id is already bound to another command",
+            ));
+        }
+    } else if current_revision != expected_revision {
+        return Err(CliError::with(
+            ErrorCode::RevisionConflict,
+            ApplicationOutcome::Rejected,
+            format!(
+                "project changed before gate policy publication (expected revision {expected_revision}, found {})",
+                current_revision
+            ),
+        ));
+    }
+    let input = parsed
+        .options
+        .input
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("gate policy publish requires --input"))?;
+    let context = project_context::resolve(parsed)?;
+    let policy_path = project_context::confined_path(&context.root, Path::new(input), false)?;
+    let metadata = fs::metadata(&policy_path).map_err(|error| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("gate policy input is not readable: {error}"),
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_JSON_BYTES as u64 {
+        return Err(CliError::invalid(
+            "gate policy input must be a regular JSON file within the inline bound",
+        ));
+    }
+    let policy_bytes = fs::read(&policy_path).map_err(|error| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            format!("unable to read gate policy: {error}"),
+        )
+    })?;
+    let declaration = parse_gate_declaration(&policy_bytes, gate_id, true)?;
+    let workspace = store
+        .source_version(project.as_str(), &declaration.source_snapshot_hash)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            "gate policy workspace snapshot is not registered in this project",
+        ))?;
+    if workspace.availability != "available"
+        || workspace.media_type != "application/vnd.boreal.workspace-snapshot.v1"
+    {
+        return Err(CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "gate policy must bind an available immutable workspace snapshot",
+        ));
+    }
+    let source_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
+    let catalog = source_catalog(&source_root)?;
+    let application = KnowledgeApplication::new(&catalog);
+    let workspace_source = application
+        .show_source(project.as_str(), &declaration.source_snapshot_hash)
+        .map_err(map_knowledge_error)?;
+    if workspace_source.content_digest != workspace.content_digest
+        || workspace_source.byte_count as u64 != workspace.byte_count
+        || workspace_source.media_type != workspace.media_type
+        || workspace_source.origin != workspace.origin
+        || workspace_source.availability != boreal_source::Availability::Available
+    {
+        return Err(CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            "workspace snapshot catalog digest does not match the project registration",
+        ));
+    }
+    let workspace_bytes = catalog.verify(&workspace_source).map_err(map_source_error)?;
+    let snapshot_check = TemporaryWorkspace::for_evidence(&context.root, operation)?;
+    let snapshot_root = snapshot_check.unpack(&workspace_bytes)?;
+    let prepared_environment = prepare_gate_environment(&declaration)?;
+    let _resolved_verifier = resolve_gate_executable(
+        &declaration,
+        snapshot_root,
+        &prepared_environment.variables,
+    )?;
+    drop(snapshot_check);
+    let gate_prefix = format!("gate-policy:{gate_id}:");
+    let mut offset = 0u64;
+    let mut latest_revision = 0u64;
+    let mut prior_configs = Vec::new();
+    loop {
+        let rows = store
+            .list_source_versions(project.as_str(), 1_000, offset)
+            .map_err(map_store_error)?;
+        for row in &rows {
+            let Some(revision_text) = row.origin.strip_prefix(&gate_prefix) else {
+                continue;
+            };
+            if row.media_type != "application/vnd.boreal.gate-policy+json"
+                || row.availability != "available"
+            {
+                return Err(CliError::with(
+                    ErrorCode::IntegrityQuarantined,
+                    ApplicationOutcome::Rejected,
+                    "registered gate policy revision is unavailable or has the wrong media type",
+                ));
+            }
+            let revision = revision_text.parse::<u64>().map_err(|_| {
+                CliError::with(
+                    ErrorCode::IntegrityQuarantined,
+                    ApplicationOutcome::Rejected,
+                    "registered gate policy has an invalid revision origin",
+                )
+            })?;
+            latest_revision = latest_revision.max(revision);
+            let stored = application
+                .show_source(project.as_str(), &row.source_version_id)
+                .map_err(map_knowledge_error)?;
+            let bytes = catalog.verify(&stored).map_err(map_source_error)?;
+            let previous = parse_gate_declaration(&bytes, gate_id, true)?;
+            prior_configs.push(previous.config_identity);
+        }
+        if rows.len() < 1_000 {
+            break;
+        }
+        offset = offset.saturating_add(rows.len() as u64);
+    }
+    if prior_operation.is_none() {
+        let expected_policy_revision = latest_revision.saturating_add(1);
+        if declaration.policy_revision != expected_policy_revision {
+            return Err(CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Rejected,
+                format!(
+                    "gate policy revision must be {expected_policy_revision}; requested {}",
+                    declaration.policy_revision
+                ),
+            ));
+        }
+        if prior_configs
+            .iter()
+            .any(|identity| identity == &declaration.config_identity)
+        {
+            return Err(CliError::with(
+                ErrorCode::ReceiptPolicyMismatch,
+                ApplicationOutcome::Rejected,
+                "each gate policy revision must have a distinct configuration identity",
+            ));
+        }
+    }
+    let origin = format!("gate-policy:{gate_id}:{}", declaration.policy_revision);
+    let capture = application
+        .capture_source(SourceCaptureInput {
+            operation_id: operation.to_owned(),
+            project_id: project.as_str().to_owned(),
+            origin,
+            media_type: "application/vnd.boreal.gate-policy+json".to_owned(),
+            bytes: policy_bytes,
+        })
+        .map_err(map_knowledge_error)?;
+    if let Some(existing) = store
+        .source_version(project.as_str(), &capture.source.source_version_id)
+        .map_err(map_store_error)?
+    {
+        if existing.origin != capture.source.origin
+            || existing.content_digest != capture.source.content_digest
+        {
+            return Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Conflict,
+                "captured policy digest is already registered under another origin",
+            ));
+        }
+    }
+    let captured_at = store
+        .source_version(project.as_str(), &capture.source.source_version_id)
+        .map_err(map_store_error)?
+        .map_or_else(now, |record| record.captured_at);
+    let registration = if prior_operation.is_some() {
+        application.register_captured_source(
+            store,
+            &capture.source,
+            &capture.operation,
+            &parsed.options.actor,
+            &captured_at,
+        )
+    } else {
+        application.register_captured_source_at_revision(
+            store,
+            &capture.source,
+            &capture.operation,
+            &parsed.options.actor,
+            &captured_at,
+            expected_revision,
+        )
+    }
+    .map_err(map_knowledge_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": project.as_str(),
+            "gate_id": gate_id,
+            "policy_revision": declaration.policy_revision,
+            "policy_version_id": registration.source.source_version_id,
+            "policy_digest": registration.source.content_digest,
+            "workspace_snapshot_id": declaration.source_snapshot_hash,
+            "config_identity": declaration.config_identity,
+            "operation_id": registration.operation.operation_id,
+            "project_revision": registration.revision,
+            "replayed": registration.replayed,
+        })),
+        Some(registration.revision),
+    )
 }
 
 fn default_gate_cwd() -> String {
@@ -4932,6 +6117,198 @@ fn default_environment_allowlist() -> Vec<String> {
     .collect()
 }
 
+struct TemporaryWorkspace(PathBuf);
+
+impl TemporaryWorkspace {
+    fn for_evidence(project_root: &Path, operation: &str) -> Result<Self, CliError> {
+        let parent = env::temp_dir().join("bwrk-witnessed-workspaces");
+        fs::create_dir_all(&parent).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("unable to create verifier staging root: {error}"),
+            )
+        })?;
+        let parent_metadata = fs::symlink_metadata(&parent).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("unable to inspect verifier staging root: {error}"),
+            )
+        })?;
+        if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+            return Err(CliError::with(
+                ErrorCode::UnsafeCommand,
+                ApplicationOutcome::Rejected,
+                "verifier staging root must be a real directory",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            unsafe extern "C" {
+                fn geteuid() -> u32;
+            }
+            if parent_metadata.uid() != unsafe { geteuid() } {
+                return Err(CliError::with(
+                    ErrorCode::UnsafeCommand,
+                    ApplicationOutcome::Rejected,
+                    "verifier staging root must be owned by the current user",
+                ));
+            }
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    format!("unable to secure verifier staging root: {error}"),
+                )
+            })?;
+        }
+        let sequence = OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let key = sha256_content_digest(
+            format!(
+                "{}:{operation}:{}:{sequence}",
+                project_root.to_string_lossy(),
+                std::process::id()
+            )
+            .as_bytes(),
+        )
+        .replace(':', "-");
+        let path = parent.join(key);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                fs::remove_dir_all(&path).map_err(|error| {
+                    CliError::with(
+                        ErrorCode::ServiceUnavailable,
+                        ApplicationOutcome::Failed,
+                        format!("unable to replace abandoned verifier snapshot: {error}"),
+                    )
+                })?;
+            }
+            Ok(_) => {
+                return Err(CliError::with(
+                    ErrorCode::UnsafeCommand,
+                    ApplicationOutcome::Rejected,
+                    "verifier snapshot path is not a real directory",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    format!("unable to inspect verifier snapshot path: {error}"),
+                ));
+            }
+        }
+        Ok(Self(path))
+    }
+
+    fn unpack(&self, bytes: &[u8]) -> Result<&Path, CliError> {
+        boreal_source::workspace_snapshot::unpack(
+            bytes,
+            &self.0,
+            boreal_source::workspace_snapshot::DEFAULT_MAX_SNAPSHOT_BYTES,
+        )
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::ReceiptInvalid,
+                ApplicationOutcome::Rejected,
+                format!("registered source is not a valid workspace snapshot: {error}"),
+            )
+        })?;
+        Ok(&self.0)
+    }
+}
+
+impl Drop for TemporaryWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn gate_policy_for_attempt(
+    store: &SqliteStore,
+    catalog: &SourceCatalog,
+    project: &str,
+    gate_id: &str,
+    config_identity: &str,
+) -> Result<(GateDeclaration, boreal_store::SourceVersionRecord), CliError> {
+    let prefix = format!("gate-policy:{gate_id}:");
+    let mut offset = 0u64;
+    let mut selected: Option<(GateDeclaration, boreal_store::SourceVersionRecord)> = None;
+    loop {
+        let records = store
+            .list_source_versions(project, 1_000, offset)
+            .map_err(map_store_error)?;
+        for record in &records {
+            let Some(revision_text) = record.origin.strip_prefix(&prefix) else {
+                continue;
+            };
+            if record.media_type != "application/vnd.boreal.gate-policy+json"
+                || record.availability != "available"
+            {
+                return Err(CliError::with(
+                    ErrorCode::IntegrityQuarantined,
+                    ApplicationOutcome::Rejected,
+                    "registered gate policy revision is unavailable or has the wrong media type",
+                ));
+            }
+            let source = catalog
+                .show_version(project, &record.source_version_id)
+                .map_err(map_source_error)?;
+            if source.content_digest != record.content_digest
+                || source.byte_count as u64 != record.byte_count
+                || source.availability != boreal_source::Availability::Available
+            {
+                return Err(CliError::with(
+                    ErrorCode::IntegrityQuarantined,
+                    ApplicationOutcome::Rejected,
+                    "gate policy catalog bytes do not match the immutable project registration",
+                ));
+            }
+            let bytes = catalog.verify(&source).map_err(map_source_error)?;
+            let declaration = parse_gate_declaration(&bytes, gate_id, true)?;
+            let registered_revision = revision_text.parse::<u64>().map_err(|_| {
+                CliError::with(
+                    ErrorCode::IntegrityQuarantined,
+                    ApplicationOutcome::Rejected,
+                    "registered gate policy has an invalid revision origin",
+                )
+            })?;
+            if declaration.policy_revision != registered_revision {
+                return Err(CliError::with(
+                    ErrorCode::IntegrityQuarantined,
+                    ApplicationOutcome::Rejected,
+                    "gate policy body revision does not match its immutable registration",
+                ));
+            }
+            if declaration.config_identity != config_identity {
+                continue;
+            }
+            if selected.is_some() {
+                return Err(CliError::with(
+                    ErrorCode::ReceiptPolicyMismatch,
+                    ApplicationOutcome::Rejected,
+                    "attempt configuration identity matches multiple gate policy revisions",
+                ));
+            }
+            selected = Some((declaration, record.clone()));
+        }
+        if records.len() < 1_000 {
+            break;
+        }
+        offset = offset.saturating_add(records.len() as u64);
+    }
+    selected.ok_or_else(|| {
+        CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "no project-published gate policy revision matches the attempt configuration identity",
+        )
+    })
+}
+
 fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
@@ -4947,6 +6324,15 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         .gate
         .clone()
         .ok_or_else(|| CliError::invalid("evidence run requires --gate"))?;
+    // Persisted service gate IDs are scoped to the work item (for example,
+    // `TASK-17:verification`), while published policy revisions use the
+    // profile's short gate key. Strip only this exact work prefix; the short
+    // key is checked against the pinned profile and registered policy below.
+    let work_gate_prefix = format!("{work_id}:");
+    let policy_gate_id = gate_id
+        .strip_prefix(&work_gate_prefix)
+        .unwrap_or(&gate_id)
+        .to_owned();
     // Completed-operation replay is checked before reading declarations,
     // creating artifacts, or launching an external process. A separate
     // durable admitted/running state is still required to close the crash
@@ -5047,16 +6433,21 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             ),
         ));
     }
-    let declaration = read_gate_declaration(gate_root, &gate_id)?;
     let canonical_gate_root = gate_root.canonicalize().map_err(|error| {
         CliError::with(
             ErrorCode::ReceiptInvalid,
             ApplicationOutcome::Rejected,
-            format!("gate policy root is unavailable: {error}"),
+            format!("evidence artifact root is unavailable: {error}"),
         )
     })?;
-    let prepared_environment = prepare_gate_environment(&declaration)?;
-    let workspace_root = resolve_workspace_root(&canonical_gate_root)?;
+    let context = project_context::resolve(parsed)?;
+    let source_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
+    let catalog = source_catalog(&source_root)?;
+    let knowledge = KnowledgeApplication::new(&catalog);
     let attempt_record = store
         .current_attempt_for_work(project.as_str(), &work_id)
         .map_err(map_store_error)?
@@ -5067,6 +6458,77 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
                 "evidence run requires a current attempt",
             )
         })?;
+    let source_version_id = attempt_record
+        .source_version_id
+        .as_deref()
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::ReceiptPolicyMismatch,
+                ApplicationOutcome::Rejected,
+                "current attempt is not bound to an immutable workspace snapshot",
+            )
+        })?;
+    let captured_source = store
+        .source_version(project.as_str(), source_version_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            "attempt workspace snapshot is not registered in this project",
+        ))?;
+    if captured_source.project_id != project.as_str()
+        || captured_source.availability != "available"
+        || captured_source.media_type != "application/vnd.boreal.workspace-snapshot.v1"
+    {
+        return Err(CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            "attempt source is not an available immutable workspace snapshot",
+        ));
+    }
+    let source = knowledge
+        .show_source(project.as_str(), source_version_id)
+        .map_err(map_knowledge_error)?;
+    let source_bytes = catalog.verify(&source).map_err(|error| {
+        CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            format!("captured workspace snapshot failed digest verification: {error}"),
+        )
+    })?;
+    if source.content_digest.as_str() != captured_source.content_digest
+        || source.byte_count as u64 != captured_source.byte_count
+    {
+        return Err(CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            "captured source catalog bytes do not match the immutable project registration",
+        ));
+    }
+    let temporary_workspace = TemporaryWorkspace::for_evidence(&context.root, operation)?;
+    let workspace_root = temporary_workspace.unpack(&source_bytes)?;
+    let (declaration, policy_record) = gate_policy_for_attempt(
+        store,
+        &catalog,
+        project.as_str(),
+        &policy_gate_id,
+        &attempt_record.config_identity,
+    )?;
+    if declaration.source_snapshot_hash != source_version_id
+        || attempt_record.config_identity != declaration.config_identity
+    {
+        return Err(CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "published gate policy source/configuration identities do not match the current attempt",
+        ));
+    }
+    let prepared_environment = prepare_gate_environment(&declaration)?;
+    let verifier_path = resolve_gate_executable(
+        &declaration,
+        workspace_root,
+        &prepared_environment.variables,
+    )?;
     let attempt_id = parsed
         .options
         .attempt
@@ -5110,13 +6572,14 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             "evidence run requires an accepted and started attempt",
         ));
     }
-    let status = boreal_application::project_status_from_store(
+    let status = boreal_application::project_status_from_store_for_session(
         store,
         &project,
         &boreal_domain::ActorContext {
             actor_id: ActorId::new(parsed.options.actor.clone()),
             role: boreal_domain::ActorRole::Agent,
         },
+        Some(parsed.options.session.as_str()),
         TimestampMs::from_millis(now_ms_u64()),
         1_000,
         0,
@@ -5133,19 +6596,22 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         .into_iter()
         .find(|item| item.work.id.as_str() == work_id)
         .ok_or_else(|| CliError::invalid("evidence run work is not in the project snapshot"))?;
+    let scoped_gate_id = format!("{work_id}:{policy_gate_id}");
     let gate = status_work
         .work
         .acceptance_profile
         .gates
         .iter()
         .find(|gate| {
-            gate.id.as_str() == gate_id || gate.id.as_str().ends_with(&format!(":{gate_id}"))
+            gate.id.as_str() == gate_id
+                || gate.id.as_str() == policy_gate_id
+                || gate.id.as_str() == scoped_gate_id
         })
         .ok_or_else(|| {
             CliError::invalid("evidence run gate is not declared by the work acceptance profile")
         })?;
     let kind = parse_gate_kind(&declaration.kind)?;
-    if kind != gate.kind || declaration.gate_id != gate_id {
+    if kind != gate.kind || declaration.gate_id != policy_gate_id {
         return Err(CliError::with(
             ErrorCode::ReceiptPolicyMismatch,
             ApplicationOutcome::Rejected,
@@ -5165,7 +6631,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         profile_id: status_work.work.acceptance_profile.id.clone(),
         profile_version: status_work.work.acceptance_profile.version.clone(),
         gate: AcceptanceGateDefinition {
-            id: GateId::new(gate_id.clone()),
+            id: gate.id.clone(),
             kind,
             required: gate.required,
             command: Some(command),
@@ -5197,6 +6663,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         receipt_id: ReceiptId::new(format!("receipt-{operation}")),
         operation_id: OperationId::new(operation),
         expectation,
+        gate_policy_identity: declaration.policy_identity.clone(),
         cwd: declaration.cwd.clone(),
         environment_fingerprint: prepared_environment.fingerprint.clone(),
         attestation: ExecutorAttestation::BorealWitnessed,
@@ -5234,8 +6701,9 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
     validation_failpoint("after_evidence_start");
     let execution = match execute_gate_command(
         &declaration,
+        &verifier_path,
         &output_path,
-        Some(&workspace_root),
+        Some(workspace_root),
         &prepared_environment.variables,
     ) {
         Ok(execution) => execution,
@@ -5288,6 +6756,10 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         "ended_at": stamp(result.receipt.ended_at.as_millis()),
         "source_snapshot_hash": result.receipt.source_snapshot_hash.as_str(),
         "config_identity": result.receipt.config_identity.as_str(),
+        "gate_policy_version_id": policy_record.source_version_id,
+        "gate_policy_revision": declaration.policy_revision,
+        "verifier_identity": declaration.verifier_digest,
+        "verifier_executable": declaration.executable,
         "environment_fingerprint": result.receipt.environment_fingerprint,
         "declared_environment_fingerprint": declaration.environment_fingerprint,
         "environment_allowlist": prepared_environment.names,
@@ -5333,6 +6805,10 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             "receipt_id": inserted.receipt.receipt_id,
             "operation_id": inserted.receipt.operation_id,
             "gate_id": inserted.receipt.gate_id,
+            "gate_policy_version_id": policy_record.source_version_id,
+            "gate_policy_revision": declaration.policy_revision,
+            "gate_policy_identity": declaration.policy_identity,
+            "verifier_identity": declaration.verifier_digest,
             "result": format!("{:?}", inserted.receipt.result).to_ascii_lowercase(),
             "execution_outcome": format!("{:?}", result.outcome).to_ascii_lowercase(),
             "output_digest": inserted.receipt.output_digest,
@@ -5388,32 +6864,19 @@ fn validation_failpoint(name: &str) {
     }
 }
 
-fn read_gate_declaration(gate_root: &Path, gate_id: &str) -> Result<GateDeclaration, CliError> {
-    if gate_id.is_empty()
-        || !gate_id
-            .chars()
-            .all(|value| value.is_ascii_alphanumeric() || value == '_' || value == '-')
-    {
-        return Err(CliError::invalid(
-            "gate identifier is not a safe policy filename",
-        ));
-    }
-    let path = gate_root.join(format!("{gate_id}.json"));
-    let text = fs::read_to_string(&path).map_err(|error| {
-        CliError::with(
-            ErrorCode::ReceiptInvalid,
-            ApplicationOutcome::Rejected,
-            format!("declared gate policy unavailable: {error}"),
-        )
-    })?;
-    if text.len() > MAX_JSON_BYTES {
+fn parse_gate_declaration(
+    bytes: &[u8],
+    gate_id: &str,
+    require_revision: bool,
+) -> Result<GateDeclaration, CliError> {
+    if bytes.len() > MAX_JSON_BYTES {
         return Err(CliError::with(
             ErrorCode::ReceiptInvalid,
             ApplicationOutcome::Rejected,
             "declared gate policy exceeds the inline bound",
         ));
     }
-    let mut declaration: GateDeclaration = serde_json::from_str(&text).map_err(|error| {
+    let mut declaration: GateDeclaration = serde_json::from_slice(bytes).map_err(|error| {
         CliError::with(
             ErrorCode::ReceiptInvalid,
             ApplicationOutcome::Rejected,
@@ -5422,8 +6885,13 @@ fn read_gate_declaration(gate_root: &Path, gate_id: &str) -> Result<GateDeclarat
     })?;
     validate_environment_policy(&declaration.environment_allowlist)?;
     if declaration.gate_id != gate_id
+        || (require_revision && declaration.policy_revision == 0)
         || declaration.max_runtime_ms.unwrap_or(1) == 0
         || declaration.max_runtime_ms.unwrap_or(1) > MAX_GATE_RUNTIME_MS
+        || declaration.config_identity.trim().is_empty()
+        || declaration.config_identity.trim().eq_ignore_ascii_case("unknown")
+        || declaration.source_snapshot_hash.trim().is_empty()
+        || !valid_sha256_digest(&declaration.verifier_digest)
     {
         return Err(CliError::with(
             ErrorCode::ReceiptPolicyMismatch,
@@ -5431,8 +6899,20 @@ fn read_gate_declaration(gate_root: &Path, gate_id: &str) -> Result<GateDeclarat
             "declared gate policy identity or runtime is invalid",
         ));
     }
-    declaration.policy_identity = sha256_content_digest(text.as_bytes());
+    CommandSpec::new(declaration.executable.clone(), declaration.argv.clone())
+        .validate()
+        .map_err(|error| map_application_error(ApplicationError::from(error)))?;
+    declaration.policy_identity = sha256_content_digest(bytes);
     Ok(declaration)
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 fn validate_environment_policy(names: &[String]) -> Result<(), CliError> {
@@ -5540,41 +7020,92 @@ fn prepare_gate_environment(
     })
 }
 
-fn resolve_workspace_root(gate_root: &Path) -> Result<PathBuf, CliError> {
-    let storage_root = gate_root.parent().ok_or_else(|| {
-        CliError::with(
-            ErrorCode::ReceiptInvalid,
-            ApplicationOutcome::Rejected,
-            "gate policy has no storage root",
-        )
-    })?;
-    let candidate = {
-        // The standard layout is <workspace>/.boreal/{boreal.sqlite,gates}.
-        // Test and explicitly external layouts use <workspace>/{db,gates}.
-        if storage_root
-            .file_name()
-            .is_some_and(|name| name == ".boreal")
-        {
-            storage_root.parent().unwrap_or(storage_root).to_path_buf()
-        } else {
-            storage_root.to_path_buf()
-        }
-    };
-    let root = candidate.canonicalize().map_err(|error| {
-        CliError::with(
-            ErrorCode::ReceiptInvalid,
-            ApplicationOutcome::Rejected,
-            format!("workspace root is unavailable: {error}"),
-        )
-    })?;
-    if !root.is_dir() {
-        return Err(CliError::with(
-            ErrorCode::ReceiptInvalid,
-            ApplicationOutcome::Rejected,
-            "workspace root is not a directory",
-        ));
+fn resolve_gate_executable(
+    declaration: &GateDeclaration,
+    workspace_root: &Path,
+    environment: &[(String, String)],
+) -> Result<PathBuf, CliError> {
+    let raw = Path::new(&declaration.executable);
+    let mut candidates = Vec::new();
+    if raw.is_absolute() {
+        candidates.push(raw.to_path_buf());
+    } else if declaration.executable.contains('/') {
+        candidates.push(workspace_root.join(raw));
+    } else {
+        let path_value = environment
+            .iter()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, value)| value.as_str())
+            .ok_or_else(|| {
+                CliError::with(
+                    ErrorCode::UnsafeCommand,
+                    ApplicationOutcome::Rejected,
+                    "gate policy executable is not absolute and the captured environment has no PATH",
+                )
+            })?;
+        candidates.extend(env::split_paths(path_value).map(|directory| {
+            if directory.is_absolute() {
+                directory.join(raw)
+            } else {
+                workspace_root.join(directory).join(raw)
+            }
+        }));
     }
-    Ok(root)
+    let mut selected = None;
+    for candidate in candidates {
+        let Ok(metadata) = fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > boreal_source::workspace_snapshot::DEFAULT_MAX_SNAPSHOT_BYTES {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+        let bytes = fs::read(&candidate).map_err(|error| {
+            CliError::with(
+                ErrorCode::UnsafeCommand,
+                ApplicationOutcome::Rejected,
+                format!("unable to read declared verifier executable: {error}"),
+            )
+        })?;
+        if sha256_content_digest(&bytes) != declaration.verifier_digest {
+            continue;
+        }
+        let canonical = candidate.canonicalize().map_err(|error| {
+            CliError::with(
+                ErrorCode::UnsafeCommand,
+                ApplicationOutcome::Rejected,
+                format!("unable to resolve declared verifier executable: {error}"),
+            )
+        })?;
+        if !raw.is_absolute()
+            && declaration.executable.contains('/')
+            && !canonical.starts_with(workspace_root)
+        {
+            return Err(CliError::with(
+                ErrorCode::UnsafeCommand,
+                ApplicationOutcome::Rejected,
+                "relative verifier executable escapes the captured workspace",
+            ));
+        }
+        // Preserve a PATH symlink name such as `cargo`; tools like rustup use
+        // argv[0] to choose the requested tool while the digest check follows
+        // the symlink to the exact executable bytes.
+        selected = Some(candidate);
+        break;
+    }
+    selected.ok_or_else(|| {
+        CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "no executable matches the verifier digest pinned by the published gate policy",
+        )
+    })
 }
 
 /// Resolves the validated project/workspace identity supplied to the atomic
@@ -5667,6 +7198,7 @@ fn parse_gate_kind(value: &str) -> Result<GateKind, CliError> {
 
 fn execute_gate_command(
     declaration: &GateDeclaration,
+    verifier_path: &Path,
     output_path: &Path,
     project_root: Option<&Path>,
     environment: &[(String, String)],
@@ -5739,8 +7271,22 @@ fn execute_gate_command(
                 error.to_string(),
             )
         })?;
+    let verifier_bytes = fs::read(verifier_path).map_err(|error| {
+        CliError::with(
+            ErrorCode::ReceiptInvalid,
+            ApplicationOutcome::Rejected,
+            format!("pinned verifier executable is unavailable: {error}"),
+        )
+    })?;
+    if sha256_content_digest(&verifier_bytes) != declaration.verifier_digest {
+        return Err(CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "verifier executable changed after policy resolution",
+        ));
+    }
     let started_at = TimestampMs::from_millis(now_ms_u64());
-    let mut process = Command::new(&command.executable);
+    let mut process = Command::new(verifier_path);
     process
         .args(command.argv.iter().skip(1))
         .current_dir(&cwd)
@@ -6359,17 +7905,26 @@ fn start_action(
     project: &ProjectId,
     work_id: &str,
     revision: u64,
-) -> NextActionDto {
-    NextActionDto {
-        directive_id: "agent.start@v1".to_owned(),
-        severity: "required".to_owned(),
-        title: "Claim and start the selected work".to_owned(),
-        instruction: "Claim the selected work with a fenced attempt.".to_owned(),
-        subject: SubjectDto {
-            subject_type: "work".to_owned(),
-            id: work_id.to_owned(),
-        },
-        safe_argv: vec![
+    store: &SqliteStore,
+) -> Result<NextActionDto, CliError> {
+    let source_version = options
+        .source_version
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let config_identity = options
+        .config_identity
+        .as_deref()
+        .filter(|value| !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("unknown"));
+    let source_is_available = match source_version {
+        Some(source_version) => store
+            .source_version(project.as_str(), source_version)
+            .map_err(map_store_error)?
+            .is_some_and(|source| source.availability == "available"),
+        None => false,
+    };
+    let source_context_bound = source_is_available && config_identity.is_some();
+    let mut safe_argv = if source_context_bound {
+        vec![
             "bwrk".to_owned(),
             "agent".to_owned(),
             "start".to_owned(),
@@ -6386,12 +7941,54 @@ fn start_action(
             "30m".to_owned(),
             "--time-limit".to_owned(),
             "2h".to_owned(),
-            "--json".to_owned(),
-        ],
+        ]
+    } else {
+        vec![
+            "bwrk".to_owned(),
+            "source".to_owned(),
+            "list".to_owned(),
+            project.as_str().to_owned(),
+        ]
+    };
+    if source_context_bound {
+        if let (Some(source_version), Some(config_identity)) = (source_version, config_identity) {
+            safe_argv.extend([
+                "--source-version".to_owned(),
+                source_version.to_owned(),
+                "--config-identity".to_owned(),
+                config_identity.to_owned(),
+            ]);
+        }
+    }
+    safe_argv.push("--json".to_owned());
+    Ok(NextActionDto {
+        directive_id: "agent.start@v1".to_owned(),
+        severity: "required".to_owned(),
+        title: if source_context_bound {
+            "Claim and start the selected work"
+        } else {
+            "Select source and configuration before starting"
+        }
+        .to_owned(),
+        instruction: if source_context_bound {
+            "Start this work with the selected project source and configuration bound to the attempt."
+                .to_owned()
+        } else if source_version.is_some() && !source_is_available {
+            format!("The supplied source version is not available in project {:?}. Inspect registered sources and choose an exact available version, then provide a meaningful configuration identity.", project.as_str())
+        } else if config_identity.is_none() {
+            "Inspect registered project sources, choose an exact available source version, and provide a meaningful configuration identity; then rerun `bwrk next` with --source-version and --config-identity. Starting without these facts is rejected before an attempt is created.".to_owned()
+        } else {
+            "First inspect registered project sources. Choose the exact source version and provide a meaningful configuration identity, then rerun `bwrk next` with --source-version and --config-identity. Starting without these facts is rejected before an attempt is created.".to_owned()
+        },
+        subject: SubjectDto {
+            subject_type: "work".to_owned(),
+            id: work_id.to_owned(),
+        },
+        safe_argv,
         cwd: ".".to_owned(),
         runner: "boreal_cli".to_owned(),
         shell: false,
-    }
+    })
 }
 
 fn typed_result<T: serde::Serialize>(
@@ -6837,29 +8434,129 @@ fn register_session_if_requested(
     if options.session.trim().is_empty() {
         return Ok(expected_revision);
     }
+    let session_id = SessionId::new(options.session.clone());
+    if app
+        .session(project, &session_id)
+        .map_err(map_application_error)?
+        .is_some()
+    {
+        // Keep retries of older durable claim operations from replaying a
+        // registration request whose historical digest included its generated
+        // timestamp. Identity and active state are revalidated by the store.
+        app.session_for_claim(
+            project,
+            &session_id,
+            &ActorId::new(options.actor.clone()),
+            &HarnessId::new(options.harness.clone()),
+        )
+        .map_err(map_application_error)?;
+        let registration_operation_id = sub_operation(operation, "session");
+        if let Some(readback) = app
+            .operation_readback(project, &registration_operation_id)
+            .map_err(map_application_error)?
+        {
+            if let Some(registration) = readback.operation {
+                if registration.command != "session.register"
+                    || registration.project_id != project.as_str()
+                    || registration.actor_id != options.actor
+                    || registration.session_id.as_deref() != Some(session_id.as_str())
+                    || registration.expected_revision != expected_revision
+                {
+                    return Err(map_application_error(ApplicationError::Store(
+                        StoreError::Conflict(format!(
+                            "operation {registration_operation_id} was already used with another immutable identity"
+                        )),
+                    )));
+                }
+                if !matches!(
+                    registration.outcome,
+                    StoreOperationOutcome::Changed | StoreOperationOutcome::Unchanged
+                ) {
+                    return Err(map_application_error(ApplicationError::Store(
+                        StoreError::Conflict(format!(
+                            "session registration operation {registration_operation_id} has no committed result"
+                        )),
+                    )));
+                }
+                return Ok(Some(registration.revision));
+            }
+            if readback.execution.is_some() {
+                return Err(map_application_error(ApplicationError::Store(
+                    StoreError::Conflict(format!(
+                        "operation {registration_operation_id} is not a session registration"
+                    )),
+                )));
+            }
+        }
+        return Ok(expected_revision);
+    }
     let request = SessionRegistrationRequest {
         project_id: project.clone(),
-        session_id: SessionId::new(options.session.clone()),
+        session_id: session_id.clone(),
         actor_id: ActorId::new(options.actor.clone()),
         harness_id: HarnessId::new(options.harness.clone()),
         operation_id: OperationId::new(sub_operation(operation, "session")),
-        request_digest: canonical_request_digest(
-            "session.register/v1",
-            json!({
-                "project_id": project.as_str(),
-                "session_id": options.session,
-                "actor_id": options.actor,
-                "harness_id": options.harness,
-                "started_at": started_at.as_millis(),
-            }),
+        request_digest: session_registration_request_digest(
+            project,
+            &session_id,
+            &ActorId::new(options.actor.clone()),
+            &HarnessId::new(options.harness.clone()),
+            expected_revision,
         ),
         expected_project_revision: expected_revision,
         started_at,
     };
-    let registered = app
-        .register_session(&request)
-        .map_err(map_application_error)?;
-    Ok(Some(registered.snapshot_revision))
+    match app.register_session(&request) {
+        Ok(registered) => Ok(Some(registered.snapshot_revision)),
+        Err(error) if is_duplicate_session_registration(&error, &session_id) => {
+            // Registration is serialized by the store. If another claim (or
+            // an earlier session-start command) registered this session,
+            // reuse it only after the store verifies the same project, actor,
+            // harness, and active state. The following claim still checks its
+            // own revision and eligibility transactionally.
+            app.session_for_claim(
+                project,
+                &session_id,
+                &ActorId::new(options.actor.clone()),
+                &HarnessId::new(options.harness.clone()),
+            )
+            .map_err(map_application_error)?;
+            Ok(expected_revision)
+        }
+        Err(error) => Err(map_application_error(error)),
+    }
+}
+
+fn session_registration_request_digest(
+    project: &ProjectId,
+    session: &SessionId,
+    actor: &ActorId,
+    harness: &HarnessId,
+    expected_revision: Option<u64>,
+) -> String {
+    canonical_request_digest(
+        "session.register/v1",
+        json!({
+            "project_id": project.as_str(),
+            "session_id": session.as_str(),
+            "actor_id": actor.as_str(),
+            "harness_id": harness.as_str(),
+            // started_at is generated at dispatch time, not caller input. It
+            // must not make same-operation retries differ between processes.
+            "expected_project_revision": expected_revision,
+        }),
+    )
+}
+
+fn is_duplicate_session_registration(error: &ApplicationError, session: &SessionId) -> bool {
+    matches!(
+        error,
+        ApplicationError::Store(StoreError::Conflict(message))
+            if message == &format!(
+                "session {} is already registered; use its original operation",
+                session.as_str()
+            )
+    )
 }
 
 fn find_session_work(
@@ -6877,6 +8574,42 @@ fn find_session_work(
 }
 
 fn select_claimable_work(
+    store: &SqliteStore,
+    project: &ProjectId,
+    actor: &str,
+    session: &str,
+) -> Result<Option<String>, CliError> {
+    let snapshot = boreal_application::project_status_from_store_for_session(
+        store,
+        project,
+        &boreal_domain::ActorContext {
+            actor_id: ActorId::new(actor.to_owned()),
+            role: boreal_domain::ActorRole::Agent,
+        },
+        Some(session),
+        TimestampMs::from_millis(now_ms_u64()),
+        1_000,
+        0,
+    )
+    .map_err(|message| {
+        CliError::with(
+            ErrorCode::GuidanceUnavailable,
+            ApplicationOutcome::Failed,
+            message,
+        )
+    })?;
+    Ok(snapshot
+        .items
+        .into_iter()
+        .find(|item| item.work.kind == WorkKind::Task && status_item_selection_eligible(item))
+        .map(|item| item.work.id.as_str().to_owned()))
+}
+
+/// Find a likely candidate for goal-less `start` without registering a
+/// session just to discover that the project is idle. This is a readiness
+/// hint only: `claim_result` registers the requested session and the store
+/// re-evaluates canonical action facts in the claim transaction.
+fn select_claimable_candidate(
     store: &SqliteStore,
     project: &ProjectId,
     actor: &str,
@@ -6902,8 +8635,24 @@ fn select_claimable_work(
     Ok(snapshot
         .items
         .into_iter()
-        .find(|item| item.work.kind == WorkKind::Task && status_item_selection_eligible(item))
+        // No session exists yet, so the action projection correctly denies
+        // Claim. This is only a candidate lookup: the following claim/start
+        // transaction registers the session and re-evaluates the authoritative
+        // action descriptor before changing execution state.
+        .find(|item| item.work.kind == WorkKind::Task && status_item_start_candidate_eligible(item))
         .map(|item| item.work.id.as_str().to_owned()))
+}
+
+fn status_item_start_candidate_eligible(item: &boreal_application::StatusWork) -> bool {
+    item.decision.display_status == boreal_domain::DerivedStatus::Ready
+        && item.work.dispatch_policy == boreal_domain::DispatchPolicy::Automatic
+        && matches!(
+            &item.action_context,
+            boreal_application::StatusActionContext::FactsRead {
+                integrity: "valid",
+                ..
+            }
+        )
 }
 
 fn phase_status(phase: AttemptPhase) -> &'static str {
@@ -6928,6 +8677,30 @@ fn request_digest(operation: &str, project: &ProjectId, work: &str, attempt: &st
             "project_id": project.as_str(),
             "work_id": work,
             "attempt_id": attempt,
+        }),
+    )
+}
+
+fn cli_claim_request_digest(
+    parsed: &ParsedCommand,
+    project: &ProjectId,
+    work: &str,
+    attempt: &str,
+) -> String {
+    canonical_request_digest(
+        "attempt.claim/v1",
+        json!({
+            "project_id": project.as_str(),
+            "work_id": work,
+            "attempt_id": attempt,
+            "actor_id": parsed.options.actor,
+            "harness_id": parsed.options.harness,
+            "session_id": parsed.options.session,
+            "expected_revision": parsed.options.expected_revision,
+            "lease_ttl_ms": parsed.options.lease_ttl_ms,
+            "hard_time_limit_ms": parsed.options.time_limit_ms,
+            "source_version_id": parsed.options.source_version,
+            "config_identity": parsed.options.config_identity.as_deref().unwrap_or("unknown"),
         }),
     )
 }
@@ -7447,8 +9220,150 @@ mod runner_process {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_registration_digest_is_stable_and_revision_bound() {
+        let project = ProjectId::new("session-project");
+        let session = SessionId::new("session-one");
+        let actor = ActorId::new("agent-one");
+        let harness = HarnessId::new("harness-one");
+
+        let first =
+            session_registration_request_digest(&project, &session, &actor, &harness, Some(7));
+        let retry =
+            session_registration_request_digest(&project, &session, &actor, &harness, Some(7));
+        let changed_revision =
+            session_registration_request_digest(&project, &session, &actor, &harness, Some(8));
+
+        assert_eq!(
+            first, retry,
+            "generated timestamps are not request identity"
+        );
+        assert_ne!(
+            first, changed_revision,
+            "revision preconditions are request identity"
+        );
+    }
+
+    #[test]
+    fn duplicate_session_registration_match_is_exact_and_session_scoped() {
+        let session = SessionId::new("session-one");
+        let duplicate = ApplicationError::Store(StoreError::Conflict(
+            "session session-one is already registered; use its original operation".to_owned(),
+        ));
+        let other_session = ApplicationError::Store(StoreError::Conflict(
+            "session session-two is already registered; use its original operation".to_owned(),
+        ));
+        let unrelated =
+            ApplicationError::Store(StoreError::Conflict("unrelated conflict".to_owned()));
+
+        assert!(is_duplicate_session_registration(&duplicate, &session));
+        assert!(!is_duplicate_session_registration(&other_session, &session));
+        assert!(!is_duplicate_session_registration(&unrelated, &session));
+    }
+
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn project_db_path(label: &str) -> PathBuf {
+        env::temp_dir()
+            .join(format!(
+                "boreal-cli-project-{label}-{}-{}",
+                std::process::id(),
+                now_ms_u64()
+            ))
+            .join(".boreal/boreal.sqlite")
+    }
+
+    fn cleanup_project_db(database: &Path) {
+        if let Some(root) = database.parent().and_then(Path::parent) {
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    fn register_fixture_source(
+        database: &Path,
+        project: &str,
+    ) -> (boreal_source::SourceCatalog, String) {
+        let store = SqliteStore::open(database, PRODUCTION_SCHEMA).expect("fixture database opens");
+        let catalog = boreal_source::SourceCatalog::default();
+        let captured = boreal_application::KnowledgeApplication::new(&catalog)
+            .capture_source_with_store(
+                &store,
+                boreal_application::SourceCaptureInput {
+                    operation_id: format!(
+                        "op_cli_fixture_source_{}_{}",
+                        std::process::id(),
+                        now_ms_u64()
+                    ),
+                    project_id: project.to_owned(),
+                    origin: "tests/cli-source-fixture.txt".to_owned(),
+                    media_type: "text/plain".to_owned(),
+                    bytes: b"deterministic CLI source fixture".to_vec(),
+                },
+                DEFAULT_ACTOR,
+                &now(),
+            )
+            .expect("fixture source captures and registers");
+        (catalog, captured.source.source_version_id)
+    }
+
+    fn enroll_fixture_agent(database: &Path, project: &str, session: Option<&str>) -> &'static str {
+        let actor = "fixture-agent";
+        let root = database
+            .parent()
+            .and_then(Path::parent)
+            .expect("fixture database lives under a project root");
+        let credential =
+            credentials::create(root, project, actor).expect("agent credential file is created");
+        let store = SqliteStore::open(database, PRODUCTION_SCHEMA).expect("fixture database opens");
+        store
+            .grant_principal(&boreal_store::principals::PrincipalGrantRequest {
+                project_id: project.to_owned(),
+                actor_id: DEFAULT_ACTOR.to_owned(),
+                session_id: Some(DEFAULT_SESSION.to_owned()),
+                principal_actor_id: actor.to_owned(),
+                role: boreal_domain::ActorRole::Agent,
+                independent: false,
+                credential: credential.clone(),
+                expires_at_ms: None,
+                display_name: "CLI fixture agent".to_owned(),
+                reason: "enroll the CLI execution-test principal".to_owned(),
+                expected_revision: store
+                    .project_revision(project)
+                    .expect("project revision reads")
+                    .0,
+                operation_id: format!(
+                    "op_cli_fixture_agent_grant_{}_{}",
+                    std::process::id(),
+                    now_ms_u64()
+                ),
+                at: now(),
+            })
+            .expect("production principal API grants the fixture agent");
+        let principal = store
+            .authenticate_principal(project, &credential, TimestampMs::from_millis(now_ms_u64()))
+            .expect("the local fixture credential authenticates");
+        assert_eq!(principal.actor_id, actor);
+        assert_eq!(principal.role, boreal_domain::ActorRole::Agent);
+        if let Some(session) = session {
+            WorkApplication::new(&store)
+                .register_session_as(
+                    &ProjectId::new(project),
+                    actor,
+                    DEFAULT_HARNESS,
+                    session,
+                    &now(),
+                    format!(
+                        "op_cli_fixture_session_{}_{}",
+                        std::process::id(),
+                        now_ms_u64()
+                    ),
+                )
+                .expect("authenticated agent fixture session registers");
+        }
+        actor
     }
 
     #[test]
@@ -7743,19 +9658,16 @@ mod tests {
     }
 
     #[test]
-    fn v3_routes_are_unavailable_without_opening_or_mutating_a_v2_database() {
+    fn unavailable_v3_routes_do_not_open_or_mutate_a_database() {
         let path = env::temp_dir().join(format!("boreal-cli-v3-gap-{}.sqlite", now_ms_u64()));
         let db = path.to_string_lossy().to_string();
         let _ = fs::remove_file(&path);
 
         let error = run(&args(&[
             "intake",
-            "capture",
+            "promote",
             "project-1",
             "intake-1",
-            "observation",
-            "--bucket",
-            "inbox",
             "--db",
             &db,
             "--json",
@@ -7770,12 +9682,9 @@ mod tests {
 
     #[test]
     fn shipped_post_init_routes_require_canonical_project_binding() {
-        let path = env::temp_dir().join(format!(
-            "boreal-cli-production-schema-route-{}.sqlite",
-            now_ms_u64()
-        ));
+        let path = project_db_path("production-schema-route");
         let db = path.to_string_lossy().to_string();
-        let _ = fs::remove_file(&path);
+        cleanup_project_db(&path);
 
         run(&args(&["init", "production-route", "--db", &db]))
             .expect("bootstrap initialization succeeds");
@@ -7801,10 +9710,10 @@ mod tests {
             &db,
         ]))
         .expect_err("canonical post-init route must reject an unbound project");
-        assert_eq!(error.code, ErrorCode::ClaimConflict);
+        assert_eq!(error.code, ErrorCode::OperationConflict);
         assert!(error.message.contains("workspace identity binding"));
 
-        let _ = fs::remove_file(path);
+        cleanup_project_db(&path);
     }
 
     #[test]
@@ -7824,18 +9733,35 @@ mod tests {
         )
         .expect("bootstrap binding is valid");
 
+        let credential = format!("bwrk1_{}", "a".repeat(64));
+        let agent_bootstrap = app.init_project_with_workspace(
+            &ProjectId::new("production-bootstrap"),
+            "agent-1",
+            "agent",
+            &credential,
+            "CLI agent",
+            &binding,
+            "unix-ms:1",
+            "op-production-bootstrap",
+        );
+        assert!(matches!(
+            agent_bootstrap,
+            Err(ApplicationError::Invalid(message))
+                if message.contains("requires an operator principal")
+        ));
+
         let result = app
             .init_project_with_workspace(
                 &ProjectId::new("production-bootstrap"),
-                "agent-1",
-                "agent",
-                "cli",
-                "CLI agent",
+                "operator-1",
+                "operator",
+                &credential,
+                "Project operator",
                 &binding,
                 "unix-ms:1",
                 "op-production-bootstrap",
             )
-            .expect("production bootstrap must bind identity before project.init");
+            .expect("operator bootstrap must bind identity before project.init");
         assert!(result.changed);
         let identity = IdentityStore::new(&store);
         assert_eq!(
@@ -7850,10 +9776,10 @@ mod tests {
         let replay = app
             .init_project_with_workspace(
                 &ProjectId::new("production-bootstrap"),
-                "agent-1",
-                "agent",
-                "cli",
-                "CLI agent",
+                "operator-1",
+                "operator",
+                &credential,
+                "Project operator",
                 &binding,
                 "unix-ms:2",
                 "op-production-bootstrap",
@@ -7866,9 +9792,9 @@ mod tests {
 
     #[test]
     fn dependency_add_is_idempotent_and_cycle_failures_are_typed() {
-        let path = env::temp_dir().join(format!("boreal-cli-dependency-{}.sqlite", now_ms_u64()));
+        let path = project_db_path("dependency");
         let db = path.to_string_lossy().to_string();
-        let _ = fs::remove_file(&path);
+        cleanup_project_db(&path);
 
         run(&args(&["init", "p", "--db", &db])).expect("project initializes");
         for work in [("a", "A"), ("b", "B")] {
@@ -7897,6 +9823,8 @@ mod tests {
             "b",
             "--operation-id",
             "op_dep_add",
+            "--expected-revision",
+            "4",
             "--db",
             &db,
         ]))
@@ -7910,6 +9838,8 @@ mod tests {
             "b",
             "--operation-id",
             "op_dep_add",
+            "--expected-revision",
+            "4",
             "--db",
             &db,
         ]))
@@ -7946,7 +9876,7 @@ mod tests {
         .expect_err("cycle rejects");
         assert_eq!(cycle.code, ErrorCode::DependencyCycle);
         assert_eq!(cycle.outcome, ApplicationOutcome::Rejected);
-        let _ = fs::remove_file(path);
+        cleanup_project_db(&path);
     }
 
     #[test]
@@ -8093,22 +10023,30 @@ mod tests {
 
     #[test]
     fn cli_smoke_start_and_release_use_the_sqlite_adapter() {
-        let path = env::temp_dir().join(format!("boreal-cli-smoke-{}.sqlite", now_ms_u64()));
+        let path = project_db_path("smoke");
         let db = path.to_string_lossy().to_string();
-        let _ = fs::remove_file(&path);
+        cleanup_project_db(&path);
         assert_eq!(
             run(&args(&["init", "p", "--db", &db])).unwrap().outcome,
             ApplicationOutcome::Changed
         );
         run(&args(&["work", "create", "p", "w", "task", "--db", &db])).unwrap();
+        let (_source_catalog, source_version) = register_fixture_source(&path, "p");
+        let actor = enroll_fixture_agent(&path, "p", None);
         let start = run(&args(&[
             "agent",
             "start",
             "w",
             "--project",
             "p",
+            "--actor",
+            actor,
             "--session",
             "s",
+            "--source-version",
+            &source_version,
+            "--config-identity",
+            "test-cli-config/v1",
             "--db",
             &db,
         ]))
@@ -8122,6 +10060,8 @@ mod tests {
             "w",
             "--project",
             "p",
+            "--actor",
+            actor,
             "--session",
             "s",
             "--attempt",
@@ -8132,14 +10072,14 @@ mod tests {
             &db,
         ]))
         .unwrap();
-        let _ = fs::remove_file(path);
+        cleanup_project_db(&path);
     }
 
     #[test]
     fn no_goal_next_emits_one_required_contract_valid_action() {
-        let path = env::temp_dir().join(format!("boreal-cli-no-goal-next-{}.sqlite", now_ms_u64()));
+        let path = project_db_path("no-goal-next");
         let db = path.to_string_lossy().to_string();
-        let _ = fs::remove_file(&path);
+        cleanup_project_db(&path);
 
         run(&args(&["init", "p", "--db", &db])).expect("project initializes");
         run(&args(&[
@@ -8152,15 +10092,21 @@ mod tests {
             &db,
         ]))
         .expect("work creates");
+        let (_source_catalog, source_version) = register_fixture_source(&path, "p");
+        let actor = enroll_fixture_agent(&path, "p", Some("unfamiliar-session"));
 
         let result = run(&args(&[
             "next",
             "--project",
             "p",
             "--actor",
-            "agent-1",
+            actor,
             "--session",
             "unfamiliar-session",
+            "--source-version",
+            &source_version,
+            "--config-identity",
+            "test-next-config/v1",
             "--db",
             &db,
             "--json",
@@ -8189,17 +10135,115 @@ mod tests {
         .expect("safe argv follows the CLI grammar");
         assert_eq!(reparsed.path, vec!["agent", "start"]);
         assert_eq!(reparsed.options.project.as_deref(), Some("p"));
+        assert_eq!(reparsed.options.actor, actor);
+        assert_eq!(reparsed.options.session, "unfamiliar-session");
         assert_eq!(reparsed.options.work.as_deref(), None);
+        assert_eq!(
+            reparsed.options.source_version.as_deref(),
+            Some(source_version.as_str())
+        );
+        assert_eq!(
+            reparsed.options.config_identity.as_deref(),
+            Some("test-next-config/v1")
+        );
 
-        let _ = fs::remove_file(path);
+        cleanup_project_db(&path);
+    }
+
+    #[test]
+    fn next_without_source_context_guides_to_source_list_without_starting_work() {
+        let path = project_db_path("next-missing-source-context");
+        let db = path.to_string_lossy().to_string();
+        cleanup_project_db(&path);
+
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        run(&args(&[
+            "work",
+            "create",
+            "p",
+            "ready-work",
+            "task",
+            "--db",
+            &db,
+        ]))
+        .expect("work creates");
+        let actor = enroll_fixture_agent(&path, "p", Some("session-next-missing-source-context"));
+        let next = run(&args(&[
+            "next",
+            "--project",
+            "p",
+            "--actor",
+            actor,
+            "--session",
+            "session-next-missing-source-context",
+            "--db",
+            &db,
+            "--json",
+        ]))
+        .expect("next remains available without source context");
+        let data = next.data.expect("next data");
+        let action = &data["next_action"];
+        assert_eq!(
+            action["title"],
+            "Select source and configuration before starting"
+        );
+        assert!(action["instruction"]
+            .as_str()
+            .is_some_and(|instruction| instruction.contains("--config-identity")));
+        assert_eq!(action["safe_argv"][1], "source");
+        assert_eq!(action["safe_argv"][2], "list");
+        assert!(SqliteStore::open(&path, PRODUCTION_SCHEMA)
+            .expect("database opens")
+            .current_attempt_for_work("p", "ready-work")
+            .expect("attempt lookup succeeds")
+            .is_none());
+
+        cleanup_project_db(&path);
+    }
+
+    #[test]
+    fn agent_start_rejects_missing_source_context_before_creating_attempt() {
+        let path = project_db_path("start-missing-source-context");
+        let db = path.to_string_lossy().to_string();
+        cleanup_project_db(&path);
+
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        run(&args(&["work", "create", "p", "task", "task", "--db", &db])).expect("work creates");
+        let actor = enroll_fixture_agent(&path, "p", None);
+        let error = run(&args(&[
+            "agent",
+            "start",
+            "task",
+            "--project",
+            "p",
+            "--actor",
+            actor,
+            "--session",
+            "session-start-missing-source-context",
+            "--db",
+            &db,
+        ]))
+        .expect_err("start requires source and configuration context");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(error.message.contains("--source-version"));
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("database opens");
+        assert!(store
+            .current_attempt_for_work("p", "task")
+            .expect("attempt lookup succeeds")
+            .is_none());
+        assert!(store
+            .session("p", "session-start-missing-source-context")
+            .expect("session lookup succeeds")
+            .is_none());
+
+        cleanup_project_db(&path);
     }
 
     #[test]
     fn no_goal_start_selects_and_starts_a_claimable_task() {
-        let path =
-            env::temp_dir().join(format!("boreal-cli-no-goal-start-{}.sqlite", now_ms_u64()));
+        let path = project_db_path("no-goal-start");
         let db = path.to_string_lossy().to_string();
-        let _ = fs::remove_file(&path);
+        cleanup_project_db(&path);
 
         run(&args(&["init", "p", "--db", &db])).expect("project initializes");
         run(&args(&[
@@ -8212,18 +10256,23 @@ mod tests {
             &db,
         ]))
         .expect("task creates");
-
+        let (_source_catalog, source_version) = register_fixture_source(&path, "p");
+        let actor = enroll_fixture_agent(&path, "p", None);
         let result = run(&args(&[
             "agent",
             "start",
             "--project",
             "p",
             "--actor",
-            "agent-1",
+            actor,
             "--harness",
             "cli",
             "--session",
             "session-no-goal-start",
+            "--source-version",
+            &source_version,
+            "--config-identity",
+            "test-cli-config/v1",
             "--db",
             &db,
             "--json",
@@ -8234,15 +10283,14 @@ mod tests {
         assert_eq!(data["phase"], "running");
         assert_eq!(data["replayed"], false);
 
-        let _ = fs::remove_file(path);
+        cleanup_project_db(&path);
     }
 
     #[test]
     fn direct_status_uses_derived_hierarchy_and_readiness() {
-        let path =
-            env::temp_dir().join(format!("boreal-cli-derived-status-{}.sqlite", now_ms_u64()));
+        let path = project_db_path("derived-status");
         let db = path.to_string_lossy().to_string();
-        let _ = fs::remove_file(&path);
+        cleanup_project_db(&path);
 
         run(&args(&["init", "p", "--db", &db])).expect("project initializes");
         run(&args(&[
@@ -8285,24 +10333,47 @@ mod tests {
             .find(|item| item["work_id"] == "task")
             .expect("task row");
         assert_eq!(task["kind"], "task");
-        assert_eq!(task["claimable_for_actor"], true);
-        assert_eq!(task["actions"], Value::Null);
-        assert_eq!(task["action_context"]["state"], "partial");
-        assert!(task["action_context"]["missing_facts"]
+        assert_eq!(task["claimable_for_actor"], false);
+        let denied_actions = task["actions"]["denied"]
             .as_array()
-            .is_some_and(|facts| facts.iter().any(|fact| fact == "authenticated_session")));
+            .expect("status includes the canonical denied-action list");
+        let claim = denied_actions
+            .iter()
+            .find(|action| action["descriptor"]["action"] == "claim")
+            .expect("bootstrap Operator cannot claim ordinary Agent work");
+        assert_eq!(claim["reason_code"], "role_denied");
+        assert_eq!(claim["descriptor"]["required_roles"], json!(["agent"]));
+        assert_eq!(task["action_context"]["state"], "available");
+        assert_eq!(task["action_context"]["integrity"], "valid");
+        assert_eq!(task["action_context"]["missing_facts"], json!([]));
+        assert_eq!(
+            task["action_context"]["authenticated_session_id"],
+            DEFAULT_SESSION
+        );
+        assert_eq!(
+            task["canonical_facts"]["authority"]["value"]["role"],
+            "operator"
+        );
+        assert_eq!(
+            task["canonical_facts"]["authority"]["value"]["session_id"],
+            DEFAULT_SESSION
+        );
+        assert_eq!(
+            task["canonical_facts"]["authority"]["value"]["principal"]["kind"],
+            "authenticated"
+        );
+        assert!(claim["descriptor"]["required_inputs"]
+            .as_array()
+            .is_some_and(|inputs| inputs.iter().any(|input| input == "session_id")));
 
-        let _ = fs::remove_file(path);
+        cleanup_project_db(&path);
     }
 
     #[test]
     fn direct_claim_validates_work_before_registering_a_session() {
-        let path = env::temp_dir().join(format!(
-            "boreal-cli-session-preflight-{}.sqlite",
-            now_ms_u64()
-        ));
+        let path = project_db_path("session-preflight");
         let db = path.to_string_lossy().to_string();
-        let _ = fs::remove_file(&path);
+        cleanup_project_db(&path);
         run(&args(&["init", "p", "--db", &db])).expect("project initializes");
         let error = run(&args(&[
             "work",
@@ -8321,7 +10392,42 @@ mod tests {
             .session("p", "session-preflight")
             .expect("session read succeeds")
             .is_none());
-        let _ = fs::remove_file(path);
+        cleanup_project_db(&path);
+    }
+
+    #[test]
+    fn direct_claim_rejects_missing_source_context_before_registering_a_session() {
+        let path = project_db_path("claim-source-preflight");
+        let db = path.to_string_lossy().to_string();
+        cleanup_project_db(&path);
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        run(&args(&["work", "create", "p", "task", "Task", "--db", &db]))
+            .expect("fixture task creates with the initialized project session");
+
+        let error = run(&args(&[
+            "work",
+            "claim",
+            "p",
+            "task",
+            "--session",
+            "session-claim-source-preflight",
+            "--db",
+            &db,
+        ]))
+        .expect_err("claim requires a source-bound execution context");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(error.message.contains("--source-version"));
+
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("database reopens");
+        assert!(store
+            .session("p", "session-claim-source-preflight")
+            .expect("session lookup succeeds")
+            .is_none());
+        assert!(store
+            .current_attempt_for_work("p", "task")
+            .expect("attempt lookup succeeds")
+            .is_none());
+        cleanup_project_db(&path);
     }
 
     fn finish_receipt_fixture() -> ReceiptPayload {
@@ -8458,11 +10564,8 @@ mod tests {
 
     #[test]
     fn finish_close_result_readback_rejects_mismatched_result_identity() {
-        let path = env::temp_dir().join(format!(
-            "boreal-cli-finish-readback-{}.sqlite",
-            now_ms_u64()
-        ));
-        let _ = fs::remove_file(&path);
+        let path = project_db_path("finish-readback");
+        cleanup_project_db(&path);
         run(&args(&[
             "init",
             "finish-project",
@@ -8563,32 +10666,39 @@ mod tests {
         let error = finish_result_readback(&journal, parent_operation, &result_operation)
             .expect_err("mismatched result identity is rejected");
         assert_eq!(error.code, ErrorCode::ProtocolMismatch);
-        let _ = fs::remove_file(path);
+        cleanup_project_db(&path);
     }
 
     #[test]
     fn finish_close_records_receipt_and_retains_open_gate_diagnostics() {
-        let db_path = env::temp_dir().join(format!("boreal-cli-finish-{}.sqlite", now_ms_u64()));
-        let receipt_path =
-            env::temp_dir().join(format!("boreal-cli-receipt-{}.json", now_ms_u64()));
-        let summary_path = env::temp_dir().join(format!("boreal-cli-summary-{}.md", now_ms_u64()));
+        let db_path = project_db_path("finish");
+        let receipt_path = db_path.parent().unwrap().join("receipt.json");
+        let summary_path = db_path.parent().unwrap().join("summary.md");
         let db = db_path.to_string_lossy().to_string();
         let receipt_file = receipt_path.to_string_lossy().to_string();
         let summary_file = summary_path.to_string_lossy().to_string();
-        let _ = fs::remove_file(&db_path);
+        cleanup_project_db(&db_path);
         let _ = fs::remove_file(&receipt_path);
         let _ = fs::remove_file(&summary_path);
 
         run(&args(&["init", "p", "--db", &db])).expect("project initializes");
         run(&args(&["work", "create", "p", "w", "task", "--db", &db])).expect("work creates");
+        let (_source_catalog, source_version) = register_fixture_source(&db_path, "p");
+        let actor = enroll_fixture_agent(&db_path, "p", None);
         let started = run(&args(&[
             "agent",
             "start",
             "w",
             "--project",
             "p",
+            "--actor",
+            actor,
             "--session",
             "s",
+            "--source-version",
+            &source_version,
+            "--config-identity",
+            "test-cli-config/v1",
             "--db",
             &db,
         ]))
@@ -8597,26 +10707,15 @@ mod tests {
         .expect("start data");
         let attempt_id = started["attempt_id"].as_str().expect("attempt id");
         let fence = started["fence"].as_u64().expect("fence");
-        SqliteStore::open(&db_path, PRODUCTION_SCHEMA)
-            .expect("database reopens")
-            .execute_batch(
-                "INSERT INTO source_version
-                 (source_version_id, project_id, origin, access_scope, content_digest,
-                  media_type, byte_count, captured_at, parser_identity, availability, citation_json)
-                 VALUES ('source-1', 'p', 'fixture.md', 'project',
-                         'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                         'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');",
-            )
-            .expect("source snapshot registers");
-        SqliteStore::open(&db_path, PRODUCTION_SCHEMA)
-            .expect("database reopens for proof context")
-            .execute_batch(&format!(
-                "UPDATE attempt
-                     SET source_version_id = 'source-1', config_identity = 'config-1'
-                     WHERE attempt_id = '{}';",
-                attempt_id
-            ))
-            .expect("attempt proof context binds");
+        let claimed_store =
+            SqliteStore::open(&db_path, PRODUCTION_SCHEMA).expect("database opens after claim");
+        assert!(
+            !claimed_store
+                .current_attempt_for_work("p", "w")
+                .expect("claimed attempt reads")
+                .expect("current attempt exists")
+                .review_required_after_expiry
+        );
         fs::write(
             &receipt_path,
             serde_json::to_string(&json!({
@@ -8631,8 +10730,8 @@ mod tests {
                 "exit_code": 0,
                 "started_at": "unix-ms:10",
                 "ended_at": "unix-ms:11",
-                "source_snapshot_hash": "source-1",
-                "config_identity": "config-1",
+                "source_snapshot_hash": source_version,
+                "config_identity": "test-cli-config/v1",
                 "environment_fingerprint": "env-1",
                 "output_digest": "output-1",
                 "output_ref": null,
@@ -8650,13 +10749,15 @@ mod tests {
         )
         .expect("summary writes");
 
-        let finished = run(&args(&[
+        let finish_result = run(&args(&[
             "agent",
             "finish",
             "w",
             "--close",
             "--project",
             "p",
+            "--actor",
+            actor,
             "--session",
             "s",
             "--attempt",
@@ -8669,8 +10770,8 @@ mod tests {
             &summary_file,
             "--db",
             &db,
-        ]))
-        .expect("close attempt returns a bounded rejection");
+        ]));
+        let finished = finish_result.expect("close attempt returns a bounded rejection");
         assert_eq!(finished.outcome, ApplicationOutcome::Rejected);
         let data = finished.data.expect("finish data");
         assert_eq!(data["close_state"], "open");
@@ -8686,7 +10787,7 @@ mod tests {
             .iter()
             .any(|gate| gate.as_str().is_some_and(|id| id.ends_with(":summary"))));
 
-        let _ = fs::remove_file(db_path);
+        cleanup_project_db(&db_path);
         let _ = fs::remove_file(receipt_path);
         let _ = fs::remove_file(summary_path);
     }

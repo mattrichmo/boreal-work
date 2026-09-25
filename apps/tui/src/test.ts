@@ -58,7 +58,8 @@ function nextOperationId(revision: number | null): string {
 
 function nextSocketPath(prefix: string): string {
   socketSequence += 1;
-  return `/tmp/${prefix}-${Date.now()}-${socketSequence}-${Math.random().toString(36).slice(2)}.sock`;
+  const temporaryDirectory = (process.env.TMPDIR || "/tmp").replace(/\/+$/u, "");
+  return `${temporaryDirectory}/${prefix}-${Date.now()}-${socketSequence}-${Math.random().toString(36).slice(2)}.sock`;
 }
 
 async function throwsAsync(action: () => Promise<unknown>, expected: string): Promise<void> {
@@ -84,18 +85,36 @@ function envelope<T>(revision: number | null, data: T | null, outcome: Envelope<
   };
 }
 
+// Mock-server policy only: production clients may never derive authority from
+// display states. Fixtures carry explicit descriptors and denial reasons.
+const mockServerPolicy = Symbol("mock-server-policy");
+function fixtureActions(work: StatusItem, revision = 4): ServerActionSet {
+  const names = ["claim", "accept_attempt", "attach_evidence", "finish_close", "release"];
+  const status = work.display_status ?? work.status;
+  const allowed = new Set<string>();
+  if (status === "ready") allowed.add("claim");
+  if (status === "claimed") { allowed.add("accept_attempt"); allowed.add("release"); }
+  if (status === "in_progress") { allowed.add("attach_evidence"); allowed.add("release");
+    if (!work.gates?.open.some(gate => gate.required)) allowed.add("finish_close"); }
+  const detail = status === "blocked" ? "work is blocked" : status === "queued" ? "waiting for prerequisite"
+    : status === "expired_review" ? "expiry requires review" : "required gate is open";
+  const descriptor = (action: string): ServerActionDescriptor => ({
+    ...serverActionDescriptor(action),
+    target: { project_id: work.project_id ?? "project_test", work_id: work.work_id, entity_revision: null },
+    expected_project_revision: revision,
+    confirmation: "Confirm this mock-server action",
+  });
+  return { allowed: names.filter(name => allowed.has(name)).map(descriptor),
+    denied: names.filter(name => !allowed.has(name)).map(name => ({ descriptor: descriptor(name),
+      reason: { code: "fixture_denial", detail }, reason_code: "fixture_denial", recovery: ["inspect"] })) };
+}
 function item(work_id: string, status: StatusItem["status"], extra: Partial<StatusItem> = {}): StatusItem {
-  return {
-    work_id,
-    project_id: "project_test",
-    status,
-    display_status: status,
-    reason_codes: [],
-    claimable: status === "ready",
-    claimable_for_actor: status === "ready",
-    next_action: null,
-    ...extra,
+  const result: StatusItem & { [mockServerPolicy]?: boolean } = {
+    work_id, project_id: "project_test", status, display_status: status, reason_codes: [],
+    claimable: status === "ready", claimable_for_actor: status === "ready", next_action: null, ...extra,
   };
+  if (!("actions" in extra)) { result[mockServerPolicy] = true; result.actions = fixtureActions(result); }
+  return result;
 }
 
 function serverActionDescriptor(action: string): ServerActionDescriptor {
@@ -115,8 +134,18 @@ function serverActionDescriptor(action: string): ServerActionDescriptor {
 }
 
 function monitoring(revision: number, items: StatusItem[]): Envelope<RevisionedStatusResponse> {
+  items = items.map(entry => (entry as StatusItem & { [mockServerPolicy]?: boolean })[mockServerPolicy]
+    ? { ...entry, actions: fixtureActions(entry, revision) } : entry);
   return envelope(revision, {
+    project_id: "project_test",
     revision,
+    // These are decisions supplied by the fake service, not client policy.
+    project_actions: ["create_project", "create_work"].map((action) => ({
+      action, target: { project_id: "project_test" },
+      caller: { actor_id: "actor-luna", session_id: "session-test" },
+      expected_project_revision: revision, allowed: true, denial_reason: null,
+      confirmation: "Confirm this project mutation?",
+    })),
     as_of: `2026-09-14T22:${revision}:00Z`,
     total: items.length,
     counts: {
@@ -171,10 +200,10 @@ const gateOpen = item("gate", "in_progress", {
   gates: { open: [{ gate_id: "verify", kind: "verification", required: true, state: "open" }], satisfied: [] },
 });
 const disabled = (work: StatusItem, action: string) => actionAvailability(work).find((entry) => entry.action === action);
-assert(disabled(blocked, "claim")?.enabled === false && disabled(blocked, "claim")?.reason === "work is blocked", "blocked claim disabled");
-assert(disabled(queued, "claim")?.enabled === false && disabled(queued, "claim")?.reason === "waiting for prerequisite", "queued claim disabled");
-assert(disabled(expired, "release")?.enabled === false && disabled(expired, "release")?.reason === "expiry requires review", "expired release disabled");
-assert(disabled(gateOpen, "finish")?.enabled === false && disabled(gateOpen, "finish")?.reason === "required gate is open", "gate finish disabled");
+assert(disabled(blocked, "claim")?.enabled === false && disabled(blocked, "claim")?.reason?.endsWith("work is blocked") === true, "blocked claim disabled");
+assert(disabled(queued, "claim")?.enabled === false && disabled(queued, "claim")?.reason?.endsWith("waiting for prerequisite") === true, "queued claim disabled");
+assert(disabled(expired, "release")?.enabled === false && disabled(expired, "release")?.reason?.endsWith("expiry requires review") === true, "expired release disabled");
+assert(disabled(gateOpen, "finish")?.enabled === false && disabled(gateOpen, "finish")?.reason?.endsWith("required gate is open") === true, "gate finish disabled");
 assert(disabled(gateOpen, "evidence")?.enabled === true, "gate evidence remains available");
 assert(workflowDisplayState(gateOpen) === "gate", "open gate is a distinct display state");
 const unavailableServerActions: ServerActionSet = {
@@ -211,8 +240,10 @@ assert(disabled(serverAllowsClaim, "claim")?.enabled === true, "server action al
 assert(parseLineCommand("help").kind === "help", "line shell parses help");
 assert(parseLineCommand("select task-flow").kind === "select", "line shell parses work selection");
 assert(parseLineCommand("exit").kind === "quit", "line shell accepts exit alias");
-const parsedClaim = parseLineCommand("claim");
-assert(parsedClaim.kind === "mutation" && parsedClaim.action === "claim", "line shell uses the mounted claim identity");
+const missingClaimContext = parseLineCommand("claim");
+assert(missingClaimContext.kind === "invalid" && missingClaimContext.message.includes("bwrk source list PROJECT"), "line shell requires explicit source/config and explains how to obtain a source");
+const parsedClaim = parseLineCommand("claim --source-version source-test-version --config-identity test-config/v1");
+assert(parsedClaim.kind === "mutation" && parsedClaim.action === "claim" && parsedClaim.source_version_id === "source-test-version" && parsedClaim.config_identity === "test-config/v1", "line shell parses explicit source/config claim context");
 assert(parseLineCommand("claim actor-luna").kind === "invalid", "line shell rejects per-request actor overrides");
 const parsedProject = parseLineCommand("create-project project_test --role operator --display-name Luna");
 assert(parsedProject.kind === "mutation" && parsedProject.action === "create_project" && parsedProject.input.project_id === "project_test", "line shell parses project creation");
@@ -288,6 +319,8 @@ const wireClaim = await wireClient.claim({
   data: {
     project_id: "project_test",
     work_id: "wire-task",
+    source_version_id: "source-test-version",
+    config_identity: "test-config/v1",
     actor_id: "actor-luna",
     harness_id: "harness-test",
     session_id: "session-test",
@@ -303,6 +336,8 @@ assert((transport.requests[1].data as Record<string, unknown>).attempt_fence ===
 assert((transport.requests[1].data as Record<string, unknown>).project_id === "project_test", "claim carries project context");
 assert((transport.requests[1].data as Record<string, unknown>).harness_id === "harness-test", "claim carries harness context");
 assert((transport.requests[1].data as Record<string, unknown>).session_id === "session-test", "claim carries session context");
+assert((transport.requests[1].data as Record<string, unknown>).source_version_id === "source-test-version", "claim carries exact caller-selected source version");
+assert((transport.requests[1].data as Record<string, unknown>).config_identity === "test-config/v1", "claim carries caller-selected execution configuration identity");
 
 const wireEvidence = await wireClient.addEvidence({
   api_version: API_VERSION,
@@ -443,6 +478,8 @@ await (async () => {
       data: {
         project_id: "project_test",
         work_id: "wire-task",
+        source_version_id: "source-test-version",
+        config_identity: "test-config/v1",
         actor_id: "actor-luna",
         harness_id: "harness-test",
         session_id: "session-test",
@@ -583,6 +620,8 @@ const tuiContext = {
   session_id: "session-test",
   now: () => new Date("2026-09-14T22:00:00.000Z"),
 };
+// Explicitly test-only identities; production claim input is collected from the operator.
+const testClaimContext = { source_version_id: "source-test-version", config_identity: "test-config/v1" };
 let notificationListener: ((notification: { kind: "revision" | "deadline"; revision?: number }) => void) | undefined;
 let notificationReads = 0;
 const notificationController = new MountedWorkflowController({
@@ -631,7 +670,16 @@ const projectResult = await controller.createProject({ project_id: "project_test
 assert(projectResult.ok && controller.view().route.kind === "project" && controller.view().route.project_id === "project_test", "project creation route");
 const workResult = await controller.createWork({ work_id: "task-flow", kind: "task", title: "Flow task", parent_id: "sprint-1", priority: 9 });
 assert(workResult.ok && controller.view().route.kind === "work" && controller.view().route.work_id === "task-flow", "work creation route");
-await controller.claim("task-flow");
+const claimCallsBeforeInvalidInput = calls.filter((call) => call.name === "claim").length;
+let invalidSourceRejected = false;
+try { await controller.claim("task-flow", { source_version_id: "unknown", config_identity: "test-config/v1" }); }
+catch (error) { invalidSourceRejected = error instanceof Error && error.message.includes("real source_version_id"); }
+assert(invalidSourceRejected && calls.filter((call) => call.name === "claim").length === claimCallsBeforeInvalidInput, "blank/unknown source is rejected before any service mutation");
+let invalidConfigRejected = false;
+try { await controller.claim("task-flow", { source_version_id: "source-test-version", config_identity: "unknown" }); }
+catch (error) { invalidConfigRejected = error instanceof Error && error.message.includes("meaningful config_identity"); }
+assert(invalidConfigRejected && calls.filter((call) => call.name === "claim").length === claimCallsBeforeInvalidInput, "unknown config identity is rejected before any service mutation");
+await controller.claim("task-flow", testClaimContext);
 await controller.acceptStart("task-flow");
 await controller.addEvidence("task-flow", { receipt_id: "receipt-flow", result: "passed" });
 const finished = await controller.finish("task-flow", "done");
@@ -647,6 +695,8 @@ assert((calls.find((call) => call.name === "claim")?.request.data as Record<stri
 assert((calls.find((call) => call.name === "claim")?.request.data as Record<string, unknown>).actor_id === "actor-luna", "controller retains its actor context");
 assert((calls.find((call) => call.name === "claim")?.request.data as Record<string, unknown>).harness_id === "harness-test", "controller retains its harness context");
 assert((calls.find((call) => call.name === "claim")?.request.data as Record<string, unknown>).attempt_id !== undefined, "controller supplies the Rust claim attempt identity");
+assert((calls.find((call) => call.name === "claim")?.request.data as Record<string, unknown>).source_version_id === testClaimContext.source_version_id, "controller forwards source binding unchanged");
+assert((calls.find((call) => call.name === "claim")?.request.data as Record<string, unknown>).config_identity === testClaimContext.config_identity, "controller forwards config binding unchanged");
 assert((calls.find((call) => call.name === "addEvidence")?.request.data as Record<string, unknown>).receipt !== undefined, "controller uses the receipt field for evidence");
 const createProjectRequest = calls.find((call) => call.name === "createProject")?.request.data as Record<string, unknown>;
 assert(createProjectRequest.project_id === "project_test" && createProjectRequest.actor_id === "actor-luna" && createProjectRequest.credential_ref === "tui:harness-test", "controller completes project creation identity fields");
@@ -709,6 +759,8 @@ assert(shellCalls.length === 0, "line shell does not mutate before confirmation"
 shellMutationOutput.length = 0;
 await runLineShell((async function* () {
   yield "claim";
+  yield "claim --source-version unknown --config-identity test-config/v1";
+  yield "claim --source-version source-test-version --config-identity test-config/v1";
   yield "confirm";
   yield "accept-start";
   yield "confirm";
@@ -721,8 +773,13 @@ await runLineShell((async function* () {
   yield "confirm";
   yield "quit";
 })(), shellController, (value) => shellMutationOutput.push(value));
-assert(shellMutationOutput.some((value) => value.includes("expected_revision=50") && value.includes("attempt_fence=none")), "confirmation shows revision and initial fence");
+assert(shellMutationOutput.some((value) => value.includes("expected_revision=50") && value.includes("attempt none")), "confirmation shows revision and no active attempt");
+assert(shellMutationOutput.some((value) => value.includes("source_version_id=source-test-version") && value.includes("config_identity=test-config/v1")), "claim confirmation reviews the exact source/config binding");
+assert(shellMutationOutput.some((value) => value.includes("bwrk source list PROJECT")), "line shell explains how to obtain a registered source version");
+assert(shellMutationOutput.some((value) => value.includes("not 'unknown'")), "line shell rejects a placeholder source before confirmation");
 assert(shellMutationOutput.filter((value) => value.includes("enter confirm or cancel")).length === 5, "every shell mutation requires confirmation");
+const shellClaimInput = shellCalls.find((call) => call.name === "claim")?.request.data as Record<string, unknown>;
+assert(shellClaimInput.source_version_id === "source-test-version" && shellClaimInput.config_identity === "test-config/v1", "line shell submits explicit source/config binding");
 assert(shellMutationOutput.some((value) => value.includes("operation=op_tui_") && value.includes("outcome=changed")), "shell renders mutation operation outcome");
 assert(shellCalls.map((call) => call.name).join(",") === "claim,acceptStart,addEvidence,finish,release", "shell routes only supported controller lifecycle actions");
 assert(shellController.view().selected_work?.status === "ready", "shell release refreshes the mounted view");
@@ -742,7 +799,7 @@ const staleService: VersionedServiceApi = {
 };
 const staleController = new MountedWorkflowController(staleService, { context: tuiContext });
 await staleController.mount({ kind: "work", project_id: "project_test", work_id: "stale-task" });
-const staleResult = await staleController.claim("stale-task");
+const staleResult = await staleController.claim("stale-task", testClaimContext);
 assert(!staleResult.ok && staleResult.error instanceof TuiServiceError && staleResult.error.stale, "typed stale error");
 assert(staleController.view().notice?.kind === "stale_revision", "stale revision is displayed");
 assert(staleController.view().notice?.stale?.expected_revision === 20, "stale expected revision is displayed");
@@ -761,7 +818,7 @@ const unknownController = new MountedWorkflowController({
   },
 }, { context: tuiContext });
 await unknownController.mount({ kind: "work", project_id: "project_test", work_id: "unknown-task" });
-const unknownResult = await unknownController.claim("unknown-task");
+const unknownResult = await unknownController.claim("unknown-task", testClaimContext);
 assert(!unknownResult.ok && unknownResult.error.unknown, "controller exposes unknown mutation outcome");
 assert(unknownController.view().pending_operations.some((operation) => operation.operation_id === unknownResult.error.operation_id), "controller retains unknown operation for readback");
 assert(unknownController.view().notice?.kind === "unknown", "unknown outcome is visibly distinct from an ordinary failure");
@@ -771,9 +828,9 @@ const blockedController = new MountedWorkflowController({
   async readStatus() { return monitoring(30, [blocked, queued, expired, gateOpen]); },
 }, { context: tuiContext });
 await blockedController.mount({ kind: "work", project_id: "project_test", work_id: "blocked" });
-await throwsAsync(() => blockedController.claim("blocked"), "work is blocked");
+await throwsAsync(() => blockedController.claim("blocked", testClaimContext), "work is blocked");
 blockedController.navigate({ kind: "work", project_id: "project_test", work_id: "queued" });
-await throwsAsync(() => blockedController.claim("queued"), "waiting for prerequisite");
+await throwsAsync(() => blockedController.claim("queued", testClaimContext), "waiting for prerequisite");
 blockedController.navigate({ kind: "work", project_id: "project_test", work_id: "expired" });
 await throwsAsync(() => blockedController.release("expired"), "expiry requires review");
 blockedController.navigate({ kind: "work", project_id: "project_test", work_id: "gate" });
@@ -1078,6 +1135,7 @@ const fakeTerminal = new FakeFullScreenTerminal();
 const fullScreenRun = runFullScreen(fullScreenController, fakeTerminal, { auto_refresh_ms: 60_000 });
 fakeTerminal.emitData("\r");
 fakeTerminal.emitData("c");
+fakeTerminal.emitData("source-real-version\rconfig-real/v1\r");
 fakeTerminal.emitData("y");
 await new Promise<void>((resolve) => setTimeout(resolve, 0));
 fakeTerminal.emitData("q");
@@ -1104,7 +1162,7 @@ fullScreenController.navigate({ kind: "work", project_id: "project_test", work_i
 const filtered = renderMountedView(fullScreenController.view(), { width: 120, height: 40, filter: "tasks", search_query: "blocked" });
 assert(filtered.includes("WORK QUEUE (1") && filtered.includes("task-ui") && !filtered.includes("[sprint] sprint-ui"), "renderer applies bounded kind and text filters without changing service state");
 assert(filtered.includes("dependencies:") && filtered.includes("upstream"), "work detail renders service-provided dependency context");
-assert(filtered.includes("work.edit: Rust service route is not exposed yet"), "renderer labels unavailable planning routes instead of inventing local mutations");
+assert(filtered.includes("This action is not available in this connection"), "renderer labels unavailable planning routes instead of inventing local mutations");
 
 const filterTerminal = new FakeFullScreenTerminal(120);
 const filterRun = runFullScreen(fullScreenController, filterTerminal, { auto_refresh_ms: 60_000 });
@@ -1143,6 +1201,7 @@ const drainingRun = runFullScreen(drainingController, drainingTerminal, {
 });
 drainingTerminal.emitData("\r");
 drainingTerminal.emitData("c");
+drainingTerminal.emitData("source-real-version\rconfig-real/v1\r");
 drainingTerminal.emitData("y");
 await new Promise<void>((resolve) => setTimeout(resolve, 0));
 assert(drainingOperationId !== null, "drain test starts the mutation before shutdown");
@@ -1187,6 +1246,7 @@ const timedOutRun = runFullScreen(timedOutController, timedOutTerminal, {
 });
 timedOutTerminal.emitData("\r");
 timedOutTerminal.emitData("c");
+timedOutTerminal.emitData("source-real-version\rconfig-real/v1\r");
 timedOutTerminal.emitData("y");
 await new Promise<void>((resolve) => setTimeout(resolve, 0));
 timedOutTerminal.emitData("\u0003");
@@ -1208,6 +1268,7 @@ const fullDtoEnvelope = envelope(110, {
   counts: { total: 3, ready: 1, in_progress: 1 },
   items: [
     {
+      actions: fixtureActions(item("dto-running", "in_progress"), 110),
       work_id: "dto-running",
       project_id: "project_test",
       display_status: "running",
@@ -1241,7 +1302,7 @@ assert(actionAvailability({ ...fullDto.items[0], attempt: { attempt_id: "attempt
 // This is the exact status/2 compatibility shape emitted by the CLI while
 // the legacy row lacks v3 identity/proof/session facts. The status field is
 // `blocked`, but the structured expiry reason preserves `expired_review` for
-// the TUI and the absent action set leaves legacy discovery available.
+// the TUI, but an absent action set never authorizes a mutation.
 const legacyExpiredEnvelope = envelope(112, {
   contract_version: "boreal.work-status/2",
   project_id: "project_test",
@@ -1267,7 +1328,8 @@ const legacyExpiredEnvelope = envelope(112, {
 const legacyExpired = buildStatusView(legacyExpiredEnvelope);
 assert(legacyExpired.items[0].status === "expired_review", "status/2 blocked expiry decodes to expired_review");
 assert(contextualAction(legacyExpired.items[0]) === "review expiry", "status/2 expiry keeps its recovery action");
-assert(actionAvailability(legacyExpired.items[0]).find((entry) => entry.action === "release")?.reason === "expiry requires review", "status/2 expiry keeps structured recovery reason");
+assert(actionAvailability(legacyExpired.items[0]).every(entry => !entry.enabled), "status/2 without server actions is read-only");
+assert(actionAvailability(item("missing-authority", "ready", { actions: undefined })).every(entry => !entry.enabled), "ready label never substitutes for server permissions");
 
 const hostileText = renderMountedView({
   mounted: true,
@@ -1312,9 +1374,10 @@ const pagedView = await pagedController.mount({ kind: "work", project_id: "proje
 assert(pagedView.selected_work?.work_id === "page-100" && pagedReads.length === 2 && pagedReads[1].offset === 100, "deep-linked records beyond the first page are reachable");
 
 let unknownAttempts = 0;
+let readbackRevision = 130;
 const readbackService: VersionedServiceApi = {
   ...service,
-  async readStatus() { return monitoring(130, [item("readback-task", "ready")]); },
+  async readStatus() { return monitoring(readbackRevision, [item("readback-task", "ready")]); },
   async claim(request) {
     unknownAttempts += 1;
     if (unknownAttempts === 1) return envelope(130, null, "unknown", {
@@ -1323,17 +1386,17 @@ const readbackService: VersionedServiceApi = {
     });
     return envelope(131, { committed: true }, "changed");
   },
-  async readOperation() { return envelope(131, { operation: { outcome: "changed" }, readback_required: false }, "changed"); },
+  async readOperation() { readbackRevision = 131; return envelope(131, { operation: { outcome: "changed" }, readback_required: false }, "changed"); },
 };
 const readbackController = new MountedWorkflowController(readbackService, { context: tuiContext });
 await readbackController.mount({ kind: "work", project_id: "project_test", work_id: "readback-task" });
-const unknownClaim = await readbackController.claim("readback-task");
+const unknownClaim = await readbackController.claim("readback-task", testClaimContext);
 assert(!unknownClaim.ok, "unknown mutation is returned as a non-success result");
-await throwsAsync(() => readbackController.claim("readback-task"), "unknown outcome");
+await throwsAsync(() => readbackController.claim("readback-task", testClaimContext), "unknown outcome");
 const preservedOperation = unknownClaim.error.operation_id;
 await readbackController.readback(preservedOperation);
 assert(readbackController.view().pending_operations.length === 0, "durable operation readback resolves the preserved operation identity");
-assert((await readbackController.claim("readback-task")).ok && unknownAttempts === 2, "a retry is possible only after readback resolves the original operation");
+assert((await readbackController.claim("readback-task", testClaimContext)).ok && unknownAttempts === 2, "a retry is possible only after readback resolves the original operation");
 
 let hydratedReceipt: unknown;
 let finishSummary = "";
@@ -1369,7 +1432,7 @@ const refreshFailureService: VersionedServiceApi = {
 };
 const refreshFailureController = new MountedWorkflowController(refreshFailureService, { context: tuiContext });
 await refreshFailureController.mount({ kind: "work", project_id: "project_test", work_id: "refresh-task" });
-const committedDespiteRefreshFailure = await refreshFailureController.claim("refresh-task");
+const committedDespiteRefreshFailure = await refreshFailureController.claim("refresh-task", testClaimContext);
 assert(committedDespiteRefreshFailure.ok && refreshFailureController.view().notice?.message.includes("mutation committed") === true, "refresh failure does not mask a committed mutation");
 
 let fullScreenFinishSummary = "";
@@ -1394,5 +1457,51 @@ await new Promise<void>((resolve) => setTimeout(resolve, 0));
 finishScreenTerminal.emitData("q");
 await finishScreenRun;
 assert(fullScreenFinishSummary === "done q", "full-screen Finish edits and submits a typed summary instead of throwing");
+
+// Regression: a transport outage keeps readable rows but revokes cached actions.
+let disconnected = false;
+const outageController = new MountedWorkflowController({
+  ...service,
+  async readStatus() {
+    if (disconnected) throw new Error("fixture connection lost");
+    return monitoring(210, [item("outage-task", "ready")]);
+  },
+}, { context: tuiContext });
+await outageController.mount({ kind: "work", project_id: "project_test", work_id: "outage-task" });
+disconnected = true;
+let observedOutage: unknown;
+try { await outageController.refresh(); } catch (error) { observedOutage = error; }
+assert(observedOutage instanceof Error && observedOutage.message === "fixture connection lost", "refresh preserves the transport error");
+assert(outageController.view().selected_work?.work_id === "outage-task", "outage retains real last-known rows");
+assert(outageController.actionAvailability("outage-task").every((action) => !action.enabled), "outage revokes cached mutation authority");
+disconnected = false;
+await outageController.refresh();
+assert(outageController.actionAvailability("outage-task").some((action) => action.action === "claim" && action.enabled), "fresh server decisions restore authority");
+
+// An operation result is a revision high-water mark, even when the following
+// read returns old cached data. Neither action permissions nor rows regress.
+let highWaterRevision = 220;
+const highWaterController = new MountedWorkflowController({
+  ...service,
+  async readStatus() { return monitoring(highWaterRevision, [item("high-water-task", "ready")]); },
+  async claim() { return envelope(221, { committed: true }, "changed"); },
+}, { context: tuiContext });
+await highWaterController.mount({ kind: "work", project_id: "project_test", work_id: "high-water-task" });
+assert((await highWaterController.claim("high-water-task", testClaimContext)).ok, "a committed response is retained despite a stale read");
+assert(highWaterController.actionAvailability("high-water-task").every((action) => !action.enabled), "an older snapshot cannot restore authority after commit");
+highWaterRevision = 221;
+await highWaterController.refresh();
+assert(highWaterController.actionAvailability("high-water-task").some((action) => action.action === "claim" && action.enabled), "matching high-water snapshot restores authority");
+
+const noProjectPermission = new MountedWorkflowController({
+  ...service,
+  async readStatus() {
+    const response = monitoring(230, []);
+    response.data!.project_actions = [];
+    return response;
+  },
+}, { context: tuiContext });
+await noProjectPermission.mount();
+assert(noProjectPermission.view().actions.filter((action) => action.action === "create_work" || action.action === "create_project").every((action) => !action.enabled), "creation also fails closed without server decisions");
 
 console.log("TUI mounted workflow, protocol/error, monitoring, disabled-action, pagination, recovery, terminal, and refresh tests passed");

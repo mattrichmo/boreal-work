@@ -244,6 +244,58 @@ fn legacy_fixture_builds_a_valid_dry_run_plan_and_retains_expiry_and_failures() 
 }
 
 #[test]
+fn historical_completion_is_provenance_not_accepted_v2_closeout() {
+    let historical_statuses = [
+        "closed",
+        "done",
+        "complete",
+        "completed",
+        "archived",
+        "CoMpLeTeD",
+    ];
+    let work_items = historical_statuses
+        .iter()
+        .enumerate()
+        .map(|(index, status)| {
+            serde_json::json!({
+                "uuid": format!("legacy-{index}"),
+                "type": "task",
+                "title": format!("Historical task {index}"),
+                "status": status,
+            })
+        })
+        .collect::<Vec<_>>();
+    let input = serde_json::json!({
+        "format": "boreal.legacy.records",
+        "version": 1,
+        "as_of_ms": 5000,
+        "project": {"uuid": "legacy-project", "title": "Legacy project"},
+        "work_items": work_items,
+    })
+    .to_string();
+
+    let plan = import_legacy_json(&input).unwrap();
+    assert_eq!(plan.report.issue_count(), 0);
+    let document = plan.materialize_in_memory().unwrap();
+
+    // Legacy completion has no source-bound v2 submission or accepted outcome,
+    // so it may not become a dependency-satisfying closed record on import.
+    for (work, legacy_status) in document.work.iter().zip(historical_statuses) {
+        assert_eq!(work.lifecycle, Lifecycle::Draft, "{}", work.id);
+
+        let encoded = work
+            .description
+            .strip_prefix("\n\n[Historical import disposition] ")
+            .expect("historical completion has a disposition record");
+        let disposition: serde_json::Value =
+            serde_json::from_str(encoded).expect("disposition is machine-readable JSON");
+        assert_eq!(disposition["legacy_status"], legacy_status);
+        assert_eq!(disposition["v2_disposition"], "draft_requires_acceptance");
+        assert_eq!(disposition["accepted_outcome"], false);
+    }
+}
+
+#[test]
 fn legacy_import_is_non_mutating_and_in_memory_materialization_is_repeatable() {
     let source_before = LEGACY_FIXTURE.to_owned();
     let sentinel_target = vec!["production-db-placeholder"];

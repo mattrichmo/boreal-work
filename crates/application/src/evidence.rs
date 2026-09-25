@@ -784,6 +784,10 @@ pub struct EvidenceRunRequest {
     pub receipt_id: ReceiptId,
     pub operation_id: OperationId,
     pub expectation: ReceiptExpectation,
+    /// Digest of the exact trusted gate declaration used to prepare this run.
+    /// It is carried into durable admission identity so a changed declaration
+    /// cannot be mistaken for a replay of the same verifier request.
+    pub gate_policy_identity: String,
     pub cwd: String,
     pub environment_fingerprint: String,
     pub attestation: ExecutorAttestation,
@@ -2079,6 +2083,7 @@ mod tests {
         EvidenceRunRequest {
             receipt_id: ReceiptId::new("receipt-run"),
             operation_id: OperationId::new("operation-run"),
+            gate_policy_identity: format!("sha256:{}", "1".repeat(64)),
             expectation: ReceiptExpectation {
                 gate: AcceptanceGateDefinition::required(
                     GateId::new("verification"),

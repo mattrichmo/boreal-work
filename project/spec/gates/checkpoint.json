@@ -1,8 +1,10 @@
 {
   "gate_id": "checkpoint",
+  "policy_revision": 1,
   "kind": "checkpoint",
   "executable": "printf",
   "argv": ["printf", "checkpoint"],
+  "verifier_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "cwd": ".",
   "source_snapshot_hash": "sha256:source-fixture-v1",
   "config_identity": "sha256:config-fixture-v1",
