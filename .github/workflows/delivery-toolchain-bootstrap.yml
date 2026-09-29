@@ -1,0 +1,37 @@
+name: Delivery offline toolchain bootstrap
+
+on:
+  push:
+    branches: [delivery/toolchain-bootstrap-20260929]
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+      - name: Prepare offline compiler and locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p offline-build
+          cargo vendor --locked offline-build/vendor > offline-build/vendor-config.toml
+          cp Cargo.lock offline-build/input-Cargo.lock
+          rustc -Vv > offline-build/rustc-version.txt
+          cargo -V >> offline-build/rustc-version.txt
+          TOOLCHAIN="$(rustc --print sysroot)"
+          tar -C "$TOOLCHAIN" -cJf offline-build/toolchain.tar.xz bin lib share
+          find offline-build/vendor -type f -print0 | sort -z | xargs -0 sha256sum > offline-build/vendor-sha256.txt
+          sha256sum offline-build/toolchain.tar.xz > offline-build/toolchain-sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boreal-offline-linux-build-tools
+          path: offline-build/
+          compression-level: 0
+          retention-days: 2
