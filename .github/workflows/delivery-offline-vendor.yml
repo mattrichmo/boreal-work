@@ -1,0 +1,26 @@
+name: Delivery offline vendor archive
+on:
+  push:
+    branches: [delivery/toolchain-bootstrap-20260929]
+    paths: [.github/workflows/delivery-offline-vendor.yml]
+permissions:
+  contents: read
+jobs:
+  vendor:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - name: Preserve complete vendor directories
+        run: |
+          set -eu
+          cargo vendor --locked vendor
+          tar -czf vendor.tar.gz vendor
+          sha256sum vendor.tar.gz > vendor.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boreal-offline-vendor
+          path: |
+            vendor.tar.gz
+            vendor.tar.gz.sha256
+          retention-days: 2
