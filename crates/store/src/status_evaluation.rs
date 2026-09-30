@@ -105,17 +105,19 @@ impl SqliteStore {
         let mut facts = BTreeMap::new();
         while statement.step()? == SQLITE_ROW {
             let work_id = statement.column_text(0)?;
-            let activation = match statement.column_optional_signed_i64(1)? {
-                Some(value) => u64::try_from(value)
-                    .map(TimestampMs)
-                    .map(Some)
-                    .map_err(|_| {
-                        StoreError::Corrupt(format!(
+            let activation = (|| -> Result<Option<TimestampMs>, StoreError> {
+                match statement.column_optional_signed_i64(1)? {
+                    Some(value) => u64::try_from(value)
+                        .map(TimestampMs)
+                        .map(Some)
+                        .map_err(|_| {
+                            StoreError::Corrupt(format!(
                             "negative planning activation timestamp for work {work_id}: {value}"
                         ))
-                    }),
-                None => Ok(None),
-            };
+                        }),
+                    None => Ok(None),
+                }
+            })();
             facts.insert(
                 work_id,
                 activation.map(|activation_at| (None, activation_at)),
@@ -223,12 +225,28 @@ impl SqliteStore {
         &self,
         project_id: &str,
         actor_id: &str,
+        as_of: TimestampMs,
+    ) -> Result<(ProjectStatusRead, ActorContext), StoreError> {
+        self.read_project_status_for_session(project_id, actor_id, None, as_of)
+    }
+
+    pub fn read_project_status_for_session(
+        &self,
+        project_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
     ) -> Result<(ProjectStatusRead, ActorContext), StoreError> {
         self.execute_batch("BEGIN")?;
         let result = (|| {
-            let actor = self.actor_context(actor_id)?;
+            let actor = self.project_actor_context(project_id, actor_id)?;
             let mut snapshot = self.read_project_status_in_transaction(project_id)?;
-            self.populate_status_action_facts(&mut snapshot, actor_id)?;
+            self.populate_status_action_facts_for_session(
+                &mut snapshot,
+                actor_id,
+                session_id,
+                as_of,
+            )?;
             Ok((snapshot, actor))
         })();
         finish_transaction(self, result)
@@ -237,113 +255,88 @@ impl SqliteStore {
     /// Attach the non-derived facts needed by the action projection while the
     /// status snapshot's read transaction is still open. Missing facts remain
     /// explicit; this method never invents a proof, session, or revision.
-    fn populate_status_action_facts(
+    pub(crate) fn populate_status_action_facts(
         &self,
         snapshot: &mut ProjectStatusRead,
         actor_id: &str,
+        as_of: TimestampMs,
     ) -> Result<(), StoreError> {
-        let session_id = self.status_session_for_actor(snapshot.project_id.as_str(), actor_id)?;
-        let has_entity_revisions = self.table_exists("boreal_entity_revision")?;
-        let has_pinned_requirements = self.table_exists("boreal_pinned_requirement")?;
-        for row in &mut snapshot.works {
-            let mut facts = StatusActionFacts {
-                entity_revision: None,
-                proof_revision: None,
-                authenticated_session_id: session_id.clone(),
-                source_version_id: row
-                    .current_attempt
-                    .as_ref()
-                    .and_then(|attempt| attempt.source_version_id.clone()),
-                config_identity: row
-                    .current_attempt
-                    .as_ref()
-                    .map(|attempt| attempt.config_identity.clone()),
-                integrity: StatusIntegrity::Valid,
-                missing_facts: Vec::new(),
-            };
-
-            if has_entity_revisions {
-                let mut entity = self.prepare(
-                    "SELECT entity_revision, proof_revision
-                     FROM boreal_entity_revision
-                     WHERE project_id = ?1 AND work_id = ?2",
-                )?;
-                entity.bind_text(1, snapshot.project_id.as_str())?;
-                entity.bind_text(2, row.work.id.as_str())?;
-                if entity.step()? == SQLITE_ROW {
-                    facts.entity_revision = Some(entity.column_u64(0)?);
-                    facts.proof_revision = Some(entity.column_u64(1)?);
-                }
-            }
-            if facts.entity_revision.is_none() {
-                facts.missing_facts.push("entity_revision".to_owned());
-            }
-            if has_pinned_requirements && facts.proof_revision.is_none() {
-                let mut proof = self.prepare(
-                    "SELECT MAX(proof_revision)
-                     FROM boreal_pinned_requirement
-                     WHERE project_id = ?1 AND work_id = ?2",
-                )?;
-                proof.bind_text(1, snapshot.project_id.as_str())?;
-                proof.bind_text(2, row.work.id.as_str())?;
-                if proof.step()? == SQLITE_ROW {
-                    facts.proof_revision = proof.column_optional_i64(0)?;
-                }
-            }
-            if facts.proof_revision.is_none() {
-                facts.missing_facts.push("proof_revision".to_owned());
-            }
-            if facts.authenticated_session_id.is_none() {
-                facts.missing_facts.push("authenticated_session".to_owned());
-            }
-            if row.current_attempt.is_some()
-                && (facts.source_version_id.is_none() || facts.config_identity.is_none())
-            {
-                facts.missing_facts.push("proof_identity".to_owned());
-            }
-            if snapshot
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.work_id == row.work.id.as_str())
-            {
-                facts.integrity = StatusIntegrity::Quarantined;
-                facts.missing_facts.push("integrity".to_owned());
-            }
-            facts.missing_facts.sort();
-            facts.missing_facts.dedup();
-            row.action_facts = facts;
-        }
-        Ok(())
+        self.populate_status_action_facts_for_session(snapshot, actor_id, None, as_of)
     }
 
-    fn status_session_for_actor(
+    pub(crate) fn populate_status_action_facts_for_session(
         &self,
-        project_id: &str,
+        snapshot: &mut ProjectStatusRead,
         actor_id: &str,
-    ) -> Result<Option<String>, StoreError> {
-        let mut statement = self.prepare(
-            "SELECT DISTINCT session.session_id
-             FROM session
-             JOIN operation registration
-               ON registration.session_id = session.session_id
-              AND registration.command = 'session.register'
-              AND registration.project_id = ?1
-             WHERE session.actor_id = ?2 AND session.state = 'active'
-             ORDER BY session.session_id",
-        )?;
-        statement.bind_text(1, project_id)?;
-        statement.bind_text(2, actor_id)?;
-        let mut selected = None;
-        while statement.step()? == SQLITE_ROW {
-            let value = statement.column_text(0)?;
-            if selected.is_some() {
-                return Err(StoreError::Conflict(
-                    "status action context has multiple active authenticated sessions".to_owned(),
-                ));
+        requested_session: Option<&str>,
+        as_of: TimestampMs,
+    ) -> Result<(), StoreError> {
+        let actor = self.project_actor_context(snapshot.project_id.as_str(), actor_id)?;
+        // Invalid/ended sessions remove mutation authority, not read access to healthy siblings.
+        let session_id = requested_session
+            .filter(|session| {
+                self.validate_project_session(snapshot.project_id.as_str(), actor_id, session)
+                    .is_ok()
+            })
+            .map(str::to_owned);
+        snapshot.caller_session_id = session_id.clone();
+        for row in &mut snapshot.works {
+            row.action_facts.integrity = if snapshot
+                .diagnostics
+                .iter()
+                .any(|d| d.work_id == row.work.id.as_str())
+            {
+                StatusIntegrity::Quarantined
+            } else {
+                StatusIntegrity::Valid
+            };
+            match self.canonical_decision_inputs(
+                snapshot.project_id.as_str(),
+                Revision(snapshot.revision.0),
+                row,
+                &actor,
+                session_id.as_deref(),
+                as_of,
+            ) {
+                Ok(inputs) => {
+                    let proof = inputs.requirements.as_present().map(|r| &r.proof);
+                    let mut missing_facts = Vec::new();
+                    if session_id.is_none() {
+                        missing_facts.push("authenticated_session".to_owned());
+                    }
+                    if !inputs.is_decidable() {
+                        missing_facts.push("decision_inputs".to_owned());
+                    }
+                    row.action_facts = StatusActionFacts {
+                        entity_revision: Some(inputs.subject.revision.get()),
+                        proof_revision: proof.map(|p| p.proof_revision.get()),
+                        authenticated_session_id: session_id.clone(),
+                        source_version_id: proof
+                            .and_then(|p| p.source_snapshot.as_ref())
+                            .map(ToString::to_string),
+                        config_identity: proof
+                            .and_then(|p| p.configuration.as_ref())
+                            .map(ToString::to_string),
+                        integrity: row.action_facts.integrity,
+                        missing_facts,
+                        canonical_inputs: Some(inputs),
+                    };
+                }
+                Err(error) => {
+                    row.action_facts = StatusActionFacts::unavailable();
+                    row.work
+                        .hard_holds
+                        .push(ReasonCode::HardHold("integrity_quarantined".into()));
+                    snapshot.diagnostics.push(StatusRecordDiagnostic {
+                        work_id: row.work.id.to_string(),
+                        title: Some(row.work.title.clone()),
+                        code: "decision_facts_corrupt".into(),
+                        detail: error.to_string(),
+                    });
+                }
             }
-            selected = Some(value);
         }
-        Ok(selected)
+        Ok(())
     }
 
     /// Caller must hold the write transaction. This does not open a nested
@@ -355,8 +348,71 @@ impl SqliteStore {
         actor_id: &str,
         as_of: TimestampMs,
     ) -> Result<StatusDecision, StoreError> {
-        let actor = self.actor_context(actor_id)?;
-        let snapshot = self.read_project_status_in_transaction(project_id)?;
+        self.work_policy_in_transaction(project_id, work_id, actor_id, None, as_of)
+            .map(|(decision, _)| decision)
+    }
+    /// Re-evaluate the same domain action policy used by status, under the
+    /// caller's write lock. Displayed descriptors are never bearer tokens.
+    pub(crate) fn authorize_work_action_in_transaction(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
+        action: boreal_domain::actions::ActionKind,
+    ) -> Result<boreal_domain::actions::ActionDescriptor, StoreError> {
+        self.principal_authority(project_id, actor_id)?;
+        self.validate_project_session(
+            project_id,
+            actor_id,
+            session_id.ok_or_else(|| {
+                StoreError::Invalid("canonical action requires a project session".into())
+            })?,
+        )?;
+        let (decision, facts) =
+            self.work_policy_in_transaction(project_id, work_id, actor_id, session_id, as_of)?;
+        let facts = facts
+            .ok_or_else(|| StoreError::Conflict("canonical action facts unavailable".into()))?;
+        let actions = boreal_domain::actions::evaluate_actions(
+            &boreal_domain::actions::ActionEvaluationInput::new(
+                &facts,
+                decision.display_status,
+                &decision.reason_codes,
+            ),
+        );
+        if let Some(descriptor) = actions
+            .allowed
+            .into_iter()
+            .find(|descriptor| descriptor.action == action)
+        {
+            return Ok(descriptor);
+        }
+        let reason = actions
+            .denied
+            .iter()
+            .find(|denied| denied.descriptor.action == action)
+            .map(|denied| denied.reason.stable_code())
+            .unwrap_or("action_not_applicable");
+        Err(StoreError::Conflict(format!("action_denied:{reason}")))
+    }
+    fn work_policy_in_transaction(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
+    ) -> Result<
+        (
+            StatusDecision,
+            Option<boreal_domain::decision_inputs::DecisionInputs>,
+        ),
+        StoreError,
+    > {
+        let actor = self.project_actor_context(project_id, actor_id)?;
+        let mut snapshot = self.read_project_status_in_transaction(project_id)?;
+        self.populate_status_action_facts_for_session(&mut snapshot, actor_id, session_id, as_of)?;
         let row = snapshot
             .works
             .iter()
@@ -385,7 +441,7 @@ impl SqliteStore {
             .map(|edge| edge.dependent_id.clone())
             .collect::<Vec<_>>();
         let attempt = row.status_attempt()?;
-        Ok(evaluate_status(StatusContext {
+        let context = StatusContext {
             work: &row.work,
             prerequisites: &prerequisites,
             current_attempt: attempt.as_ref(),
@@ -397,7 +453,12 @@ impl SqliteStore {
             schedule: row.schedule,
             activation_at: row.activation_at,
             affected_dependents: &dependents,
-        }))
+        };
+        let decision = match row.action_facts.canonical_inputs.as_ref() {
+            Some(facts) => boreal_domain::evaluate_canonical_status(context, facts),
+            None => evaluate_status(context),
+        };
+        Ok((decision, row.action_facts.canonical_inputs.clone()))
     }
 }
 

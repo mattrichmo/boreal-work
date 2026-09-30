@@ -28,6 +28,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use profiles::{PinnedRequirements, ProfileStore, ProfileVersion, RequirementSubjectKind};
 
 pub mod acceptance;
+pub mod completion;
+mod completion_migrations;
+pub mod cycle_commands;
 pub mod execution;
 pub mod identity;
 pub mod jobs;
@@ -35,9 +38,11 @@ mod knowledge;
 pub mod maintenance;
 mod migrations;
 pub mod operations;
+pub mod principals;
 pub mod profiles;
 pub mod recovery;
 mod status_evaluation;
+mod status_facts;
 pub mod transactions;
 mod work_model_v3;
 pub use knowledge::*;
@@ -242,7 +247,7 @@ CREATE TABLE audit_event_repair (
   project_id TEXT NOT NULL REFERENCES project(project_id),
   revision INTEGER NOT NULL CHECK (revision > 0),
   operation_id TEXT NOT NULL UNIQUE REFERENCES operation(operation_id),
-  event_type TEXT NOT NULL CHECK (event_type IN ('work.created','work.published','work.closed','work.blocked','work.paused','work.resumed','work.cancelled','work.reopened','attempt.claimed','attempt.accepted','attempt.started','attempt.submitted','attempt.released','attempt.failed','attempt.expiry_pending','attempt.expired','evidence.verifier.admitted','expiry.resolved','lease.renewed','receipt.recorded','receipt.rejected','review.accepted','review.rejected','close.requested','close.completed','gate.satisfied','hold.resolved','repair.correction','repair.supersession')),
+  event_type TEXT NOT NULL CHECK (event_type IN ('work.created','work.published','work.closed','work.blocked','work.paused','work.resumed','work.cancelled','work.reopened','attempt.claimed','attempt.accepted','attempt.started','attempt.checkpoint','attempt.submitted','attempt.released','attempt.failed','attempt.expiry_pending','attempt.expired','evidence.verifier.admitted','expiry.resolved','lease.renewed','receipt.recorded','receipt.rejected','review.accepted','review.rejected','close.requested','close.completed','gate.satisfied','hold.resolved','repair.correction','repair.supersession')),
   subject_type TEXT NOT NULL CHECK (subject_type IN ('work','attempt','receipt','review','gate','hold','dependency','summary','operation','project')),
   subject_id TEXT NOT NULL,
   actor_id TEXT NOT NULL REFERENCES actor(actor_id),
@@ -342,6 +347,7 @@ unsafe extern "C" {
     fn sqlite3_column_int64(statement: *mut sqlite3_stmt, index: c_int) -> i64;
     fn sqlite3_column_type(statement: *mut sqlite3_stmt, index: c_int) -> c_int;
     fn sqlite3_column_text(statement: *mut sqlite3_stmt, index: c_int) -> *const u8;
+    fn sqlite3_column_bytes(statement: *mut sqlite3_stmt, index: c_int) -> c_int;
     fn sqlite3_backup_init(
         destination: *mut sqlite3,
         destination_name: *const c_char,
@@ -627,6 +633,7 @@ pub struct StatusWorkRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusActionFacts {
+    pub canonical_inputs: Option<boreal_domain::decision_inputs::DecisionInputs>,
     pub entity_revision: Option<u64>,
     pub proof_revision: Option<u64>,
     pub authenticated_session_id: Option<String>,
@@ -646,6 +653,7 @@ pub enum StatusIntegrity {
 impl StatusActionFacts {
     pub fn unavailable() -> Self {
         Self {
+            canonical_inputs: None,
             entity_revision: None,
             proof_revision: None,
             authenticated_session_id: None,
@@ -681,6 +689,9 @@ pub struct StatusDependencyRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectStatusRead {
+    pub caller_session_id: Option<String>,
+    /// Stable pagination identities for all physical rows, including quarantine rows.
+    pub ordered_work_ids: Vec<String>,
     pub project_id: ProjectId,
     pub revision: SnapshotRevision,
     pub total: u64,
@@ -1428,6 +1439,39 @@ impl SqliteStore {
         }
     }
 
+    /// Opens diagnostics without migrations, WAL configuration or schema repair.
+    /// Only explicitly authenticated local maintenance adapters may use this
+    /// relaxed schema-open path; ordinary application reads still verify contracts.
+    pub fn open_read_only_for_diagnostics(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let mut store = Self::open_connection(path, SQLITE_OPEN_READONLY)?;
+        store.canonical_production = store.table_exists("boreal_schema_identity")?;
+        Ok(store)
+    }
+
+    /// Bounded SQLite checks in one read transaction. These never repair data.
+    pub fn diagnostic_checks(&self) -> Result<serde_json::Value, StoreError> {
+        self.execute_batch("BEGIN")?;
+        let result = (|| {
+            let mut integrity = Vec::new();
+            let mut check = self.prepare("PRAGMA quick_check(32)")?;
+            while check.step()? == SQLITE_ROW {
+                integrity.push(check.column_text(0)?);
+            }
+            let mut foreign_keys = Vec::new();
+            let mut rows = self.prepare("PRAGMA foreign_key_check")?;
+            while foreign_keys.len() < 64 && rows.step()? == SQLITE_ROW {
+                foreign_keys.push(json!({"table": rows.column_text(0)?, "rowid": rows.column_optional_signed_i64(1)?,
+                    "parent": rows.column_text(2)?, "constraint": rows.column_i64(3)?}));
+            }
+            let foreign_keys_truncated = foreign_keys.len() == 64 && rows.step()? == SQLITE_ROW;
+            Ok(
+                json!({"read_only": true, "quick_check": integrity, "foreign_key_violations": foreign_keys,
+                "foreign_key_violations_truncated": foreign_keys_truncated}),
+            )
+        })();
+        finish_transaction(self, result)
+    }
+
     /// Opens an established database for read-only work. This path never
     /// enables WAL or runs schema DDL, so status/readback callers cannot take
     /// a writer lock merely by opening a connection.
@@ -1684,16 +1728,15 @@ impl SqliteStore {
         // connection, still pass through the canonical install boundary.
         let identity_installed = self.table_exists("boreal_database_identity")?;
         let install_identity = || -> Result<(), StoreError> {
-            let source = self
-                .database_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ":memory:".to_owned());
-            let mut encoded = String::new();
-            for byte in source.as_bytes() {
-                write!(&mut encoded, "{byte:02x}")
-                    .expect("writing hexadecimal identity into String cannot fail");
+            // Random persistent instance identity prevents stale cache reuse after
+            // database recreation at the same filesystem path.
+            let mut random = self.prepare("SELECT lower(hex(randomblob(32)))")?;
+            if random.step()? != SQLITE_ROW {
+                return Err(StoreError::Corrupt(
+                    "database identity generation failed".into(),
+                ));
             }
+            let encoded = random.column_text(0)?;
             let identity = identity::DatabaseIdentity::new(format!("boreal-db-{encoded}"), 1)
                 .map_err(|error| StoreError::Invalid(error.to_string()))?;
             identity::IdentityStore::new(self)
@@ -1721,7 +1764,8 @@ impl SqliteStore {
             ));
         }
         maintenance::ensure_schema(self)?;
-        self.verify_additive_store_schema_contract()
+        self.verify_additive_store_schema_contract()?;
+        self.install_completion_contract()
     }
 
     /// Verifies the complete additive contract at the production-open
@@ -3489,6 +3533,15 @@ impl SqliteStore {
         definition_json: &str,
         now: &str,
     ) -> Result<(), StoreError> {
+        if self.canonical_production {
+            profiles::ProfileVersion::from_canonical_definition(
+                profile_id,
+                version,
+                policy_digest,
+                definition_json,
+                now,
+            )?;
+        }
         let mut existing = self.prepare(
             "SELECT policy_digest, definition_json
              FROM acceptance_profile
@@ -3501,6 +3554,11 @@ impl SqliteStore {
             let existing_definition = existing.column_text(1)?;
             if existing_digest == policy_digest && existing_definition == definition_json {
                 return Ok(());
+            }
+            if self.canonical_production {
+                return Err(StoreError::Conflict(format!(
+                    "acceptance profile {profile_id} v{version} is immutable; register a new version instead of rewriting historical content"
+                )));
             }
             // An empty legacy row is an explicitly non-authoritative
             // placeholder. Replace it only when the caller supplies a
@@ -3935,14 +3993,54 @@ impl SqliteStore {
         expected_project_revision: Option<u64>,
         now: &str,
     ) -> Result<MutationResult, StoreError> {
+        self.create_work_operation_for_session(
+            work,
+            actor_id,
+            None,
+            operation_id,
+            request_digest,
+            expected_project_revision,
+            now,
+        )
+    }
+
+    pub fn create_work_operation_for_session(
+        &self,
+        work: &WorkItem,
+        actor_id: &str,
+        session_id: Option<&str>,
+        operation_id: &str,
+        request_digest: &str,
+        expected_project_revision: Option<u64>,
+        now: &str,
+    ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
+            if self.canonical_production {
+                let (role, _) = self.principal_authority(work.project_id.as_str(), actor_id)?;
+                if !boreal_domain::work_model_v3::planning_role_allowed(role)
+                    || expected_project_revision.is_none()
+                {
+                    return Err(StoreError::Invalid(
+                        "work creation requires project planning authority and a revision".into(),
+                    ));
+                }
+                self.validate_project_session(
+                    work.project_id.as_str(),
+                    actor_id,
+                    session_id.ok_or_else(|| {
+                        StoreError::Invalid(
+                            "work creation requires an explicit project session".into(),
+                        )
+                    })?,
+                )?;
+            }
             if let Some(existing) = self.preflight_operation_replay(
                 work.project_id.as_str(),
                 operation_id,
                 "work.create",
                 actor_id,
-                None,
+                session_id,
                 expected_project_revision,
                 None,
                 None,
@@ -3968,7 +4066,7 @@ impl SqliteStore {
                 project_id: work.project_id.to_string(),
                 command: "work.create".to_owned(),
                 actor_id: actor_id.to_owned(),
-                session_id: None,
+                session_id: session_id.map(str::to_owned),
                 expected_revision: expected_project_revision,
                 attempt_id: None,
                 fence: None,
@@ -3987,7 +4085,7 @@ impl SqliteStore {
                 subject_type: "work".to_owned(),
                 subject_id: work.id.to_string(),
                 actor_id: actor_id.to_owned(),
-                session_id: None,
+                session_id: session_id.map(str::to_owned),
                 fence: None,
                 as_of: now.to_owned(),
                 payload_json: payload,
@@ -4185,6 +4283,31 @@ impl SqliteStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn append_dependency_history(
+        &self,
+        project: &str,
+        prerequisite: &str,
+        dependent: &str,
+        change: &str,
+        actor: &str,
+        operation: &str,
+        at: &str,
+    ) -> Result<(), StoreError> {
+        let mut row = self.prepare("INSERT INTO boreal_dependency_event
+            (event_id,project_id,prerequisite_id,dependent_id,change_kind,actor_id,reason,operation_id,created_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?1,?8)")?;
+        row.bind_text(1, operation)?;
+        row.bind_text(2, project)?;
+        row.bind_text(3, prerequisite)?;
+        row.bind_text(4, dependent)?;
+        row.bind_text(5, change)?;
+        row.bind_text(6, actor)?;
+        row.bind_text(7, "explicit dependency edit; original operation retained")?;
+        row.bind_text(8, at)?;
+        row.run()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn remove_dependency_operation(
         &self,
         project_id: &str,
@@ -4233,6 +4356,23 @@ impl SqliteStore {
                     entity: "dependency",
                     id: format!("{prerequisite_id}->{dependent_id}"),
                 });
+            }
+            if self.canonical_production {
+                let (role, _) = self.principal_authority(project_id, actor_id)?;
+                if !boreal_domain::work_model_v3::planning_role_allowed(role) {
+                    return Err(StoreError::Invalid(
+                        "dependency edits require planning authority".into(),
+                    ));
+                }
+                self.append_dependency_history(
+                    project_id,
+                    prerequisite_id,
+                    dependent_id,
+                    "removed",
+                    actor_id,
+                    operation_id,
+                    now,
+                )?;
             }
             let revision = self.bump_revision_in_transaction(project_id)?;
             let payload = json_object(json!({
@@ -4566,6 +4706,23 @@ impl SqliteStore {
             }
             check_expected_revision(current_revision, Some(expected_revision))?;
             self.add_dependency_in_transaction(project_id, prerequisite_id, dependent_id, now)?;
+            if self.canonical_production {
+                let (role, _) = self.principal_authority(project_id, actor_id)?;
+                if !boreal_domain::work_model_v3::planning_role_allowed(role) {
+                    return Err(StoreError::Invalid(
+                        "dependency edits require planning authority".into(),
+                    ));
+                }
+                self.append_dependency_history(
+                    project_id,
+                    prerequisite_id,
+                    dependent_id,
+                    "added",
+                    actor_id,
+                    operation_id,
+                    now,
+                )?;
+            }
             let revision = self.bump_revision_in_transaction(project_id)?;
             let payload = json_object(json!({
                 "prerequisite_id": prerequisite_id,
@@ -4741,8 +4898,10 @@ impl SqliteStore {
         // These two relations are independent of each work row. Fetching
         // them once keeps the canonical read consistent while removing
         // two avoidable N+1 query families from large status snapshots.
-        let current_attempts = self.current_attempts_for_project(project_id)?;
-        let active_holds = self.active_hard_holds_for_project(project_id)?;
+        let (current_attempts, mut scoped_diagnostics) =
+            self.current_attempts_for_project(project_id)?;
+        let (active_holds, hold_diagnostics) = self.active_hard_holds_for_project(project_id)?;
+        scoped_diagnostics.extend(hold_diagnostics);
         let gate_read =
             self.status_gate_diagnostics_for_project(project_id, &current_attempts, revision.0)?;
         let gate_diagnostics = gate_read.diagnostics;
@@ -4753,11 +4912,12 @@ impl SqliteStore {
             "SELECT work_id, project_id, kind, parent_id, lifecycle,
                     dispatch_policy, retry_not_before, priority,
                     acceptance_profile_id, acceptance_profile_version,
-                    title, description
+                    title, description, rowid
              FROM work_item WHERE project_id = ?1 ORDER BY work_id",
         )?;
         rows.bind_text(1, project_id)?;
         let mut works = Vec::with_capacity(total as usize);
+        let mut ordered_work_ids = Vec::with_capacity(total as usize);
         let mut record_diagnostics = requirement_diagnostics
             .iter()
             .map(|(work_id, detail)| StatusRecordDiagnostic {
@@ -4767,8 +4927,23 @@ impl SqliteStore {
                 detail: detail.clone(),
             })
             .collect::<Vec<_>>();
+        record_diagnostics.extend(scoped_diagnostics);
         while rows.step()? == SQLITE_ROW {
-            let work_id = rows.column_text(0)?;
+            let work_id = match rows.column_text(0) {
+                Ok(id) => id,
+                Err(error) => {
+                    let identity = format!("quarantined-row:{}", rows.column_i64(12)?);
+                    ordered_work_ids.push(identity.clone());
+                    record_diagnostics.push(StatusRecordDiagnostic {
+                        work_id: identity,
+                        title: rows.column_text(10).ok(),
+                        code: "invalid_work_identity".to_owned(),
+                        detail: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            ordered_work_ids.push(work_id.clone());
             let current_attempt = current_attempts.get(&work_id).cloned();
             let diagnostics =
                 gate_diagnostics
@@ -4801,7 +4976,10 @@ impl SqliteStore {
                     .remove(&work_id)
                     .unwrap_or(Ok((None, None)))?;
                 let mut hard_holds = active_holds.get(&work_id).cloned().unwrap_or_default();
-                if requirement_diagnostics.contains_key(&work_id) {
+                if record_diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.work_id == work_id)
+                {
                     hard_holds.push(ReasonCode::HardHold("integrity_quarantined".to_owned()));
                 }
                 let work = WorkItem {
@@ -4823,18 +5001,20 @@ impl SqliteStore {
                         gates,
                     },
                 };
-                Ok::<_, StoreError>((work, schedule, activation_at))
+                Ok::<_, StoreError>((work, schedule, activation_at, rows.column_optional_text(6)?))
             })();
             match work {
-                Ok((work, schedule, activation_at)) => works.push(StatusWorkRecord {
-                    work,
-                    retry_not_before: rows.column_optional_text(6)?,
-                    schedule,
-                    activation_at,
-                    current_attempt,
-                    gate_diagnostics: diagnostics,
-                    action_facts: StatusActionFacts::unavailable(),
-                }),
+                Ok((work, schedule, activation_at, retry_not_before)) => {
+                    works.push(StatusWorkRecord {
+                        work,
+                        retry_not_before,
+                        schedule,
+                        activation_at,
+                        current_attempt,
+                        gate_diagnostics: diagnostics,
+                        action_facts: StatusActionFacts::unavailable(),
+                    })
+                }
                 Err(error) => record_diagnostics.push(StatusRecordDiagnostic {
                     work_id,
                     title,
@@ -4852,14 +5032,41 @@ impl SqliteStore {
         )?;
         edges.bind_text(1, project_id)?;
         while edges.step()? == SQLITE_ROW {
-            dependencies.push(StatusDependencyRecord {
-                prerequisite_id: WorkId::new(edges.column_text(0)?),
-                dependent_id: WorkId::new(edges.column_text(1)?),
-                policy: parse_dependency_policy(&edges.column_text(2)?)?,
-            });
+            let dependent_id = edges
+                .column_text(1)
+                .unwrap_or_else(|_| "unreadable-dependent".to_owned());
+            let edge = (|| -> Result<StatusDependencyRecord, StoreError> {
+                Ok(StatusDependencyRecord {
+                    prerequisite_id: WorkId::new(edges.column_text(0)?),
+                    dependent_id: WorkId::new(edges.column_text(1)?),
+                    policy: parse_dependency_policy(&edges.column_text(2)?)?,
+                })
+            })();
+            match edge {
+                Ok(edge) => dependencies.push(edge),
+                Err(error) => {
+                    if let Some(row) = works
+                        .iter_mut()
+                        .find(|row| row.work.id.as_str() == dependent_id)
+                    {
+                        row.work
+                            .hard_holds
+                            .push(ReasonCode::HardHold("dependency_corrupt".to_owned()));
+                    }
+                    record_diagnostics.push(StatusRecordDiagnostic {
+                        work_id: dependent_id,
+                        title: None,
+                        code: "dependency_corrupt".to_owned(),
+                        detail: error.to_string(),
+                    });
+                }
+            }
         }
 
+        ordered_work_ids.sort();
         let mut snapshot = ProjectStatusRead {
+            caller_session_id: None,
+            ordered_work_ids,
             project_id: ProjectId::new(project_id),
             revision,
             total,
@@ -4978,6 +5185,16 @@ impl SqliteStore {
                 return Err(StoreError::Invalid(
                     "claim deadlines must be strictly after claimed_at".to_owned(),
                 ));
+            }
+            if self.canonical_production {
+                self.authorize_work_action_in_transaction(
+                    project_id,
+                    work_id,
+                    actor_id,
+                    session_id,
+                    claimed_at_ms,
+                    boreal_domain::actions::ActionKind::Claim,
+                )?;
             }
             let decision =
                 self.status_decision_in_transaction(project_id, work_id, actor_id, claimed_at_ms)?;
@@ -5180,7 +5397,7 @@ impl SqliteStore {
     fn current_attempts_for_project(
         &self,
         project_id: &str,
-    ) -> Result<BTreeMap<String, AttemptRecord>, StoreError> {
+    ) -> Result<(BTreeMap<String, AttemptRecord>, Vec<StatusRecordDiagnostic>), StoreError> {
         let mut statement = self.prepare(
             "SELECT wi.project_id, a.work_id, a.attempt_id, a.actor_id,
                     a.harness_id, a.session_id, a.fence, a.current, a.state,
@@ -5196,17 +5413,80 @@ impl SqliteStore {
         )?;
         statement.bind_text(1, project_id)?;
         let mut attempts = BTreeMap::new();
+        let mut diagnostics = Vec::new();
         while statement.step()? == SQLITE_ROW {
-            let attempt = self.attempt_from_statement(&statement)?;
-            attempts.insert(attempt.work_id.clone(), attempt);
+            let work_id = statement
+                .column_text(1)
+                .unwrap_or_else(|_| "unreadable-work".to_owned());
+            match self.attempt_from_statement(&statement) {
+                Ok(attempt) if !attempts.contains_key(&work_id) => {
+                    attempts.insert(work_id, attempt);
+                }
+                result => {
+                    let detail = match result {
+                        Err(error) => error.to_string(),
+                        Ok(_) => "multiple current attempts for one work item".to_owned(),
+                    };
+                    diagnostics.push(StatusRecordDiagnostic {
+                        work_id,
+                        title: None,
+                        code: "attempt_corrupt".to_owned(),
+                        detail,
+                    });
+                }
+            }
         }
-        Ok(attempts)
+        if self.canonical_production {
+            let mut rows = self.prepare("SELECT s.work_id, s.attempt_id FROM boreal_submission s JOIN boreal_entity_revision e ON e.project_id=s.project_id AND e.work_id=s.work_id AND e.proof_revision=s.proof_revision WHERE s.project_id=?1 AND s.rowid=(SELECT MAX(n.rowid) FROM boreal_submission n WHERE n.project_id=s.project_id AND n.work_id=s.work_id AND n.proof_revision=s.proof_revision) ORDER BY s.work_id")?;
+            rows.bind_text(1, project_id)?;
+            while rows.step()? == SQLITE_ROW {
+                let work_id = rows
+                    .column_text(0)
+                    .unwrap_or_else(|_| "unreadable-work".into());
+                if attempts.contains_key(&work_id) {
+                    continue;
+                }
+                let decoded = (|| -> Result<AttemptRecord, StoreError> {
+                    let attempt_id = rows.column_text(1)?;
+                    let attempt = self
+                        .attempt_record(&attempt_id, false)?
+                        .ok_or_else(|| StoreError::Corrupt("submission attempt missing".into()))?;
+                    if attempt.project_id != project_id
+                        || attempt.work_id != work_id
+                        || !self.attempt_has_current_submission(&attempt)?
+                    {
+                        return Err(StoreError::Corrupt(
+                            "submission attempt scope or generation mismatch".into(),
+                        ));
+                    }
+                    Ok(attempt)
+                })();
+                match decoded {
+                    Ok(attempt) => {
+                        attempts.insert(work_id, attempt);
+                    }
+                    Err(error) => diagnostics.push(StatusRecordDiagnostic {
+                        work_id,
+                        title: None,
+                        code: "submission_corrupt".into(),
+                        detail: error.to_string(),
+                    }),
+                }
+            }
+        }
+        Ok((attempts, diagnostics))
     }
 
     fn active_hard_holds_for_project(
         &self,
         project_id: &str,
-    ) -> Result<BTreeMap<String, Vec<ReasonCode>>, StoreError> {
+    ) -> Result<
+        (
+            BTreeMap<String, Vec<ReasonCode>>,
+            Vec<StatusRecordDiagnostic>,
+        ),
+        StoreError,
+    > {
         let mut statement = self.prepare(
             "SELECT wh.work_id, wh.reason_code
              FROM work_hold wh JOIN work_item wi ON wi.work_id = wh.work_id
@@ -5215,13 +5495,32 @@ impl SqliteStore {
         )?;
         statement.bind_text(1, project_id)?;
         let mut holds = BTreeMap::new();
+        let mut diagnostics = Vec::new();
         while statement.step()? == SQLITE_ROW {
+            let work_id = statement
+                .column_text(0)
+                .unwrap_or_else(|_| "unreadable-work".to_owned());
+            let reason = match statement.column_text(1) {
+                Ok(reason) if !reason.trim().is_empty() => reason,
+                result => {
+                    diagnostics.push(StatusRecordDiagnostic {
+                        work_id: work_id.clone(),
+                        title: None,
+                        code: "hold_corrupt".to_owned(),
+                        detail: result
+                            .err()
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "hold reason is empty".to_owned()),
+                    });
+                    "integrity_quarantined".to_owned()
+                }
+            };
             holds
-                .entry(statement.column_text(0)?)
+                .entry(work_id)
                 .or_insert_with(Vec::new)
-                .push(ReasonCode::HardHold(statement.column_text(1)?));
+                .push(ReasonCode::HardHold(reason));
         }
-        Ok(holds)
+        Ok((holds, diagnostics))
     }
 
     /// Loads all status gate facts for a project in bounded relation scans.
@@ -5262,7 +5561,7 @@ impl SqliteStore {
                )
              ORDER BY p.work_id"
         } else {
-            "SELECT g.work_id, 0, '', g.profile_id, g.profile_version,
+            "SELECT g.work_id, g.gate_id, '', g.profile_id, g.profile_version,
                     '', '', '', '', '', g.kind, g.required, g.state
              FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
              WHERE wi.project_id = ?1
@@ -5273,7 +5572,9 @@ impl SqliteStore {
         if pinned_schema_installed {
             let mut requirements = BTreeMap::<String, PinnedRequirements>::new();
             while statement.step()? == SQLITE_ROW {
-                let work_id = statement.column_text(0)?;
+                let work_id = statement
+                    .column_text(0)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
                 let result = (|| {
                     let proof_revision = statement.column_u64(1)?;
                     let subject_kind = match statement.column_text(2)?.as_str() {
@@ -5414,10 +5715,9 @@ impl SqliteStore {
                     Ok(resolved) => {
                         requirements.insert(work_id, resolved);
                     }
-                    Err(StoreError::Corrupt(detail)) => {
-                        requirement_diagnostics.insert(work_id, detail);
+                    Err(error) => {
+                        requirement_diagnostics.insert(work_id, error.to_string());
                     }
-                    Err(other) => return Err(other),
                 }
             }
 
@@ -5425,7 +5725,9 @@ impl SqliteStore {
                 .prepare("SELECT work_id FROM work_item WHERE project_id = ?1 ORDER BY work_id")?;
             work_ids.bind_text(1, project_id)?;
             while work_ids.step()? == SQLITE_ROW {
-                let work_id = work_ids.column_text(0)?;
+                let work_id = work_ids
+                    .column_text(0)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
                 if self.canonical_production
                     && !requirements.contains_key(&work_id)
                     && !requirement_diagnostics.contains_key(&work_id)
@@ -5457,7 +5759,9 @@ impl SqliteStore {
             child_rows.bind_text(1, project_id)?;
             let mut seen = BTreeMap::<String, BTreeSet<String>>::new();
             while child_rows.step()? == SQLITE_ROW {
-                let work_id = child_rows.column_text(0)?;
+                let work_id = child_rows
+                    .column_text(0)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
                 let Some(pinned) = requirements.get(&work_id) else {
                     continue;
                 };
@@ -5518,7 +5822,7 @@ impl SqliteStore {
                         "resolved_at": pinned.provenance.resolved_at,
                         "source": pinned.provenance.source,
                     });
-                    let child_required = child_rows.column_i64(5)? == 1;
+                    let child_required = child_rows.column_bool(5)?;
                     let expected_subject_kind = match pinned.subject_kind {
                         RequirementSubjectKind::Task => "task",
                         RequirementSubjectKind::Container => "container",
@@ -5558,10 +5862,9 @@ impl SqliteStore {
                             .insert(requirement_id);
                         gate_rows.push(row);
                     }
-                    Err(StoreError::Corrupt(detail)) => {
-                        requirement_diagnostics.insert(work_id, detail);
+                    Err(error) => {
+                        requirement_diagnostics.insert(work_id, error.to_string());
                     }
-                    Err(other) => return Err(other),
                 }
             }
             for (work_id, pinned) in &requirements {
@@ -5606,28 +5909,50 @@ impl SqliteStore {
                 )?;
                 legacy_rows.bind_text(1, project_id)?;
                 while legacy_rows.step()? == SQLITE_ROW {
-                    gate_rows.push(StatusGateRow {
-                        work_id: legacy_rows.column_text(0)?,
-                        gate_id: legacy_rows.column_text(1)?,
-                        profile_id: legacy_rows.column_text(2)?,
-                        profile_version: legacy_rows.column_u64(3)?,
-                        kind: parse_gate_kind(&legacy_rows.column_text(4)?)?,
-                        required: legacy_rows.column_i64(5)? == 1,
-                        state: parse_gate_state(&legacy_rows.column_text(6)?)?,
-                    });
+                    let work_id = legacy_rows
+                        .column_text(0)
+                        .unwrap_or_else(|_| "unreadable-work".to_owned());
+                    let decoded = (|| -> Result<StatusGateRow, StoreError> {
+                        Ok(StatusGateRow {
+                            work_id: legacy_rows.column_text(0)?,
+                            gate_id: legacy_rows.column_text(1)?,
+                            profile_id: legacy_rows.column_text(2)?,
+                            profile_version: legacy_rows.column_u64(3)?,
+                            kind: parse_gate_kind(&legacy_rows.column_text(4)?)?,
+                            required: legacy_rows.column_bool(5)?,
+                            state: parse_gate_state(&legacy_rows.column_text(6)?)?,
+                        })
+                    })();
+                    match decoded {
+                        Ok(row) => gate_rows.push(row),
+                        Err(error) => {
+                            requirement_diagnostics.insert(work_id, error.to_string());
+                        }
+                    }
                 }
             }
         } else {
             while statement.step()? == SQLITE_ROW {
-                gate_rows.push(StatusGateRow {
-                    work_id: statement.column_text(0)?,
-                    gate_id: statement.column_text(1)?,
-                    profile_id: statement.column_text(3)?,
-                    profile_version: statement.column_u64(4)?,
-                    kind: parse_gate_kind(&statement.column_text(10)?)?,
-                    required: statement.column_i64(11)? == 1,
-                    state: parse_gate_state(&statement.column_text(12)?)?,
-                });
+                let work_id = statement
+                    .column_text(0)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
+                let decoded = (|| -> Result<StatusGateRow, StoreError> {
+                    Ok(StatusGateRow {
+                        work_id: statement.column_text(0)?,
+                        gate_id: statement.column_text(1)?,
+                        profile_id: statement.column_text(3)?,
+                        profile_version: statement.column_u64(4)?,
+                        kind: parse_gate_kind(&statement.column_text(10)?)?,
+                        required: statement.column_bool(11)?,
+                        state: parse_gate_state(&statement.column_text(12)?)?,
+                    })
+                })();
+                match decoded {
+                    Ok(row) => gate_rows.push(row),
+                    Err(error) => {
+                        requirement_diagnostics.insert(work_id, error.to_string());
+                    }
+                }
             }
         }
         gate_rows.retain(|row| !requirement_diagnostics.contains_key(&row.work_id));
@@ -5641,24 +5966,39 @@ impl SqliteStore {
              JOIN attempt a ON a.work_id = r.work_id
                            AND a.attempt_id = r.attempt_id
                            AND a.fence = r.fence
-                           AND a.current = 1
+                           AND (a.current = 1 OR a.state = 'completed')
              WHERE wi.project_id = ?1 AND r.gate_id IS NOT NULL
              ORDER BY r.work_id, r.attempt_id, r.fence, r.gate_id,
-                      r.ended_at DESC, r.receipt_id DESC",
+                      r.rowid DESC",
         )?;
         statement.bind_text(1, project_id)?;
         while statement.step()? == SQLITE_ROW {
-            let key = (
-                statement.column_text(0)?,
-                statement.column_text(1)?,
-                statement.column_u64(2)?,
-                statement.column_text(3)?,
-            );
-            receipts.entry(key).or_insert(StatusReceiptFact {
-                receipt_id: statement.column_text(4)?,
-                result: parse_receipt_outcome(&statement.column_text(5)?)?,
-                rejection_code: statement.column_optional_text(6)?,
-            });
+            let work_id = statement
+                .column_text(0)
+                .unwrap_or_else(|_| "unreadable-work".to_owned());
+            let decoded = (|| -> Result<_, StoreError> {
+                Ok((
+                    (
+                        work_id.clone(),
+                        statement.column_text(1)?,
+                        statement.column_u64(2)?,
+                        statement.column_text(3)?,
+                    ),
+                    StatusReceiptFact {
+                        receipt_id: statement.column_text(4)?,
+                        result: parse_receipt_outcome(&statement.column_text(5)?)?,
+                        rejection_code: statement.column_optional_text(6)?,
+                    },
+                ))
+            })();
+            match decoded {
+                Ok((key, fact)) => {
+                    receipts.entry(key).or_insert(fact);
+                }
+                Err(error) => {
+                    requirement_diagnostics.insert(work_id, error.to_string());
+                }
+            }
         }
 
         let mut reviews = BTreeMap::<(String, String, u64, String), bool>::new();
@@ -5670,22 +6010,35 @@ impl SqliteStore {
              JOIN attempt a ON a.work_id = r.work_id
                            AND a.attempt_id = r.attempt_id
                            AND a.fence = r.fence
-                           AND a.current = 1
+                           AND (a.current = 1 OR a.state = 'completed')
              WHERE wi.project_id = ?1 AND r.gate_id IS NOT NULL
              ORDER BY r.work_id, r.attempt_id, r.fence, r.gate_id,
-                      r.created_at DESC, r.review_id DESC",
+                      r.rowid DESC",
         )?;
         statement.bind_text(1, project_id)?;
         while statement.step()? == SQLITE_ROW {
-            let key = (
-                statement.column_text(0)?,
-                statement.column_text(1)?,
-                statement.column_u64(2)?,
-                statement.column_text(3)?,
-            );
-            let accepted =
-                parse_review_decision(&statement.column_text(4)?)? == ReviewDecision::Accepted;
-            reviews.entry(key).or_insert(accepted);
+            let work_id = statement
+                .column_text(0)
+                .unwrap_or_else(|_| "unreadable-work".to_owned());
+            let decoded = (|| -> Result<_, StoreError> {
+                Ok((
+                    (
+                        work_id.clone(),
+                        statement.column_text(1)?,
+                        statement.column_u64(2)?,
+                        statement.column_text(3)?,
+                    ),
+                    parse_review_decision(&statement.column_text(4)?)? == ReviewDecision::Accepted,
+                ))
+            })();
+            match decoded {
+                Ok((key, fact)) => {
+                    reviews.entry(key).or_insert(fact);
+                }
+                Err(error) => {
+                    requirement_diagnostics.insert(work_id, error.to_string());
+                }
+            }
         }
 
         let mut summaries = BTreeMap::<String, SummaryRecord>::new();
@@ -5699,16 +6052,23 @@ impl SqliteStore {
              JOIN attempt a ON a.work_id = s.work_id
                            AND a.attempt_id = s.attempt_id
                            AND a.fence = s.fence
-                           AND a.current = 1
+                           AND (a.current = 1 OR a.state = 'completed')
              WHERE wi.project_id = ?1 AND s.current = 1
              ORDER BY s.work_id, s.created_at DESC, s.summary_id DESC",
         )?;
         statement.bind_text(1, project_id)?;
         while statement.step()? == SQLITE_ROW {
-            let work_id = statement.column_text(2)?;
-            summaries
-                .entry(work_id)
-                .or_insert(summary_from_statement(&statement)?);
+            let work_id = statement
+                .column_text(2)
+                .unwrap_or_else(|_| "unreadable-work".to_owned());
+            match summary_from_statement(&statement) {
+                Ok(summary) => {
+                    summaries.entry(work_id).or_insert(summary);
+                }
+                Err(error) => {
+                    requirement_diagnostics.insert(work_id, error.to_string());
+                }
+            }
         }
 
         let mut diagnostics = BTreeMap::new();
@@ -5777,6 +6137,10 @@ impl SqliteStore {
                             });
                         if review_satisfied || summary_satisfied {
                             (GateState::Satisfied, None, None)
+                        } else if row.kind == GateKind::Review
+                            && reviews.get(&review_key) == Some(&false)
+                        {
+                            (GateState::Failed, None, Some("review_rejected".to_owned()))
                         } else {
                             (
                                 GateState::Open,
@@ -5798,6 +6162,41 @@ impl SqliteStore {
             });
         }
         for entry in diagnostics.values_mut() {
+            if self.canonical_production {
+                if let (Some(attempt_id), Some(fence)) = (entry.attempt_id.as_deref(), entry.fence)
+                {
+                    for gate in &mut entry.gates {
+                        if gate.kind == GateKind::Review {
+                            match self.current_review_decision(
+                                &entry.work_id,
+                                attempt_id,
+                                fence,
+                                &gate.gate_id,
+                            ) {
+                                Ok(decision) => {
+                                    gate.state = match decision {
+                                        Some(ReviewDecision::Accepted) => GateState::Satisfied,
+                                        Some(ReviewDecision::Rejected) => GateState::Failed,
+                                        None => GateState::Open,
+                                    };
+                                    gate.receipt_id = None;
+                                    gate.reason = match decision {
+                                        Some(ReviewDecision::Accepted) => None,
+                                        Some(ReviewDecision::Rejected) => {
+                                            Some("review_rejected".into())
+                                        }
+                                        None => Some("submission_review_missing".into()),
+                                    };
+                                }
+                                Err(error) => {
+                                    requirement_diagnostics
+                                        .insert(entry.work_id.clone(), error.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             entry.missing = entry
                 .gates
                 .iter()
@@ -5924,6 +6323,42 @@ impl SqliteStore {
                     id: request.attempt_id.clone(),
                 })?;
             self.validate_attempt_subject(request, &current)?;
+            if self.canonical_production {
+                self.principal_authority(&request.project_id, &request.actor_id)?;
+                self.validate_project_session(
+                    &request.project_id,
+                    &request.actor_id,
+                    request.session_id.as_deref().ok_or_else(|| {
+                        StoreError::Invalid("attempt mutation requires project session".into())
+                    })?,
+                )?;
+                use boreal_domain::actions::ActionKind;
+                let action = match &request.mutation {
+                    AttemptMutationKind::Accept => Some(ActionKind::AcceptAttempt),
+                    AttemptMutationKind::Start => Some(ActionKind::StartAttempt),
+                    AttemptMutationKind::Submit => Some(ActionKind::Submit),
+                    AttemptMutationKind::Release => Some(ActionKind::Release),
+                    AttemptMutationKind::Fail | AttemptMutationKind::Cancel { .. } => {
+                        Some(ActionKind::Stop)
+                    }
+                    AttemptMutationKind::Expire { .. } => Some(ActionKind::Recover),
+                    // Heartbeat/renew use the typed lease policy plus exact owner,
+                    // fence, session and deadline checks below; they cannot advance work.
+                    AttemptMutationKind::Heartbeat { .. }
+                    | AttemptMutationKind::RenewLease { .. } => None,
+                };
+                if let Some(action) = action {
+                    self.authorize_work_action_in_transaction(
+                        &request.project_id,
+                        &request.work_id,
+                        &request.actor_id,
+                        request.session_id.as_deref(),
+                        status_evaluation::canonical_status_timestamp(&request.at)?,
+                        action,
+                    )?;
+                }
+            }
+
             if current.fence != request.fence {
                 return Err(StoreError::StaleFence {
                     expected: request.fence,
@@ -6456,7 +6891,7 @@ impl SqliteStore {
             harness_id: statement.column_optional_text(4)?,
             session_id: statement.column_optional_text(5)?,
             fence: statement.column_u64(6)?,
-            current: statement.column_i64(7)? == 1,
+            current: statement.column_bool(7)?,
             phase: parse_phase(&statement.column_text(8)?)?,
             claimed_at: statement.column_text(9)?,
             accepted_at: statement.column_optional_text(10)?,
@@ -6464,7 +6899,7 @@ impl SqliteStore {
             hard_deadline: statement.column_text(12)?,
             last_heartbeat_at: statement.column_optional_text(13)?,
             last_checkpoint_at: statement.column_optional_text(14)?,
-            review_required_after_expiry: statement.column_i64(15)? == 1,
+            review_required_after_expiry: statement.column_bool(15)?,
             stop_requested_at: statement.column_optional_text(16)?,
             stop_acknowledged_at: statement.column_optional_text(17)?,
             terminal_at: statement.column_optional_text(18)?,
@@ -6846,7 +7281,7 @@ impl SqliteStore {
             self.prepare("SELECT project_revision FROM project WHERE project_id = ?1")?;
         statement.bind_text(1, project_id)?;
         match statement.step()? {
-            SQLITE_ROW => Ok(SnapshotRevision(statement.column_i64(0)? as u64)),
+            SQLITE_ROW => Ok(SnapshotRevision(statement.column_u64(0)?)),
             SQLITE_DONE => Err(StoreError::NotFound {
                 entity: "project",
                 id: project_id.to_owned(),
@@ -7007,8 +7442,16 @@ impl SqliteStore {
         subject_type: &str,
         subject_id: &str,
     ) -> Result<Option<OperationRecord>, StoreError> {
+        if self.canonical_production && !matches!(command, "project.init" | "principal.bootstrap") {
+            self.principal_authority(project_id, actor_id)?;
+        }
         let context = self.operation_identity_context(project_id)?;
         let Some(existing) = self.operation(operation_id)? else {
+            if self.canonical_production && command != "session.register" {
+                if let Some(session) = session_id {
+                    self.validate_project_session(project_id, actor_id, session)?;
+                }
+            }
             return Ok(None);
         };
         if existing.project_id != project_id
@@ -7444,7 +7887,7 @@ impl SqliteStore {
             return replay_evidence_execution_admission(request, existing);
         }
         let attempt = self
-            .attempt_record(&request.attempt_id, true)?
+            .attempt_record(&request.attempt_id, false)?
             .ok_or_else(|| StoreError::NotCurrent {
                 attempt_id: request.attempt_id.clone(),
             })?;
@@ -7472,16 +7915,29 @@ impl SqliteStore {
                 actual: attempt.session_id.unwrap_or_default(),
             });
         }
-        if attempt.phase != AttemptPhase::Running {
+        self.require_open_proof_subject(&attempt)?;
+        let submitted = self.attempt_has_current_submission(&attempt)?;
+        if !(attempt.current
+            && matches!(
+                attempt.phase,
+                AttemptPhase::Running | AttemptPhase::Verifying
+            ))
+            && !submitted
+        {
             return Err(StoreError::IllegalTransition {
                 from: attempt.phase,
                 operation: "admit evidence execution",
             });
         }
-        if timestamp_cmp(&request.admitted_at, &attempt.hard_deadline) != std::cmp::Ordering::Less {
+        if !submitted
+            && timestamp_cmp(&request.admitted_at, &attempt.hard_deadline)
+                != std::cmp::Ordering::Less
+        {
             return Err(StoreError::HardDeadlineElapsed);
         }
-        if timestamp_cmp(&request.admitted_at, &attempt.lease_deadline) != std::cmp::Ordering::Less
+        if !submitted
+            && timestamp_cmp(&request.admitted_at, &attempt.lease_deadline)
+                != std::cmp::Ordering::Less
         {
             return Err(StoreError::LeaseExpired);
         }
@@ -7987,7 +8443,7 @@ impl SqliteStore {
             profile_id: statement.column_text(3)?,
             profile_version: statement.column_u64(4)?,
             kind: parse_gate_kind(&statement.column_text(5)?)?,
-            required: statement.column_i64(6)? == 1,
+            required: statement.column_bool(6)?,
             state: parse_gate_state(&statement.column_text(7)?)?,
             subject_ref: statement.column_text(8)?,
             updated_at: statement.column_text(9)?,
@@ -8059,6 +8515,17 @@ impl SqliteStore {
                     expected: request.fence,
                     actual: attempt.fence,
                 });
+            }
+            if self.canonical_production {
+                self.authorize_work_action_in_transaction(
+                    &request.project_id,
+                    &request.work_id,
+                    &request.actor_id,
+                    request.session_id.as_deref(),
+                    status_evaluation::canonical_status_timestamp(&request.created_at)?,
+                    boreal_domain::actions::ActionKind::Review,
+                )?;
+                self.record_review_event_in_transaction(request, &attempt)?;
             }
             let mut statement = self.prepare(
                 "INSERT INTO review (
@@ -8370,10 +8837,36 @@ impl SqliteStore {
                 return self.replay_close_operation(request, &existing);
             }
             self.validate_close_subject(request)?;
+            if self.canonical_production {
+                self.authorize_work_action_in_transaction(
+                    &request.project_id,
+                    &request.work_id,
+                    &request.actor_id,
+                    request.session_id.as_deref(),
+                    status_evaluation::canonical_status_timestamp(&request.at)?,
+                    boreal_domain::actions::ActionKind::FinishClose,
+                )?;
+            }
+
             check_expected_revision(
                 self.project_revision(&request.project_id)?.0,
                 request.expected_project_revision,
             )?;
+            if self.canonical_production {
+                let summary_id = request.summary_id.as_deref().ok_or_else(|| {
+                    StoreError::Invalid(
+                        "finish requires a source-bound summary before submission".into(),
+                    )
+                })?;
+                self.seal_submission_in_transaction(
+                    &request.project_id,
+                    &request.work_id,
+                    &request.attempt_id,
+                    request.fence,
+                    summary_id,
+                    &request.at,
+                )?;
+            }
             let mut statement = self.prepare(
                 "INSERT INTO close_intent (
                     close_intent_id, work_id, attempt_id, fence, operation_id,
@@ -8393,6 +8886,9 @@ impl SqliteStore {
             statement.bind_optional_text(10, request.summary_id.as_deref())?;
             statement.bind_text(11, &request.at)?;
             statement.run()?;
+            if self.canonical_production {
+                self.end_execution_for_submission_in_transaction(request)?;
+            }
             let revision = self.bump_revision_in_transaction(&request.project_id)?;
             let result_json = close_intent_result_json(&request.close_intent_id, "open")?;
             self.append_operation_audit_in_transaction(
@@ -8496,13 +8992,23 @@ impl SqliteStore {
                 &request.attempt_id,
                 request.fence,
             )?;
+            let applied_exceptions = if self.canonical_production {
+                self.apply_gate_exception_diagnostics(
+                    &mut diagnostics,
+                    status_evaluation::canonical_status_timestamp(&request.at)?,
+                )?
+            } else {
+                Vec::new()
+            };
             let attempt = self
                 .attempt_record(&request.attempt_id, false)?
                 .ok_or_else(|| StoreError::NotFound {
                     entity: "attempt",
                     id: request.attempt_id.clone(),
                 })?;
-            if !attempt.current || !matches!(attempt.phase, AttemptPhase::Verifying) {
+            if !(attempt.current && matches!(attempt.phase, AttemptPhase::Verifying))
+                && !self.attempt_has_current_submission(&attempt)?
+            {
                 diagnostics.missing.push("attempt_not_verifying".to_owned());
                 diagnostics.missing.sort();
                 diagnostics.missing.dedup();
@@ -8565,7 +9071,29 @@ impl SqliteStore {
                     diagnostics: Some(diagnostics),
                 });
             }
+            if self.canonical_production {
+                self.validate_submission_for_close(request, &attempt)?;
+            }
+            if self.canonical_production {
+                self.authorize_work_action_in_transaction(
+                    &request.project_id,
+                    &request.work_id,
+                    &request.actor_id,
+                    request.session_id.as_deref(),
+                    status_evaluation::canonical_status_timestamp(&request.at)?,
+                    boreal_domain::actions::ActionKind::Close,
+                )?;
+            }
             self.finalize_close_rows(request)?;
+            if self.canonical_production {
+                self.record_accepted_outcome_in_transaction(request)?;
+                for exception_id in &applied_exceptions {
+                    let mut link = self.prepare("INSERT INTO boreal_outcome_exception(outcome_id,exception_id) VALUES (?1,?2)")?;
+                    link.bind_text(1, &format!("accepted:{}", request.close_intent_id))?;
+                    link.bind_text(2, exception_id)?;
+                    link.run()?;
+                }
+            }
             let revision = self.bump_revision_in_transaction(&request.project_id)?;
             let result_json = close_intent_result_json(&request.close_intent_id, "finalized")?;
             self.append_operation_audit_in_transaction(
@@ -8792,7 +9320,8 @@ impl SqliteStore {
                 actual: attempt.fence,
             });
         }
-        if !attempt.current {
+        self.require_open_proof_subject(&attempt)?;
+        if !attempt.current && !self.attempt_has_current_submission(&attempt)? {
             return Err(StoreError::NotCurrent {
                 attempt_id: attempt.attempt_id,
             });
@@ -8882,7 +9411,7 @@ impl SqliteStore {
             && summary.body_size > 0
             && summary.body_size <= MAX_SUMMARY_BODY_BYTES
             && valid_sha256_digest(&summary.body_digest)
-            && attempt.current
+            && (attempt.current || self.attempt_has_current_submission(attempt)?)
             && attempt.actor_id == request.actor_id
             && attempt.session_id == request.session_id
             && attempt.source_version_id == request.source_version_id
@@ -8938,7 +9467,8 @@ impl SqliteStore {
                 actual: attempt.fence,
             }));
         }
-        if !attempt.current {
+        self.require_open_proof_subject(&attempt)?;
+        if !attempt.current && !self.attempt_has_current_submission(&attempt)? {
             return Ok(Some(StoreError::NotCurrent {
                 attempt_id: attempt.attempt_id,
             }));
@@ -9047,7 +9577,7 @@ impl SqliteStore {
         let persisted_profile_id = gate.column_text(0)?;
         let persisted_profile_version = gate.column_u64(1)?;
         let persisted_kind = parse_gate_kind(&gate.column_text(2)?)?;
-        let persisted_required = gate.column_i64(3)? == 1;
+        let persisted_required = gate.column_bool(3)?;
         let work_profile_id = gate.column_text(4)?;
         let work_profile_version = gate.column_u64(5)?;
         if persisted_profile_id != expected.profile_id
@@ -9246,7 +9776,7 @@ impl SqliteStore {
         while statement.step()? == SQLITE_ROW {
             let gate_id = statement.column_text(0)?;
             let kind = parse_gate_kind(&statement.column_text(1)?)?;
-            let required = statement.column_i64(2)? == 1;
+            let required = statement.column_bool(2)?;
             let persisted_state = parse_gate_state(&statement.column_text(3)?)?;
             let (state, receipt_id, reason) =
                 if let (Some(attempt_id), Some(fence)) = (attempt_id, fence) {
@@ -9275,13 +9805,19 @@ impl SqliteStore {
                         });
                         (state, Some(receipt_id), reason)
                     } else if (kind == GateKind::Review
-                        && self.current_review_is_accepted(work_id, attempt_id, fence, &gate_id)?)
+                        && self.current_review_decision(work_id, attempt_id, fence, &gate_id)?
+                            == Some(ReviewDecision::Accepted))
                         || (kind == GateKind::Summary
                             && self.current_summary_satisfies_gate(
                                 project_id, work_id, attempt_id, fence, &gate_id,
                             )?)
                     {
                         (GateState::Satisfied, None, None)
+                    } else if kind == GateKind::Review
+                        && self.current_review_decision(work_id, attempt_id, fence, &gate_id)?
+                            == Some(ReviewDecision::Rejected)
+                    {
+                        (GateState::Failed, None, Some("review_rejected".to_owned()))
                     } else {
                         (
                             GateState::Open,
@@ -9317,26 +9853,43 @@ impl SqliteStore {
         })
     }
 
-    fn current_review_is_accepted(
+    fn current_review_decision(
         &self,
         work_id: &str,
         attempt_id: &str,
         fence: u64,
         gate_id: &str,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<ReviewDecision>, StoreError> {
+        if self.canonical_production {
+            let mut row = self.prepare("SELECT r.outcome FROM boreal_review_event r JOIN boreal_submission s ON s.submission_id=r.submission_id JOIN boreal_entity_revision e ON e.project_id=s.project_id AND e.work_id=s.work_id AND e.proof_revision=s.proof_revision WHERE s.work_id=?1 AND s.attempt_id=?2 AND s.fence=?3 AND r.gate_id=?4 AND s.rowid=(SELECT MAX(n.rowid) FROM boreal_submission n WHERE n.project_id=s.project_id AND n.work_id=s.work_id AND n.proof_revision=s.proof_revision) ORDER BY r.rowid DESC LIMIT 1")?;
+            row.bind_text(1, work_id)?;
+            row.bind_text(2, attempt_id)?;
+            row.bind_i64(3, fence)?;
+            row.bind_text(4, gate_id)?;
+            if row.step()? != SQLITE_ROW {
+                return Ok(None);
+            }
+            return match row.column_text(0)?.as_str() {
+                "approved" => Ok(Some(ReviewDecision::Accepted)),
+                "rejected" | "returned" | "revoked" => Ok(Some(ReviewDecision::Rejected)),
+                value => Err(StoreError::Corrupt(format!(
+                    "invalid canonical review outcome: {value}"
+                ))),
+            };
+        }
         let mut statement = self.prepare(
             "SELECT decision FROM review
              WHERE work_id = ?1 AND attempt_id = ?2 AND fence = ?3 AND gate_id = ?4
-             ORDER BY created_at DESC, review_id DESC LIMIT 1",
+             ORDER BY rowid DESC LIMIT 1",
         )?;
         statement.bind_text(1, work_id)?;
         statement.bind_text(2, attempt_id)?;
         statement.bind_i64(3, fence)?;
         statement.bind_text(4, gate_id)?;
         if statement.step()? != SQLITE_ROW {
-            return Ok(false);
+            return Ok(None);
         }
-        Ok(parse_review_decision(&statement.column_text(0)?)? == ReviewDecision::Accepted)
+        parse_review_decision(&statement.column_text(0)?).map(Some)
     }
 
     fn current_summary_satisfies_gate(
@@ -9377,7 +9930,7 @@ impl SqliteStore {
         let mut statement = self.prepare(
             "SELECT receipt_id FROM receipt
              WHERE gate_id = ?1 AND work_id = ?2 AND attempt_id = ?3 AND fence = ?4
-             ORDER BY ended_at DESC, receipt_id DESC LIMIT 1",
+             ORDER BY rowid DESC LIMIT 1",
         )?;
         statement.bind_text(1, gate_id)?;
         statement.bind_text(2, work_id)?;
@@ -9409,6 +9962,12 @@ impl SqliteStore {
                 actual: attempt.fence,
             });
         }
+        if attempt.actor_id != request.actor_id || attempt.session_id != request.session_id {
+            return Err(StoreError::Conflict(
+                "close requires the submission owner and bound session".into(),
+            ));
+        }
+        self.require_open_proof_subject(&attempt)?;
         Ok(())
     }
 
@@ -9432,53 +9991,64 @@ impl SqliteStore {
                 "work is not open for close finalization".to_owned(),
             ));
         }
-        let mut attempt = self.prepare(
-            "UPDATE attempt SET current = 0, state = 'completed', terminal_at = ?1,
-                    terminal_reason = 'close.finalize'
-             WHERE attempt_id = ?2 AND current = 1",
-        )?;
-        attempt.bind_text(1, &request.at)?;
-        attempt.bind_text(2, &request.attempt_id)?;
-        attempt.run()?;
-        if attempt.changes()? != 1 {
-            return Err(StoreError::Conflict(
-                "attempt is no longer current for close finalization".to_owned(),
-            ));
-        }
-        let mut reservation = self.prepare(
-            "UPDATE reservation SET state = 'released', released_at = ?1
-             WHERE attempt_id = ?2 AND state = 'active'",
-        )?;
-        reservation.bind_text(1, &request.at)?;
-        reservation.bind_text(2, &request.attempt_id)?;
-        reservation.run()?;
-
-        // Closing ends execution ownership, but it does not prove that the
-        // physical worktree/resource has been released. Preserve that fact in
-        // the canonical release protocol and retain a recovery obligation
-        // until the release is acknowledged.
-        if self.table_exists("boreal_resource_reservation")? {
-            self.request_canonical_resource_release_in_transaction(
-                &request.project_id,
-                &request.attempt_id,
-                request.fence,
-                &request.operation_id,
-                &request.actor_id,
-                &request.at,
-            )?;
-            self.create_recovery_obligation_in_transaction(&recovery::RecoveryObligationInput {
-                obligation_id: format!("{}:recovery:close-finalize", request.operation_id),
-                project_id: request.project_id.clone(),
-                work_id: request.work_id.clone(),
-                attempt_id: Some(request.attempt_id.clone()),
-                fence: Some(request.fence),
-                reason: "resource_unknown".to_owned(),
-                resource_state: "release_pending".to_owned(),
-                owner_actor_id: Some(request.actor_id.clone()),
-                next_action: "acknowledge resource release before reusing the execution resource"
-                    .to_owned(),
-                created_at: request.at.clone(),
+        let execution = self
+            .attempt_record(&request.attempt_id, false)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "attempt",
+                id: request.attempt_id.clone(),
             })?;
+        if !self.attempt_has_current_submission(&execution)? {
+            let mut attempt = self.prepare(
+                "UPDATE attempt SET current = 0, state = 'completed', terminal_at = ?1,
+                        terminal_reason = 'close.finalize'
+                 WHERE attempt_id = ?2 AND current = 1",
+            )?;
+            attempt.bind_text(1, &request.at)?;
+            attempt.bind_text(2, &request.attempt_id)?;
+            attempt.run()?;
+            if attempt.changes()? != 1 {
+                return Err(StoreError::Conflict(
+                    "attempt is no longer current for close finalization".to_owned(),
+                ));
+            }
+            let mut reservation = self.prepare(
+                "UPDATE reservation SET state = 'released', released_at = ?1
+                 WHERE attempt_id = ?2 AND state = 'active'",
+            )?;
+            reservation.bind_text(1, &request.at)?;
+            reservation.bind_text(2, &request.attempt_id)?;
+            reservation.run()?;
+
+            // Closing ends execution ownership, but it does not prove that the
+            // physical worktree/resource has been released. Preserve that fact in
+            // the canonical release protocol and retain a recovery obligation
+            // until the release is acknowledged.
+            if self.table_exists("boreal_resource_reservation")? {
+                self.request_canonical_resource_release_in_transaction(
+                    &request.project_id,
+                    &request.attempt_id,
+                    request.fence,
+                    &request.operation_id,
+                    &request.actor_id,
+                    &request.at,
+                )?;
+                self.create_recovery_obligation_in_transaction(
+                    &recovery::RecoveryObligationInput {
+                        obligation_id: format!("{}:recovery:close-finalize", request.operation_id),
+                        project_id: request.project_id.clone(),
+                        work_id: request.work_id.clone(),
+                        attempt_id: Some(request.attempt_id.clone()),
+                        fence: Some(request.fence),
+                        reason: "resource_unknown".to_owned(),
+                        resource_state: "release_pending".to_owned(),
+                        owner_actor_id: Some(request.actor_id.clone()),
+                        next_action:
+                            "acknowledge resource release before reusing the execution resource"
+                                .to_owned(),
+                        created_at: request.at.clone(),
+                    },
+                )?;
+            }
         }
         Ok(())
     }
@@ -10563,7 +11133,22 @@ impl<'a> Statement<'a> {
     }
 
     fn column_i64(&self, index: c_int) -> Result<i64, StoreError> {
+        if unsafe { sqlite3_column_type(self.statement, index) } != 1 {
+            return Err(StoreError::Corrupt(format!(
+                "SQLite column {index} is not an integer"
+            )));
+        }
         Ok(unsafe { sqlite3_column_int64(self.statement, index) })
+    }
+
+    fn column_bool(&self, index: c_int) -> Result<bool, StoreError> {
+        match self.column_i64(index)? {
+            0 => Ok(false),
+            1 => Ok(true),
+            value => Err(StoreError::Corrupt(format!(
+                "SQLite column {index} has invalid boolean {value}"
+            ))),
+        }
     }
 
     fn column_u64(&self, index: c_int) -> Result<u64, StoreError> {
@@ -10593,29 +11178,29 @@ impl<'a> Statement<'a> {
         if value.is_null() {
             return Err(StoreError::Corrupt("SQLite returned NULL text".to_owned()));
         }
-        let text = unsafe { CStr::from_ptr(value.cast()) }
-            .to_string_lossy()
-            .into_owned();
+        let byte_count = unsafe { sqlite3_column_bytes(self.statement, index) };
+        let byte_count = usize::try_from(byte_count)
+            .map_err(|_| StoreError::Corrupt("invalid SQLite text length".to_owned()))?;
+        let bytes = unsafe { std::slice::from_raw_parts(value, byte_count) };
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| StoreError::Corrupt(format!("SQLite column {index} is not UTF-8")))?;
+        if text.contains('\0') {
+            return Err(StoreError::Corrupt(format!(
+                "SQLite column {index} contains NUL"
+            )));
+        }
         self.store
             .query_metrics
             .text_bytes_read
-            .fetch_add(text.len() as u64, Ordering::Relaxed);
-        Ok(text)
+            .fetch_add(byte_count as u64, Ordering::Relaxed);
+        Ok(text.to_owned())
     }
 
     fn column_optional_text(&self, index: c_int) -> Result<Option<String>, StoreError> {
-        let value = unsafe { sqlite3_column_text(self.statement, index) };
-        if value.is_null() {
+        if unsafe { sqlite3_column_type(self.statement, index) } == SQLITE_NULL {
             Ok(None)
         } else {
-            let text = unsafe { CStr::from_ptr(value.cast()) }
-                .to_string_lossy()
-                .into_owned();
-            self.store
-                .query_metrics
-                .text_bytes_read
-                .fetch_add(text.len() as u64, Ordering::Relaxed);
-            Ok(Some(text))
+            self.column_text(index).map(Some)
         }
     }
 }
@@ -11506,7 +12091,7 @@ fn summary_from_statement(statement: &Statement<'_>) -> Result<SummaryRecord, St
         profile_version: statement.column_u64(9)?,
         body_digest: statement.column_text(10)?,
         body_size: statement.column_u64(11)?,
-        current: statement.column_i64(12)? == 1,
+        current: statement.column_bool(12)?,
         created_at: statement.column_text(13)?,
     })
 }
@@ -11972,4 +12557,14 @@ fn json_u64_field(json: &str, field: &str) -> Result<u64, StoreError> {
         .get(field)
         .and_then(Value::as_u64)
         .ok_or_else(|| StoreError::Corrupt(format!("attempt operation result has invalid {field}")))
+}
+
+pub mod memory;
+
+impl SqliteStore {
+    /// Composition adapters may locate sibling source assets, never select a
+    /// different database or derive authority from this pathname.
+    pub fn database_location(&self) -> Option<&Path> {
+        self.database_path.as_deref()
+    }
 }

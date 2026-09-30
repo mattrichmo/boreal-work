@@ -497,7 +497,7 @@ impl WorkApplication<'_> {
     ) -> Result<AcceptanceEvaluation, ApplicationError> {
         let attempt = self
             .store()
-            .current_attempt(project_id, attempt_id.as_str())?;
+            .proof_attempt(project_id, attempt_id.as_str())?;
         if attempt.work_id != work_id.as_str() || attempt.fence != fence.get() {
             return Err(ApplicationError::Evidence(
                 crate::EvidenceValidationError::new(EvidenceErrorCode::StaleFence),
@@ -568,7 +568,7 @@ impl WorkApplication<'_> {
         let project_id = self.project_for_work(receipt.work_id.as_str())?;
         let attempt = self
             .store()
-            .current_attempt(&project_id, receipt.attempt_id.as_str())?;
+            .proof_attempt(&project_id, receipt.attempt_id.as_str())?;
         if attempt.work_id != receipt.work_id.as_str()
             || attempt.actor_id != actor_id
             || attempt.session_id.as_deref() != session_id
@@ -780,6 +780,28 @@ impl WorkApplication<'_> {
                 )
             })
             .transpose()?;
+        let policy_digest = if self.store().is_canonical_production() {
+            let pin = boreal_store::profiles::ProfileStore::new(self.store())
+                .current_pinned_requirements(&project_id, review.work_id.as_str())?;
+            if pin.profile.version.to_string() != review.policy_version {
+                return Err(ApplicationError::Store(boreal_store::StoreError::Conflict(
+                    "review policy version is not the pinned profile version".into(),
+                )));
+            }
+            let attempt = self
+                .store()
+                .proof_attempt(&project_id, review.attempt_id.as_str())?;
+            if attempt.actor_id != review.attempt_actor_id.as_str()
+                || attempt.config_identity != review.config_identity.as_str()
+            {
+                return Err(ApplicationError::Store(boreal_store::StoreError::Conflict(
+                    "review owner/configuration is not the submitted context".into(),
+                )));
+            }
+            pin.profile.policy_digest
+        } else {
+            review.policy_version.clone()
+        };
         let result = self.store().insert_review(ReviewInsertRequest {
             project_id,
             actor_id: actor_id.as_str().to_owned(),
@@ -797,7 +819,7 @@ impl WorkApplication<'_> {
             },
             reason: review.reason.clone(),
             source_version_id: Some(review.source_snapshot_hash.as_str().to_owned()),
-            policy_digest: review.policy_version.clone(),
+            policy_digest,
             operation_id: format!("review:{}", review.review_id),
             request_digest: canonical_request_digest(
                 "review.decide/v1",
@@ -881,15 +903,24 @@ impl WorkApplication<'_> {
             actor_id: actor_id.to_owned(),
             session_id: session_id.map(str::to_owned),
             expected_project_revision,
-            close_intent_id: format!("close:{}", intent.attempt_id),
+            close_intent_id: close_candidate_id(intent),
             work_id: intent.work_id.as_str().to_owned(),
             attempt_id: intent.attempt_id.as_str().to_owned(),
             fence: intent.fence.get(),
-            operation_id: format!("close:request:{}", intent.attempt_id),
+            operation_id: format!("request:{}", close_candidate_id(intent)),
             source_version_id: Some(intent.source_snapshot_hash.as_str().to_owned()),
             config_identity: intent.config_identity.as_str().to_owned(),
             profile_id: intent.profile_id.as_str().to_owned(),
-            profile_version: intent.profile_version.parse().unwrap_or(1),
+            profile_version: intent
+                .profile_version
+                .parse()
+                .ok()
+                .filter(|version| *version > 0)
+                .ok_or_else(|| {
+                    ApplicationError::Invalid(
+                        "close profile version must be a positive integer".into(),
+                    )
+                })?,
             summary_id: intent.summary_id.clone(),
             at: stamp(now),
             request_digest: close_request_digest(
@@ -1064,7 +1095,7 @@ impl WorkApplication<'_> {
             actor_id: actor_id.to_owned(),
             session_id: session_id.map(str::to_owned),
             expected_project_revision,
-            close_intent_id: format!("close:{}", intent.attempt_id),
+            close_intent_id: close_candidate_id(intent),
             work_id: intent.work_id.as_str().to_owned(),
             attempt_id: intent.attempt_id.as_str().to_owned(),
             fence: intent.fence.get(),
@@ -1072,7 +1103,16 @@ impl WorkApplication<'_> {
             source_version_id: Some(intent.source_snapshot_hash.as_str().to_owned()),
             config_identity: intent.config_identity.as_str().to_owned(),
             profile_id: intent.profile_id.as_str().to_owned(),
-            profile_version: intent.profile_version.parse().unwrap_or(1),
+            profile_version: intent
+                .profile_version
+                .parse()
+                .ok()
+                .filter(|version| *version > 0)
+                .ok_or_else(|| {
+                    ApplicationError::Invalid(
+                        "close profile version must be a positive integer".into(),
+                    )
+                })?,
             summary_id: intent.summary_id.clone(),
             at: stamp(now),
             request_digest: close_request_digest(
@@ -2124,4 +2164,21 @@ mod tests {
             .expect("read failed receipt operation")
             .is_none());
     }
+}
+
+/// New summary/proof candidates have new close intent identities. A rejected
+/// candidate and its operation result remain immutable and readable.
+fn close_candidate_id(intent: &CloseIntent) -> String {
+    format!(
+        "close:{}",
+        canonical_request_digest(
+            "close.candidate/v1",
+            json!({
+                "work_id":intent.work_id.as_str(),"attempt_id":intent.attempt_id.as_str(),
+                "fence":intent.fence.get(),"source":intent.source_snapshot_hash.as_str(),
+                "configuration":intent.config_identity.as_str(),"profile":intent.profile_id.as_str(),
+                "profile_version":intent.profile_version,"summary_id":intent.summary_id,
+            })
+        )
+    )
 }

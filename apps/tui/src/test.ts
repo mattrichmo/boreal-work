@@ -84,18 +84,36 @@ function envelope<T>(revision: number | null, data: T | null, outcome: Envelope<
   };
 }
 
+// Mock-server policy only: production clients may never derive authority from
+// display states. Fixtures carry explicit descriptors and denial reasons.
+const mockServerPolicy = Symbol("mock-server-policy");
+function fixtureActions(work: StatusItem, revision = 4): ServerActionSet {
+  const names = ["claim", "accept_attempt", "attach_evidence", "finish_close", "release"];
+  const status = work.display_status ?? work.status;
+  const allowed = new Set<string>();
+  if (status === "ready") allowed.add("claim");
+  if (status === "claimed") { allowed.add("accept_attempt"); allowed.add("release"); }
+  if (status === "in_progress") { allowed.add("attach_evidence"); allowed.add("release");
+    if (!work.gates?.open.some(gate => gate.required)) allowed.add("finish_close"); }
+  const detail = status === "blocked" ? "work is blocked" : status === "queued" ? "waiting for prerequisite"
+    : status === "expired_review" ? "expiry requires review" : "required gate is open";
+  const descriptor = (action: string): ServerActionDescriptor => ({
+    ...serverActionDescriptor(action),
+    target: { project_id: work.project_id ?? "project_test", work_id: work.work_id, entity_revision: null },
+    expected_project_revision: revision,
+    confirmation: "Confirm this mock-server action",
+  });
+  return { allowed: names.filter(name => allowed.has(name)).map(descriptor),
+    denied: names.filter(name => !allowed.has(name)).map(name => ({ descriptor: descriptor(name),
+      reason: { code: "fixture_denial", detail }, reason_code: "fixture_denial", recovery: ["inspect"] })) };
+}
 function item(work_id: string, status: StatusItem["status"], extra: Partial<StatusItem> = {}): StatusItem {
-  return {
-    work_id,
-    project_id: "project_test",
-    status,
-    display_status: status,
-    reason_codes: [],
-    claimable: status === "ready",
-    claimable_for_actor: status === "ready",
-    next_action: null,
-    ...extra,
+  const result: StatusItem & { [mockServerPolicy]?: boolean } = {
+    work_id, project_id: "project_test", status, display_status: status, reason_codes: [],
+    claimable: status === "ready", claimable_for_actor: status === "ready", next_action: null, ...extra,
   };
+  if (!("actions" in extra)) { result[mockServerPolicy] = true; result.actions = fixtureActions(result); }
+  return result;
 }
 
 function serverActionDescriptor(action: string): ServerActionDescriptor {
@@ -115,8 +133,18 @@ function serverActionDescriptor(action: string): ServerActionDescriptor {
 }
 
 function monitoring(revision: number, items: StatusItem[]): Envelope<RevisionedStatusResponse> {
+  items = items.map(entry => (entry as StatusItem & { [mockServerPolicy]?: boolean })[mockServerPolicy]
+    ? { ...entry, actions: fixtureActions(entry, revision) } : entry);
   return envelope(revision, {
+    project_id: "project_test",
     revision,
+    // These are decisions supplied by the fake service, not client policy.
+    project_actions: ["create_project", "create_work"].map((action) => ({
+      action, target: { project_id: "project_test" },
+      caller: { actor_id: "actor-luna", session_id: "session-test" },
+      expected_project_revision: revision, allowed: true, denial_reason: null,
+      confirmation: "Confirm this project mutation?",
+    })),
     as_of: `2026-09-14T22:${revision}:00Z`,
     total: items.length,
     counts: {
@@ -171,10 +199,10 @@ const gateOpen = item("gate", "in_progress", {
   gates: { open: [{ gate_id: "verify", kind: "verification", required: true, state: "open" }], satisfied: [] },
 });
 const disabled = (work: StatusItem, action: string) => actionAvailability(work).find((entry) => entry.action === action);
-assert(disabled(blocked, "claim")?.enabled === false && disabled(blocked, "claim")?.reason === "work is blocked", "blocked claim disabled");
-assert(disabled(queued, "claim")?.enabled === false && disabled(queued, "claim")?.reason === "waiting for prerequisite", "queued claim disabled");
-assert(disabled(expired, "release")?.enabled === false && disabled(expired, "release")?.reason === "expiry requires review", "expired release disabled");
-assert(disabled(gateOpen, "finish")?.enabled === false && disabled(gateOpen, "finish")?.reason === "required gate is open", "gate finish disabled");
+assert(disabled(blocked, "claim")?.enabled === false && disabled(blocked, "claim")?.reason?.endsWith("work is blocked") === true, "blocked claim disabled");
+assert(disabled(queued, "claim")?.enabled === false && disabled(queued, "claim")?.reason?.endsWith("waiting for prerequisite") === true, "queued claim disabled");
+assert(disabled(expired, "release")?.enabled === false && disabled(expired, "release")?.reason?.endsWith("expiry requires review") === true, "expired release disabled");
+assert(disabled(gateOpen, "finish")?.enabled === false && disabled(gateOpen, "finish")?.reason?.endsWith("required gate is open") === true, "gate finish disabled");
 assert(disabled(gateOpen, "evidence")?.enabled === true, "gate evidence remains available");
 assert(workflowDisplayState(gateOpen) === "gate", "open gate is a distinct display state");
 const unavailableServerActions: ServerActionSet = {
@@ -1104,7 +1132,7 @@ fullScreenController.navigate({ kind: "work", project_id: "project_test", work_i
 const filtered = renderMountedView(fullScreenController.view(), { width: 120, height: 40, filter: "tasks", search_query: "blocked" });
 assert(filtered.includes("WORK QUEUE (1") && filtered.includes("task-ui") && !filtered.includes("[sprint] sprint-ui"), "renderer applies bounded kind and text filters without changing service state");
 assert(filtered.includes("dependencies:") && filtered.includes("upstream"), "work detail renders service-provided dependency context");
-assert(filtered.includes("work.edit: Rust service route is not exposed yet"), "renderer labels unavailable planning routes instead of inventing local mutations");
+assert(filtered.includes("This action is not available in this connection"), "renderer labels unavailable planning routes instead of inventing local mutations");
 
 const filterTerminal = new FakeFullScreenTerminal(120);
 const filterRun = runFullScreen(fullScreenController, filterTerminal, { auto_refresh_ms: 60_000 });
@@ -1208,6 +1236,7 @@ const fullDtoEnvelope = envelope(110, {
   counts: { total: 3, ready: 1, in_progress: 1 },
   items: [
     {
+      actions: fixtureActions(item("dto-running", "in_progress"), 110),
       work_id: "dto-running",
       project_id: "project_test",
       display_status: "running",
@@ -1241,7 +1270,7 @@ assert(actionAvailability({ ...fullDto.items[0], attempt: { attempt_id: "attempt
 // This is the exact status/2 compatibility shape emitted by the CLI while
 // the legacy row lacks v3 identity/proof/session facts. The status field is
 // `blocked`, but the structured expiry reason preserves `expired_review` for
-// the TUI and the absent action set leaves legacy discovery available.
+// the TUI, but an absent action set never authorizes a mutation.
 const legacyExpiredEnvelope = envelope(112, {
   contract_version: "boreal.work-status/2",
   project_id: "project_test",
@@ -1267,7 +1296,8 @@ const legacyExpiredEnvelope = envelope(112, {
 const legacyExpired = buildStatusView(legacyExpiredEnvelope);
 assert(legacyExpired.items[0].status === "expired_review", "status/2 blocked expiry decodes to expired_review");
 assert(contextualAction(legacyExpired.items[0]) === "review expiry", "status/2 expiry keeps its recovery action");
-assert(actionAvailability(legacyExpired.items[0]).find((entry) => entry.action === "release")?.reason === "expiry requires review", "status/2 expiry keeps structured recovery reason");
+assert(actionAvailability(legacyExpired.items[0]).every(entry => !entry.enabled), "status/2 without server actions is read-only");
+assert(actionAvailability(item("missing-authority", "ready", { actions: undefined })).every(entry => !entry.enabled), "ready label never substitutes for server permissions");
 
 const hostileText = renderMountedView({
   mounted: true,
@@ -1312,9 +1342,10 @@ const pagedView = await pagedController.mount({ kind: "work", project_id: "proje
 assert(pagedView.selected_work?.work_id === "page-100" && pagedReads.length === 2 && pagedReads[1].offset === 100, "deep-linked records beyond the first page are reachable");
 
 let unknownAttempts = 0;
+let readbackRevision = 130;
 const readbackService: VersionedServiceApi = {
   ...service,
-  async readStatus() { return monitoring(130, [item("readback-task", "ready")]); },
+  async readStatus() { return monitoring(readbackRevision, [item("readback-task", "ready")]); },
   async claim(request) {
     unknownAttempts += 1;
     if (unknownAttempts === 1) return envelope(130, null, "unknown", {
@@ -1323,7 +1354,7 @@ const readbackService: VersionedServiceApi = {
     });
     return envelope(131, { committed: true }, "changed");
   },
-  async readOperation() { return envelope(131, { operation: { outcome: "changed" }, readback_required: false }, "changed"); },
+  async readOperation() { readbackRevision = 131; return envelope(131, { operation: { outcome: "changed" }, readback_required: false }, "changed"); },
 };
 const readbackController = new MountedWorkflowController(readbackService, { context: tuiContext });
 await readbackController.mount({ kind: "work", project_id: "project_test", work_id: "readback-task" });
@@ -1394,5 +1425,51 @@ await new Promise<void>((resolve) => setTimeout(resolve, 0));
 finishScreenTerminal.emitData("q");
 await finishScreenRun;
 assert(fullScreenFinishSummary === "done q", "full-screen Finish edits and submits a typed summary instead of throwing");
+
+// Regression: a transport outage keeps readable rows but revokes cached actions.
+let disconnected = false;
+const outageController = new MountedWorkflowController({
+  ...service,
+  async readStatus() {
+    if (disconnected) throw new Error("fixture connection lost");
+    return monitoring(210, [item("outage-task", "ready")]);
+  },
+}, { context: tuiContext });
+await outageController.mount({ kind: "work", project_id: "project_test", work_id: "outage-task" });
+disconnected = true;
+let observedOutage: unknown;
+try { await outageController.refresh(); } catch (error) { observedOutage = error; }
+assert(observedOutage instanceof Error && observedOutage.message === "fixture connection lost", "refresh preserves the transport error");
+assert(outageController.view().selected_work?.work_id === "outage-task", "outage retains real last-known rows");
+assert(outageController.actionAvailability("outage-task").every((action) => !action.enabled), "outage revokes cached mutation authority");
+disconnected = false;
+await outageController.refresh();
+assert(outageController.actionAvailability("outage-task").some((action) => action.action === "claim" && action.enabled), "fresh server decisions restore authority");
+
+// An operation result is a revision high-water mark, even when the following
+// read returns old cached data. Neither action permissions nor rows regress.
+let highWaterRevision = 220;
+const highWaterController = new MountedWorkflowController({
+  ...service,
+  async readStatus() { return monitoring(highWaterRevision, [item("high-water-task", "ready")]); },
+  async claim() { return envelope(221, { committed: true }, "changed"); },
+}, { context: tuiContext });
+await highWaterController.mount({ kind: "work", project_id: "project_test", work_id: "high-water-task" });
+assert((await highWaterController.claim("high-water-task")).ok, "a committed response is retained despite a stale read");
+assert(highWaterController.actionAvailability("high-water-task").every((action) => !action.enabled), "an older snapshot cannot restore authority after commit");
+highWaterRevision = 221;
+await highWaterController.refresh();
+assert(highWaterController.actionAvailability("high-water-task").some((action) => action.action === "claim" && action.enabled), "matching high-water snapshot restores authority");
+
+const noProjectPermission = new MountedWorkflowController({
+  ...service,
+  async readStatus() {
+    const response = monitoring(230, []);
+    response.data!.project_actions = [];
+    return response;
+  },
+}, { context: tuiContext });
+await noProjectPermission.mount();
+assert(noProjectPermission.view().actions.filter((action) => action.action === "create_work" || action.action === "create_project").every((action) => !action.enabled), "creation also fails closed without server decisions");
 
 console.log("TUI mounted workflow, protocol/error, monitoring, disabled-action, pagination, recovery, terminal, and refresh tests passed");

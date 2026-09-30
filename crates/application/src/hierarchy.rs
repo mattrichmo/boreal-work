@@ -47,6 +47,7 @@ pub struct DependencyEdgeView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CycleBoardView {
+    pub diagnostics: Vec<boreal_store::StatusRecordDiagnostic>,
     pub project_id: ProjectId,
     pub revision: u64,
     pub cycle: boreal_store::CycleV3Record,
@@ -55,6 +56,7 @@ pub struct CycleBoardView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CycleBoardAssignment {
+    pub accepted_closed: bool,
     pub assignment: boreal_store::CycleAssignmentV3Record,
     pub work_title: Option<String>,
     pub work_kind: Option<String>,
@@ -112,26 +114,22 @@ impl WorkApplication<'_> {
                 "cycle board requires work-model/3 to be enabled".to_owned(),
             ));
         }
-        let cycle = self
+        let (cycle, stored_assignments, status, accepted) = self
             .store_ref()
-            .cycle_v3(project_id.as_str(), cycle_id)?
-            .ok_or_else(|| boreal_store::StoreError::NotFound {
-                entity: "cycle_v3",
-                id: cycle_id.to_owned(),
-            })?;
-        let status = self.store_ref().read_project_status(project_id.as_str())?;
+            .cycle_board_snapshot_v3(project_id.as_str(), cycle_id)?;
+        let revision = status.revision.0;
+        let diagnostics = status.diagnostics;
         let work = status
             .works
             .into_iter()
             .map(|row| (row.work.id.to_string(), row.work))
             .collect::<BTreeMap<_, _>>();
-        let assignments = self
-            .store_ref()
-            .cycle_assignments_v3(project_id.as_str(), cycle_id)?
+        let assignments = stored_assignments
             .into_iter()
             .map(|assignment| {
                 let item = work.get(&assignment.work_id);
                 CycleBoardAssignment {
+                    accepted_closed: accepted.contains(&assignment.work_id),
                     work_title: item.map(|value| value.title.clone()),
                     work_kind: item.map(|value| format!("{:?}", value.kind).to_ascii_lowercase()),
                     work_lifecycle: item
@@ -142,7 +140,8 @@ impl WorkApplication<'_> {
             .collect();
         Ok(CycleBoardView {
             project_id: project_id.clone(),
-            revision: self.store_ref().project_revision(project_id.as_str())?.0,
+            revision,
+            diagnostics,
             cycle,
             assignments,
         })
@@ -157,10 +156,11 @@ impl WorkApplication<'_> {
                 "intake requires work-model/3 to be enabled".to_owned(),
             ));
         }
+        let (revision, items) = self.store_ref().intake_snapshot_v3(project_id.as_str())?;
         Ok(IntakeItemsView {
             project_id: project_id.clone(),
-            revision: self.store_ref().project_revision(project_id.as_str())?.0,
-            items: self.store_ref().intake_items_v3(project_id.as_str())?,
+            revision,
+            items,
         })
     }
 
@@ -881,25 +881,6 @@ fn ensure_mutation_scope(
     scope: &PlanningScope,
 ) -> Result<(), ApplicationError> {
     scope.validate().map_err(ApplicationError::from)?;
-    if let Some(session_id) = scope.session_id.as_deref() {
-        let session = store
-            .session(scope.project_id.as_str(), session_id)?
-            .ok_or_else(|| boreal_store::StoreError::NotFound {
-                entity: "session",
-                id: session_id.to_owned(),
-            })?;
-        if session.actor_id != scope.actor_id {
-            return Err(ApplicationError::Planning(PlanningError::ScopeConflict {
-                expected: session.actor_id,
-                actual: scope.actor_id.clone(),
-            }));
-        }
-        if session.state != SessionState::Active {
-            return Err(ApplicationError::Invalid(format!(
-                "session {session_id} is not active"
-            )));
-        }
-    }
     // The v3 store mutation owns the replay-first, transactional expected
     // revision check.  Do not perform a read-before-write revision check here:
     // a retry must be able to replay after the project revision has advanced.
@@ -921,6 +902,7 @@ fn v3_context(
     V3MutationContext {
         project_id: scope.project_id.to_string(),
         actor_id: scope.actor_id.clone(),
+        session_id: scope.session_id.clone(),
         operation_id: operation_id.to_owned(),
         request_digest: canonical_request_digest(
             command,

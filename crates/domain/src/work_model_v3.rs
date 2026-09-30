@@ -1221,3 +1221,52 @@ fn civil_from_days(days: i64) -> (i32, u8, u8) {
     year += i64::from(month <= 2);
     (year as i32, month as u8, day as u8)
 }
+
+/// Shared role boundary for project planning. A reviewer or publisher cannot
+/// silently acquire planning authority merely by supplying a valid actor ID.
+pub const fn planning_role_allowed(role: crate::ActorRole) -> bool {
+    matches!(role, crate::ActorRole::Agent | crate::ActorRole::Operator)
+}
+
+/// Commitment history is monotone. Reassignment/carry-over creates a new row;
+/// it never resets the state of an earlier commitment.
+pub fn assignment_transition_allowed(prior: &str, next: &str) -> bool {
+    matches!(
+        (prior, next),
+        (
+            "planned",
+            "committed" | "removed" | "carried_over" | "completed"
+        ) | ("committed", "removed" | "carried_over" | "completed")
+    )
+}
+
+/// Project planning permission returned by reads and repeated by transaction writers.
+/// This is distinct from a task's execution/proof action descriptor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectPlanningAction {
+    pub action: &'static str,
+    pub project_id: crate::ProjectId,
+    pub actor_id: crate::ActorId,
+    pub session_id: Option<crate::SessionId>,
+    pub expected_project_revision: crate::Revision,
+    pub allowed: bool,
+    pub denial_reason: Option<&'static str>,
+    pub confirmation: &'static str,
+}
+
+pub fn project_planning_actions(
+    project: &crate::ProjectId,
+    actor: &crate::ActorContext,
+    session: Option<&crate::SessionId>,
+    revision: crate::Revision,
+) -> Vec<ProjectPlanningAction> {
+    ["create_project", "create_work", "cycle_create", "cycle_change", "dependency_edit"].into_iter().map(|action| {
+        let denial=if action=="create_project" {Some("Initialize a separate workspace with bwrk init; this connection already belongs to one project.")}
+            else if session.is_none() {Some("A current authenticated project session is required.")}
+            else if !planning_role_allowed(actor.role) {Some("The current project principal cannot edit planning.")}
+            else {None};
+        ProjectPlanningAction {action,project_id:project.clone(),actor_id:actor.actor_id.clone(),session_id:session.cloned(),
+            expected_project_revision:revision,allowed:denial.is_none(),denial_reason:denial,
+            confirmation:"Confirm the project-scoped planning change at this revision."}
+    }).collect()
+}

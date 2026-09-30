@@ -1,0 +1,86 @@
+status	path	purpose
+modified	ARCHIVE_MANIFEST.json	Root compatibility manifest required by existing apply_overlay.py
+modified	REFERENCE_INDEX.md	Archive-only index; hashed in nested manifest, not applied by the baseline merger
+modified	apps/tui/installer/wizard.cjs	Regenerate tracked standalone installer from current TUI sources
+modified	apps/tui/src/client.ts	Consume server actions; enforce project/credential/revision scope and safe outage/readback
+modified	apps/tui/src/entrypoint.ts	Transport authenticated project-local CLI/TUI connection context
+modified	apps/tui/src/test.ts	Exercise explicit server actions, outage read-only behavior and revision high-water guards
+modified	apps/tui/src/ui/dashboard.ts	Expose attention groups and canonical server decision presentation
+modified	apps/tui/src/ui/model.ts	Preserve diagnostics and project/action identity in dashboard projection
+modified	apps/tui/src/ui/screen.ts	Keep quarantined rows red and mutations disabled in responsive views
+modified	apps/tui/tests/fixtures.mjs	Supply explicit mock server permissions in terminal test fixtures
+modified	apps/tui/tests/responsive.test.mjs	Test responsive rendering with authoritative action fixtures
+added	crates/application/src/completion.rs	Shared completion facade and immutable-result finish preparation
+added	crates/application/src/cycle_runtime.rs	Typed cycle creation/change/read facade over existing planning store
+added	crates/application/src/decision_wire.rs	Serialize all canonical facts and 30 allowed/denied work actions
+modified	crates/application/src/evidence_store.rs	Bind proof/review decisions to sealed submission and exact source/profile identity
+modified	crates/application/src/guidance.rs	Select guidance from canonical status and allowed server actions
+modified	crates/application/src/hierarchy.rs	Separate milestone/task containment from cycle membership
+modified	crates/application/src/knowledge.rs	Durable cited drafts/reviews and recoverable Git publication admission/readback
+modified	crates/application/src/lib.rs	Integrate credential bootstrap and session-bound project work creation
+modified	crates/application/src/status.rs	Canonical status/action facts, project planning permissions and exact projection totals
+modified	crates/application/src/workflow_assets.rs	Digest-verify embedded workflows and expose trusted conditional action metadata
+added	crates/cli/src/authority.rs	Route principal, delegation, role and credential changes through project authority
+modified	crates/cli/src/command_registry.rs	Register supported completion/cycle/memory/authority/checkpoint commands
+added	crates/cli/src/completion_commands.rs	Shared typed direct/service completion transport with explicit revision/reason/confirmation
+added	crates/cli/src/credentials.rs	Secure local key storage, generation and project credential authentication
+added	crates/cli/src/cycle_commands.rs	Expose revision-bound cycle lifecycle, assignment and carry-over commands
+modified	crates/cli/src/dashboard.rs	Resolve explicit confined project context for terminal launch
+modified	crates/cli/src/main.rs	Wire new command families, canonical status JSON, explicit sessions and read-only doctor
+added	crates/cli/src/memory_commands.rs	Expose durable memory draft/review/publication/search/readback/reconciliation
+added	crates/cli/src/project_context.rs	Require local initialization and canonical workspace/database/path confinement
+modified	crates/cli/src/service.rs	Authenticate scoped service requests and share completion/planning/memory/doctor adapters
+modified	crates/cli/src/setup.rs	Persist explicit project binding and confine setup paths/local credentials
+modified	crates/domain/src/actions.rs	Use exact ownership/session/proof/root identity in domain action policy
+added	crates/domain/src/completion.rs	Typed completion command vocabulary and exception-reason mapping
+modified	crates/domain/src/decision_inputs.rs	Carry proof-relevant authority roots and immutable submission caller context
+modified	crates/domain/src/lib.rs	Export new domain policy modules
+added	crates/domain/src/maintenance.rs	Define operator authority and irreversible maintenance transitions
+modified	crates/domain/src/status_evaluator.rs	Keep rejected review/failed facts distinct from missing proof
+modified	crates/domain/src/work_model_v3.rs	Typed containment/assignment transitions and project planning action descriptors
+modified	crates/domain/tests/production_action_policy.rs	Bind existing domain fixtures to new authority-root and proof-relevant facts
+modified	crates/domain/tests/production_decision_inputs.rs	Bind existing domain fixtures to new authority-root and proof-relevant facts
+modified	crates/domain/tests/production_domain_api.rs	Bind existing domain fixtures to new authority-root and proof-relevant facts
+modified	crates/domain/tests/production_properties.rs	Bind existing domain fixtures to new authority-root and proof-relevant facts
+modified	crates/domain/tests/production_t10_oracle.rs	Bind existing domain fixtures to new authority-root and proof-relevant facts
+modified	crates/memory/src/lib.rs	Defer Git filesystem publication until durable admission and retain frozen manifest identity
+modified	crates/migration/src/lib.rs	Preserve v1 completion provenance without creating accepted v2 closeout
+modified	crates/protocol/src/models.rs	Typed completion/cycle/memory/authority/fact and trusted workflow wire DTOs
+modified	crates/store/src/acceptance.rs	Seal real submissions; exact review binding and accepted-outcome/exception links
+added	crates/store/src/completion.rs	Transactional review/exception/waiver/reopen/cancel/retry/publish/checkpoint with audit
+modified	crates/store/src/completion_migrations.rs	Register ordered immutable completion migration history v2–v6
+added	crates/store/src/cycle_commands.rs	Persist cycle lifecycle/commitment/carry-over history and frozen boards
+modified	crates/store/src/jobs.rs	Enforce legal external-job phase advancement for reconciliation
+modified	crates/store/src/lib.rs	Wire canonical lifecycle writers, strict profile identity, session creation and accepted closeout
+modified	crates/store/src/maintenance.rs	Validate role/state transitions and preserve terminal outcome readback
+added	crates/store/src/memory.rs	Persist cited immutable drafts, independent reviews and publication admission records
+added	crates/store/src/principals.rs	Durable authenticated principals, delegation roots, sessions and revocation
+modified	crates/store/src/status_evaluation.rs	Assemble canonical request-session, accepted dependency and recovery facts
+modified	crates/store/src/status_facts.rs	Retain scoped corrupt/missing predecessor diagnostics in canonical fact reads
+modified	crates/store/src/work_model_v3.rs	Bind full planning payload/session, preserve canonical dependency history and one graph
+modified	crates/store/tests/schema_v3.rs	Align focused schema fixtures with canonical authority/history contracts
+added	handoff/delivery/CHANGED_FILES.tsv	Delivery handoff metadata
+added	handoff/delivery/IMPLEMENTATION_REPORT.md	Delivery handoff metadata
+added	handoff/delivery/MINI_GIT_LOG.md	Delivery handoff metadata
+added	handoff/delivery/OVERLAY_MANIFEST.json	Delivery handoff metadata
+modified	install.sh	Regenerate embedded installer and verify absolute installed binary/TUI with rollback
+added	project/spec/schema-completion-v2.sql	Add immutable principal, credential, delegation/session and transition history schema
+added	project/spec/schema-completion-v3.sql	Retain exact exception links used by accepted outcomes
+added	project/spec/schema-completion-v4.sql	Canonical containment/dependency projections and immutable cycle/assignment history
+added	project/spec/schema-completion-v5.sql	Immutable cited memory draft/review and publication-intent schema
+added	project/spec/schema-completion-v6.sql	Preserve audit rows while adding typed checkpoints and strict profile immutability
+modified	project/spec/workflows/audit.json	Update audit workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/claim.json	Update claim workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/context.json	Update context workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/finish.json	Update finish workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/handoff.json	Update handoff workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/health.json	Update health workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/memory.json	Update memory workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/package.json	Publish digest-bound embedded workflow package v1.1.0 metadata
+modified	project/spec/workflows/plan.json	Update plan workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/review.json	Update review workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/route.json	Update route workflow with trusted structured context and executable registry commands
+modified	project/spec/workflows/validator.py	Validate against executable registry and preserve negative-test fixture parity
+modified	scripts/release/build_release.py	Stage full authored TUI and all runtime modules in existing release layout
+modified	scripts/release/package-smoke.sh	Invoke genuine installed-prefix two-project isolation checks after installation
+added	scripts/release/two-project-smoke.py	Verify real installed asset hashes and local/foreign/uninitialized project isolation

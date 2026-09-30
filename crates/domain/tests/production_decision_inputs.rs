@@ -56,6 +56,7 @@ fn valid_inputs() -> DecisionInputs {
             terminal_decision: None,
         }),
         authority: Fact::present(ActorAuthorityInput {
+            authority_root: "agent-1".into(),
             project_id: ProjectId::new("project-1"),
             role: ActorRole::Agent,
             principal: PrincipalBinding::Authenticated {
@@ -66,6 +67,7 @@ fn valid_inputs() -> DecisionInputs {
         requirements: Fact::present(PinnedRequirementsInput {
             proof: proof(Some(attempt.clone()), 1),
             requirements: vec![PinnedRequirement {
+                exception: None,
                 id: RequirementId::new("requirement-1"),
                 gate_id: GateId::new("verification"),
                 kind: GateKind::Verification,

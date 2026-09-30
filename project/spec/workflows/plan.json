@@ -1,13 +1,134 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.0.0",
+  "asset_version": "1.1.0",
   "ref": "boreal.workflow.plan.v1",
   "kind": "plan",
   "title": "Plan milestone, sprint, and task work with acceptance context",
-  "refs": {"route": "boreal.workflow.route.v1", "context": "boreal.workflow.context.v1", "health": "boreal.workflow.health.v1"},
-  "allowed_commands": ["bwrk work create --json", "bwrk work edit --json", "bwrk work show <work_id> --json", "bwrk work list --json", "bwrk work rollup <work_id> --json", "bwrk work split <work_id> --json", "bwrk sprint list --json", "bwrk sprint show <sprint_id> --json", "bwrk sprint launch <sprint_id> --json", "bwrk sprint current --json", "bwrk sprint status <sprint_id> --json", "bwrk sprint activate <sprint_id> --json", "bwrk sprint board <sprint_id> --json", "bwrk sprint report <sprint_id> --json", "bwrk sprint metrics <sprint_id> --json", "bwrk dep add --json", "bwrk dep remove --json", "bwrk dep tree <work_id> --json", "bwrk dep cycles --json", "bwrk work ready <work_id> --json"],
-  "typed_inputs": [{"name": "project_id", "type": "project_id", "required": true, "source": "session", "validation": "project_scope"}, {"name": "work_kind", "type": "enum:milestone|sprint|task", "required": true, "source": "typed_request", "validation": "allowed_work_kind"}, {"name": "title", "type": "bounded_string", "required": true, "source": "typed_request", "validation": "non_empty"}, {"name": "work_id", "type": "nullable_work_id", "required": false, "source": "store", "validation": "project_bound"}, {"name": "sprint_id", "type": "nullable_work_id", "required": false, "source": "store", "validation": "kind_sprint_and_project_bound"}, {"name": "parent_id", "type": "nullable_work_id", "required": false, "source": "typed_request", "validation": "acyclic_parent_and_rollup_containment"}, {"name": "acceptance_profile_ref", "type": "workflow_ref", "required": true, "source": "policy", "validation": "packaged_ref"}, {"name": "dependency_ids", "type": "work_id_array", "required": false, "source": "typed_request", "validation": "close_only_edges_by_default"}, {"name": "launch_intent", "type": "boolean", "required": false, "source": "typed_request", "validation": "explicit_sprint_action"}],
-  "finish_criteria": [{"id": "plan.published", "type": "explicit_launch_readiness", "required": true}, {"id": "plan.hierarchy", "type": "parent_containment_is_explicit", "required": true}, {"id": "plan.graph", "type": "acyclic_typed_dependencies", "required": true}, {"id": "plan.acceptance", "type": "versioned_profile_present", "required": true}, {"id": "plan.sprint_action", "type": "launch_or_activation_is_explicit", "required": true}],
-  "next_refs": ["boreal.workflow.claim.v1", "boreal.workflow.context.v1"],
-  "state_transition_owner": "boreal.application.v2"
+  "refs": {
+    "route": "boreal.workflow.route.v1",
+    "context": "boreal.workflow.context.v1",
+    "health": "boreal.workflow.health.v1"
+  },
+  "allowed_commands": [
+    "bwrk work list --json",
+    "bwrk work create <project_id> <work_id> <title> --expected-revision <revision> --json",
+    "bwrk work edit <work_id> --input <input_path> --expected-revision <revision> --json",
+    "bwrk dep tree --json",
+    "bwrk dep cycles --json",
+    "bwrk cycle list --json",
+    "bwrk cycle board <cycle_id> --json",
+    "bwrk cycle create --input <input_path> --expected-revision <revision> --reason <reason> --yes --json"
+  ],
+  "typed_inputs": [
+    {
+      "name": "project_id",
+      "type": "project_id",
+      "required": true,
+      "source": "session",
+      "validation": "project_scope"
+    },
+    {
+      "name": "work_kind",
+      "type": "enum:milestone|sprint|task",
+      "required": true,
+      "source": "typed_request",
+      "validation": "allowed_work_kind"
+    },
+    {
+      "name": "title",
+      "type": "bounded_string",
+      "required": true,
+      "source": "typed_request",
+      "validation": "non_empty"
+    },
+    {
+      "name": "work_id",
+      "type": "nullable_work_id",
+      "required": false,
+      "source": "store",
+      "validation": "project_bound"
+    },
+    {
+      "name": "sprint_id",
+      "type": "nullable_work_id",
+      "required": false,
+      "source": "store",
+      "validation": "kind_sprint_and_project_bound"
+    },
+    {
+      "name": "parent_id",
+      "type": "nullable_work_id",
+      "required": false,
+      "source": "typed_request",
+      "validation": "acyclic_parent_and_rollup_containment"
+    },
+    {
+      "name": "acceptance_profile_ref",
+      "type": "workflow_ref",
+      "required": true,
+      "source": "policy",
+      "validation": "packaged_ref"
+    },
+    {
+      "name": "dependency_ids",
+      "type": "work_id_array",
+      "required": false,
+      "source": "typed_request",
+      "validation": "close_only_edges_by_default"
+    },
+    {
+      "name": "launch_intent",
+      "type": "boolean",
+      "required": false,
+      "source": "typed_request",
+      "validation": "explicit_sprint_action"
+    },
+    {
+      "name": "server_action",
+      "type": "action_descriptor",
+      "required": true,
+      "source": "canonical_status_or_command_response",
+      "validation": "target_project_actor_session_revisions_confirmation_and_denials_must_match; guidance_is_not_authority"
+    }
+  ],
+  "finish_criteria": [
+    {
+      "id": "plan.published",
+      "type": "explicit_launch_readiness",
+      "required": true
+    },
+    {
+      "id": "plan.hierarchy",
+      "type": "parent_containment_is_explicit",
+      "required": true
+    },
+    {
+      "id": "plan.graph",
+      "type": "acyclic_typed_dependencies",
+      "required": true
+    },
+    {
+      "id": "plan.acceptance",
+      "type": "versioned_profile_present",
+      "required": true
+    },
+    {
+      "id": "plan.sprint_action",
+      "type": "launch_or_activation_is_explicit",
+      "required": true
+    },
+    {
+      "id": "plan.authority",
+      "type": "mutation_authorized_again_inside_canonical_transaction",
+      "required": true
+    }
+  ],
+  "next_refs": [
+    "boreal.workflow.claim.v1",
+    "boreal.workflow.context.v1"
+  ],
+  "state_transition_owner": "boreal.application.v2",
+  "required_server_actions": [
+    "planning"
+  ]
 }
