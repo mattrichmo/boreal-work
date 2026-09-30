@@ -1,8 +1,8 @@
 use boreal_application::{GlobalManagerApplication, GlobalManagerError};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::{
-    Arc, Barrier,
     atomic::{AtomicU64, Ordering},
+    Arc, Barrier,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -70,25 +70,21 @@ fn hierarchy_status_history_replay_and_failed_transition() {
         "rename",
     )
     .unwrap();
-    assert!(
-        call(
-            &app,
-            "task add",
-            json!({"project_id":pid,"parent_id":subtask["id"],"title":"Invalid child"}),
-            "invalid-hierarchy"
-        )
-        .is_err()
-    );
+    assert!(call(
+        &app,
+        "task add",
+        json!({"project_id":pid,"parent_id":subtask["id"],"title":"Invalid child"}),
+        "invalid-hierarchy"
+    )
+    .is_err());
     let rev = app.revision().unwrap();
-    assert!(
-        call(
-            &app,
-            "todo add",
-            json!({"title":"Bad status","status_id":"missing"}),
-            "failed"
-        )
-        .is_err()
-    );
+    assert!(call(
+        &app,
+        "todo add",
+        json!({"title":"Bad status","status_id":"missing"}),
+        "failed"
+    )
+    .is_err());
     assert_eq!(app.revision().unwrap(), rev);
     assert!(matches!(
         call(&app, "project add", json!({"name":"Different"}), "project"),
@@ -111,6 +107,247 @@ fn hierarchy_status_history_replay_and_failed_transition() {
 }
 
 #[test]
+fn bounded_snapshot_pages_search_and_preserves_large_notes_for_export() {
+    let path = db();
+    let app = GlobalManagerApplication::open(&path).unwrap();
+    let project = call(&app, "project add", json!({"name":"Large"}), "p").unwrap();
+    let body = "x".repeat(100_000);
+    for n in 0..12 {
+        call(
+            &app,
+            "note add",
+            json!({"project_id":project["id"],"title":format!("Note {n}"),"body":body}),
+            &format!("n{n}"),
+        )
+        .unwrap();
+    }
+    let snapshot = call(&app, "snapshot", json!({}), "snap").unwrap();
+    assert_eq!(snapshot["totals"]["notes"], 12);
+    assert!(snapshot["notes"][0].get("body").is_none());
+    assert!(serde_json::to_vec(&snapshot).unwrap().len() < 1024 * 1024);
+    let notes_page = call(
+        &app,
+        "detail page",
+        json!({"collection":"notes","limit":50,"offset":0}),
+        "all-notes-page",
+    )
+    .unwrap();
+    assert_eq!(notes_page["total"], 12);
+    assert_eq!(notes_page["rows"].as_array().unwrap().len(), 12);
+    assert!(notes_page["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row.get("body").is_none()));
+    assert!(serde_json::to_vec(&notes_page).unwrap().len() < 1024 * 1024);
+    let page = call(
+        &app,
+        "detail page",
+        json!({"collection":"notes","query":"note 1","limit":5,"offset":0}),
+        "page",
+    )
+    .unwrap();
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["rows"].as_array().unwrap().len(), 3);
+    let full = call(
+        &app,
+        "note show",
+        json!({"note_id":page["rows"][0]["id"]}),
+        "show",
+    )
+    .unwrap();
+    assert_eq!(full["body"].as_str().unwrap().len(), 100_000);
+    let backup = call(&app, "export", json!({}), "backup").unwrap();
+    assert_eq!(backup["notes"].as_array().unwrap().len(), 12);
+    let restore_path = db();
+    let restore = GlobalManagerApplication::open(&restore_path).unwrap();
+    call(&restore, "import", json!({"snapshot":backup}), "import-one").unwrap();
+    call(
+        &restore,
+        "import",
+        json!({"snapshot":backup,"replace":true,"expected_revision":1}),
+        "import-two",
+    )
+    .unwrap();
+    let history_page = call(
+        &restore,
+        "detail page",
+        json!({"collection":"imported_history","limit":10}),
+        "history-page",
+    )
+    .unwrap();
+    assert!(history_page["total"].as_u64().unwrap() > 2);
+    assert!(history_page["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row.get("snapshot").is_none()));
+    assert!(serde_json::to_vec(&history_page).unwrap().len() < 1024 * 1024);
+    drop(restore);
+    let _ = std::fs::remove_file(restore_path);
+    drop(app);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn waiting_follow_up_is_separate_from_due_date_and_survives_snapshot() {
+    let path = db();
+    let app = GlobalManagerApplication::open(&path).unwrap();
+    let item = call(
+        &app,
+        "todo add",
+        json!({"title":"Call back","due_at":"2026-10-02","follow_up_at":"2026-10-03"}),
+        "follow-up",
+    )
+    .unwrap();
+    assert_eq!(item["due_at"], "2026-10-02");
+    assert_eq!(item["follow_up_at"], "2026-10-03");
+    let snapshot = call(&app, "snapshot", json!({}), "snapshot").unwrap();
+    assert_eq!(snapshot["items"][0]["follow_up_at"], "2026-10-03");
+    drop(app);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn related_transfer_rejects_atomically_and_status_history_is_portable() {
+    let path = db();
+    let target_path = db();
+    let app = GlobalManagerApplication::open(&path).unwrap();
+    let a = call(&app, "project add", json!({"name":"A"}), "a").unwrap();
+    let b = call(&app, "project add", json!({"name":"B"}), "b").unwrap();
+    let x = call(
+        &app,
+        "todo add",
+        json!({"project_id":a["id"],"title":"X"}),
+        "x",
+    )
+    .unwrap();
+    let y = call(
+        &app,
+        "todo add",
+        json!({"project_id":a["id"],"title":"Y"}),
+        "y",
+    )
+    .unwrap();
+    call(
+        &app,
+        "relationship add",
+        json!({"source_id":x["id"],"target_id":y["id"],"kind":"related"}),
+        "edge",
+    )
+    .unwrap();
+    let revision = app.revision().unwrap();
+    assert!(call(
+        &app,
+        "todo edit",
+        json!({"item_id":x["id"],"project_id":b["id"],"status_id":"todo"}),
+        "split"
+    )
+    .is_err());
+    assert_eq!(app.revision().unwrap(), revision);
+    let removed = call(
+        &app,
+        "relationship remove",
+        json!({"source_id":x["id"],"target_id":y["id"],"kind":"related"}),
+        "edge-remove",
+    )
+    .unwrap();
+    assert_eq!(removed["project_id"], a["id"]);
+    assert_eq!(removed["source_id"], x["id"]);
+    let activity = call(&app, "history", json!({"limit":50}), "history").unwrap();
+    let removal = activity["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["command"] == "relationship remove")
+        .expect("relationship removal activity");
+    assert_eq!(removal["project_id"], a["id"]);
+    assert_eq!(removal["source_id"], x["id"]);
+    assert_eq!(removal["target_id"], y["id"]);
+    call(
+        &app,
+        "workflow status add",
+        json!({"project_id":a["id"],"status_id":"approved","label":"Approved","category":"active"}),
+        "status",
+    )
+    .unwrap();
+    call(&app,"workflow status add",json!({"project_id":b["id"],"status_id":"approved","label":"Accepted","category":"completed"}),"status-b").unwrap();
+    call(
+        &app,
+        "todo move",
+        json!({"item_id":x["id"],"status_id":"approved"}),
+        "custom-status",
+    )
+    .unwrap();
+    call(
+        &app,
+        "todo edit",
+        json!({"item_id":x["id"],"project_id":b["id"],"status_id":"approved","parent_id":null}),
+        "transfer",
+    )
+    .unwrap();
+    let restored = GlobalManagerApplication::open(&target_path).unwrap();
+    let backup = call(&app, "export", json!({}), "export").unwrap();
+    call(&restored, "import", json!({"snapshot":backup}), "import").unwrap();
+    assert_eq!(
+        call(&restored, "snapshot", json!({}), "s").unwrap()["relationships"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let restored_x = call(&restored, "todo show", json!({"item_id":x["id"]}), "show-x").unwrap();
+    assert_eq!(restored_x["project_id"], b["id"]);
+    assert_eq!(restored_x["status_id"], "approved");
+    let history = call(
+        &restored,
+        "detail page",
+        json!({"collection":"status_history","limit":20}),
+        "history",
+    )
+    .unwrap();
+    assert!(history["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["item_id"] == x["id"]
+            && row["to_status_id"] == "approved"
+            && row["to_status_label"] == "Approved"));
+    assert!(history["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["item_id"] == x["id"]
+            && row["to_status_id"] == "approved"
+            && row["to_status_label"] == "Accepted"
+            && row["to_status_category"] == "completed"));
+    drop(app);
+    drop(restored);
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(target_path);
+}
+
+#[test]
+fn malformed_nested_history_is_rejected_without_revision_change() {
+    let path = db();
+    let app = GlobalManagerApplication::open(&path).unwrap();
+    let mut backup = call(&app, "export", json!({}), "export").unwrap();
+    backup["revision_history"] = json!([{"revision":0,"snapshot":{},"created_at":"now"}]);
+    let revision = app.revision().unwrap();
+    assert!(call(&app, "import", json!({"snapshot":backup}), "bad-history").is_err());
+    assert_eq!(app.revision().unwrap(), revision);
+    assert!(call(
+        &app,
+        "operation show",
+        json!({"operation_id":"bad-history"}),
+        "read"
+    )
+    .is_err());
+    drop(app);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn blocks_relationships_reject_reverse_cycle_without_revision_change() {
     let path = db();
     let app = GlobalManagerApplication::open(&path).unwrap();
@@ -124,15 +361,13 @@ fn blocks_relationships_reject_reverse_cycle_without_revision_change() {
     )
     .unwrap();
     let revision = app.revision().unwrap();
-    assert!(
-        call(
-            &app,
-            "relationship add",
-            json!({"source_id":second["id"],"target_id":first["id"],"kind":"blocks"}),
-            "blocks-reverse",
-        )
-        .is_err()
-    );
+    assert!(call(
+        &app,
+        "relationship add",
+        json!({"source_id":second["id"],"target_id":first["id"],"kind":"blocks"}),
+        "blocks-reverse",
+    )
+    .is_err());
     assert_eq!(app.revision().unwrap(), revision);
     let snapshot = call(&app, "snapshot", json!({}), "snapshot").unwrap();
     assert_eq!(snapshot["relationships"].as_array().unwrap().len(), 1);
@@ -164,15 +399,13 @@ fn mixed_blocks_and_depends_on_use_same_prerequisite_direction() {
     .unwrap();
     let revision = app.revision().unwrap();
     // “First depends on second” reverses the edge and closes a cycle.
-    assert!(
-        call(
-            &app,
-            "relationship add",
-            json!({"source_id":first["id"],"target_id":second["id"],"kind":"depends_on"}),
-            "mixed-cycle",
-        )
-        .is_err()
-    );
+    assert!(call(
+        &app,
+        "relationship add",
+        json!({"source_id":first["id"],"target_id":second["id"],"kind":"depends_on"}),
+        "mixed-cycle",
+    )
+    .is_err());
     assert_eq!(app.revision().unwrap(), revision);
 
     let mut backup = call(&app, "export", json!({}), "export").unwrap();
@@ -183,15 +416,13 @@ fn mixed_blocks_and_depends_on_use_same_prerequisite_direction() {
         "kind":"depends_on"
     }));
     let target = GlobalManagerApplication::open(&imported_path).unwrap();
-    assert!(
-        call(
-            &target,
-            "import",
-            json!({"snapshot":backup}),
-            "invalid-cycle-import",
-        )
-        .is_err()
-    );
+    assert!(call(
+        &target,
+        "import",
+        json!({"snapshot":backup}),
+        "invalid-cycle-import",
+    )
+    .is_err());
     drop(target);
     drop(app);
     let _ = std::fs::remove_file(path);
@@ -229,17 +460,25 @@ fn import_is_revision_guarded_and_backup_round_trips() {
     .unwrap();
     let snapshot = call(&restored, "snapshot", json!({}), "snapshot").unwrap();
     assert_eq!(snapshot["projects"][0]["id"], project["id"]);
-    assert_eq!(snapshot["notes"][0]["body"], "Keep history");
-    assert_eq!(snapshot["associations"][0]["kind"], "folder");
-    assert!(
+    let note_id = snapshot["notes"][0]["id"].as_str().unwrap();
+    assert_eq!(
         call(
             &restored,
-            "import",
-            json!({"snapshot":backup,"replace":true,"expected_revision":0}),
-            "stale-import"
+            "note show",
+            json!({"note_id":note_id}),
+            "note-body"
         )
-        .is_err()
+        .unwrap()["body"],
+        "Keep history"
     );
+    assert_eq!(snapshot["associations"][0]["kind"], "folder");
+    assert!(call(
+        &restored,
+        "import",
+        json!({"snapshot":backup,"replace":true,"expected_revision":0}),
+        "stale-import"
+    )
+    .is_err());
     drop(restored);
     let _ = std::fs::remove_file(source);
     let _ = std::fs::remove_file(target);

@@ -1,7 +1,8 @@
 #![cfg(unix)]
 
+use boreal_application::GlobalManagerApplication;
 use boreal_service::{JsonRequest, TransportConfig, UnixSocketClient};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     fs,
     path::PathBuf,
@@ -95,6 +96,116 @@ fn global_service_rejects_an_unknown_request_schema_in_a_versioned_envelope() {
 }
 
 #[test]
+fn global_service_survives_abandoned_connections_and_answers_next_snapshot() {
+    use std::{io::Write, os::unix::net::UnixStream};
+    let root = temp_root("boreal-global-service-liveness");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let runtime = root.join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let socket = runtime.join("s");
+    let mut service = Command::new(binary())
+        .args([
+            "global",
+            "service",
+            "run",
+            "--socket",
+            socket.to_str().unwrap(),
+            "--max-requests",
+            "7",
+        ])
+        .env("BOREAL_GLOBAL_ROOT", root.join("state"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !socket.exists() && service.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if !socket.exists() {
+        let out = service.wait_with_output().unwrap();
+        let message = String::from_utf8_lossy(&out.stderr);
+        if message.contains("Permission denied") || message.contains("Operation not permitted") {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+        panic!(
+            "global service failed to bind: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let assert_healthy_snapshot = |operation_id: &str| {
+        let request = JsonRequest::new(
+            format!("healthy-{operation_id}"),
+            json!({"api_version":"2","schema_version":"boreal.global.request.v1","operation_id":operation_id,"command":"snapshot","payload":{}}).to_string(),
+        ).unwrap();
+        let mut client = UnixSocketClient::connect(&socket, TransportConfig::default()).unwrap();
+        let response = client.request(request).unwrap();
+        let envelope: Value = serde_json::from_str(response.payload().unwrap()).unwrap();
+        assert_eq!(envelope["outcome"], "unchanged");
+        assert_eq!(
+            envelope["data"]["revision"], 0,
+            "failed connection changed state"
+        );
+    };
+    drop(UnixStream::connect(&socket).unwrap()); // EOF before prefix.
+    assert_healthy_snapshot("after-eof");
+    let mut prefix = UnixStream::connect(&socket).unwrap();
+    prefix.write_all(&[0, 0]).unwrap();
+    drop(prefix);
+    assert_healthy_snapshot("after-partial-prefix");
+    let mut partial = UnixStream::connect(&socket).unwrap();
+    partial.write_all(&[0, 0, 0, 8, b'{']).unwrap();
+    drop(partial);
+    assert_healthy_snapshot("after-partial-frame");
+    let mut oversized = UnixStream::connect(&socket).unwrap();
+    oversized.write_all(&u32::MAX.to_be_bytes()).unwrap();
+    drop(oversized);
+    assert_healthy_snapshot("after-invalid-size");
+    let idle = UnixStream::connect(&socket).unwrap();
+    thread::sleep(Duration::from_millis(650));
+    drop(idle);
+    assert_healthy_snapshot("after-idle-timeout");
+    let operation_id = "op_global_disconnect_once";
+    let inner = json!({"api_version":"2","schema_version":"boreal.global.request.v1","operation_id":operation_id,"command":"todo add","payload":{"title":"One committed action"}}).to_string();
+    let encoded =
+        serde_json::to_vec(&json!({"request_id":"disconnect-write","payload":inner})).unwrap();
+    let mut raw = UnixStream::connect(&socket).unwrap();
+    raw.write_all(&(encoded.len() as u32).to_be_bytes())
+        .unwrap();
+    raw.write_all(&encoded).unwrap();
+    raw.shutdown(std::net::Shutdown::Both).unwrap();
+    drop(raw);
+    thread::sleep(Duration::from_millis(150));
+    let request = JsonRequest::new("read-receipt",json!({"api_version":"2","schema_version":"boreal.global.request.v1","operation_id":"op_receipt_readback","command":"operation show","payload":{"operation_id":operation_id}}).to_string()).unwrap();
+    let mut client = UnixSocketClient::connect(&socket, TransportConfig::default()).unwrap();
+    let response = client.request(request).unwrap();
+    let envelope: Value = serde_json::from_str(response.payload().unwrap()).unwrap();
+    assert_eq!(envelope["data"]["operation_id"], operation_id);
+    assert_eq!(envelope["data"]["result"]["title"], "One committed action");
+    drop(client);
+    let request = JsonRequest::new("healthy-snapshot",json!({"api_version":"2","schema_version":"boreal.global.request.v1","operation_id":"op_healthy_snapshot","command":"snapshot","payload":{}}).to_string()).unwrap();
+    let mut client = UnixSocketClient::connect(&socket, TransportConfig::default()).unwrap();
+    let response = client.request(request).unwrap();
+    let envelope: Value = serde_json::from_str(response.payload().unwrap()).unwrap();
+    assert_eq!(envelope["data"]["totals"]["items"], 1);
+    assert_eq!(envelope["data"]["revision"], 1);
+    let out = service.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn global_commands_are_independent_of_cwd_and_workspace_links_are_validated() {
     let root = temp_root("boreal-global-cwd");
     let _ = fs::remove_dir_all(&root);
@@ -118,6 +229,38 @@ fn global_commands_are_independent_of_cwd_and_workspace_links_are_validated() {
     );
     let project: Value = serde_json::from_slice(&created.stdout).unwrap();
     let project_id = project["data"]["id"].as_str().unwrap();
+    let default_priority = run(&[
+        "global",
+        "todo",
+        "add",
+        "--title",
+        "Optional priority",
+        "--json",
+    ]);
+    assert!(
+        default_priority.status.success(),
+        "{}",
+        String::from_utf8_lossy(&default_priority.stdout)
+    );
+    let default_priority: Value = serde_json::from_slice(&default_priority.stdout).unwrap();
+    assert_eq!(default_priority["data"]["priority"], 0);
+    let selected_priority = run(&[
+        "global",
+        "todo",
+        "add",
+        "--title",
+        "Chosen priority",
+        "--priority",
+        "7",
+        "--json",
+    ]);
+    assert!(
+        selected_priority.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected_priority.stdout)
+    );
+    let selected_priority: Value = serde_json::from_slice(&selected_priority.stdout).unwrap();
+    assert_eq!(selected_priority["data"]["priority"], 7);
 
     let not_a_workspace = root.join("ordinary-folder");
     fs::create_dir(&not_a_workspace).unwrap();
@@ -138,16 +281,92 @@ fn global_commands_are_independent_of_cwd_and_workspace_links_are_validated() {
     assert!(snapshot.status.success());
     let snapshot: Value = serde_json::from_slice(&snapshot.stdout).unwrap();
     assert_eq!(snapshot["data"]["projects"].as_array().unwrap().len(), 1);
-    assert!(
-        snapshot["data"]["associations"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(snapshot["data"]["associations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert!(
         !cwd.join(".boreal").exists(),
         "global commands initialized the cwd"
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn file_export_bypasses_interactive_frame_limit_even_with_socket_routing() {
+    let root = temp_root("boreal-global-large-export");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let database = root.join("state/global.sqlite");
+    let app = GlobalManagerApplication::open(&database).unwrap();
+    let project = app
+        .execute("project add", &json!({"name":"Large"}), "p")
+        .unwrap();
+    let body = "x".repeat(100_000);
+    for n in 0..12 {
+        app.execute(
+            "note add",
+            &json!({"project_id":project["id"],"title":format!("Note {n}"),"body":body}),
+            &format!("n{n}"),
+        )
+        .unwrap();
+    }
+    drop(app);
+    let backup = root.join("backup.json");
+    let output = Command::new(binary())
+        .args([
+            "global",
+            "export",
+            "--out",
+            backup.to_str().unwrap(),
+            "--socket",
+            root.join("no-service.sock").to_str().unwrap(),
+            "--json",
+        ])
+        .env("BOREAL_GLOBAL_ROOT", root.join("state"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["data"]["exported"], true);
+    let bytes = fs::read(&backup).unwrap();
+    assert!(bytes.len() > 1024 * 1024);
+    let exported: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(exported["notes"].as_array().unwrap().len(), 12);
+
+    let restore_root = root.join("restored-state");
+    let restored = Command::new(binary())
+        .args([
+            "global",
+            "import",
+            "--input",
+            backup.to_str().unwrap(),
+            "--socket",
+            root.join("no-service.sock").to_str().unwrap(),
+            "--json",
+        ])
+        .env("BOREAL_GLOBAL_ROOT", &restore_root)
+        .output()
+        .unwrap();
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stdout)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(restored["data"]["imported"], true);
+    let snapshot = Command::new(binary())
+        .args(["global", "snapshot", "--json"])
+        .env("BOREAL_GLOBAL_ROOT", &restore_root)
+        .output()
+        .unwrap();
+    assert!(snapshot.status.success());
+    let snapshot: Value = serde_json::from_slice(&snapshot.stdout).unwrap();
+    assert_eq!(snapshot["data"]["totals"]["notes"], 12);
     let _ = fs::remove_dir_all(root);
 }
 

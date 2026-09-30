@@ -126,6 +126,7 @@ test("keyboard flow creates a project, custom status, task, completes and reopen
   key("\r");key("7");key("s");key("review\tReview\t\u001b[C\u0013");await wait(()=>controller.snapshot?.statuses.some(s=>s.status_id==="review"));
   key("3");key("n");key("Prepare launch\r");await wait(()=>controller.snapshot?.items.length===2);
   key("/");key("launch\r");await wait(()=>controller.searchQuery==="launch");
+  await new Promise(resolve=>setImmediate(resolve)); // Let the asynchronous form save close before sending the next key.
   assert.equal(controller.items.length,1);assert.match(render(controller),/Filter: launch/);assert.match(render(controller),/Prepare launch/);assert.doesNotMatch(render(controller),/Review taxes/);
   key("x");assert.equal(controller.items.length,2);assert.equal(controller.searchQuery,"");
   key("c");await wait(()=>controller.snapshot?.items[0]?.status_id==="done");

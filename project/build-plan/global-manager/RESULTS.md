@@ -2,6 +2,8 @@
 
 The first-pass [TUI audit](TUI_AUDIT.md) is retained as historical evidence.
 Its findings are addressed by the [redesign and qualification](TUI_REDESIGN_RESULTS.md).
+The 2026-09-30 global management audit follow-up and remaining work are recorded
+in [AUDIT_REMEDIATION_RESULTS.md](AUDIT_REMEDIATION_RESULTS.md).
 The original checks below concern the initial API and installation slice.
 
 Implemented by three user-requested Luna agents, with coordinator integration

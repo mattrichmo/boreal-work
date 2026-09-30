@@ -82,7 +82,7 @@ test("todo views filter Today, overdue, waiting, and all open independently",asy
  c.todoFilter="overdue";assert.deepEqual(c.rows().map(x=>x.id),["due-old"]);
  c.todoFilter="waiting";assert.deepEqual(c.rows().map(x=>x.id),["waiting"]);
  c.todoFilter="all_open";for(const id of ["due-today","due-old","waiting","unscheduled"])assert.ok(c.rows().some(x=>x.id===id));
- snapshot.items.push({...snapshot.items[0],id:"personal0",project_id:null,title:"Personal inbox capture",status_id:"todo",due_at:null});await c.refresh();c.setRoute("inbox");assert.ok(c.rows().some(x=>x.id==="personal0"));
+ snapshot.items.push({...snapshot.items[0],id:"personal0",project_id:null,title:"Personal inbox capture",status_id:"todo",due_at:null});await c.refresh();c.setScope();c.setRoute("inbox");assert.ok(c.rows().some(x=>x.id==="personal0"));
 });
 test("archive respects project scope and keeps archived project children reachable",async()=>{
  const {client,snapshot}=fixture();snapshot.projects[1].archived=true;snapshot.items[0].archived=true;snapshot.items.push({...snapshot.items[0],id:"biz-child",project_id:"biz",archived:false,title:"Child of archived project"},{...snapshot.items[0],id:"life-archived",project_id:"life",archived:true});const c=new GlobalController(client);await c.refresh();c.setRoute("archive");assert.ok(c.rows().some(x=>x.id==="biz"));assert.ok(c.rows().some(x=>x.id==="biz-child"));c.setScope("life");assert.ok(c.rows().some(x=>x.id==="life-archived"));assert.ok(!c.rows().some(x=>x.id==="biz"));
@@ -99,4 +99,55 @@ test("narrow navigation focus shows a reachable window in shared route order",as
  const {client}=fixture();const c=new GlobalController(client);await c.refresh();c.setRoute("inbox");c.focus="navigation";const screen=render(c,60,12);assert.match(screen,/Inbox/);assert.match(screen,/▸ Inbox/);assert.deepEqual(ROUTE_MENU.map(([route])=>route),["overview","projects","board","list","todos","notes","workflow","links","planning","archive","history","inbox"]);assert.ok(screen.split("\n").length<=12);assert.ok(screen.split("\n").every(line=>line.length<=60));
 });
 
- test("Tab focus wraps between work, inspector and navigation",()=>{ const c=new GlobalController({});c.focus="work";c.moveFocus(1);assert.equal(c.focus,"inspector");c.moveFocus(1);assert.equal(c.focus,"navigation");c.moveFocus(-1);assert.equal(c.focus,"inspector");});
+test("Tab focus wraps between work, inspector and navigation",()=>{ const c=new GlobalController({});c.focus="work";c.moveFocus(1);assert.equal(c.focus,"inspector");c.moveFocus(1);assert.equal(c.focus,"navigation");c.moveFocus(-1);assert.equal(c.focus,"inspector");});
+
+test("scope toggle returns to the last explicit project and route changes keep the chosen scope",async()=>{
+ const {client}=fixture();const c=new GlobalController(client);await c.refresh();c.setScope("biz");c.setRoute("list");c.toggleScope();assert.equal(c.projectId,undefined);c.setRoute("overview");c.toggleScope();assert.equal(c.projectId,"biz");assert.equal(c.route,"overview");
+});
+
+test("search is shared by projects, notes, and planning retains matching child ancestors",async()=>{
+ const {client,snapshot}=fixture();snapshot.items.push({...snapshot.items[0],id:"child-match",parent_id:"item1",project_id:"life",title:"Needle child",status_id:"s1"});snapshot.notes.push({id:"n1",project_id:"life",title:"Reference",body:"needle inside note",archived:false,created_at:now,updated_at:now});const c=new GlobalController(client);await c.refresh();c.searchQuery="needle";c.setScope("life");c.setRoute("planning");assert.deepEqual(c.rows().map(x=>x.id),["item1","child-match"]);assert.equal(c.selectedRow()?.id,"item1");c.setRoute("notes");assert.deepEqual(c.rows().map(x=>x.id),["n1"]);c.setRoute("projects");assert.deepEqual(c.rows().map(x=>x.id),[]);
+});
+
+test("archived project hides active children from Home and active views while archive keeps independent records",async()=>{
+ const {client,snapshot}=fixture();snapshot.projects.find(p=>p.id==="biz").archived=true;snapshot.items.push({...snapshot.items[0],id:"biz-unarchived-child",project_id:"biz",archived:false,title:"Retained child"});const c=new GlobalController(client);await c.refresh();c.setRoute("overview");assert.ok(!c.rows().some(r=>r.id==="biz-unarchived-child"));c.setRoute("archive");assert.ok(c.rows().some(r=>r.id==="biz-unarchived-child"));
+});
+
+test("Home uses its selectable rows for project summaries and mixed rows show project origin",async()=>{
+ const {client}=fixture();const c=new GlobalController(client);await c.refresh();c.setScope();c.setRoute("overview");const rows=c.rows();for(let i=0;i<rows.length;i++){c.selected=i;c.selectedId="id" in rows[i]?rows[i].id:undefined;const row=rows[i];const screen=render(c,120,16);const id="id" in row?row.id:undefined;assert.equal(c.selectedRow()?.id,id);if("title" in row&&"status_id" in row)assert.match(screen,new RegExp(c.projectName(row.project_id)));if("name" in row)assert.match(screen,new RegExp(row.name));}
+});
+
+test("committed mutation reports a refresh failure without retrying the saved command",async()=>{
+ let writes=0,reads=0;const {snapshot}=fixture();const client={snapshot:async()=>{reads++;if(reads>1)throw new Error("refresh unavailable");return structuredClone(snapshot);},execute:async()=>{writes++;return{operation_id:"saved-once",revision:7};}};const c=new GlobalController(client);await c.refresh();await c.mutate("todo add",{title:"saved"});assert.equal(writes,1);assert.equal(c.lastMutationRefreshFailed,true);assert.match(c.notice,/Saved; refresh failed/);assert.equal(c.snapshot.revision,6);
+});
+
+test("Home search with no matches leaves rendered and selectable rows empty",async()=>{
+ const {client}=fixture();const c=new GlobalController(client);await c.refresh();c.setRoute("overview");c.searchQuery="no such record";assert.deepEqual(c.rows(),[]);assert.equal(c.selectedRow(),undefined);assert.match(render(c,100,24),/Home · 0 actionable records/);assert.doesNotMatch(render(c,100,24),/Task \d/);
+});
+
+test("search loads complete server matches and visible note detail on demand",async()=>{
+ const {snapshot}=fixture();snapshot.notes=[{id:"long-note",project_id:"life",title:"Kitchen",body:undefined,archived:false,created_at:now,updated_at:now}];let pageCalls=0,detailCalls=0;
+ const client={snapshot:async()=>structuredClone(snapshot),execute:async(command,payload)=>{detailCalls++;assert.equal(command,"note show");return{id:payload.note_id,project_id:"life",title:"Kitchen",body:"needle lives beyond summary",archived:false,created_at:now,updated_at:now};},detailPage:async(collection,options)=>{pageCalls++;assert.equal(collection,"notes");assert.equal(options.query,"needle");return{rows:[{...snapshot.notes[0]}],total:1,limit:100,offset:0,next_offset:null,revision:6};}};
+ const c=new GlobalController(client);await c.refresh();c.setScope("life");c.setRoute("notes");await c.search("needle");assert.deepEqual(c.rows().map(x=>x.id),["long-note"]);assert.equal(pageCalls,1);await c.loadSelectedDetail();assert.equal(c.snapshot.notes[0].body,"needle lives beyond summary");assert.equal(detailCalls,1);
+});
+
+test("waiting follow-up date stays distinct from obligation due date and unscheduled has its own filter",async()=>{
+ const {snapshot}=fixture();snapshot.statuses.push({project_id:"life",status_id:"waiting",label:"Waiting",category:"waiting",position:11});snapshot.items.push({...snapshot.items[1],id:"waiting-follow-up",project_id:"life",status_id:"waiting",title:"Call supplier",due_at:null,follow_up_at:"2026-09-29T12:00:00Z"},{...snapshot.items[1],id:"waiting-no-follow-up",project_id:"life",status_id:"waiting",title:"Await reply",due_at:"2001-01-01T00:00:00Z",follow_up_at:null});
+ const c=new GlobalController({snapshot:async()=>structuredClone(snapshot),execute:async()=>({})});await c.refresh();c.setScope("life");c.setRoute("todos");c.setTodoFilter("waiting");assert.equal(c.rows()[0].id,"waiting-follow-up");assert.equal(c.rows()[1].id,"waiting-no-follow-up");c.setTodoFilter("unscheduled");assert.ok(!c.rows().some(x=>x.id.startsWith("waiting-")));
+});
+
+test("date-only obligations and RFC3339 timestamps use UTC calendar-day boundaries",()=>{
+ const now=Date.parse("2026-09-30T12:00:00Z");assert.equal(isOverdue({due_at:"2026-09-29"},now),true);assert.equal(isOverdue({due_at:"2026-09-30"},now),false);assert.equal(isOverdue({due_at:"2026-09-30T00:15:00Z"},now),false);assert.equal(isOverdue({due_at:"2026-10-01T00:15:00+02:00"},now),false);
+});
+
+test("route paging appends rows without changing the selected record",async()=>{
+ const {snapshot}=fixture();snapshot.snapshot_limit=100;const extra={...snapshot.items[0],id:"page-101",title:"Page 101",project_id:"life",position:101};let calls=0;const client={snapshot:async()=>structuredClone(snapshot),execute:async()=>({}),detailPage:async(collection,options)=>{calls++;assert.equal(collection,"items");assert.equal(options.offset,55);return{rows:[extra],total:56,limit:100,offset:55,next_offset:null,revision:6};}};const c=new GlobalController(client);await c.refresh();c.setScope();c.setRoute("list");c.selectId("item1");await c.loadMoreRows();assert.equal(c.selectedRow().id,"item1");assert.ok(c.rows().some(x=>x.id==="page-101"));assert.equal(calls,1);
+});
+
+test("refresh rehydrates the selected item detail after it falls outside the capped summary",async()=>{
+ const {snapshot}=fixture();const selected={...snapshot.items[0],id:"off-page",title:"Stable off-page record",position:101};let include=false;const client={snapshot:async()=>{const s=structuredClone(snapshot);if(include)s.snapshot_limit=100;return s;},execute:async(command,payload)=>{assert.equal(command,"task show");assert.equal(payload.item_id,"off-page");return selected;},detailPage:async()=>({rows:[selected],total:56,limit:100,offset:55,next_offset:null,revision:6})};const c=new GlobalController(client);await c.refresh();c.setScope();c.setRoute("list");await c.loadMoreRows();c.selectId("off-page");assert.equal(c.selectedRow().title,"Stable off-page record");include=true;await c.refresh();assert.equal(c.selectedRow().id,"off-page");assert.equal(c.selectedRow().title,"Stable off-page record");
+});
+
+test("linked refresh keeps last-good execution sample stale and drops it after unlink",async()=>{
+ const {snapshot}=fixture();snapshot.associations=[{project_id:"life",kind:"workspace",identity:"workspace",path:"/workspace",updated_at:now}];snapshot.linked_projects=[{management_project_id:"life",project_id:"workspace",path:"/workspace",availability:"available",revision:12,as_of:"2026-09-30T12:00:00Z",counts:{open:3},items:[{work_id:"w1",project_id:"workspace",title:"Execution task",kind:"task",parent_id:null,lifecycle:"active",display_status:"Doing",status:"doing",priority:1,reason_codes:[]}]}];let offline=false,unlinked=false;const client={snapshot:async()=>{const s=structuredClone(snapshot);if(offline)s.linked_projects=[{management_project_id:"life",project_id:"workspace",path:"/workspace",availability:"unavailable",revision:null,as_of:null,error:"service unavailable"}];if(unlinked)s.associations=[];return s;},execute:async()=>({})};const c=new GlobalController(client);await c.refresh();offline=true;await c.refresh();const stale=c.snapshot.linked_projects[0];assert.equal(stale.availability,"stale");assert.equal(stale.revision,12);assert.equal(stale.as_of,"2026-09-30T12:00:00Z");assert.equal(stale.counts.open,3);assert.equal(stale.items[0].title,"Execution task");unlinked=true;await c.refresh();assert.equal(c.snapshot.linked_projects.length,0);
+});

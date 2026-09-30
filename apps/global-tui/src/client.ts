@@ -6,18 +6,20 @@ export const ENVELOPE_SCHEMA = "boreal.protocol.envelope.v1";
 export const MAX_FRAME_BYTES = 1024 * 1024;
 
 export interface Project { id: string; name: string; description: string; labels?: string[]; priority?:number; lifecycle?:string; health?:string; archived: boolean; created_at: string; updated_at: string }
-export interface Item { id: string; project_id: string | null; parent_id: string | null; kind: string; title: string; description: string; labels?:string[]; status_id: string; priority: number | null; due_at: string | null; archived: boolean; position: number; created_at: string; updated_at: string }
-export interface Note { id: string; project_id: string | null; title: string; body: string; archived: boolean; created_at: string; updated_at: string }
+export interface Item { id: string; project_id: string | null; parent_id: string | null; kind: string; title: string; description?: string; labels?:string[]; status_id: string; priority: number | null; due_at: string | null; follow_up_at?: string | null; archived: boolean; position: number; created_at: string; updated_at: string }
+export interface Note { id: string; project_id: string | null; title: string; body?: string; archived: boolean; created_at: string; updated_at: string }
 export interface Status { project_id: string; status_id: string; label: string; category: string; position: number }
-export interface StatusHistoryEntry { item_id: string; from_status_id: string | null; to_status_id: string; revision: number; changed_at: string }
+export interface StatusHistoryEntry { item_id: string; workflow_owner_id?:string|null; from_workflow_owner_id?:string|null; from_status_id: string | null; from_status_label?:string|null; from_status_category?:string|null; to_status_id: string; to_status_label?:string|null; to_status_category?:string|null; revision: number; changed_at: string }
 export interface Relationship { source_id: string; target_id: string; kind: string }
 export interface Association { project_id: string; kind: string; identity: string; path: string | null; updated_at: string }
 export interface LinkedWorkItem { work_id: string; project_id: string; title: string; kind: string; parent_id: string | null; lifecycle: string; display_status: string; status: string; priority: number; reason_codes: string[] }
 export interface LinkedProject { management_project_id: string; project_id: string; path: string | null; availability: string; revision: number | null; as_of: string | null; counts?: Record<string, number>; error?: string | null; items?: LinkedWorkItem[]; items_total?: number; items_has_more?: boolean }
-export interface GlobalActivityEvent { operation_id: string; revision: number; command: string; entity_kind: string | null; entity_id: string | null; title: string | null; summary: string; created_at: string }
+export interface GlobalActivityEvent { operation_id: string; revision: number; command: string; entity_kind: string | null; entity_id: string | null; project_id?:string|null; source_id?:string|null; target_id?:string|null; title: string | null; summary: string; created_at: string }
 export interface GlobalHistory { events: GlobalActivityEvent[]; current_revision: number; total: number; limit: number; offset: number; has_more: boolean; next_offset: number | null }
 export interface TodoReorderResult extends Item { moved: boolean; ordered_ids: string[]; revision: number }
-export interface GlobalSnapshot { schema_version: number; revision: number; projects: Project[]; items: Item[]; notes: Note[]; statuses: Status[]; status_history: StatusHistoryEntry[]; relationships: Relationship[]; associations: Association[]; activity?: GlobalHistory; linked_projects?: LinkedProject[] }
+export interface GlobalSnapshot { schema_version: number; revision: number; snapshot_limit?:number; totals?:Record<string,number>; attention?:{portfolio:Record<string,number>;projects:Record<string,Record<string,number>>}; projects: Project[]; items: Item[]; notes: Note[]; statuses: Status[]; status_history?: StatusHistoryEntry[]; relationships: Relationship[]; associations: Association[]; activity?: GlobalHistory; linked_projects?: LinkedProject[] }
+export interface GlobalPage<T> { rows:T[]; total:number; limit:number; offset:number; has_more:boolean; next_offset:number|null; revision:number }
+export interface LinkedPage { items:LinkedWorkItem[]; total:number; limit:number; offset:number; has_more:boolean; next_offset:number|null; revision:number|null; as_of:string|null; availability:string; error:string|null }
 export interface GlobalEnvelopeError { code: string; message: string; operation_id?: string | null; operation_preserved?: boolean | null; readback_required?: boolean | null; retryable?: boolean | null }
 export interface GlobalEnvelope<T = unknown> { api_version: string; schema_version: string; operation_id: string; outcome: string; transport: string; data: T | null; error: GlobalEnvelopeError | null; revision?: number | null; as_of?: string; next_status_change_at?: string | null; detail_ref?: string | null }
 
@@ -117,6 +119,13 @@ export class GlobalServiceClient {
       ...(options.limit === undefined ? {} : { limit: options.limit }),
       ...(options.offset === undefined ? {} : { offset: options.offset }),
     });
+  }
+  detailPage<T = unknown>(collection: string, options: { projectId?:string; limit?:number; offset?:number; includeArchived?:boolean; kind?:string; query?:string } = {}): Promise<GlobalPage<T>> {
+    return this.execute<GlobalPage<T>>("detail page", { collection, ...(options.projectId ? {project_id:options.projectId}:{}), ...(options.limit === undefined ? {}:{limit:options.limit}), ...(options.offset === undefined ? {}:{offset:options.offset}), ...(options.includeArchived ? {include_archived:true}:{}), ...(options.kind ? {kind:options.kind}:{}), ...(options.query ? {query:options.query}:{}) });
+  }
+  noteShow(noteId:string): Promise<Note> { return this.execute<Note>("note show",{note_id:noteId}); }
+  linkedPage(projectId:string, identity:string, options:{limit?:number;offset?:number}={}): Promise<LinkedPage> {
+    return this.execute<LinkedPage>("linked page",{project_id:projectId,identity,...(options.limit===undefined?{}:{limit:options.limit}),...(options.offset===undefined?{}:{offset:options.offset})});
   }
   linkedShow(managementProjectId: string, workspaceProjectId: string): Promise<LinkedProject> {
     return this.execute<LinkedProject>("linked show", { project_id: managementProjectId, identity: workspaceProjectId });

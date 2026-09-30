@@ -4,8 +4,8 @@
 //! families in one atomic revision boundary. Operation receipts and audit
 //! events are separate append-only tables and commit with each state update.
 
-use super::{SQLITE_ROW, SqliteStore, StoreError};
-use serde_json::{Value, json};
+use super::{SqliteStore, StoreError, SQLITE_ROW};
+use serde_json::{json, Value};
 use std::path::Path;
 const GLOBAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS global_manager_state (
@@ -265,7 +265,7 @@ impl GlobalManagerStore {
                 "global activity limit must be from 1 to 200".into(),
             ));
         }
-        let filters = " WHERE (?1 IS NULL OR COALESCE(json_extract(o.result_json,'$.project_id'),json_extract(o.result_json,'$.id'))=?1) AND (?2 IS NULL OR COALESCE(json_extract(o.result_json,'$.id'),json_extract(o.result_json,'$.item_id'),json_extract(o.result_json,'$.note_id'),json_extract(o.result_json,'$.source_id'),json_extract(o.result_json,'$.target_id'))=?2)";
+        let filters = " WHERE (?1 IS NULL OR COALESCE(json_extract(o.result_json,'$.project_id'),json_extract(o.result_json,'$.id'))=?1) AND (?2 IS NULL OR json_extract(o.result_json,'$.id')=?2 OR json_extract(o.result_json,'$.item_id')=?2 OR json_extract(o.result_json,'$.note_id')=?2 OR json_extract(o.result_json,'$.source_id')=?2 OR json_extract(o.result_json,'$.target_id')=?2)";
         let mut count = self.inner.prepare(&format!(
             "SELECT COUNT(*) FROM global_audit a JOIN global_operation o USING(operation_id){filters}"
         ))?;

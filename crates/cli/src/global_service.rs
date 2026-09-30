@@ -2,9 +2,8 @@
 
 use super::*;
 use boreal_protocol::{
-    Envelope, ProtocolError,
     global_manager::{GlobalManagerRequest, REQUEST_SCHEMA},
-    schema,
+    schema, Envelope, ProtocolError,
 };
 #[cfg(unix)]
 use boreal_service::{
@@ -15,8 +14,8 @@ use std::time::Duration;
 use std::{
     os::unix::{fs::PermissionsExt, net::UnixStream},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
 };
 
@@ -90,7 +89,16 @@ pub(crate) fn run_service(parsed: &ParsedCommand, _operation: &str) -> Result<Cl
             Ok(boreal_service::ServeOnceOutcome::WouldBlock) => {
                 thread::sleep(Duration::from_millis(20))
             }
-            Err(error) => return Err(transport_error(error)),
+            Err(boreal_service::TransportError::Accept(error)) => {
+                return Err(transport_error(boreal_service::TransportError::Accept(
+                    error,
+                )));
+            }
+            // Every other failure occurs after accept and belongs to one
+            // connection. Dropping that connection keeps the listener alive;
+            // a response-write failure may follow a committed mutation, so
+            // its durable operation receipt remains the only recovery path.
+            Err(_) => continue,
         }
     }
     drop(signals);
@@ -121,6 +129,36 @@ pub(crate) fn request(parsed: &ParsedCommand, operation: &str) -> Result<CliResu
         .as_deref()
         .ok_or_else(|| CliError::invalid("global service routing requires --socket"))?;
     let (command, payload) = global_commands::build_command(parsed)?;
+    if command == "export" && !parsed.options.extra.contains_key("--out") {
+        return Err(CliError::invalid(
+            "global export through the service requires --out PATH so the backup can bypass interactive frame limits",
+        ));
+    }
+    if command == "export" && parsed.options.extra.contains_key("--out") {
+        // Backup payloads may exceed the interactive frame limit. Read and
+        // write the consistent bundle through the same application/store
+        // boundary, then return only bounded metadata to the CLI caller.
+        let data = global_commands::execute_request(&command, &payload, operation)?;
+        return Ok(CliResult {
+            outcome: ApplicationOutcome::Unchanged,
+            revision: data.get("revision").and_then(Value::as_u64),
+            data: Some(data),
+            as_of: Some(global_now_timestamp()),
+            ..CliResult::default()
+        });
+    }
+    if command == "import" {
+        // Restore files can exceed the frame bound too. The CLI has already
+        // validated the file and replacement intent; apply it through the
+        // application/store boundary and return its bounded count summary.
+        let data = global_commands::execute_request(&command, &payload, operation)?;
+        return Ok(CliResult {
+            outcome: ApplicationOutcome::Changed,
+            data: Some(data),
+            as_of: Some(global_now_timestamp()),
+            ..CliResult::default()
+        });
+    }
     let body = json!({"api_version":API_VERSION,"schema_version":REQUEST_SCHEMA,"operation_id":operation,"command":command,"payload":payload});
     let unique_id = format!(
         "global-{}-{}",
@@ -200,7 +238,9 @@ pub(crate) fn request(parsed: &ParsedCommand, operation: &str) -> Result<CliResu
         detail_ref: envelope.detail_ref,
         human: None,
     };
-    if command == "export" {
+    if command == "export"
+        && result.data.as_ref().and_then(|v| v.get("exported")) != Some(&Value::Bool(true))
+    {
         if let Some(data) = result.data.as_ref() {
             global_commands::write_export(&parsed.options.extra, data)?;
         }
@@ -257,6 +297,12 @@ fn dispatch_request(
     let result = if parsed.command == "service shutdown" {
         stopping.store(true, Ordering::SeqCst);
         Ok(json!({"stopping":true}))
+    } else if parsed.command == "export"
+        && parsed.payload.get("path").and_then(Value::as_str).is_none()
+    {
+        Err(CliError::invalid(
+            "global export through the service requires a destination path",
+        ))
     } else {
         global_commands::execute_request(&parsed.command, &parsed.payload, &parsed.operation_id)
     };

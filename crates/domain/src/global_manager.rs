@@ -13,6 +13,9 @@ pub struct GlobalActivityEvent {
     pub command: String,
     pub entity_kind: Option<String>,
     pub entity_id: Option<String>,
+    pub project_id: Option<String>,
+    pub source_id: Option<String>,
+    pub target_id: Option<String>,
     pub title: Option<String>,
     pub summary: String,
     pub created_at: String,
@@ -114,6 +117,8 @@ pub struct ManagementItem {
     pub status_id: String,
     pub priority: u8,
     pub due_at: Option<String>,
+    /// Optional date for checking back on waiting work; it does not schedule a reminder.
+    pub follow_up_at: Option<String>,
     pub archived: bool,
     pub position: i64,
 }

@@ -6,7 +6,9 @@ export class StreamingKeyDecoder {
     private pasting = false;
     private pasted = "";
     private controlString = false;
-    get awaitingEscape(): boolean { return this.pending.startsWith("\x1b") && !this.pasting; }
+    // Only a lone ESC can be resolved by the ambiguity timer. Keep CSI/SS3
+    // prefixes buffered until their final byte arrives, even across slow chunks.
+    get awaitingEscape(): boolean { return this.pending === "\x1b" && !this.pasting; }
     push(value: string | Uint8Array): string[] {
         this.pending += typeof value === "string" ? value : this.decoder.decode(value, { stream: true });
         return this.parse(false);

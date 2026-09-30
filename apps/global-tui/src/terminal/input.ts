@@ -18,6 +18,7 @@ export function editInput(value: string, cursor: number | undefined, key: string
         parts.splice(at, end - at);
     } else {
         let inserted = key.startsWith("paste:") ? key.slice(6) : Array.from(key).length === 1 ? key : "";
+        if (multiline) inserted = inserted.replace(/\r\n?/gu, "\n");
         inserted = inserted.replace(multiline ? /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu : /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ");
         const room = Math.max(0, limit - parts.join("").length), adding: string[] = [];
         let size = 0;

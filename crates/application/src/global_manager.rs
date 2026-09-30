@@ -212,11 +212,14 @@ impl GlobalManagerApplication {
                         command: record.command,
                         entity_kind,
                         entity_id,
-                        title,
-                        summary: format!("{verb} {subject}"),
+                        project_id: result.get("project_id").and_then(Value::as_str).map(str::to_owned),
+                        source_id: result.get("source_id").and_then(Value::as_str).map(str::to_owned),
+                        target_id: result.get("target_id").and_then(Value::as_str).map(str::to_owned),
+                        title: title.map(|value| bound_text(&value,512)),
+                        summary: bound_text(&format!("{verb} {subject}"),512),
                         created_at: record.created_at,
                     };
-                    json!({"operation_id":event.operation_id,"revision":event.revision,"command":event.command,"entity_kind":event.entity_kind,"entity_id":event.entity_id,"title":event.title,"summary":event.summary,"created_at":event.created_at})
+                    json!({"operation_id":event.operation_id,"revision":event.revision,"command":event.command,"entity_kind":event.entity_kind,"entity_id":event.entity_id,"project_id":event.project_id,"source_id":event.source_id,"target_id":event.target_id,"title":event.title,"summary":event.summary,"created_at":event.created_at})
                 })
                 .collect::<Vec<_>>();
             let current_revision = self.store.revision()?;
@@ -225,6 +228,47 @@ impl GlobalManagerApplication {
                 json!({"events":events,"current_revision":current_revision,"total":total,"limit":limit,"offset":offset,"has_more":next_offset < total,"next_offset":if next_offset < total {json!(next_offset)} else {Value::Null}}),
             );
         }
+        if command == "detail page" {
+            if !payload
+                .get("collection")
+                .and_then(Value::as_str)
+                .is_some_and(|name| {
+                    [
+                        "projects",
+                        "items",
+                        "notes",
+                        "statuses",
+                        "relationships",
+                        "associations",
+                        "status_history",
+                        "imported_history",
+                    ]
+                    .contains(&name)
+                })
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "unsupported detail collection".into(),
+                ));
+            }
+            if payload
+                .get("limit")
+                .is_some_and(|v| v.as_u64().is_none_or(|n| !(1..=200).contains(&n)))
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "detail page limit must be from 1 to 200".into(),
+                ));
+            }
+            if payload.get("offset").is_some_and(|v| v.as_u64().is_none()) {
+                return Err(GlobalManagerError::Invalid(
+                    "detail page offset must be a non-negative integer".into(),
+                ));
+            }
+            if payload.get("query").is_some_and(|v| !v.is_string()) {
+                return Err(GlobalManagerError::Invalid(
+                    "detail page query must be a string".into(),
+                ));
+            }
+        }
         if command == "export" {
             let (mut state, revision, history) = self.store.export_bundle()?;
             state["schema_version"] = json!(2);
@@ -232,7 +276,7 @@ impl GlobalManagerApplication {
             state["revision_history"] = json!(history);
             return Ok(state);
         }
-        let (mut state, revision) = if command == "snapshot" {
+        let (mut state, revision) = if matches!(command, "snapshot" | "detail page") {
             self.store.snapshot()?
         } else {
             (self.store.state()?, self.store.revision()?)
@@ -241,8 +285,196 @@ impl GlobalManagerApplication {
             "snapshot" => {
                 state["schema_version"] = serde_json::json!(2);
                 state["revision"] = serde_json::json!(revision);
+                let attention = attention_summary(&state);
+                let mut totals = serde_json::Map::new();
+                let archived_projects = state
+                    .get("projects")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|row| row.get("archived").and_then(Value::as_bool) == Some(true))
+                    .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_owned))
+                    .collect::<std::collections::BTreeSet<_>>();
+                for key in [
+                    "projects",
+                    "items",
+                    "notes",
+                    "statuses",
+                    "relationships",
+                    "associations",
+                    "status_history",
+                    "imported_history",
+                ] {
+                    let rows = state.get(key).and_then(Value::as_array).map_or(0, Vec::len);
+                    totals.insert(key.to_owned(), json!(rows));
+                    if let Some(all) = state.get_mut(key).and_then(Value::as_array_mut) {
+                        if matches!(key, "items" | "notes") {
+                            all.retain(|row| {
+                                row.get("project_id")
+                                    .and_then(Value::as_str)
+                                    .is_none_or(|owner| !archived_projects.contains(owner))
+                            });
+                        }
+                        all.truncate(100);
+                    }
+                }
+                if let Some(notes) = state.get_mut("notes").and_then(Value::as_array_mut) {
+                    for note in notes {
+                        if let Some(object) = note.as_object_mut() {
+                            object.remove("body");
+                        }
+                    }
+                }
+                if let Some(items) = state.get_mut("items").and_then(Value::as_array_mut) {
+                    for item in items {
+                        if let Some(object) = item.as_object_mut() {
+                            object.remove("description");
+                        }
+                    }
+                }
+                bound_summary_text(&mut state, 512);
+                state.as_object_mut().unwrap().remove("imported_history");
+                state["totals"] = Value::Object(totals);
+                state["snapshot_limit"] = json!(100);
+                state["attention"] = attention;
                 state["activity"] = self.read("history", &json!({"limit":50,"offset":0}))?;
                 Ok(state)
+            }
+            "detail page" => {
+                let collection = required_string(payload, "collection")?;
+                if ![
+                    "projects",
+                    "items",
+                    "notes",
+                    "statuses",
+                    "relationships",
+                    "associations",
+                    "status_history",
+                    "imported_history",
+                ]
+                .contains(&collection)
+                {
+                    return Err(GlobalManagerError::Invalid(
+                        "unsupported detail collection".into(),
+                    ));
+                }
+                let limit = payload
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(50)
+                    .clamp(1, 200) as usize;
+                let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let project_id = payload.get("project_id").and_then(Value::as_str);
+                let kind = payload.get("kind").and_then(Value::as_str);
+                let query = payload
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .map(str::to_lowercase);
+                let include_archived = payload
+                    .get("include_archived")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let source = state
+                    .get(collection)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let archived_projects = state
+                    .get("projects")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|row| row.get("archived").and_then(Value::as_bool) == Some(true))
+                    .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_owned))
+                    .collect::<std::collections::BTreeSet<_>>();
+                let item_projects = state
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| {
+                        Some((
+                            item.get("id")?.as_str()?.to_owned(),
+                            item.get("project_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                        ))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                let rows = source
+                    .into_iter()
+                    .filter(|row| {
+                        let owner = row
+                            .get("project_id")
+                            .and_then(Value::as_str)
+                            .or_else(|| row.get("management_project_id").and_then(Value::as_str))
+                            .map(str::to_owned)
+                            .or_else(|| {
+                                let item_id = if collection == "status_history" {
+                                    row.get("item_id").and_then(Value::as_str)
+                                } else if collection == "relationships" {
+                                    row.get("source_id").and_then(Value::as_str)
+                                } else {
+                                    None
+                                };
+                                item_id.and_then(|id| item_projects.get(id).cloned().flatten())
+                            });
+                        (project_id.is_none() || owner.as_deref() == project_id)
+                            && (kind.is_none() || row.get("kind").and_then(Value::as_str) == kind)
+                            && query.as_ref().is_none_or(|q| {
+                                ["title", "name", "body", "description", "status_id"]
+                                    .iter()
+                                    .any(|field| {
+                                        row.get(*field)
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|text| text.to_lowercase().contains(q))
+                                    })
+                            })
+                            && (include_archived
+                                || row.get("archived").and_then(Value::as_bool) != Some(true))
+                            && (include_archived
+                                || !row
+                                    .get("project_id")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|owner| archived_projects.contains(owner)))
+                    })
+                    .collect::<Vec<_>>();
+                let total = rows.len();
+                let mut page = rows
+                    .into_iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|mut row| {
+                        if let Some(object) = row.as_object_mut() {
+                            match collection {
+                                "notes" => {
+                                    object.remove("body");
+                                }
+                                "items" => {
+                                    object.remove("description");
+                                }
+                                "projects" => {
+                                    object.remove("description");
+                                }
+                                // Prior imported database images are available to restore/export
+                                // flows but can be portfolio-sized. Keep their revision metadata
+                                // browsable without putting nested full states in an interactive page.
+                                "imported_history" => {
+                                    object.remove("snapshot");
+                                }
+                                _ => {}
+                            }
+                        }
+                        row
+                    })
+                    .collect::<Vec<_>>();
+                let mut page_value = Value::Array(std::mem::take(&mut page));
+                bound_summary_text(&mut page_value, 512);
+                let page = page_value.as_array().cloned().unwrap_or_default();
+                let next = offset.saturating_add(page.len());
+                Ok(
+                    json!({"collection":collection,"rows":page,"total":total,"limit":limit,"offset":offset,"has_more":next < total,"next_offset":if next < total {json!(next)} else {Value::Null},"revision":revision}),
+                )
             }
             "project list" => Ok(filter_project_list(&state["projects"], payload)),
             "project show" => Ok(one_from(
@@ -444,6 +676,10 @@ impl GlobalManagerApplication {
                     .unwrap_or(0)
                     .min(255) as u8,
                 due_at: p.get("due_at").and_then(Value::as_str).map(str::to_owned),
+                follow_up_at: p
+                    .get("follow_up_at")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 archived: false,
                 position: p.get("position").and_then(Value::as_i64).unwrap_or(0),
             };
@@ -466,6 +702,28 @@ impl GlobalManagerApplication {
                 return Err(GlobalManagerError::Invalid(
                     "due_at must be a string or null".into(),
                 ));
+            }
+            if p.get("due_at")
+                .and_then(Value::as_str)
+                .is_some_and(|v| utc_date_from_iso(v).is_none())
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "due_at must be YYYY-MM-DD or an ISO timestamp with Z or an explicit offset"
+                        .into(),
+                ));
+            }
+            if p.get("follow_up_at")
+                .is_some_and(|v| !v.is_null() && v.as_str().is_none())
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "follow_up_at must be a string or null".into(),
+                ));
+            }
+            if p.get("follow_up_at")
+                .and_then(Value::as_str)
+                .is_some_and(|v| utc_date_from_iso(v).is_none())
+            {
+                return Err(GlobalManagerError::Invalid("follow_up_at must be YYYY-MM-DD or an ISO timestamp with Z or an explicit offset".into()));
             }
         }
         if command == "workflow status edit" {
@@ -536,6 +794,28 @@ impl GlobalManagerApplication {
                     "due_at must be a string or null".into(),
                 ));
             }
+            if p.get("due_at")
+                .and_then(Value::as_str)
+                .is_some_and(|v| utc_date_from_iso(v).is_none())
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "due_at must be YYYY-MM-DD or an ISO timestamp with Z or an explicit offset"
+                        .into(),
+                ));
+            }
+            if p.get("follow_up_at")
+                .is_some_and(|v| !v.is_null() && v.as_str().is_none())
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "follow_up_at must be a string or null".into(),
+                ));
+            }
+            if p.get("follow_up_at")
+                .and_then(Value::as_str)
+                .is_some_and(|v| utc_date_from_iso(v).is_none())
+            {
+                return Err(GlobalManagerError::Invalid("follow_up_at must be YYYY-MM-DD or an ISO timestamp with Z or an explicit offset".into()));
+            }
         }
         Ok(())
     }
@@ -566,6 +846,7 @@ fn is_mutation(command: &str) -> bool {
             | "note show"
             | "export"
             | "history"
+            | "detail page"
             | "operation show"
     )
 }
@@ -810,9 +1091,14 @@ fn apply_mutation(
             if priority > 255 {
                 return Err(StoreError::Invalid("priority must be from 0 to 255".into()));
             }
-            let value = json!({"id":iid,"project_id":project_id,"parent_id":parent,"kind":kind.as_str(),"title":title,"description":p.get("description").and_then(Value::as_str).unwrap_or(""),"labels":p.get("labels").cloned().unwrap_or(json!([])),"status_id":status,"priority":priority,"due_at":p.get("due_at").cloned().unwrap_or(Value::Null),"archived":false,"position":p.get("position").and_then(Value::as_i64).unwrap_or(0),"created_at":timestamp,"updated_at":timestamp});
+            let value = json!({"id":iid,"project_id":project_id,"parent_id":parent,"kind":kind.as_str(),"title":title,"description":p.get("description").and_then(Value::as_str).unwrap_or(""),"labels":p.get("labels").cloned().unwrap_or(json!([])),"status_id":status,"priority":priority,"due_at":p.get("due_at").cloned().unwrap_or(Value::Null),"follow_up_at":p.get("follow_up_at").cloned().unwrap_or(Value::Null),"archived":false,"position":p.get("position").and_then(Value::as_i64).unwrap_or(0),"created_at":timestamp,"updated_at":timestamp});
             arr_mut(s, "items").push(value.clone());
-            arr_mut(s, "status_history").push(json!({"item_id":iid,"from_status_id":null,"to_status_id":status,"revision":revision,"changed_at":timestamp}));
+            let status_record = arr(s, "statuses")
+                .iter()
+                .find(|row| row["status_id"] == status && row["project_id"].as_str() == project_id)
+                .cloned()
+                .unwrap_or(Value::Null);
+            arr_mut(s, "status_history").push(json!({"item_id":iid,"workflow_owner_id":project_id,"from_workflow_owner_id":project_id,"from_status_id":null,"from_status_label":null,"from_status_category":null,"to_status_id":status,"to_status_label":status_record["label"],"to_status_category":status_record["category"],"revision":revision,"changed_at":timestamp}));
             Ok(value)
         }
         "todo reorder" => {
@@ -933,6 +1219,36 @@ fn apply_mutation(
                     "moving an item would separate it from its children".into(),
                 ));
             }
+            if new_owner != project_id
+                && arr(s, "relationships").iter().any(|edge| {
+                    if edge["source_id"] != iid && edge["target_id"] != iid {
+                        return false;
+                    }
+                    let other_id = if edge["source_id"] == iid {
+                        edge["target_id"].as_str()
+                    } else {
+                        edge["source_id"].as_str()
+                    };
+                    arr(s, "items")
+                        .iter()
+                        .find(|item| item["id"].as_str() == other_id)
+                        .is_some_and(|other| {
+                            other["project_id"].as_str().map(str::to_owned) != new_owner
+                        })
+                })
+            {
+                return Err(StoreError::Invalid(
+                    "moving an item would split a relationship; move both endpoints atomically"
+                        .into(),
+                ));
+            }
+            if new_owner != project_id
+                && arr(s, "status_history").iter().any(|entry| {
+                    entry["item_id"] == iid && entry.get("workflow_owner_id").is_none()
+                })
+            {
+                return Err(StoreError::Invalid("item transfer is unsafe because historical workflow identity cannot be preserved".into()));
+            }
             let new_parent = match p.get("parent_id") {
                 Some(Value::Null) => None,
                 Some(v) => v.as_str().map(str::to_owned),
@@ -1032,6 +1348,9 @@ fn apply_mutation(
                 if let Some(v) = p.get("due_at") {
                     row["due_at"] = v.clone();
                 }
+                if let Some(v) = p.get("follow_up_at") {
+                    row["follow_up_at"] = v.clone();
+                }
                 if let Some(v) = p.get("position").and_then(Value::as_i64) {
                     row["position"] = json!(v);
                 }
@@ -1045,8 +1364,25 @@ fn apply_mutation(
             row["updated_at"] = json!(timestamp);
             let value = row.clone();
             let new_status = value["status_id"].as_str().unwrap_or_default();
-            if old_status != new_status {
-                arr_mut(s,"status_history").push(json!({"item_id":iid,"from_status_id":old_status,"to_status_id":new_status,"revision":revision,"changed_at":timestamp}));
+            let old_owner = item_snapshot["project_id"].as_str();
+            if old_status != new_status || old_owner != new_owner.as_deref() {
+                let old_record = arr(s, "statuses")
+                    .iter()
+                    .find(|record| {
+                        record["project_id"].as_str() == old_owner
+                            && record["status_id"] == old_status
+                    })
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let status_record = arr(s, "statuses")
+                    .iter()
+                    .find(|record| {
+                        record["project_id"].as_str() == new_owner.as_deref()
+                            && record["status_id"] == new_status
+                    })
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                arr_mut(s,"status_history").push(json!({"item_id":iid,"workflow_owner_id":new_owner,"from_workflow_owner_id":old_owner,"from_status_id":old_status,"from_status_label":old_record["label"],"from_status_category":old_record["category"],"to_status_id":new_status,"to_status_label":status_record["label"],"to_status_category":status_record["category"],"revision":revision,"changed_at":timestamp}));
             }
             Ok(value)
         }
@@ -1183,7 +1519,14 @@ fn apply_mutation(
             if rows.len() == n {
                 return Err(StoreError::Invalid("relationship not found".into()));
             }
-            Ok(json!({"removed":true}))
+            let project_id = arr(s, "items")
+                .iter()
+                .find(|r| r["id"] == source)
+                .and_then(|r| r["project_id"].as_str())
+                .map(str::to_owned);
+            Ok(
+                json!({"removed":true,"project_id":project_id,"source_id":source,"target_id":target,"kind":kind}),
+            )
         }
         "note add" => {
             let title = required_string(p, "title")?;
@@ -1331,8 +1674,202 @@ fn status_for_category(
         })
 }
 
+fn attention_summary(state: &Value) -> Value {
+    let today = utc_today();
+    let archived = arr(state, "projects")
+        .iter()
+        .filter(|p| p["archived"] == true)
+        .filter_map(|p| p["id"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let categories = arr(state, "statuses");
+    let mut portfolio = [0_u64; 5];
+    let mut projects = serde_json::Map::new();
+    for item in arr(state, "items") {
+        if item["archived"] == true
+            || item["project_id"]
+                .as_str()
+                .is_some_and(|id| archived.contains(id))
+        {
+            continue;
+        }
+        let owner = item["project_id"].as_str().unwrap_or("personal");
+        let category = categories
+            .iter()
+            .find(|s| {
+                s["project_id"].as_str() == item["project_id"].as_str()
+                    && s["status_id"] == item["status_id"]
+            })
+            .and_then(|s| s["category"].as_str())
+            .unwrap_or("open");
+        if matches!(category, "completed" | "cancelled") {
+            continue;
+        }
+        let due = item["due_at"].as_str().and_then(utc_date_from_iso);
+        let counts = projects.entry(owner.to_owned()).or_insert_with(
+            || json!({"open":0,"waiting":0,"overdue":0,"unscheduled":0,"due_today":0}),
+        );
+        let mut inc = |idx: usize, key: &str| {
+            portfolio[idx] += 1;
+            counts[key] = json!(counts[key].as_u64().unwrap_or(0) + 1);
+        };
+        inc(0, "open");
+        if category == "waiting" {
+            inc(1, "waiting");
+        }
+        match due.as_deref() {
+            Some(d) if d < today.as_str() => inc(2, "overdue"),
+            None => inc(3, "unscheduled"),
+            Some(d) if d == today => inc(4, "due_today"),
+            _ => {}
+        }
+    }
+    json!({"portfolio":{"open":portfolio[0],"waiting":portfolio[1],"overdue":portfolio[2],"unscheduled":portfolio[3],"due_today":portfolio[4]},"projects":projects})
+}
+
+fn bound_summary_text(value: &mut Value, maximum_bytes: usize) {
+    match value {
+        Value::Array(rows) => {
+            for row in rows {
+                bound_summary_text(row, maximum_bytes);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, field) in fields {
+                if matches!(key.as_str(), "title" | "name" | "label" | "summary") {
+                    if let Some(text) = field.as_str() {
+                        *field = json!(bound_text(text, maximum_bytes));
+                    }
+                } else if field.is_array() || field.is_object() {
+                    bound_summary_text(field, maximum_bytes);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn bound_text(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    let mut end = maximum_bytes.saturating_sub(3);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &value[..end])
+}
+
+fn utc_today() -> String {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+        / 86_400;
+    civil_from_days(days)
+}
+
+fn utc_date_from_iso(value: &str) -> Option<String> {
+    if value.len() < 10
+        || value.as_bytes().get(4) != Some(&b'-')
+        || value.as_bytes().get(7) != Some(&b'-')
+    {
+        return None;
+    }
+    let year = value.get(0..4)?.parse::<i64>().ok()?;
+    let month = value.get(5..7)?.parse::<i64>().ok()?;
+    let day = value.get(8..10)?.parse::<i64>().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    if civil_from_days(days) != format!("{year:04}-{month:02}-{day:02}") {
+        return None;
+    }
+    if value.len() == 10 {
+        return Some(value.to_owned());
+    }
+    if value.as_bytes().get(10) != Some(&b'T') {
+        return None;
+    }
+    let rest = &value[11..];
+    let (time, offset_seconds) = if let Some(time) = rest.strip_suffix('Z') {
+        (time, 0_i64)
+    } else {
+        let split = rest
+            .char_indices()
+            .skip(1)
+            .find(|(_, ch)| *ch == '+' || *ch == '-')?
+            .0;
+        let (time, offset) = rest.split_at(split);
+        if offset.len() != 6 || offset.as_bytes().get(3) != Some(&b':') {
+            return None;
+        }
+        let hours = offset.get(1..3)?.parse::<i64>().ok()?;
+        let minutes = offset.get(4..6)?.parse::<i64>().ok()?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        let amount = hours * 3600 + minutes * 60;
+        (
+            time,
+            if offset.starts_with('-') {
+                -amount
+            } else {
+                amount
+            },
+        )
+    };
+    let clock = time.split('.').next()?;
+    let mut parts = clock.split(':');
+    let hour = parts.next()?.parse::<i64>().ok()?;
+    let minute = parts.next()?.parse::<i64>().ok()?;
+    let second = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let utc_seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset_seconds;
+    Some(civil_from_days(utc_seconds.div_euclid(86_400)))
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let mp = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
 fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
     let error = |message: &str| StoreError::Invalid(format!("invalid global backup: {message}"));
+    for key in [
+        "projects",
+        "items",
+        "notes",
+        "statuses",
+        "relationships",
+        "associations",
+        "status_history",
+    ] {
+        if !snapshot.get(key).is_some_and(Value::is_array) {
+            return Err(error(&format!("{key} must be an array")));
+        }
+    }
     let projects = arr(snapshot, "projects");
     let mut project_ids = std::collections::BTreeSet::new();
     for project in projects {
@@ -1550,13 +2087,27 @@ fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
         {
             return Err(error("status history item missing"));
         }
-        if transition["to_status_id"].as_str().is_none_or(|sid| {
-            !status_ids.contains(&(
+        let historical_owner = transition
+            .get("workflow_owner_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
                 items_by_id[transition["item_id"].as_str().unwrap()]["project_id"]
                     .as_str()
-                    .map(str::to_owned),
-                sid.to_owned(),
-            ))
+                    .map(str::to_owned)
+            });
+        if transition["to_status_id"].as_str().is_none_or(|sid| {
+            if transition.get("workflow_owner_id").is_some() {
+                return !transition
+                    .get("to_status_label")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| !v.trim().is_empty())
+                    || !matches!(
+                        transition.get("to_status_category").and_then(Value::as_str),
+                        Some("open" | "active" | "waiting" | "blocked" | "completed" | "cancelled")
+                    );
+            }
+            !status_ids.contains(&(historical_owner.clone(), sid.to_owned()))
         }) {
             return Err(error("status history status missing"));
         }
@@ -1571,6 +2122,26 @@ fn dependency_edge(source: &str, target: &str, kind: &str) -> Option<(String, St
         "blocks" => Some((source.to_owned(), target.to_owned())),
         "depends_on" => Some((target.to_owned(), source.to_owned())),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod global_date_tests {
+    use super::utc_date_from_iso;
+
+    #[test]
+    fn date_only_is_stable_and_instants_cross_utc_midnight_by_offset() {
+        assert_eq!(utc_date_from_iso("2026-01-02"), Some("2026-01-02".into()));
+        assert_eq!(
+            utc_date_from_iso("2026-01-02T00:30:00+01:00"),
+            Some("2026-01-01".into())
+        );
+        assert_eq!(
+            utc_date_from_iso("2026-01-01T23:30:00-01:00"),
+            Some("2026-01-02".into())
+        );
+        assert_eq!(utc_date_from_iso("2026-02-30"), None);
+        assert_eq!(utc_date_from_iso("2026-01-02T00:30:00"), None);
     }
 }
 
