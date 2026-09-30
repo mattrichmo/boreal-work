@@ -30,3 +30,6 @@ cross-project credentials are copied or work claimed by global next.
 
 These commands are local; they do not silently redirect an explicit project
 service socket to the separate global database.
+
+Discovery refuses registries above 1,000 associations rather than silently
+returning an incomplete diagnostic. Linked project metadata is bounded to 64 KiB.

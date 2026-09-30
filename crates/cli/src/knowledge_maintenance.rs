@@ -1,6 +1,6 @@
 //! Reviewable duplicate and compaction commands plus the memory scaffold alias.
 use super::*;
-use boreal_application::{KnowledgeMaintenanceApplication, canonical_request_digest};
+use boreal_application::{canonical_request_digest, KnowledgeMaintenanceApplication};
 use boreal_store::V3MutationContext;
 
 pub(crate) fn supported(path: &[String]) -> bool {
@@ -108,11 +108,32 @@ pub(crate) fn run(
                 let (report, _) = published_memory_snapshot(parsed, &project)?;
                 let source = published_entry(&report, source_id)?;
                 let canonical = published_entry(&report, canonical_id)?;
-                if source_id == canonical_id { return Err(CliError::invalid("merge source and canonical item must differ")); }
+                if source_id == canonical_id {
+                    return Err(CliError::invalid(
+                        "merge source and canonical item must differ",
+                    ));
+                }
                 let revision = store.project_revision(&project).map_err(map_store_error)?.0;
-                let digest = published_plan_digest("merge", &project, revision, &report, source_id, &source.content_digest, canonical_id, Some(&canonical.content_digest));
-                let mut citations = source.source_citations.clone(); citations.extend(canonical.source_citations.clone()); citations.sort(); citations.dedup();
-                let mut result = bounded_result(Some(json!({"schema":"boreal.maintenance.merge-plan.v1","project_id":project,"revision":revision,"plan_digest":digest,"source":{"kind":"published_memory","id":source_id,"content_digest":source.content_digest},"canonical":{"kind":"published_memory","id":canonical_id,"content_digest":canonical.content_digest},"source_citations":citations,"git_revision":report.git_revision,"manifest_identity":report.manifest_identity,"effect":"prepare a new cited memory draft pending independent review and normal Git publication; both original entries remain unchanged","proof_transfer":false})), Some(revision))?;
+                let digest = published_plan_digest(
+                    "merge",
+                    &project,
+                    revision,
+                    &report,
+                    source_id,
+                    &source.content_digest,
+                    canonical_id,
+                    Some(&canonical.content_digest),
+                );
+                let mut citations = source.source_citations.clone();
+                citations.extend(canonical.source_citations.clone());
+                citations.sort();
+                citations.dedup();
+                let mut result = bounded_result(
+                    Some(
+                        json!({"schema":"boreal.maintenance.merge-plan.v1","project_id":project,"revision":revision,"plan_digest":digest,"source":{"kind":"published_memory","id":source_id,"content_digest":source.content_digest},"canonical":{"kind":"published_memory","id":canonical_id,"content_digest":canonical.content_digest},"source_citations":citations,"git_revision":report.git_revision,"manifest_identity":report.manifest_identity,"effect":"prepare a new cited memory draft pending independent review and normal Git publication; both original entries remain unchanged","proof_transfer":false}),
+                    ),
+                    Some(revision),
+                )?;
                 result.outcome = ApplicationOutcome::Unchanged;
                 return Ok(result);
             }
@@ -158,8 +179,21 @@ pub(crate) fn run(
             let canonical_kind = field(&input, "canonical_kind")?;
             let canonical_id = field(&input, "canonical_id")?;
             if source_kind == "published_memory" {
-                if canonical_kind != "published_memory" { return Err(CliError::invalid("published memory can only be consolidated with another published memory entry")); }
-                return apply_published_memory(parsed, store, operation, &project, &input, &plan_digest, expected, source_id, canonical_id, true);
+                if canonical_kind != "published_memory" {
+                    return Err(CliError::invalid("published memory can only be consolidated with another published memory entry"));
+                }
+                return apply_published_memory(
+                    parsed,
+                    store,
+                    operation,
+                    &project,
+                    &input,
+                    &plan_digest,
+                    expected,
+                    source_id,
+                    canonical_id,
+                    true,
+                );
             }
             let payload = json!({"project":project,"source_kind":source_kind,"source_id":source_id,"canonical_kind":canonical_kind,"canonical_id":canonical_id,"plan_digest":plan_digest,"expected_revision":expected});
             let context = context(
@@ -202,7 +236,10 @@ pub(crate) fn run(
                 .map_err(maintenance_error)?;
             let (report, memory_root) = published_memory_snapshot_optional(parsed, &project)?;
             let revision = store.project_revision(&project).map_err(map_store_error)?.0;
-            if report.as_ref().is_some_and(|report| report.entries.len() as u64 > limit) {
+            if report
+                .as_ref()
+                .is_some_and(|report| report.entries.len() as u64 > limit)
+            {
                 return Err(CliError::invalid(format!("published memory has more than the requested {limit} entries; increase --limit for a complete compaction analysis")));
             }
             let candidates = report.as_ref().map(|report| report.entries.iter().filter_map(|entry| {
@@ -215,7 +252,12 @@ pub(crate) fn run(
             let mut existing = value["candidates"].as_array().cloned().unwrap_or_default();
             existing.extend(candidates);
             value["candidates"] = json!(existing);
-            value["published_git_memory"] = match report { Some(report) => json!({"git_revision":report.git_revision,"manifest_identity":report.manifest_identity,"entries":report.entries.len()}), None => json!({"scanned":false,"reason":"no published memory manifest exists"}) };
+            value["published_git_memory"] = match report {
+                Some(report) => {
+                    json!({"git_revision":report.git_revision,"manifest_identity":report.manifest_identity,"entries":report.entries.len()})
+                }
+                None => json!({"scanned":false,"reason":"no published memory manifest exists"}),
+            };
             let revision = value["revision"].as_u64();
             let mut result = bounded_result(Some(value), revision)?;
             result.outcome = ApplicationOutcome::Unchanged;
@@ -231,7 +273,18 @@ pub(crate) fn run(
             let source_kind = field(&input, "source_kind")?;
             let source_id = field(&input, "source_id")?;
             if source_kind == "published_memory" {
-                return apply_published_memory(parsed, store, operation, &project, &input, &plan_digest, expected, source_id, "", false);
+                return apply_published_memory(
+                    parsed,
+                    store,
+                    operation,
+                    &project,
+                    &input,
+                    &plan_digest,
+                    expected,
+                    source_id,
+                    "",
+                    false,
+                );
             }
             let source_revision = input
                 .get("source_revision")
@@ -305,7 +358,11 @@ fn published_memory_snapshot(
         .map_err(|e| CliError::invalid(format!("published memory root is invalid: {e}")))?;
     let report = boreal_memory::Publisher::deferred(root)
         .reimport(project)
-        .map_err(|e| CliError::invalid(format!("published memory manifest cannot be validated: {e}")))?;
+        .map_err(|e| {
+            CliError::invalid(format!(
+                "published memory manifest cannot be validated: {e}"
+            ))
+        })?;
     Ok((report, memory_root))
 }
 
@@ -315,22 +372,43 @@ fn published_memory_snapshot_optional(
 ) -> Result<(Option<boreal_memory::ImportReport>, Option<PathBuf>), CliError> {
     let context = project_context::resolve(parsed)?;
     let memory_root = project_context::confined_path(&context.root, Path::new("memory"), true)?;
-    if !memory_root.exists() { return Ok((None, None)); }
-    if !memory_root.is_dir() { return Err(CliError::invalid("project memory root exists but is not a directory")); }
+    if !memory_root.exists() {
+        return Ok((None, None));
+    }
+    if !memory_root.is_dir() {
+        return Err(CliError::invalid(
+            "project memory root exists but is not a directory",
+        ));
+    }
     let manifest = project_context::confined_path(&memory_root, Path::new("manifest.json"), true)?;
-    if !manifest.exists() { return Ok((None, Some(memory_root))); }
+    if !manifest.exists() {
+        return Ok((None, Some(memory_root)));
+    }
     let root = boreal_memory::MemoryRoot::new(&memory_root)
         .map_err(|e| CliError::invalid(format!("published memory root is invalid: {e}")))?;
-    boreal_memory::Publisher::deferred(root).reimport(project)
-        .map(|report| (Some(report), Some(memory_root))).map_err(|e| CliError::invalid(format!("published memory manifest cannot be validated: {e}")))
+    boreal_memory::Publisher::deferred(root)
+        .reimport(project)
+        .map(|report| (Some(report), Some(memory_root)))
+        .map_err(|e| {
+            CliError::invalid(format!(
+                "published memory manifest cannot be validated: {e}"
+            ))
+        })
 }
 
 fn published_entry<'a>(
     report: &'a boreal_memory::ImportReport,
     id: &str,
 ) -> Result<&'a boreal_memory::ImportedEntry, CliError> {
-    report.entries.iter().find(|entry| entry.memory_entry_id == id)
-        .ok_or_else(|| CliError::invalid(format!("published memory entry {id} was not found in the validated manifest")))
+    report
+        .entries
+        .iter()
+        .find(|entry| entry.memory_entry_id == id)
+        .ok_or_else(|| {
+            CliError::invalid(format!(
+                "published memory entry {id} was not found in the validated manifest"
+            ))
+        })
 }
 
 fn published_plan_digest(
@@ -343,12 +421,15 @@ fn published_plan_digest(
     canonical_id: &str,
     canonical_digest: Option<&str>,
 ) -> String {
-    canonical_request_digest("maintenance.published_memory.plan.v1", json!({
-        "action":action,"project_id":project,"revision":revision,
-        "git_revision":report.git_revision,"manifest_identity":report.manifest_identity,
-        "source_id":source_id,"source_digest":source_digest,
-        "canonical_id":canonical_id,"canonical_digest":canonical_digest
-    }))
+    canonical_request_digest(
+        "maintenance.published_memory.plan.v1",
+        json!({
+            "action":action,"project_id":project,"revision":revision,
+            "git_revision":report.git_revision,"manifest_identity":report.manifest_identity,
+            "source_id":source_id,"source_digest":source_digest,
+            "canonical_id":canonical_id,"canonical_digest":canonical_digest
+        }),
+    )
 }
 
 fn apply_published_memory(
@@ -363,27 +444,92 @@ fn apply_published_memory(
     canonical_id: &str,
     merging: bool,
 ) -> Result<CliResult, CliError> {
-    require_operator(store,project,&parsed.options.actor)?;
-    store.validate_project_session(project,&parsed.options.actor,&parsed.options.session).map_err(map_store_error)?;
-    let intent=boreal_application::canonical_request_digest("maintenance.published.intent",json!({"input":input,"plan":plan_digest,"expected_revision":expected,"source_id":source_id,"canonical_id":canonical_id,"merging":merging,"actor":parsed.options.actor,"session":parsed.options.session}));
-    let desired = if merging { field(input, "merged_body")? } else { field(input, "summary")? };
-    let entry_id = input.get("memory_entry_id").and_then(Value::as_str).map(str::to_owned)
-        .unwrap_or_else(|| format!("maintenance-{}", &canonical_request_digest("maintenance.entry", json!({"operation":operation,"plan":plan_digest}))[..20]));
-    let draft_id = format!("maintenance-draft-{}", &canonical_request_digest("maintenance.draft", json!({"operation":operation,"plan":plan_digest}))[..20]);
-    let title = input.get("title").and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+    require_operator(store, project, &parsed.options.actor)?;
+    store
+        .validate_project_session(project, &parsed.options.actor, &parsed.options.session)
+        .map_err(map_store_error)?;
+    let intent = boreal_application::canonical_request_digest(
+        "maintenance.published.intent",
+        json!({"input":input,"plan":plan_digest,"expected_revision":expected,"source_id":source_id,"canonical_id":canonical_id,"merging":merging,"actor":parsed.options.actor,"session":parsed.options.session}),
+    );
+    let desired = if merging {
+        field(input, "merged_body")?
+    } else {
+        field(input, "summary")?
+    };
+    let entry_id = input
+        .get("memory_entry_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "maintenance-{}",
+                &canonical_request_digest(
+                    "maintenance.entry",
+                    json!({"operation":operation,"plan":plan_digest})
+                )[..20]
+            )
+        });
+    let draft_id = format!(
+        "maintenance-draft-{}",
+        &canonical_request_digest(
+            "maintenance.draft",
+            json!({"operation":operation,"plan":plan_digest})
+        )[..20]
+    );
+    let title = input
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
         .unwrap_or("Consolidated memory");
-    if let Some(existing) = store.memory_draft(project, &draft_id).map_err(map_store_error)? {
+    if let Some(existing) = store
+        .memory_draft(project, &draft_id)
+        .map_err(map_store_error)?
+    {
         let draft_revision = existing.project_revision;
-        let supplied_ids = input.get("source_citations").and_then(Value::as_array)
-            .ok_or_else(|| CliError::invalid("published memory apply requires source_citations from its plan"))?;
-        let ids = supplied_ids.iter().map(|v| v.as_str().ok_or_else(|| CliError::invalid("source_citations must contain strings"))).collect::<Result<Vec<_>, _>>()?;
+        let supplied_ids = input
+            .get("source_citations")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                CliError::invalid("published memory apply requires source_citations from its plan")
+            })?;
+        let ids = supplied_ids
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .ok_or_else(|| CliError::invalid("source_citations must contain strings"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut endpoints = vec![format!("{}@{}", source_id, field(input, "git_revision")?)];
-        if merging { endpoints.push(format!("{}@{}", canonical_id, field(input, "git_revision")?)); }
-        let expected_body = format!("Supersedes published memory: {}\nMaintenance intent: {}\n\n{}", endpoints.join(", "), intent, desired);
-        let stored_citations: Value = serde_json::from_str(&existing.citations_json).map_err(|e| CliError::invalid(e.to_string()))?;
+        if merging {
+            endpoints.push(format!(
+                "{}@{}",
+                canonical_id,
+                field(input, "git_revision")?
+            ));
+        }
+        let expected_body = format!(
+            "Supersedes published memory: {}\nMaintenance intent: {}\n\n{}",
+            endpoints.join(", "),
+            intent,
+            desired
+        );
+        let stored_citations: Value = serde_json::from_str(&existing.citations_json)
+            .map_err(|e| CliError::invalid(e.to_string()))?;
         let expected_citations = ids.iter().map(|id| json!({"source_version_id":id,"location":format!("published memory entry {} at Git revision {}", source_id, field(input, "git_revision").unwrap_or("") )})).collect::<Vec<_>>();
-        if existing.actor_id != parsed.options.actor || existing.project_revision != expected.checked_add(1).ok_or_else(||CliError::invalid("revision overflow"))? || existing.entry_id != entry_id || existing.title != title || existing.body != expected_body || stored_citations != json!(expected_citations) {
-            return Err(CliError::invalid("operation ID was replayed with different published-memory maintenance content"));
+        if existing.actor_id != parsed.options.actor
+            || existing.project_revision
+                != expected
+                    .checked_add(1)
+                    .ok_or_else(|| CliError::invalid("revision overflow"))?
+            || existing.entry_id != entry_id
+            || existing.title != title
+            || existing.body != expected_body
+            || stored_citations != json!(expected_citations)
+        {
+            return Err(CliError::invalid(
+                "operation ID was replayed with different published-memory maintenance content",
+            ));
         }
         let review_reason = input.get("review_reason").and_then(Value::as_str).filter(|s| !s.trim().is_empty())
             .unwrap_or("Review the operator-authored consolidation and cited source set before publication.");
@@ -397,57 +543,136 @@ fn apply_published_memory(
     let (report, _) = published_memory_snapshot(parsed, project)?;
     let revision = store.project_revision(project).map_err(map_store_error)?.0;
     if revision != expected {
-        return Err(CliError::invalid("project revision changed; rebuild the maintenance plan"));
+        return Err(CliError::invalid(
+            "project revision changed; rebuild the maintenance plan",
+        ));
     }
     let source = published_entry(&report, source_id)?;
-    let source_revision = input.get("source_revision").and_then(Value::as_u64).unwrap_or(revision);
+    let source_revision = input
+        .get("source_revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(revision);
     if source_revision != expected {
-        return Err(CliError::invalid("published memory plan revision is stale; analyze again"));
+        return Err(CliError::invalid(
+            "published memory plan revision is stale; analyze again",
+        ));
     }
     let supplied_manifest = field(input, "manifest_identity")?;
     let supplied_git = field(input, "git_revision")?;
     let supplied_source_digest = field(input, "source_digest")?;
-    let canonical = if merging { Some(published_entry(&report, canonical_id)?) } else { None };
-    let canonical_digest = if let Some(entry) = canonical { Some(entry.content_digest.as_str()) } else { None };
+    let canonical = if merging {
+        Some(published_entry(&report, canonical_id)?)
+    } else {
+        None
+    };
+    let canonical_digest = if let Some(entry) = canonical {
+        Some(entry.content_digest.as_str())
+    } else {
+        None
+    };
     if let Some(entry) = canonical {
-        if input.get("canonical_digest").and_then(Value::as_str) != Some(entry.content_digest.as_str()) {
-            return Err(CliError::invalid("published canonical entry changed; build a fresh plan"));
+        if input.get("canonical_digest").and_then(Value::as_str)
+            != Some(entry.content_digest.as_str())
+        {
+            return Err(CliError::invalid(
+                "published canonical entry changed; build a fresh plan",
+            ));
         }
     }
-    if supplied_manifest != report.manifest_identity || supplied_git != report.git_revision
+    if supplied_manifest != report.manifest_identity
+        || supplied_git != report.git_revision
         || supplied_source_digest != source.content_digest
     {
-        return Err(CliError::invalid("published memory manifest or source changed; build a fresh plan"));
+        return Err(CliError::invalid(
+            "published memory manifest or source changed; build a fresh plan",
+        ));
     }
-    let fresh_plan = published_plan_digest(if merging { "merge" } else { "compact" }, project, revision, &report,
-        source_id, &source.content_digest, if merging { canonical_id } else { "" }, canonical_digest);
-    if fresh_plan != plan_digest || input.get("plan_digest").and_then(Value::as_str).is_some_and(|x| x != plan_digest) {
-        return Err(CliError::invalid("published memory plan identity differs; build a fresh plan"));
+    let fresh_plan = published_plan_digest(
+        if merging { "merge" } else { "compact" },
+        project,
+        revision,
+        &report,
+        source_id,
+        &source.content_digest,
+        if merging { canonical_id } else { "" },
+        canonical_digest,
+    );
+    if fresh_plan != plan_digest
+        || input
+            .get("plan_digest")
+            .and_then(Value::as_str)
+            .is_some_and(|x| x != plan_digest)
+    {
+        return Err(CliError::invalid(
+            "published memory plan identity differs; build a fresh plan",
+        ));
     }
     if desired.trim().is_empty() || desired.len() > 65_536 {
-        return Err(CliError::invalid("consolidated memory body must contain 1..65536 bytes"));
+        return Err(CliError::invalid(
+            "consolidated memory body must contain 1..65536 bytes",
+        ));
     }
     let mut ids = source.source_citations.clone();
-    if let Some(entry) = canonical { ids.extend(entry.source_citations.clone()); }
-    ids.sort(); ids.dedup();
-    let planned_ids = input.get("source_citations").and_then(Value::as_array)
-        .ok_or_else(|| CliError::invalid("published memory apply requires source_citations from its plan"))?
-        .iter().map(|value| value.as_str().map(str::to_owned).ok_or_else(|| CliError::invalid("source_citations must contain strings")))
+    if let Some(entry) = canonical {
+        ids.extend(entry.source_citations.clone());
+    }
+    ids.sort();
+    ids.dedup();
+    let planned_ids = input
+        .get("source_citations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CliError::invalid("published memory apply requires source_citations from its plan")
+        })?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| CliError::invalid("source_citations must contain strings"))
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    if planned_ids != ids { return Err(CliError::invalid("published memory source citations changed; build a fresh plan")); }
-    if ids.is_empty() { return Err(CliError::invalid("published memory entries have no registered source citations")); }
+    if planned_ids != ids {
+        return Err(CliError::invalid(
+            "published memory source citations changed; build a fresh plan",
+        ));
+    }
+    if ids.is_empty() {
+        return Err(CliError::invalid(
+            "published memory entries have no registered source citations",
+        ));
+    }
     let mut endpoints = vec![format!("{}@{}", source_id, report.git_revision)];
-    if merging { endpoints.push(format!("{}@{}", canonical_id, report.git_revision)); }
-    let body = format!("Supersedes published memory: {}\nMaintenance intent: {}\n\n{}", endpoints.join(", "), intent, desired);
+    if merging {
+        endpoints.push(format!("{}@{}", canonical_id, report.git_revision));
+    }
+    let body = format!(
+        "Supersedes published memory: {}\nMaintenance intent: {}\n\n{}",
+        endpoints.join(", "),
+        intent,
+        desired
+    );
     let citations = ids.into_iter().map(|source_version_id| json!({
         "source_version_id":source_version_id,
         "location":format!("published memory entry {} at Git revision {}", source_id, report.git_revision)
     })).collect::<Vec<_>>();
     let value = json!({"expected_revision":expected,"confirmed":true,"change":{"kind":"draft","draft_id":draft_id,"entry_id":entry_id,"title":title,"body":body,"citations":citations}});
-    let draft = super::memory_commands::apply(store, project, &parsed.options.actor, &parsed.options.session, operation, value)?;
+    let draft = super::memory_commands::apply(
+        store,
+        project,
+        &parsed.options.actor,
+        &parsed.options.session,
+        operation,
+        value,
+    )?;
     let draft_revision = draft.revision.unwrap_or(expected + 1);
-    let review_reason = input.get("review_reason").and_then(Value::as_str).filter(|s| !s.trim().is_empty())
-        .unwrap_or("Review the operator-authored consolidation and cited source set before publication.");
+    let review_reason = input
+        .get("review_reason")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(
+            "Review the operator-authored consolidation and cited source set before publication.",
+        );
     let result = json!({
         "state":"awaiting_independent_review","published":false,"draft_id":draft_id,"entry_id":entry_id,
         "draft_operation_id":operation,"draft_revision":draft_revision,"plan_digest":plan_digest,
@@ -455,7 +680,7 @@ fn apply_published_memory(
         "canonical":canonical.map(|entry|json!({"id":entry.memory_entry_id,"content_digest":entry.content_digest})),
         "git_revision":report.git_revision,"manifest_identity":report.manifest_identity,
         "originals_preserved":true,"source_citations_preserved":true,
-        "review":{"command":"bwrk memory review <project> <draft_id> --input review.json --expected-revision <current-revision> --yes","input":{"kind":"review","decision":"approved","reason":review_reason}},
+        "review":{"requires_independent_reviewer_credentials":true,"draft_id":draft_id,"project_id":project,"expected_revision_at_response":draft_revision,"safe_argv":["bwrk","memory","review",draft_id,"--project",project,"--input","review.json","--expected-revision",draft_revision.to_string(),"--yes","--json"],"command":"bwrk memory review <project> <draft_id> --input review.json --expected-revision <current-revision> --yes","input":{"kind":"review","decision":"approved","reason":review_reason}},
         "publish":{"command":"bwrk memory publish <project> <review_id> --input publish.json --expected-revision <review-revision> --yes","input":{"kind":"publish","expected_manifest_identity":report.manifest_identity},"requires_independent_approved_review":true}
     });
     let mut response = bounded_result(Some(result), Some(draft_revision))?;
@@ -499,9 +724,20 @@ fn input_object(parsed: &ParsedCommand) -> Result<Value, CliError> {
         .ok_or_else(|| CliError::invalid("command requires --input JSON file"))?;
     let context = project_context::resolve(parsed)?;
     let path = project_context::confined_path(&context.root, Path::new(path), false)?;
-    let value: Value =
-        serde_json::from_slice(&fs::read(path).map_err(|e| CliError::invalid(e.to_string()))?)
+    let value: Value = serde_json::from_slice(&{
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        fs::File::open(path)
+            .map_err(|e| CliError::invalid(e.to_string()))?
+            .take(1_048_577)
+            .read_to_end(&mut bytes)
             .map_err(|e| CliError::invalid(e.to_string()))?;
+        if bytes.len() > 1_048_576 {
+            return Err(CliError::invalid("maintenance input exceeds 1 MiB"));
+        }
+        bytes
+    })
+    .map_err(|e| CliError::invalid(e.to_string()))?;
     if !value.is_object() {
         return Err(CliError::invalid("input must be a JSON object"));
     }

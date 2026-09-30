@@ -72,6 +72,9 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
             .as_array()
             .cloned()
             .unwrap_or_default();
+        if links.len() > 1000 {
+            return Err(CliError::invalid("global discovery exceeds 1000 associations; narrow the registry before requesting a complete diagnostic"));
+        }
         let mut checks = Vec::new();
         let mut candidates = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -156,10 +159,21 @@ fn fresh_candidate(parsed: &ParsedCommand, root: &str, project: &str) -> Result<
     let store =
         SqliteStore::open_read_only_for_diagnostics(&ctx.database).map_err(map_store_error)?;
     project_context::validate_store(&ctx, &store)?;
-    let metadata: Value = serde_json::from_slice(
-        &fs::read(ctx.root.join(".boreal/project.json"))
-            .map_err(|e| CliError::invalid(e.to_string()))?,
-    )
+    let metadata: Value = serde_json::from_slice(&{
+        use std::io::Read;
+        let path =
+            project_context::confined_path(&ctx.root, Path::new(".boreal/project.json"), false)?;
+        let mut bytes = Vec::new();
+        fs::File::open(path)
+            .map_err(|e| CliError::invalid(e.to_string()))?
+            .take(65537)
+            .read_to_end(&mut bytes)
+            .map_err(|e| CliError::invalid(e.to_string()))?;
+        if bytes.len() > 65536 {
+            return Err(CliError::invalid("project metadata exceeds 64 KiB"));
+        }
+        bytes
+    })
     .map_err(|e| CliError::invalid(e.to_string()))?;
     let actor = metadata["operator_actor"]
         .as_str()

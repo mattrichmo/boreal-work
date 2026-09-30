@@ -3125,14 +3125,56 @@ fn flag_metadata(command: &CommandSpec) -> Vec<Value> {
 }
 fn input_schema(path: &str) -> Value {
     match path {
-        "merge plan" | "merge apply" => {
-            json!({"type":"object","required":["source_kind","source_id","canonical_kind","canonical_id"],"properties":{"source_kind":{"enum":["work","source","decision","claim","memory_draft","published_memory"]},"source_id":{"type":"string"},"canonical_kind":{"enum":["work","source","decision","claim","memory_draft","published_memory"]},"canonical_id":{"type":"string"}},"description":"Same-kind endpoints in the selected project. Reviewed application adds lineage; acceptance proofs remain attached to their originals."})
+        "merge plan" | "merge apply" | "compact apply" => {
+            let merging = path.starts_with("merge");
+            let applying = path.ends_with("apply");
+            let mut schema = json!({"type":"object","required":["source_kind","source_id"],"properties":{
+                "source_kind":{"enum":["work","source","decision","claim","memory_draft","published_memory"]},
+                "source_id":{"type":"string","minLength":1},
+                "source_revision":{"type":"integer","minimum":0},"source_digest":{"type":"string","minLength":1},
+                "manifest_identity":{"type":"string","minLength":1},"git_revision":{"type":"string","minLength":1},
+                "source_citations":{"type":"array","items":{"type":"string","minLength":1},"minItems":1,"uniqueItems":true},
+                "title":{"type":"string"},"memory_entry_id":{"type":"string"},"review_reason":{"type":"string"},"plan_digest":{"type":"string"}
+            },"description":"Same-kind project sources. SQLite maintenance preserves originals and records lineage or summaries. Published memory stages a cited draft requiring independent review and publication. Input is bounded to 1 MiB."});
+            if merging {
+                schema["properties"]["canonical_kind"] =
+                    schema["properties"]["source_kind"].clone();
+                schema["properties"]["canonical_id"] = json!({"type":"string","minLength":1});
+                schema["required"]
+                    .as_array_mut()
+                    .unwrap()
+                    .extend([json!("canonical_kind"), json!("canonical_id")]);
+            } else {
+                schema["properties"]["source_kind"] =
+                    json!({"enum":["work","decision","claim","memory_draft","published_memory"]});
+                schema["properties"]["summary"] =
+                    json!({"type":"string","minLength":1,"maxLength":65536});
+                schema["required"].as_array_mut().unwrap().extend([
+                    json!("source_revision"),
+                    json!("source_digest"),
+                    json!("summary"),
+                ]);
+            }
+            if applying {
+                let mut required = vec![
+                    "manifest_identity",
+                    "git_revision",
+                    "source_digest",
+                    "source_citations",
+                ];
+                if merging {
+                    schema["properties"]["canonical_digest"] =
+                        json!({"type":"string","minLength":1});
+                    schema["properties"]["merged_body"] =
+                        json!({"type":"string","minLength":1,"maxLength":65536});
+                    required.extend(["canonical_digest", "merged_body"]);
+                }
+                schema["allOf"] = json!([{"if":{"properties":{"source_kind":{"const":"published_memory"}},"required":["source_kind"]},"then":{"required":required}}]);
+            }
+            schema
         }
         "merge show" | "compact show" => {
             json!({"type":"object","required":["source_kind","source_id"],"properties":{"source_kind":{"type":"string"},"source_id":{"type":"string"}}})
-        }
-        "compact apply" => {
-            json!({"type":"object","required":["source_kind","source_id","source_revision","source_digest","summary"],"properties":{"source_kind":{"enum":["work","decision","claim","memory_draft","published_memory"]},"source_id":{"type":"string"},"source_revision":{"type":"integer"},"source_digest":{"type":"string"},"summary":{"type":"string","maxLength":65536}},"description":"Fields must match the reviewed compaction candidate and --plan identity; original content is preserved."})
         }
         "orchestrate pool configure" => {
             json!({"type":"object","additionalProperties":false,"required":["workers"],"properties":{"workers":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["actor_id","session_id","harness_id"],"properties":{"actor_id":{"type":"string"},"session_id":{"type":"string"},"harness_id":{"type":"string"}}}}},"description":"Distinct active sessions with project-local private credentials and registered harness policies."})

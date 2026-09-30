@@ -153,6 +153,8 @@ The first verified memory publication creates the manifest.
 
 ## Durability and retry behavior
 
+Input JSON is confined to the selected project and bounded to 1 MiB.
+
 SQLite merge lineage and compaction summaries use the normal revision-checked
 application/store mutation boundary and immutable operation journal.
 Published-memory apply durably records a cited draft before independent

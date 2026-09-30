@@ -48,3 +48,8 @@ writing to the retained archive until they do so.
 `operation prune` and `ledger delete` are retired behaviors. Explicit lifecycle
 retirement and revocation preserve canonical history; derived projections can
 be rebuilt without deleting their sources.
+
+Lock inspection examines at most 500 directory entries and reports `truncated`
+when the bound is reached. An interrupted diagnostic log rotation records a
+`readback_required` maintenance state where journaling remains available; inspect
+the original and archive paths before reconciliation.

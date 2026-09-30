@@ -126,8 +126,10 @@ pub(crate) fn run(
                     }
                     let latest = maintenance["summaries"]
                         .as_array()
-                        .and_then(|rows| rows.first())
-                        .filter(|row| row["matches_current_source"] == true)
+                        .and_then(|rows| {
+                            rows.iter()
+                                .find(|row| row["matches_current_source"] == true)
+                        })
                         .cloned();
                     maintenance.as_object_mut().unwrap().remove("summaries");
                     maintenance["current_summary"] = json!(latest);

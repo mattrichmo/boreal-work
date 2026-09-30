@@ -111,11 +111,18 @@ fn read_bounded_json(path: &Path, max: u64) -> Result<Value, CliError> {
 fn lock_inspect(root: &Path, project: &str, store: &SqliteStore) -> Result<Value, CliError> {
     let runtime = project_context::confined_path(root, Path::new(".boreal/runtime"), true)?;
     let mut locks = Vec::new();
+    let mut entries_examined = 0;
+    let mut truncated = false;
     if runtime.is_dir() {
         for entry in fs::read_dir(runtime)
             .map_err(|e| CliError::invalid(e.to_string()))?
             .take(501)
         {
+            if entries_examined == 500 {
+                truncated = true;
+                break;
+            }
+            entries_examined += 1;
             let entry = entry.map_err(|e| CliError::invalid(e.to_string()))?;
             if entry.path().extension().and_then(|v| v.to_str()) != Some("lock") {
                 continue;
@@ -157,7 +164,7 @@ fn lock_inspect(root: &Path, project: &str, store: &SqliteStore) -> Result<Value
     }
     let recovery=store.list_unresolved_recovery_obligations(project,None,100).map_err(map_store_error)?.iter().map(|r|json!({"obligation_id":r.obligation_id,"work_id":r.work_id,"state":r.state,"reason":r.reason,"next_action":r.next_action})).collect::<Vec<_>>();
     Ok(
-        json!({"project_id":project,"read_only":true,"locks":locks,"recovery_obligations":recovery,"recovery_limit":100,"live_locks_broken":false,"recovery_command":"bwrk recovery list --json"}),
+        json!({"project_id":project,"read_only":true,"entries_examined":entries_examined,"entry_limit":500,"truncated":truncated,"locks":locks,"recovery_obligations":recovery,"recovery_limit":100,"live_locks_broken":false,"recovery_command":"bwrk recovery list --json"}),
     )
 }
 fn rotate(
@@ -296,10 +303,27 @@ fn rotate(
                 ..CliResult::default()
             })
         }
-        Err(e) => Err(CliError::with(
-            ErrorCode::OperationConflict,
-            ApplicationOutcome::Unknown,
-            format!("rotation requires readback: {e}; inspect maintenance show {operation}"),
-        )),
+        Err(e) => {
+            let reason =
+                format!("rotation requires readback: {e}; inspect maintenance show {operation}");
+            let journal_error = store.transition_maintenance_job(&MaintenanceJobTransition {
+                operation_id: operation.into(),
+                expected_stage: "registered".into(),
+                next_stage: "readback_required".into(),
+                result_json: Some(json!({"path":path,"archived_path":archive,"readback_required":true,"canonical_history_modified":false}).to_string()),
+                error_message: Some(reason.clone()),
+                at: stamp(now_ms_u64()),
+            }).err();
+            Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Unknown,
+                match journal_error {
+                    Some(error) => {
+                        format!("{reason}; recording readback requirement also failed: {error}")
+                    }
+                    None => reason,
+                },
+            ))
+        }
     }
 }
