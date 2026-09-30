@@ -15,6 +15,15 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
     if crate::command_registry::is_unavailable_path(path) {
         return false;
     }
+    if super::memory_commands::supported(path) {
+        return true;
+    }
+    if super::completion_commands::kind(path).is_some()
+        || super::cycle_commands::kind(path).is_some()
+        || super::cycle_commands::read_kind(path).is_some()
+    {
+        return true;
+    }
     matches!(
         path.iter()
             .map(String::as_str)
@@ -61,29 +70,6 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
     ) || (path == &["agent".to_owned(), "finish".to_owned()]
         && (parsed.options.release || (parsed.options.close && parsed.options.receipt.is_some())))
         || (path == &["evidence".to_owned(), "add".to_owned()] && parsed.options.receipt.is_some())
-}
-
-/// Derive the caller binding from the local operating-system identity. The
-/// value is intentionally not accepted from user input on production routes;
-/// it is only serialized into the local request envelope after derivation.
-pub(crate) fn local_credential_ref() -> String {
-    #[cfg(unix)]
-    {
-        let uid = Command::new("/usr/bin/id")
-            .arg("-u")
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "unknown".to_owned());
-        return format!("os-uid:{uid}");
-    }
-    #[cfg(not(unix))]
-    {
-        "os-user:unknown".to_owned()
-    }
 }
 
 #[cfg(not(unix))]
@@ -868,7 +854,14 @@ mod unix {
                 )
             })?;
         }
-        let host = bind_service_host(&db, Path::new(socket), config)?;
+        let context = super::super::project_context::resolve(parsed)?;
+        let socket_path =
+            super::super::project_context::confined_path(&context.root, Path::new(socket), true)?;
+        let identity_store =
+            SqliteStore::open(&db, super::super::PRODUCTION_SCHEMA).map_err(map_store_error)?;
+        super::super::project_context::validate_store(&context, &identity_store)?;
+        drop(identity_store);
+        let host = bind_service_host(&db, &socket_path, config)?;
         let endpoint = host.socket_path().to_string_lossy().into_owned();
         let handle = host.start_concurrent().map_err(|error| {
             CliError::with(
@@ -1252,7 +1245,18 @@ mod unix {
             && !matches!(path.as_slice(), ["work", "list"] | ["work", "show"])
             && !matches!(path.as_slice(), ["intake", "list"] | ["intake", "show"])
             && !matches!(path.as_slice(), ["dep", "tree"] | ["dep", "cycles"])
-            && !matches!(path.as_slice(), ["cycle", "board"] | ["cycle", "report"])
+            && !matches!(
+                path.as_slice(),
+                ["cycle", "board"]
+                    | ["cycle", "report"]
+                    | ["cycle", "list"]
+                    | ["sprint", "board"]
+                    | ["sprint", "report"]
+                    | ["sprint", "list"]
+                    | ["memory", "show"]
+                    | ["memory", "search"]
+                    | ["memory", "readback"]
+            )
     }
 
     fn recovered_unknown_duplicate(
@@ -1351,10 +1355,33 @@ mod unix {
         let mut data = json!({
             "project_id": if project.is_empty() { Value::Null } else { json!(project) },
             "actor_id": parsed.options.actor,
-            "credential_ref": local_credential_ref(),
+            "credential_ref": if project.is_empty() { Value::Null } else { json!(super::super::credentials::for_command(parsed)?) },
             "harness_id": parsed.options.harness,
             "session_id": parsed.options.session,
         });
+        if super::super::memory_commands::supported(&parsed.path) {
+            data["command"] = json!("memory_command");
+            data["memory"] = super::super::memory_commands::payload(parsed)?;
+            return Ok(data);
+        }
+        if super::super::cycle_commands::kind(&parsed.path).is_some() {
+            data["command"] = json!("cycle_change");
+            data["cycle_change"] = super::super::cycle_commands::payload(parsed)?;
+            return Ok(data);
+        }
+        if let Some(read) = super::super::cycle_commands::read_kind(&parsed.path) {
+            data["command"] = json!("cycle_read");
+            data["view"] = json!(read);
+            data["cycle_id"] = json!(parsed.options.positionals.first());
+            data["limit"] = json!(parsed.options.limit.unwrap_or(50));
+            data["offset"] = json!(parsed.options.offset.unwrap_or(0));
+            return Ok(data);
+        }
+        if super::super::completion_commands::kind(&parsed.path).is_some() {
+            data["command"] = json!("completion");
+            data["completion"] = super::super::completion_commands::payload(parsed)?;
+            return Ok(data);
+        }
         match path.as_slice() {
             ["workflows", "list"] => {
                 data["command"] = json!("workflow_list");
@@ -1370,7 +1397,7 @@ mod unix {
                 data["name"] = json!(project);
                 data["description"] = json!("");
                 data["actor_role"] = json!(parsed.options.actor_role.as_deref().unwrap_or("agent"));
-                data["credential_ref"] = json!(local_credential_ref());
+                data["credential_ref"] = json!(super::super::credentials::for_command(parsed)?);
                 data["expected_revision"] = parsed
                     .options
                     .expected_revision
@@ -1887,7 +1914,31 @@ mod unix {
             })?;
             let result = self.dispatch(&request, &data);
             let envelope = match result {
-                Ok((outcome, revision, value)) => {
+                Ok((outcome, revision, mut value)) => {
+                    // Database lineage is read back by the server, never echoed from a caller.
+                    if self.store.is_canonical_production() {
+                        if let Some(project_id) = data.get("project_id").and_then(Value::as_str) {
+                            let scope = boreal_store::identity::IdentityStore::new(&self.store)
+                                .context(project_id)
+                                .map_err(|error| {
+                                    boreal_service::ProtocolError::new(
+                                        boreal_service::ProtocolErrorCode::InvalidPayload,
+                                        format!("project identity readback failed: {error}"),
+                                    )
+                                })?;
+                            if let Some(Value::Object(object)) = value.as_mut() {
+                                object.insert(
+                                    "_scope".into(),
+                                    json!({
+                                        "project_id": scope.project_id,
+                                        "database_instance_id": scope.database_instance_id.as_str(),
+                                        "restore_epoch": scope.restore_epoch.get(),
+                                        "workspace_binding_digest": scope.workspace_binding_digest,
+                                    }),
+                                );
+                            }
+                        }
+                    }
                     make_envelope(&request.operation_id, outcome, revision, value, None)
                 }
                 Err(error) => {
@@ -2042,27 +2093,100 @@ mod unix {
                             "authenticated request requires a local credential binding",
                         )
                     })?;
-                let local = local_credential_ref();
-                if supplied != local {
+                if request.command == "create_project" {
                     return Err(CliError::with(
                         ErrorCode::PermissionDenied,
                         ApplicationOutcome::Rejected,
-                        "caller credential is not bound to this local process",
+                        "project bootstrap is local-only; run bwrk init in the intended workspace",
                     ));
                 }
-                if request.command != "create_project" {
-                    self.store
-                        .authenticate_actor(actor_id, &local)
-                        .map_err(|error| {
-                            CliError::with(
-                                ErrorCode::PermissionDenied,
-                                ApplicationOutcome::Rejected,
-                                error.to_string(),
-                            )
+                let project_id =
+                    data.get("project_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            CliError::invalid("authenticated request requires project_id")
                         })?;
+                let principal = self
+                    .store
+                    .authenticate_principal(project_id, supplied, TimestampMs(now_ms_u64()))
+                    .map_err(|_| {
+                        CliError::with(
+                            ErrorCode::PermissionDenied,
+                            ApplicationOutcome::Rejected,
+                            "project credential is unknown, expired or revoked",
+                        )
+                    })?;
+                if principal.actor_id != actor_id {
+                    return Err(CliError::with(
+                        ErrorCode::PermissionDenied,
+                        ApplicationOutcome::Rejected,
+                        "credential does not authorize the supplied actor",
+                    ));
                 }
             }
+            let mut authenticated_data = data.clone();
+            if self.store.is_canonical_production() {
+                if let Some(fields) = authenticated_data.as_object_mut() {
+                    fields.remove("credential_ref");
+                }
+            }
+            let data = &authenticated_data;
             match request.command.as_str() {
+                "memory_command" => {
+                    let result = super::super::memory_commands::apply(
+                        &self.store,
+                        &string(data, "project_id")?,
+                        &string(data, "actor_id")?,
+                        &string(data, "session_id")?,
+                        &request.operation_id,
+                        data.get("memory")
+                            .cloned()
+                            .ok_or_else(|| CliError::invalid("memory payload required"))?,
+                    )?;
+                    Ok((result.outcome, result.revision, result.data))
+                }
+                "cycle_change" => {
+                    let result = super::super::cycle_commands::apply(
+                        &self.store,
+                        &string(data, "project_id")?,
+                        &string(data, "actor_id")?,
+                        &string(data, "session_id")?,
+                        &request.operation_id,
+                        data.get("cycle_change")
+                            .cloned()
+                            .ok_or_else(|| CliError::invalid("cycle payload required"))?,
+                    )?;
+                    Ok((result.outcome, result.revision, result.data))
+                }
+                "cycle_read" => {
+                    let mut parsed = ParsedCommand {
+                        path: vec!["cycle".into(), string(data, "view")?],
+                        options: CliOptions::default(),
+                    };
+                    parsed.options.project = Some(string(data, "project_id")?);
+                    parsed.options.actor = string(data, "actor_id")?;
+                    parsed.options.session = string(data, "session_id")?;
+                    if let Some(id) = data.get("cycle_id").and_then(Value::as_str) {
+                        parsed.options.positionals.push(id.into());
+                    }
+                    parsed.options.limit = data.get("limit").and_then(Value::as_u64);
+                    parsed.options.offset = data.get("offset").and_then(Value::as_u64);
+                    let result = super::super::cycle_commands::read(&parsed, &self.store)?;
+                    Ok((result.outcome, result.revision, result.data))
+                }
+                "completion" => {
+                    let result = super::super::completion_commands::apply(
+                        &self.store,
+                        &string(data, "project_id")?,
+                        &string(data, "actor_id")?,
+                        &string(data, "session_id")?,
+                        &request.operation_id,
+                        data.get("completion")
+                            .cloned()
+                            .ok_or_else(|| CliError::invalid("completion payload is required"))?,
+                    )?;
+                    Ok((result.outcome, result.revision, result.data))
+                }
                 "workflow_list" => self.workflow_list(),
                 "workflow_show" => self.workflow_show(data),
                 "create_project" => self.create_project(data, &request.operation_id),
@@ -2251,17 +2375,18 @@ mod unix {
                 acceptance_profile,
             };
             let app = WorkApplication::new(&self.store);
-            let result = match request.expected_revision {
-                Some(expected_revision) => app.create_work_as_checked(
+            let result = app
+                .create_work_as_session_checked(
                     &work,
                     &actor_id,
-                    Some(expected_revision),
+                    request._session_id.as_deref().ok_or_else(|| {
+                        CliError::invalid("work creation requires project session")
+                    })?,
+                    request.expected_revision,
                     &now(),
                     operation,
-                ),
-                None => app.create_work_as(&work, &actor_id, &now(), operation),
-            }
-            .map_err(map_application_error)?;
+                )
+                .map_err(map_application_error)?;
             Ok((
                 if result.changed {
                     ApplicationOutcome::Changed
@@ -2751,6 +2876,7 @@ mod unix {
                         "schema_version": schema_version,
                         "work_model_v3": if v3_enabled { "enabled" } else { "not_enabled" },
                         "sqlite_runtime": self.store.sqlite_runtime_identity().as_json(),
+                        "integrity": self.store.diagnostic_checks().map_err(map_store_error)?,
                     },
                     "repair": {
                         "available": false,
@@ -2836,15 +2962,22 @@ mod unix {
             if include_query_metrics {
                 self.store.reset_query_metrics();
             }
-            let snapshot =
-                project_status_from_store(&self.store, &project, &actor, as_of, limit, offset)
-                    .map_err(|message| {
-                        CliError::with(
-                            ErrorCode::ServiceUnavailable,
-                            ApplicationOutcome::Failed,
-                            message,
-                        )
-                    })?;
+            let snapshot = boreal_application::project_status_from_store_for_session(
+                &self.store,
+                &project,
+                &actor,
+                optional_string(data, "session_id")?.as_deref(),
+                as_of,
+                limit,
+                offset,
+            )
+            .map_err(|message| {
+                CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    message,
+                )
+            })?;
             let mut status = super::super::status_snapshot_json(
                 &snapshot,
                 Some(json!({
@@ -3544,7 +3677,7 @@ mod unix {
             };
             let adapter = SqliteAttemptAdapter::new(&self.store);
             let submitted = app
-                .submit(
+                .prepare_finish(
                     &adapter,
                     attempt_request_from_data(
                         data,
@@ -3602,7 +3735,7 @@ mod unix {
                 ApplicationOutcome::Changed
             };
             let close_data = json!({
-                "attempt": attempt_mutation_json(&submitted.value),
+                "attempt": submitted.as_ref().map(|result| attempt_mutation_json(&result.value)),
                 "receipt_id": receipt.receipt_id.as_str(),
                 "receipt_replayed": receipt_replayed,
                 "summary_id": summary.summary_id,

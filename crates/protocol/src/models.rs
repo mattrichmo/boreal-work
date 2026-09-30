@@ -44,6 +44,8 @@ pub struct WorkflowCriterionDto {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowAssetDto {
+    #[serde(default)]
+    pub required_server_actions: Vec<String>,
     pub reference: String,
     pub kind: String,
     pub title: String,
@@ -55,6 +57,8 @@ pub struct WorkflowAssetDto {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowPackageDto {
+    #[serde(default)]
+    pub trusted: bool,
     pub schema_version: String,
     pub package_id: String,
     pub package_version: String,
@@ -468,4 +472,213 @@ mod tests {
         assert_eq!(doctor.project_id.as_deref(), Some("project-1"));
         assert_eq!(doctor.actor_id, None);
     }
+}
+
+/// Explicit optimistic binding for immutable completion decisions. Caller and
+/// project identity belong to the authenticated envelope, never this payload.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionCommandDto {
+    pub kind: String,
+    pub work_id: String,
+    pub expected_revision: u64,
+    pub expected_entity_revision: u64,
+    pub expected_proof_revision: u64,
+    #[serde(default)]
+    pub submission_id: Option<String>,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub predecessor_revision: Option<u64>,
+    #[serde(default)]
+    pub exception_reason: Option<String>,
+    pub reason: String,
+    #[serde(default)]
+    pub expires_at_ms: Option<u64>,
+    pub confirmed: bool,
+}
+
+/// Server-read identity boundary for cached snapshots and operation readback.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectReadbackScope {
+    pub project_id: String,
+    pub database_instance_id: String,
+    pub restore_epoch: u64,
+    pub workspace_binding_digest: String,
+}
+
+/// Local wall-clock input is resolved by the application against its actual
+/// TZif bytes. Clients cannot supply an invented UTC offset or tzdb identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalDateTimeDto {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    #[serde(default)]
+    pub second: u8,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CycleOperationDto {
+    Create {
+        cycle_id: String,
+        name: String,
+        #[serde(default)]
+        goal: String,
+        timezone: String,
+        start: LocalDateTimeDto,
+        end: Option<LocalDateTimeDto>,
+        #[serde(default)]
+        later_fold: bool,
+    },
+    Activate {
+        cycle_id: String,
+    },
+    Close {
+        cycle_id: String,
+    },
+    Cancel {
+        cycle_id: String,
+    },
+    Assign {
+        cycle_id: String,
+        assignment_id: String,
+        work_id: String,
+    },
+    Commit {
+        cycle_id: String,
+        assignment_id: String,
+    },
+    Remove {
+        cycle_id: String,
+        assignment_id: String,
+    },
+    CarryOver {
+        cycle_id: String,
+        assignment_id: String,
+        successor_cycle_id: String,
+        successor_assignment_id: String,
+    },
+    MapLegacy {
+        cycle_id: String,
+        work_id: String,
+    },
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCommandDto {
+    pub expected_revision: u64,
+    pub reason: String,
+    pub confirmed: bool,
+    pub change: CycleOperationDto,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryCitationDto {
+    pub source_version_id: String,
+    pub location: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemoryOperationDto {
+    Draft {
+        draft_id: String,
+        entry_id: String,
+        title: String,
+        body: String,
+        citations: Vec<MemoryCitationDto>,
+    },
+    Review {
+        draft_id: String,
+        decision: String,
+        reason: String,
+    },
+    Publish {
+        review_id: String,
+        expected_manifest_identity: String,
+    },
+    Show {
+        draft_id: String,
+    },
+    Search {
+        text: Option<String>,
+        entry_id: Option<String>,
+        source_version_id: Option<String>,
+        requested_git_revision: Option<String>,
+        limit: Option<usize>,
+    },
+    Readback {
+        operation_id: String,
+    },
+    Reconcile {
+        operation_id: String,
+    },
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryCommandDto {
+    pub expected_revision: Option<u64>,
+    pub confirmed: bool,
+    pub change: MemoryOperationDto,
+}
+
+/// Versioned facts accompany actions; clients must not interpret diagnostic states as permission.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CanonicalFactDto {
+    Present { value: serde_json::Value },
+    Absent { diagnostic: serde_json::Value },
+    Unreadable { diagnostic: serde_json::Value },
+    Stale { diagnostic: serde_json::Value },
+    Failed { diagnostic: serde_json::Value },
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalDecisionFactsDto {
+    pub schema_version: String,
+    pub subject: serde_json::Value,
+    pub snapshot_revision: u64,
+    pub clock: serde_json::Value,
+    pub availability: String,
+    pub lifecycle: CanonicalFactDto,
+    pub authority: CanonicalFactDto,
+    pub requirements: CanonicalFactDto,
+    pub dependencies: CanonicalFactDto,
+    pub holds: CanonicalFactDto,
+    pub execution: CanonicalFactDto,
+    pub submission: CanonicalFactDto,
+    pub review: CanonicalFactDto,
+    pub recovery: CanonicalFactDto,
+    pub integrity: serde_json::Value,
+    pub permitted_actions_input: serde_json::Value,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkActionDescriptorDto {
+    pub action: String,
+    pub target: serde_json::Value,
+    pub expected_project_revision: u64,
+    pub expected_entity_revision: Option<u64>,
+    pub expected_proof_revision: Option<u64>,
+    pub attempt: Option<serde_json::Value>,
+    pub required_roles: Vec<String>,
+    pub required_inputs: Vec<String>,
+    pub confirmation: Option<String>,
+    pub read_only: bool,
+    pub recovery: bool,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeniedWorkActionDto {
+    pub descriptor: WorkActionDescriptorDto,
+    pub reason: serde_json::Value,
+    pub reason_code: String,
+    pub recovery: Vec<String>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkActionDecisionDto {
+    pub allowed: Vec<WorkActionDescriptorDto>,
+    pub denied: Vec<DeniedWorkActionDto>,
 }

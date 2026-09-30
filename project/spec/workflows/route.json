@@ -1,13 +1,93 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.0.0",
+  "asset_version": "1.1.0",
   "ref": "boreal.workflow.route.v1",
   "kind": "route",
   "title": "Route the next safe project action",
-  "refs": {"context": "boreal.workflow.context.v1", "plan": "boreal.workflow.plan.v1", "claim": "boreal.workflow.claim.v1", "review": "boreal.workflow.review.v1", "audit": "boreal.workflow.audit.v1", "health": "boreal.workflow.health.v1", "handoff": "boreal.workflow.handoff.v1", "memory": "boreal.workflow.memory.v1"},
-  "allowed_commands": ["bwrk next --json", "bwrk agent guide --json", "bwrk agent resume --session <session_id> --json"],
-  "typed_inputs": [{"name": "project_id", "type": "project_id", "required": false, "source": "request", "validation": "project_scope"}, {"name": "actor_id", "type": "actor_id", "required": true, "source": "session", "validation": "credential_bound"}, {"name": "goal", "type": "nullable_string", "required": false, "source": "request", "validation": "bounded; never executable"}, {"name": "expected_revision", "type": "revision", "required": false, "source": "snapshot", "validation": "non_negative_integer"}],
-  "finish_criteria": [{"id": "route.snapshot", "type": "revision_bound_context", "required": true}, {"id": "route.selection", "type": "one_action_or_idle", "required": true}, {"id": "route.trust", "type": "registry_and_argv_validated", "required": true}],
-  "next_refs": ["boreal.workflow.context.v1", "boreal.workflow.plan.v1", "boreal.workflow.claim.v1", "boreal.workflow.review.v1", "boreal.workflow.audit.v1", "boreal.workflow.health.v1"],
-  "state_transition_owner": "boreal.application.v2"
+  "refs": {
+    "context": "boreal.workflow.context.v1",
+    "plan": "boreal.workflow.plan.v1",
+    "claim": "boreal.workflow.claim.v1",
+    "review": "boreal.workflow.review.v1",
+    "audit": "boreal.workflow.audit.v1",
+    "health": "boreal.workflow.health.v1",
+    "handoff": "boreal.workflow.handoff.v1",
+    "memory": "boreal.workflow.memory.v1"
+  },
+  "allowed_commands": [
+    "bwrk commands --json",
+    "bwrk workflows list --json",
+    "bwrk agent guide --json",
+    "bwrk agent next --json",
+    "bwrk status --json"
+  ],
+  "typed_inputs": [
+    {
+      "name": "project_id",
+      "type": "project_id",
+      "required": false,
+      "source": "request",
+      "validation": "project_scope"
+    },
+    {
+      "name": "actor_id",
+      "type": "actor_id",
+      "required": true,
+      "source": "session",
+      "validation": "credential_bound"
+    },
+    {
+      "name": "goal",
+      "type": "nullable_string",
+      "required": false,
+      "source": "request",
+      "validation": "bounded; never executable"
+    },
+    {
+      "name": "expected_revision",
+      "type": "revision",
+      "required": false,
+      "source": "snapshot",
+      "validation": "non_negative_integer"
+    },
+    {
+      "name": "server_action",
+      "type": "action_descriptor",
+      "required": false,
+      "source": "canonical_status_or_command_response",
+      "validation": "target_project_actor_session_revisions_confirmation_and_denials_must_match; guidance_is_not_authority"
+    }
+  ],
+  "finish_criteria": [
+    {
+      "id": "route.snapshot",
+      "type": "revision_bound_context",
+      "required": true
+    },
+    {
+      "id": "route.selection",
+      "type": "one_action_or_idle",
+      "required": true
+    },
+    {
+      "id": "route.trust",
+      "type": "registry_and_argv_validated",
+      "required": true
+    },
+    {
+      "id": "route.authority",
+      "type": "mutation_authorized_again_inside_canonical_transaction",
+      "required": true
+    }
+  ],
+  "next_refs": [
+    "boreal.workflow.context.v1",
+    "boreal.workflow.plan.v1",
+    "boreal.workflow.claim.v1",
+    "boreal.workflow.review.v1",
+    "boreal.workflow.audit.v1",
+    "boreal.workflow.health.v1"
+  ],
+  "state_transition_owner": "boreal.application.v2",
+  "required_server_actions": []
 }

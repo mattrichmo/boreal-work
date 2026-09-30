@@ -16,10 +16,33 @@ use serde_json::json;
 pub struct V3MutationContext {
     pub project_id: String,
     pub actor_id: String,
+    pub session_id: Option<String>,
     pub operation_id: String,
     pub request_digest: String,
     pub expected_revision: Option<u64>,
     pub now: String,
+}
+
+impl V3MutationContext {
+    /// Bind every semantic input, not just its object identifier. Observation
+    /// timestamps are excluded so a lost-response retry can use a new clock.
+    pub(crate) fn with_payload(&self, payload: serde_json::Value) -> Self {
+        let mut bound = self.clone();
+        bound.request_digest = super::checksum(
+            json!({
+                "schema": "boreal.planning-request.v1",
+                "scope_digest": self.request_digest,
+                "project_id": self.project_id,
+                "actor_id": self.actor_id,
+                "session_id": self.session_id,
+                "expected_revision": self.expected_revision,
+                "payload": payload,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        bound
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,6 +234,8 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &WorkNodeV3Input,
     ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({"project_id": input.project_id, "work_id": input.work_id, "decomposition_kind": input.decomposition_kind, "execution_mode": input.execution_mode, "parent_id": input.parent_id}));
+        let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
         self.v3_mutation(
             context,
@@ -289,6 +314,8 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &CycleSeriesV3Input,
     ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({"project_id": input.project_id, "series_id": input.series_id, "name": input.name, "lifecycle": input.lifecycle, "timezone": input.timezone, "tzdb_identity": input.tzdb_identity}));
+        let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
         self.v3_mutation(
             context,
@@ -348,6 +375,8 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &CycleTemplateV3Input,
     ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({"project_id": input.project_id, "template_version_id": input.template_version_id, "series_id": input.series_id, "version": input.version, "effective_from_slot_ordinal": input.effective_from_slot_ordinal, "interval_weeks": input.interval_weeks, "anchor_local_date": input.anchor_local_date, "anchor_local_time": input.anchor_local_time, "anchor_weekday": input.anchor_weekday, "recurrence_end_kind": input.recurrence_end_kind, "recurrence_end_count": input.recurrence_end_count, "recurrence_end_local_date": input.recurrence_end_local_date, "name_pattern": input.name_pattern, "goal_template": input.goal_template, "timezone": input.timezone, "tzdb_identity": input.tzdb_identity, "gap_policy": input.gap_policy, "fold_policy": input.fold_policy, "weekdays": input.weekdays}));
+        let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
         self.v3_mutation(
             context,
@@ -465,6 +494,8 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &CycleV3Input,
     ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({"project_id": input.project_id, "cycle_id": input.cycle_id, "series_id": input.series_id, "template_version_id": input.template_version_id, "slot_ordinal": input.slot_ordinal, "name": input.name, "goal": input.goal, "lifecycle": input.lifecycle, "scheduled_start_utc_ms": input.scheduled_start_utc_ms, "scheduled_end_utc_ms": input.scheduled_end_utc_ms, "scheduled_start_local": input.scheduled_start_local, "scheduled_start_utc_offset_minutes": input.scheduled_start_utc_offset_minutes, "timezone": input.timezone, "tzdb_identity": input.tzdb_identity, "gap_policy": input.gap_policy, "fold_policy": input.fold_policy}));
+        let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
         self.v3_mutation(context, "cycle.create", "cycle", &input.cycle_id, || {
             let mut statement = self.prepare(
@@ -553,6 +584,8 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &CycleAssignmentV3Input,
     ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({"project_id": input.project_id, "assignment_id": input.assignment_id, "cycle_id": input.cycle_id, "work_id": input.work_id, "state": input.state, "activation_policy": input.activation_policy, "activation_at_utc_ms": input.activation_at_utc_ms, "predecessor_id": input.predecessor_id, "successor_id": input.successor_id}));
+        let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
         self.v3_mutation(
             context,
@@ -621,6 +654,8 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &IntakeBucketV3Input,
     ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({"project_id": input.project_id, "bucket_id": input.bucket_id, "name": input.name, "archived": input.archived}));
+        let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
         self.v3_mutation(
             context,
@@ -649,6 +684,8 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &IntakeItemV3Input,
     ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({"project_id": input.project_id, "intake_id": input.intake_id, "bucket_id": input.bucket_id, "kind": input.kind, "lifecycle": input.lifecycle, "content": input.content, "content_revision": input.content_revision, "content_digest": input.content_digest, "revisit_at_utc_ms": input.revisit_at_utc_ms}));
+        let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
         self.v3_mutation(
             context,
@@ -742,6 +779,8 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &IntakePromotionV3Input,
     ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({"project_id": input.project_id, "promotion_id": input.promotion_id, "intake_id": input.intake_id, "intake_revision": input.intake_revision, "intake_digest": input.intake_digest, "target_kind": input.target_kind, "target_id": input.target_id, "actor_id": input.actor_id, "operation_id": input.operation_id}));
+        let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
         ensure_project(&context.actor_id, &input.actor_id)?;
         self.v3_mutation(
@@ -810,6 +849,8 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &ContainerDispositionV3Input,
     ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({"project_id": input.project_id, "disposition_id": input.disposition_id, "container_work_id": input.container_work_id, "descendant_work_id": input.descendant_work_id, "kind": input.kind, "descendant_revision": input.descendant_revision, "descendant_outcome_digest": input.descendant_outcome_digest, "replacement_work_id": input.replacement_work_id, "reason": input.reason, "supersedes_id": input.supersedes_id}));
+        let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
         self.v3_mutation(
             context,
@@ -882,12 +923,39 @@ impl SqliteStore {
         }))
     }
 
-    fn v3_mutation<F>(
+    pub(crate) fn v3_mutation<F>(
         &self,
         context: &V3MutationContext,
         command: &str,
         subject_type: &str,
         subject_id: &str,
+        write: F,
+    ) -> Result<MutationResult, StoreError>
+    where
+        F: FnOnce() -> Result<(), StoreError>,
+    {
+        self.fact_mutation(
+            context,
+            command,
+            subject_type,
+            subject_id,
+            &[
+                boreal_domain::ActorRole::Agent,
+                boreal_domain::ActorRole::Operator,
+            ],
+            write,
+        )
+    }
+
+    /// Shared canonical fact transaction: role/session, replay, revision, write,
+    /// journal and audit. Knowledge and planning cannot develop divergent policy.
+    pub(crate) fn fact_mutation<F>(
+        &self,
+        context: &V3MutationContext,
+        command: &str,
+        subject_type: &str,
+        subject_id: &str,
+        roles: &[boreal_domain::ActorRole],
         write: F,
     ) -> Result<MutationResult, StoreError>
     where
@@ -900,9 +968,40 @@ impl SqliteStore {
         }
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            let session_id =
-                self.v3_authenticated_session_id(&context.project_id, &context.actor_id)?;
-            if let Some(existing) = self.operation(&context.operation_id)? {
+            let session_id = context.session_id.clone();
+            if self.canonical_production {
+                let (role, _) = self.principal_authority(&context.project_id, &context.actor_id)?;
+                if !roles.contains(&role) {
+                    return Err(StoreError::Invalid(
+                        "principal role does not permit this canonical mutation".into(),
+                    ));
+                }
+                if context.expected_revision.is_none() || session_id.is_none() {
+                    return Err(StoreError::Invalid(
+                        "canonical mutations require explicit revision and project session".into(),
+                    ));
+                }
+                self.validate_project_session(
+                    &context.project_id,
+                    &context.actor_id,
+                    session_id
+                        .as_deref()
+                        .ok_or_else(|| StoreError::Invalid("project session missing".into()))?,
+                )?;
+            }
+            if let Some(existing) = self.preflight_operation_replay(
+                &context.project_id,
+                &context.operation_id,
+                command,
+                &context.actor_id,
+                session_id.as_deref(),
+                context.expected_revision,
+                None,
+                None,
+                &context.request_digest,
+                subject_type,
+                subject_id,
+            )? {
                 if existing.project_id != context.project_id
                     || existing.command != command
                     || existing.request_digest != context.request_digest
@@ -983,44 +1082,6 @@ impl SqliteStore {
                 Err(error)
             }
         }
-    }
-
-    /// Resolve the authenticated session bound to this project and actor
-    /// through its durable `session.register` operation. The v3 context
-    /// predates an explicit session field, so an unambiguous active
-    /// registration is the only safe compatibility path. Ambiguity fails
-    /// closed rather than selecting an arbitrary session.
-    fn v3_authenticated_session_id(
-        &self,
-        project_id: &str,
-        actor_id: &str,
-    ) -> Result<Option<String>, StoreError> {
-        let mut statement = self.prepare(
-            "SELECT DISTINCT session.session_id
-             FROM session
-             JOIN operation registration
-               ON registration.session_id = session.session_id
-              AND registration.command = 'session.register'
-              AND registration.project_id = ?1
-             WHERE session.actor_id = ?2
-               AND session.state = 'active'
-             ORDER BY session.session_id",
-        )?;
-        statement.bind_text(1, project_id)?;
-        statement.bind_text(2, actor_id)?;
-
-        let mut resolved = None;
-        while statement.step()? == SQLITE_ROW {
-            let session_id = statement.column_text(0)?;
-            if resolved.is_some() {
-                return Err(StoreError::Conflict(
-                    "v3 mutation has multiple active authenticated sessions; refusing to select one"
-                        .to_owned(),
-                ));
-            }
-            resolved = Some(session_id);
-        }
-        Ok(resolved)
     }
 }
 

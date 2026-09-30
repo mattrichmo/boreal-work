@@ -1895,6 +1895,7 @@ fn action_facts(role: ActorRole) -> DecisionInputs {
             terminal_decision: None,
         }),
         authority: Fact::present(ActorAuthorityInput {
+            authority_root: "actor".into(),
             project_id: "project".into(),
             role,
             principal: PrincipalBinding::Authenticated {
@@ -1905,6 +1906,7 @@ fn action_facts(role: ActorRole) -> DecisionInputs {
         requirements: Fact::present(PinnedRequirementsInput {
             proof,
             requirements: vec![PinnedRequirement {
+                exception: None,
                 id: RequirementId::new("verification-requirement"),
                 gate_id: GateId::new("verification"),
                 kind: GateKind::Verification,
@@ -1986,6 +1988,9 @@ fn action_facts_with_submission(role: ActorRole, state: SubmissionState) -> Deci
     let mut facts = action_facts(role);
     let proof = facts.requirements.as_present().unwrap().proof.clone();
     facts.submission = Fact::present(SubmissionInput {
+        actor_id: ActorId::new("actor"),
+        session_id: SessionId::new("session"),
+        authority_root: ActorId::new("actor"),
         id: SubmissionId::new("submission"),
         proof,
         summary_digest: ContentDigest::new("sha256:summary"),
@@ -2350,6 +2355,8 @@ fn historical_submission_and_review_states_do_not_change_claim_authority() {
         .proof
         .clone();
     rejected_review.review = Fact::present(ReviewInput {
+        reviewer_authority_root: ActorId::new("reviewer"),
+        attempt_authority_root: ActorId::new("actor"),
         id: ReviewId::new("historical-review"),
         submission_id: SubmissionId::new("submission"),
         proof,
@@ -2445,12 +2452,17 @@ fn malformed_facts_fail_closed_and_retain_typed_diagnostics() {
     let mut self_review = action_facts(ActorRole::Reviewer);
     let proof = self_review.requirements.as_present().unwrap().proof.clone();
     self_review.submission = Fact::present(SubmissionInput {
+        actor_id: ActorId::new("actor"),
+        session_id: SessionId::new("session"),
+        authority_root: ActorId::new("actor"),
         id: SubmissionId::new("submission"),
         proof: proof.clone(),
         summary_digest: ContentDigest::new("sha256:summary"),
         state: SubmissionState::Sealed,
     });
     self_review.review = Fact::present(ReviewInput {
+        reviewer_authority_root: ActorId::new("actor"),
+        attempt_authority_root: ActorId::new("actor"),
         id: ReviewId::new("review"),
         submission_id: SubmissionId::new("submission"),
         proof,
@@ -2774,6 +2786,7 @@ fn availability_and_integrity_dimensions_have_typed_safe_action_policy() {
         let operator = {
             let mut operator = facts.clone();
             operator.authority = Fact::present(ActorAuthorityInput {
+                authority_root: "operator".into(),
                 project_id: "project".into(),
                 role: ActorRole::Operator,
                 principal: PrincipalBinding::Authenticated {

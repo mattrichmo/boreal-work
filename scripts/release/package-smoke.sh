@@ -50,4 +50,6 @@ for asset in manifest["assets"]:
 print("package smoke: release manifest and asset digests verified")
 PY
 
+python3 "$root/scripts/release/two-project-smoke.py" --prefix "$scratch/prefix"
+
 echo "package smoke: PASS ($archive)"

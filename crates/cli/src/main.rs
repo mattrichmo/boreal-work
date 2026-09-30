@@ -1,12 +1,11 @@
 use boreal_application::{
-    canonical_request_digest, guide_checked, sha256_content_digest, AcceptanceGateDefinition,
-    ApplicationError, AttemptPolicy, AttemptRequest, AuthenticatedOperationJournal,
-    BoundedExecutionResult, CommandSpec, EndAttemptRequest, EvidenceExecutionOutcome,
-    EvidenceRunRequest, ExecutorAttestation, IntakeBucket, IntakeBucketId, IntakeItem,
-    IntakeItemId, IntakeKind, IntakeLifecycle, KnowledgeApplication, LivenessMetadata,
-    OperationResult, ReceiptCoverage, ReceiptExpectation, ReceiptPayload,
-    SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter, SummaryPayload,
-    WorkApplication, WorkflowRegistry,
+    canonical_request_digest, sha256_content_digest, AcceptanceGateDefinition, ApplicationError,
+    AttemptPolicy, AttemptRequest, AuthenticatedOperationJournal, BoundedExecutionResult,
+    CommandSpec, EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest,
+    ExecutorAttestation, IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind,
+    IntakeLifecycle, KnowledgeApplication, LivenessMetadata, OperationResult, ReceiptCoverage,
+    ReceiptExpectation, ReceiptPayload, SessionRegistrationRequest, SourceCaptureInput,
+    SqliteAttemptAdapter, SummaryPayload, WorkApplication, WorkflowRegistry,
 };
 use boreal_domain::{
     AcceptanceProfile, ActorId, AttemptId, AttemptPhase, ConfigIdentity, DispatchPolicy, Fence,
@@ -49,8 +48,14 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+mod authority;
 mod command_registry;
+mod completion_commands;
+mod credentials;
+mod cycle_commands;
 mod dashboard;
+mod memory_commands;
+mod project_context;
 mod service;
 mod setup;
 mod update;
@@ -586,7 +591,26 @@ fn run(args: &[String]) -> Result<CliResult, CliError> {
 }
 
 fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, CliError> {
-    let parsed = parse(args)?;
+    let mut parsed = parse(args)?;
+    if !setup::is_setup_command(&parsed.path)
+        && !command_registry::is_registry_path(&parsed.path)
+        && parsed.path.first().map(String::as_str) != Some("workflows")
+    {
+        let context = project_context::resolve(&parsed)?;
+        parsed.options.db = context.database.to_string_lossy().into_owned();
+        if let Some(socket) = parsed.options.socket.as_deref() {
+            parsed.options.socket = Some(
+                project_context::confined_path(
+                    &context.root,
+                    Path::new(socket),
+                    parsed.path == ["service", "run"],
+                )?
+                .to_string_lossy()
+                .into_owned(),
+            );
+        }
+        parsed.options.project = Some(context.project_id);
+    }
     if parsed.path == ["service", "run"] {
         return service::run_service(&parsed, operation);
     }
@@ -612,7 +636,23 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     if parsed.path == ["dashboard"] {
         return dashboard::run_dashboard(&parsed);
     }
+    if parsed.path == ["doctor"] && parsed.options.socket.is_none() {
+        let context = project_context::resolve(&parsed)?;
+        let store = SqliteStore::open_read_only_for_diagnostics(&context.database)
+            .map_err(map_store_error)?;
+        project_context::validate_store(&context, &store)?;
+        credentials::authenticate(&parsed, &store)?;
+        return doctor_result(&parsed, &store);
+    }
     if parsed.path.len() == 1 && matches!(parsed.path[0].as_str(), "update" | "upgrade") {
+        if parsed.options.socket.is_none() {
+            let context = project_context::resolve(&parsed)?;
+            let store = SqliteStore::open_read_only_for_diagnostics(&context.database)
+                .map_err(map_store_error)?;
+            project_context::validate_store(&context, &store)?;
+            credentials::authenticate(&parsed, &store)?;
+            require_operator(&store, &context.project_id, &parsed.options.actor)?;
+        }
         if parsed.options.socket.is_some() {
             if service::supports(&parsed) {
                 return service::request(&parsed, operation);
@@ -629,7 +669,7 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         return backup_restore_result(&parsed, operation);
     }
     let setup_command = setup::is_setup_command(&parsed.path);
-    let setup_requested = setup::should_setup(&parsed);
+    let setup_requested = setup_command;
     if setup_command && parsed.options.expected_revision.is_some() {
         return Err(CliError::invalid(
             "project creation does not yet expose an atomic expected-revision store contract",
@@ -706,6 +746,7 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
             })?
         };
         let binding = workspace_binding(&binding_root)?;
+        let credential = credentials::create(&binding_root, &project, &parsed.options.actor)?;
         let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).map_err(map_store_error)?;
         let app = WorkApplication::new(&store);
         let initialized_at = now();
@@ -713,9 +754,9 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
             .init_project_with_workspace(
                 &ProjectId::new(project.clone()),
                 &parsed.options.actor,
-                "agent",
-                &service::local_credential_ref(),
-                "CLI agent",
+                "operator",
+                &credential,
+                "Project operator",
                 &binding,
                 &initialized_at,
                 operation.to_owned(),
@@ -748,30 +789,46 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         });
     }
     let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).map_err(map_store_error)?;
+    if parsed.path.first().map(String::as_str) == Some("auth") {
+        return authority::run(&parsed, operation, &store);
+    }
     if store.is_canonical_production() {
-        store
-            .authenticate_actor(&parsed.options.actor, &service::local_credential_ref())
-            .map_err(|error| {
-                CliError::with(
-                    ErrorCode::PermissionDenied,
-                    ApplicationOutcome::Rejected,
-                    error.to_string(),
-                )
-            })?;
+        credentials::authenticate(&parsed, &store)?;
     }
     let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
     dispatch(&parsed, operation, &app, &adapter, &store)
 }
 
+fn require_operator(store: &SqliteStore, project: &str, actor: &str) -> Result<(), CliError> {
+    WorkApplication::new(store)
+        .authorize_maintenance(project, actor)
+        .map_err(map_application_error)
+}
+
 fn backup_restore_result(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, CliError> {
+    let context = project_context::resolve(parsed)?;
+    {
+        let authentication = SqliteStore::open_read_only_for_diagnostics(&context.database)
+            .map_err(map_store_error)?;
+        project_context::validate_store(&context, &authentication)?;
+        credentials::authenticate(parsed, &authentication)?;
+        require_operator(&authentication, &context.project_id, &parsed.options.actor)?;
+    }
+    if parsed.path == ["restore"] && !parsed.options.setup.yes {
+        return Err(CliError::invalid(
+            "restore replaces project state; review the package and pass --yes",
+        ));
+    }
     let package = parsed
         .options
         .positionals
         .first()
         .map(PathBuf::from)
         .ok_or_else(|| CliError::invalid("backup or restore requires a package directory"))?;
-    let database = PathBuf::from(&parsed.options.db);
+    let package =
+        project_context::confined_path(&context.root, &package, parsed.path == ["backup"])?;
+    let database = context.database;
     ensure_db_parent(&database)?;
     let _database_owner = direct_database_maintenance_owner(&database)?;
     match parsed.path.first().map(String::as_str) {
@@ -785,8 +842,8 @@ fn backup_restore_result(parsed: &ParsedCommand, operation: &str) -> Result<CliR
             }
             let store = SqliteStore::open(&database, PRODUCTION_SCHEMA).map_err(map_store_error)?;
             let request_digest = canonical_request_digest(
-                "maintenance.backup/v1",
-                json!({
+                "maintenance.backup/v2",
+                json!({"project_id": context.project_id, "actor_id": parsed.options.actor,
                     "database_path": database,
                     "package_path": package,
                 }),
@@ -911,8 +968,8 @@ fn backup_restore_result(parsed: &ParsedCommand, operation: &str) -> Result<CliR
             let source_store = SqliteStore::open(&maintenance_database, PRODUCTION_SCHEMA)
                 .map_err(map_store_error)?;
             let request_digest = canonical_request_digest(
-                "maintenance.restore/v1",
-                json!({
+                "maintenance.restore/v2",
+                json!({"project_id": context.project_id, "actor_id": parsed.options.actor,
                     "database_path": database,
                     "package_path": package,
                 }),
@@ -1096,6 +1153,7 @@ fn workflow_package_json(registry: &WorkflowRegistry) -> Value {
 
 fn workflow_asset_dto(asset: &boreal_application::WorkflowAsset) -> WorkflowAssetDto {
     WorkflowAssetDto {
+        required_server_actions: asset.required_server_actions.clone(),
         reference: asset.reference.clone(),
         kind: asset.kind.clone(),
         title: asset.title.clone(),
@@ -1125,6 +1183,7 @@ fn workflow_asset_dto(asset: &boreal_application::WorkflowAsset) -> WorkflowAsse
 
 fn workflow_package_dto(registry: &WorkflowRegistry) -> WorkflowPackageDto {
     WorkflowPackageDto {
+        trusted: registry.trusted(),
         schema_version: registry.schema_version().to_owned(),
         package_id: registry.package_id().to_owned(),
         package_version: registry.package_version().to_owned(),
@@ -1154,6 +1213,18 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
     store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let path = parsed.path.iter().map(String::as_str).collect::<Vec<_>>();
+    if memory_commands::supported(&parsed.path) {
+        return memory_commands::run(parsed, operation, store);
+    }
+    if completion_commands::kind(&parsed.path).is_some() {
+        return completion_commands::run(parsed, operation, store);
+    }
+    if cycle_commands::kind(&parsed.path).is_some() {
+        return cycle_commands::run(parsed, operation, store);
+    }
+    if cycle_commands::read_kind(&parsed.path).is_some() {
+        return cycle_commands::read(parsed, store);
+    }
     match path.as_slice() {
         [command] if *command == "status" || *command == "prime" => status_result(parsed, store),
         ["work", "list"] => list_result(parsed, app),
@@ -2189,6 +2260,9 @@ fn cycle_board_result(
                 "work_title": item.work_title,
                 "work_kind": item.work_kind,
                 "work_lifecycle": item.work_lifecycle,
+                "accepted_closed": item.accepted_closed,
+                "predecessor_id": item.assignment.predecessor_id,
+                "successor_id": item.assignment.successor_id,
             })
         })
         .collect::<Vec<_>>();
@@ -2218,6 +2292,9 @@ fn cycle_board_result(
             },
             "assignments": assignments,
             "counts": state_counts,
+            "accepted_closed": board.assignments.iter().filter(|a|a.accepted_closed).count(),
+            "total": board.assignments.len(),
+            "diagnostics": board.diagnostics.iter().map(|d|json!({"work_id":d.work_id,"code":d.code,"detail":d.detail})).collect::<Vec<_>>(),
         })),
         Some(board.revision),
     )
@@ -2460,7 +2537,7 @@ fn source_catalog_root(db_path: &str) -> PathBuf {
         )
 }
 
-fn source_catalog(root: &Path) -> Result<SourceCatalog, CliError> {
+fn source_catalog_create(root: &Path) -> Result<SourceCatalog, CliError> {
     fs::create_dir_all(root).map_err(|error| {
         CliError::with(
             ErrorCode::ServiceUnavailable,
@@ -2468,6 +2545,15 @@ fn source_catalog(root: &Path) -> Result<SourceCatalog, CliError> {
             format!("unable to initialize source catalog: {error}"),
         )
     })?;
+    SourceCatalog::with_persistent_filesystem(root).map_err(map_source_error)
+}
+
+fn source_catalog(root: &Path) -> Result<SourceCatalog, CliError> {
+    if !root.is_dir() {
+        return Err(CliError::invalid(
+            "project source catalog does not exist; capture a source first",
+        ));
+    }
     SourceCatalog::with_persistent_filesystem(root).map_err(map_source_error)
 }
 
@@ -2490,7 +2576,9 @@ fn source_add_result(
         .origin
         .as_deref()
         .ok_or_else(|| CliError::invalid("source add requires --origin"))?;
-    let metadata = fs::metadata(input_path).map_err(|error| {
+    let context = project_context::resolve(parsed)?;
+    let input_path = project_context::confined_path(&context.root, Path::new(input_path), false)?;
+    let metadata = fs::metadata(&input_path).map_err(|error| {
         CliError::with(
             ErrorCode::NotFound,
             ApplicationOutcome::Rejected,
@@ -2506,7 +2594,7 @@ fn source_add_result(
             MAX_SOURCE_INPUT_BYTES
         )));
     }
-    let file = fs::File::open(input_path).map_err(|error| {
+    let file = fs::File::open(&input_path).map_err(|error| {
         CliError::with(
             ErrorCode::NotFound,
             ApplicationOutcome::Rejected,
@@ -2529,8 +2617,13 @@ fn source_add_result(
             MAX_SOURCE_INPUT_BYTES
         )));
     }
-    let catalog_root = source_catalog_root(&parsed.options.db);
-    let catalog = source_catalog(&catalog_root)?;
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
+    let catalog = source_catalog_create(&catalog_root)?;
     let app = KnowledgeApplication::new(&catalog);
     let mut result = app
         .capture_source(SourceCaptureInput {
@@ -2603,7 +2696,12 @@ fn source_show_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<Cli
         .ok_or_else(|| CliError::invalid("source show requires a source version identifier"))?;
     let project_id = ProjectId::new(project.clone());
     let revision = store_revision(store, &project_id)?;
-    let catalog_root = source_catalog_root(&parsed.options.db);
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
     let catalog = source_catalog(&catalog_root)?;
     let app = KnowledgeApplication::new(&catalog);
     let source = app
@@ -2627,7 +2725,12 @@ fn source_list_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<Cli
     let project = project_argument(parsed, 0)?;
     let project_id = ProjectId::new(project.clone());
     let revision = store_revision(store, &project_id)?;
-    let catalog_root = source_catalog_root(&parsed.options.db);
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
     let catalog = source_catalog(&catalog_root)?;
     let app = KnowledgeApplication::new(&catalog);
     let all = app
@@ -2667,7 +2770,12 @@ fn source_verify_result(
             CliError::invalid("source verify requires a source version identifier")
         })?;
     let revision = store_revision(store, &ProjectId::new(project.clone()))?;
-    let catalog_root = source_catalog_root(&parsed.options.db);
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
     let catalog = source_catalog(&catalog_root)?;
     let app = KnowledgeApplication::new(&catalog);
     let result = app
@@ -2762,6 +2870,7 @@ fn doctor_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
                 "schema_version": schema_version,
                 "work_model_v3": if v3_enabled { "enabled" } else { "not_enabled" },
                 "sqlite_runtime": store.sqlite_runtime_identity().as_json(),
+                "integrity": store.diagnostic_checks().map_err(map_store_error)?,
             },
             "repair": {
                 "available": false,
@@ -2769,7 +2878,7 @@ fn doctor_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
             }
         })),
         revision,
-    )
+    ).map(|mut result| { result.outcome = ApplicationOutcome::Unchanged; result })
 }
 
 /// The direct status/prime view is the same derived projection exposed by the
@@ -2778,13 +2887,14 @@ fn doctor_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
 /// and clock decisions from one coherent snapshot.
 fn status_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
-    let snapshot = boreal_application::project_status_from_store(
+    let snapshot = boreal_application::project_status_from_store_for_session(
         store,
         &project,
         &boreal_domain::ActorContext {
             actor_id: ActorId::new(parsed.options.actor.clone()),
             role: boreal_domain::ActorRole::Agent,
         },
+        Some(parsed.options.session.as_str()),
         TimestampMs::from_millis(now_ms_u64()),
         parsed.options.limit.unwrap_or(100),
         parsed.options.offset.unwrap_or(0),
@@ -2811,7 +2921,7 @@ fn status_snapshot_json(
     recovery: Option<Value>,
 ) -> Value {
     let counts = &snapshot.counts;
-    json!({
+    let mut result = json!({
         "command": "status",
         "contract_version": snapshot.contract_version,
         "project_id": snapshot.project_id.as_str(),
@@ -2824,13 +2934,11 @@ fn status_snapshot_json(
         "total": snapshot.total,
         "has_more": snapshot.has_more(),
         "next_offset": snapshot.next_offset(),
-        "diagnostics": snapshot.diagnostics.iter().map(|diagnostic| json!({
-            "work_id": diagnostic.work_id,
-            "title": diagnostic.title,
-            "code": diagnostic.code,
-            "detail": diagnostic.detail,
-            "display_status": "corrupt",
+        "returned_rows": snapshot.page_count,
+        "project_diagnostics": snapshot.project_diagnostics.iter().map(|diagnostic| json!({
+            "code": diagnostic.code, "detail": diagnostic.detail, "subject": diagnostic.work_id,
         })).collect::<Vec<_>>(),
+        "diagnostics": [],
         "counts": {
             "matched": snapshot.total,
             "total": snapshot.total,
@@ -2848,9 +2956,16 @@ fn status_snapshot_json(
             "retry_wait": counts.retry_wait,
             "expired_review": counts.expired_review,
             "cancelled": counts.cancelled,
-            "degraded": snapshot.diagnostics.len(),
+            "degraded": snapshot.quarantined_count,
+            "scheduled": counts.scheduled,
         },
-        "items": snapshot.items.iter().map(status_item_json).collect::<Vec<_>>(),
+        "items": [],
+        "project_actions": snapshot.project_actions.iter().map(|action|json!({
+            "action":action.action,"target":{"project_id":action.project_id.as_str()},
+            "caller":{"actor_id":action.actor_id.as_str(),"session_id":action.session_id.as_ref().map(|id|id.as_str())},
+            "expected_project_revision":action.expected_project_revision.0,"allowed":action.allowed,
+            "denial_reason":action.denial_reason,"confirmation":action.confirmation
+        })).collect::<Vec<_>>(),
         "timing": {
             "as_of": stamp(snapshot.as_of.as_millis()),
             "next_status_change_at": snapshot.next_status_change_at.map(|value| stamp(value.as_millis())),
@@ -2859,7 +2974,46 @@ fn status_snapshot_json(
             "readback_required": false,
             "service_state": "ready",
         })),
-    })
+    });
+    let bound = MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET + 2048);
+    let mut consumed = 0u64;
+    for id in &snapshot.page_work_ids {
+        let previous = result.clone();
+        if let Some(item) = snapshot
+            .items
+            .iter()
+            .find(|item| item.work.id.as_str() == id)
+        {
+            result["items"]
+                .as_array_mut()
+                .expect("array created above")
+                .push(status_item_json(item));
+        }
+        for diagnostic in snapshot.diagnostics.iter().filter(|d| &d.work_id == id) {
+            result["diagnostics"]
+                .as_array_mut()
+                .expect("array created above")
+                .push(json!({
+                "work_id":diagnostic.work_id,"title":diagnostic.title,"code":diagnostic.code,
+                "detail":diagnostic.detail,"display_status":"corrupt"}));
+        }
+        // A single oversized row produces a bounded protocol error; never silently
+        // truncate its proof or skip it and report a misleading successful page.
+        if consumed > 0 && serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > bound) {
+            result = previous;
+            break;
+        }
+        consumed += 1;
+    }
+    let next = snapshot.offset.saturating_add(consumed);
+    result["returned_rows"] = json!(consumed);
+    result["has_more"] = json!(next < snapshot.total);
+    result["next_offset"] = if next < snapshot.total {
+        json!(next)
+    } else {
+        Value::Null
+    };
+    result
 }
 
 fn status_item_json(item: &boreal_application::StatusWork) -> Value {
@@ -2893,12 +3047,8 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
             "hard_deadline": stamp(attempt.max_attempt_deadline.as_millis()),
         })
     });
-    // A compatibility status row does not yet carry the v3 identity/proof
-    // facts required to make action descriptors authoritative.  Do not send
-    // synthetic denied descriptors here: they would override the legacy
-    // discovery hint in clients while still claiming that the row is
-    // selectable.  Once the store supplies a complete action context, the
-    // same response includes the canonical descriptor set.
+    // The same canonical snapshot supplies decisions and their input facts.
+    // No client-specific action vocabulary is filtered out of the contract.
     let actions = item
         .actions
         .as_ref()
@@ -2937,7 +3087,7 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         // status/3 value in `display_status` so newer clients can render
         // expiry as its own recovery state without breaking older clients.
         "status": status2_name(item.display_status()),
-        "display_status": status_name(item.display_status()),
+        "display_status": status_name(item.status3_display_status()),
         // Compatibility status rows predate the v3 identity/proof read model.
         // Keep their legacy readiness hint for discovery, but keep the
         // server-derived action set alongside it; mutating commands still
@@ -2950,6 +3100,8 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
         "attempt": attempt,
         "actions": actions,
+        "canonical_facts": item.canonical_inputs.as_ref().map(boreal_application::canonical_decision_facts_json),
+        "action_contract_version": "boreal.work-actions.v1",
         "action_context": action_context,
         "gates": { "open": open, "satisfied": satisfied },
         "dependencies": item.dependency_blockers.iter().map(|blocker| json!({
@@ -2975,56 +3127,8 @@ fn action_decision_json(
     decision: &boreal_domain::actions::ActionDecision,
     context_available: bool,
 ) -> Value {
-    json!({
-        "allowed": decision
-            .allowed
-            .iter()
-            .filter(|descriptor| inline_status_action(descriptor.action))
-            .map(|descriptor| action_descriptor_json(descriptor, context_available))
-            .collect::<Vec<_>>(),
-        "denied": decision
-            .denied
-            .iter()
-            .filter(|denied| inline_status_action(denied.descriptor.action))
-            .map(|denied| {
-                json!({
-                    "descriptor": action_descriptor_json(&denied.descriptor, context_available),
-                    "reason": {
-                        "code": action_denial_code(&denied.reason),
-                        "detail": format!("{:?}", denied.reason),
-                    },
-                    "reason_code": action_denial_code(&denied.reason),
-                    "recovery": denied
-                        .recovery
-                        .iter()
-                        .map(|action| action_kind_name(*action))
-                        .collect::<Vec<_>>(),
-                })
-            })
-            .collect::<Vec<_>>(),
-    })
+    boreal_application::action_decision_json(decision, context_available)
 }
-
-/// The status envelope carries the action vocabulary consumed by the current
-/// terminal client. The domain still evaluates the complete action set; the
-/// remaining descriptors are available through the dedicated action/readback
-/// routes rather than making a normal paginated status page exceed its inline
-/// protocol bound.
-fn inline_status_action(action: boreal_domain::actions::ActionKind) -> bool {
-    use boreal_domain::actions::ActionKind;
-    matches!(
-        action,
-        ActionKind::Inspect
-            | ActionKind::Claim
-            | ActionKind::AcceptAttempt
-            | ActionKind::StartAttempt
-            | ActionKind::AttachEvidence
-            | ActionKind::FinishClose
-            | ActionKind::Release
-            | ActionKind::Recover
-    )
-}
-
 /// Select a candidate for discovery without turning a compatibility status
 /// hint into authorization. Once the store supplies v3 identity/proof facts,
 /// this is exactly the server-derived Claim decision. Until then, the real
@@ -3033,130 +3137,9 @@ fn status_item_selection_eligible(item: &boreal_application::StatusWork) -> bool
     item.claimable_for_actor()
 }
 
-fn action_descriptor_json(
-    descriptor: &boreal_domain::actions::ActionDescriptor,
-    context_available: bool,
-) -> Value {
-    json!({
-        "action": action_kind_name(descriptor.action),
-        "target": {
-            "project_id": descriptor.target.project_id.as_str(),
-            "work_id": descriptor.target.work_id.as_str(),
-            "entity_revision": context_available.then_some(descriptor.target.revision.get()),
-        },
-        "expected_project_revision": descriptor.expected_project_revision.0,
-        "expected_entity_revision": context_available.then_some(descriptor.expected_entity_revision.get()),
-        "expected_proof_revision": context_available.then(|| descriptor.expected_proof_revision.map(|revision| revision.get())).flatten(),
-        "attempt": context_available.then(|| descriptor.attempt.as_ref().map(|attempt| json!({
-            "attempt_id": attempt.attempt_id.as_str(),
-            "fence": attempt.fence.get(),
-        }))).flatten(),
-        "required_roles": descriptor
-            .required_roles
-            .iter()
-            .map(|role| actor_role_name(*role))
-            .collect::<Vec<_>>(),
-        "required_inputs": descriptor
-            .required_inputs
-            .iter()
-            .map(|input| action_input_name(*input))
-            .collect::<Vec<_>>(),
-        "confirmation": descriptor.confirmation,
-        "read_only": descriptor.read_only,
-        "recovery": descriptor.recovery,
-    })
-}
-
-fn action_kind_name(value: boreal_domain::actions::ActionKind) -> &'static str {
-    use boreal_domain::actions::ActionKind::*;
-    match value {
-        Inspect => "inspect",
-        ReadHistory => "read_history",
-        ReadOperation => "read_operation",
-        Export => "export",
-        Publish => "publish",
-        Claim => "claim",
-        AcceptAttempt => "accept_attempt",
-        StartAttempt => "start_attempt",
-        Checkpoint => "checkpoint",
-        AttachEvidence => "attach_evidence",
-        Submit => "submit",
-        RequestReview => "request_review",
-        Review => "review",
-        FinishClose => "finish_close",
-        Close => "close",
-        Stop => "stop",
-        Release => "release",
-        PausePolicy => "pause_policy",
-        ResumePolicy => "resume_policy",
-        Cancel => "cancel",
-        Reopen => "reopen",
-        ResolveHold => "resolve_hold",
-        WaiveDependency => "waive_dependency",
-        ForceGate => "force_gate",
-        Recover => "recover",
-        ReconcileResource => "reconcile_resource",
-        Repair => "repair",
-    }
-}
-
-fn action_input_name(value: boreal_domain::actions::ActionInputKind) -> &'static str {
-    use boreal_domain::actions::ActionInputKind::*;
-    match value {
-        ExpectedProjectRevision => "expected_project_revision",
-        ExpectedEntityRevision => "expected_entity_revision",
-        ExpectedProofRevision => "expected_proof_revision",
-        AttemptId => "attempt_id",
-        Fence => "fence",
-        SessionId => "session_id",
-        OperationId => "operation_id",
-        Confirmation => "confirmation",
-        Reason => "reason",
-        Comment => "comment",
-        Evidence => "evidence",
-        Summary => "summary",
-        ReviewDecision => "review_decision",
-        RecoveryDisposition => "recovery_disposition",
-    }
-}
-
-fn actor_role_name(value: boreal_domain::ActorRole) -> &'static str {
-    match value {
-        boreal_domain::ActorRole::Agent => "agent",
-        boreal_domain::ActorRole::Reviewer => "reviewer",
-        boreal_domain::ActorRole::Operator => "operator",
-        boreal_domain::ActorRole::Publisher => "publisher",
-    }
-}
-
-fn action_denial_code(value: &boreal_domain::actions::ActionDenialReason) -> &'static str {
-    use boreal_domain::actions::ActionDenialReason::*;
-    match value {
-        Unauthenticated => "unauthenticated",
-        ScopeMismatch => "scope_mismatch",
-        InvalidFacts => "invalid_facts",
-        AvailabilityUnavailable(_) => "availability_unavailable",
-        IntegrityQuarantined => "integrity_quarantined",
-        IntegrityDegraded => "integrity_degraded",
-        RoleDenied { .. } => "role_denied",
-        DelegationInvalid => "delegation_invalid",
-        PolicyDenied => "policy_denied",
-        StatusDenied(_) => "status_denied",
-        HoldActive(_) => "hold_active",
-        StaleSnapshot { .. } => "stale_snapshot",
-        StaleEntity { .. } => "stale_entity",
-        StaleProof { .. } => "stale_proof",
-        MissingAttempt => "attempt_missing",
-        StaleFence { .. } => "stale_fence",
-        AttemptOwnerMismatch => "attempt_owner_mismatch",
-        AttemptPhaseDenied(_) => "attempt_phase_denied",
-        MissingSubmission => "submission_missing",
-        ReviewNotIndependent => "review_not_independent",
-        RecoveryRequired => "recovery_required",
-        NoActiveHold => "hold_missing",
-        ActionNotApplicable => "action_not_applicable",
-    }
-}
+use boreal_application::{
+    action_denial_code, action_input_name, action_kind_name, actor_role_name,
+};
 
 fn lifecycle_name(value: PersistedLifecycle) -> &'static str {
     match value {
@@ -3732,17 +3715,16 @@ fn create_work_result(
             .collect(),
         acceptance_profile: AcceptanceProfile::focused(),
     };
-    let result = match parsed.options.expected_revision {
-        Some(expected_revision) => app.create_work_as_checked(
+    let result = app
+        .create_work_as_session_checked(
             &work,
             &parsed.options.actor,
-            Some(expected_revision),
+            &parsed.options.session,
+            parsed.options.expected_revision,
             &now(),
             operation.to_owned(),
-        ),
-        None => app.create_work_as(&work, &parsed.options.actor, &now(), operation.to_owned()),
-    }
-    .map_err(map_application_error)?;
+        )
+        .map_err(map_application_error)?;
     bounded_result(
         Some(json!({
             "project_id": result.value.project_id,
@@ -3886,6 +3868,7 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
             store,
             &project,
             &parsed.options.actor,
+            &parsed.options.session,
         )?)
     else {
         return Ok(CliResult {
@@ -4148,13 +4131,14 @@ fn next_result(
         })?;
         return next_from_guide(parsed, result.revision, guide);
     }
-    let snapshot = boreal_application::project_status_from_store(
+    let snapshot = boreal_application::project_status_from_store_for_session(
         store,
         &project,
         &boreal_domain::ActorContext {
             actor_id: ActorId::new(parsed.options.actor.clone()),
             role: boreal_domain::ActorRole::Agent,
         },
+        Some(parsed.options.session.as_str()),
         TimestampMs::from_millis(now_ms_u64()),
         1_000,
         0,
@@ -4247,15 +4231,58 @@ fn guide_for_work(
     work_id: &str,
     resume: bool,
 ) -> Result<CliResult, CliError> {
-    let work = app
-        .show_work(project, work_id)
-        .map_err(map_application_error)?;
-    let revision = store_revision(store, project)?;
-    let current = store
-        .current_attempt_for_work(project.as_str(), work_id)
-        .map_err(map_store_error)?;
-    let (display_status, state, attempt_id, fence, reason_codes, next_action) =
-        guide_state(parsed, project, &work, current.as_ref(), revision, resume)?;
+    let _ = (app, resume);
+    let (revision, item) = boreal_application::guidance_subject(
+        store,
+        project,
+        &boreal_domain::ActorContext {
+            actor_id: ActorId::new(parsed.options.actor.clone()),
+            role: boreal_domain::ActorRole::Agent,
+        },
+        Some(parsed.options.session.as_str()),
+        TimestampMs::from_millis(now_ms_u64()),
+        work_id,
+    )
+    .map_err(|error| {
+        CliError::with(
+            ErrorCode::GuidanceUnavailable,
+            ApplicationOutcome::Rejected,
+            error,
+        )
+    })?;
+    let revision = revision.0;
+    let display_status = status_name(item.status3_display_status()).to_owned();
+    let state = display_status.clone();
+    let attempt_id = item
+        .attempt
+        .as_ref()
+        .map(|attempt| attempt.attempt_id.to_string());
+    let fence = item.attempt.as_ref().map(|attempt| attempt.fence.get());
+    let reason_codes = item
+        .decision
+        .reason_codes
+        .iter()
+        .map(|reason| reason.stable_code().to_owned())
+        .collect::<Vec<_>>();
+    let selected = boreal_application::guided_action(&item);
+    let next_action=selected.map(|kind| {
+        if kind==boreal_domain::actions::ActionKind::Claim {
+            return start_action(&parsed.options,project,work_id,revision);
+        }
+        // Non-claim actions require structured proof/decision inputs. Explain the
+        // exact server descriptor via a read rather than manufacturing an argv.
+        NextActionDto {directive_id:format!("guidance.{}@v1",action_kind_name(kind)),severity:"advisory".into(),
+            title:format!("Inspect the {} action",action_kind_name(kind)),
+            instruction:"Load the current server descriptor, bind its required inputs and confirmation, then submit that action. Guidance itself is not permission.".into(),
+            subject:SubjectDto{subject_type:"work".into(),id:work_id.into()},
+            safe_argv:vec!["bwrk".into(),"work".into(),"show".into(),work_id.into(),"--project".into(),project.to_string(),"--json".into()],
+            cwd:".".into(),runner:"boreal_cli".into(),shell:false}
+    });
+    let bound_proof = item
+        .canonical_inputs
+        .as_ref()
+        .and_then(|facts| facts.requirements.as_present())
+        .map(|requirements| &requirements.proof);
     let dto = AgentGuideDto {
         kind: "agent_guide".to_owned(),
         guide_schema_version: schema::GUIDANCE.to_owned(),
@@ -4299,8 +4326,14 @@ fn guide_for_work(
         provenance: GuidanceProvenanceDto {
             registry_version: "directives.v1".to_owned(),
             registry_path: "boreal.agent.directive.registry.v1".to_owned(),
-            source_snapshot_hash: "sha256:unknown".to_owned(),
-            config_identity: "sha256:unknown".to_owned(),
+            source_snapshot_hash: bound_proof
+                .and_then(|proof| proof.source_snapshot.as_ref())
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_else(|| "unbound".into()),
+            config_identity: bound_proof
+                .and_then(|proof| proof.configuration.as_ref())
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_else(|| "unbound".into()),
             gap_codes: reason_codes,
             workflow_refs: vec![
                 "boreal.workflow.claim.v1".to_owned(),
@@ -4310,112 +4343,6 @@ fn guide_for_work(
         selection_key: format!("{}|{}|agent.guide@v1", work_id, revision),
     };
     typed_result(ApplicationOutcome::Unchanged, Some(revision), dto)
-}
-
-type GuideState = (
-    String,
-    String,
-    Option<String>,
-    Option<u64>,
-    Vec<String>,
-    Option<NextActionDto>,
-);
-
-fn guide_state(
-    parsed: &ParsedCommand,
-    project: &ProjectId,
-    work: &boreal_store::WorkRecord,
-    current: Option<&AttemptRecord>,
-    revision: u64,
-    _resume: bool,
-) -> Result<GuideState, CliError> {
-    if let Some(attempt) = current {
-        let expired = attempt.phase == AttemptPhase::ExpiryPending
-            || now_ms_u64() >= parse_stamp_ms(&attempt.lease_deadline).unwrap_or(u64::MAX);
-        return Ok((
-            phase_status(attempt.phase).to_owned(),
-            if expired {
-                "expired_review"
-            } else {
-                "active_attempt"
-            }
-            .to_owned(),
-            Some(attempt.attempt_id.clone()),
-            Some(attempt.fence),
-            vec![if expired {
-                "expired_review"
-            } else {
-                "attempt.active"
-            }
-            .to_owned()],
-            (!expired).then(|| resume_action(&parsed.options, project, &attempt.work_id, attempt)),
-        ));
-    }
-    let derived = if work.lifecycle == "closed" {
-        boreal_domain::DerivedStatus::Closed
-    } else if work.dispatch_policy == "automatic" && work.lifecycle == "open" {
-        boreal_domain::DerivedStatus::Ready
-    } else {
-        boreal_domain::DerivedStatus::Blocked
-    };
-    let reasons = if derived == boreal_domain::DerivedStatus::Ready {
-        Vec::new()
-    } else {
-        vec!["blocked_work".to_owned()]
-    };
-    let directive = guide_checked(boreal_application::GuidanceContext {
-        work_id: work.work_id.as_str(),
-        status: derived,
-        reason_codes: &reasons,
-        has_goal: true,
-    })
-    .map_err(|error| {
-        CliError::with(
-            ErrorCode::GuidanceUnavailable,
-            ApplicationOutcome::Failed,
-            error.to_string(),
-        )
-    })?;
-    let action = if derived == boreal_domain::DerivedStatus::Ready {
-        Some(start_action(
-            &parsed.options,
-            project,
-            &work.work_id,
-            revision,
-        ))
-    } else {
-        Some(NextActionDto {
-            directive_id: directive.registry_id.to_owned(),
-            severity: "blocking".to_owned(),
-            title: directive.explanation.to_owned(),
-            instruction: directive.explanation.to_owned(),
-            subject: SubjectDto {
-                subject_type: "work".to_owned(),
-                id: work.work_id.clone(),
-            },
-            safe_argv: directive
-                .safe_argv
-                .iter()
-                .map(|value| value.to_string())
-                .collect(),
-            cwd: ".".to_owned(),
-            runner: "boreal_cli".to_owned(),
-            shell: false,
-        })
-    };
-    Ok((
-        format!("{derived:?}").to_ascii_lowercase(),
-        if derived == boreal_domain::DerivedStatus::Ready {
-            "ready"
-        } else {
-            "blocked"
-        }
-        .to_owned(),
-        None,
-        None,
-        reasons,
-        action,
-    ))
 }
 
 fn guide_idle(
@@ -4765,14 +4692,21 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         }
         Err(error) => return Err(map_application_error(error)),
     };
-    let submitted = attempt_mutation_result(
-        parsed,
-        app,
-        adapter,
-        &sub_operation(operation, "submit"),
-        store,
-        AttemptOperation::Submit,
-    )?;
+    let submitted = app
+        .prepare_finish(
+            adapter,
+            attempt_request(
+                &ProjectId::new(project.clone()),
+                &work_id,
+                &AttemptId::new(expected_attempt),
+                &parsed.options,
+                Fence::new(expected_fence),
+                &sub_operation(operation, "submit"),
+                AttemptOperation::Submit.command_identity(),
+                parsed.options.reason.as_deref(),
+            )?,
+        )
+        .map_err(map_application_error)?;
     let summary_result = app
         .record_summary(
             &parsed.options.actor,
@@ -4819,7 +4753,7 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         ApplicationOutcome::Changed
     };
     let close_data = json!({
-        "attempt": submitted.data,
+        "attempt": submitted.as_ref().map(|result| attempt_json_with_current(&result.value, true)),
         "receipt_id": receipt.receipt_id.as_str(),
         "receipt_replayed": receipt_replayed,
         "summary_id": summary.summary_id,
@@ -5110,13 +5044,14 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             "evidence run requires an accepted and started attempt",
         ));
     }
-    let status = boreal_application::project_status_from_store(
+    let status = boreal_application::project_status_from_store_for_session(
         store,
         &project,
         &boreal_domain::ActorContext {
             actor_id: ActorId::new(parsed.options.actor.clone()),
             role: boreal_domain::ActorRole::Agent,
         },
+        Some(parsed.options.session.as_str()),
         TimestampMs::from_millis(now_ms_u64()),
         1_000,
         0,
@@ -6880,14 +6815,16 @@ fn select_claimable_work(
     store: &SqliteStore,
     project: &ProjectId,
     actor: &str,
+    session: &str,
 ) -> Result<Option<String>, CliError> {
-    let snapshot = boreal_application::project_status_from_store(
+    let snapshot = boreal_application::project_status_from_store_for_session(
         store,
         project,
         &boreal_domain::ActorContext {
             actor_id: ActorId::new(actor.to_owned()),
             role: boreal_domain::ActorRole::Agent,
         },
+        Some(session),
         TimestampMs::from_millis(now_ms_u64()),
         1_000,
         0,

@@ -175,8 +175,8 @@ class Screen {
         if (theme === "mono")
             return this.plain();
         const map = theme === "light"
-            ? { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[34;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m", selected: "\x1b[7;1m", heading: "\x1b[1m", border: "\x1b[90m" }
-            : { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[36;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m", selected: "\x1b[7;1m", heading: "\x1b[1m", border: "\x1b[90m" };
+            ? { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[34;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m", selected: "\x1b[7;1m", selected_danger: "\x1b[31;7;1m", heading: "\x1b[1m", border: "\x1b[90m" }
+            : { text: "\x1b[0m", muted: "\x1b[90m", accent: "\x1b[36;1m", good: "\x1b[32m", warn: "\x1b[33m", danger: "\x1b[31;1m", selected: "\x1b[7;1m", selected_danger: "\x1b[31;7;1m", heading: "\x1b[1m", border: "\x1b[90m" };
         return this.cells.map((row) => {
             let tone = null, result = "";
             for (const cell of row) {

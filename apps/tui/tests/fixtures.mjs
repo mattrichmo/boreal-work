@@ -32,6 +32,17 @@ export function fixtureView() {
         activity: [{ kind: 'created', occurred_at: '2026-09-18T19:10:00Z', actor_id: 'operator', summary: 'Work added to the operator-experience sprint.' }, { kind: 'dependency_satisfied', occurred_at: '2026-09-18T20:42:00Z', actor_id: 'test-agent', summary: 'UTF-8 input handling verified.' }],
         attempt: status === 'in_progress' ? { attempt_id: 'attempt-' + id, fence: 4, phase: 'running', actor_id: 'operator', lease_deadline: '2026-09-18T23:00:00Z' } : null,
     }));
+    // Explicit mock-server actions, not client-side fallback policy.
+    for (const item of items) {
+        const names = ['claim','accept_attempt','attach_evidence','finish_close','release'];
+        const allowed = item.status === 'ready' ? ['claim'] : item.status === 'in_progress'
+            ? ['attach_evidence','release'] : [];
+        const descriptor = action => ({action,target:{project_id:item.project_id,work_id:item.work_id,entity_revision:1},
+            expected_project_revision:248,expected_entity_revision:1,expected_proof_revision:1,attempt:item.attempt,
+            required_roles:['agent'],required_inputs:[],confirmation:'Confirm this fixture action',read_only:false,recovery:false});
+        item.actions = {allowed:allowed.map(descriptor),denied:names.filter(name=>!allowed.includes(name)).map(action=>({
+            descriptor:descriptor(action),reason:{code:'fixture_denial',detail:'The mock server denies this action'},recovery:['inspect']}))};
+    }
     const selected = items[0];
     return {
         mounted: true,

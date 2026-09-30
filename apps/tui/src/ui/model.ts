@@ -8,9 +8,13 @@ export const FILTERS: readonly {
 }[] = [
     { id: "all", label: "All work", key: "1" }, { id: "ready", label: "Ready", key: "2" },
     { id: "active", label: "In progress", key: "3" }, { id: "blocked", label: "Blocked", key: "4" },
-    { id: "expired", label: "Needs review", key: "5" }, { id: "closed", label: "Closed", key: "6" },
+    { id: "expired", label: "Expired work", key: "5" }, { id: "closed", label: "Closed", key: "6" },
     { id: "milestones", label: "Milestones", key: "7" }, { id: "sprints", label: "Sprints", key: "8" },
     { id: "tasks", label: "Tasks", key: "9" },
+    { id: "review", label: "Awaiting review", key: "" },
+    { id: "failed", label: "Failed execution", key: "" },
+    { id: "held", label: "Operator holds", key: "" },
+    { id: "corrupt", label: "Damaged records", key: "" },
 ];
 export const ACTION_NAMES: Record<TuiAction, string> = { create_project: "Initialize project", create_work: "Create work", claim: "Claim work", accept_start: "Start work", evidence: "Attach evidence", finish: "Finish & close", release: "Release claim" };
 export type Focus = "navigation" | "queue" | "inspector";
@@ -86,11 +90,15 @@ export function initialState(view: MountedView, theme: Theme = "dark", ascii = f
         focus: "queue", navIndex: 0, inspectorTab: 0, inspectorOffset: 0, detailOnly: false, sort: "service", frozen: false,
         status: "Ready. Select work to inspect its next available action.", error: false, busy: null, density: "auto", zen: false, theme, ascii, modal: null };
 }
-export function itemStatus(item: StatusItem): string { return item.display_status ?? item.status; }
+export function itemStatus(item: StatusItem): string { return item.diagnostic ? "corrupt" : item.display_status ?? item.status; }
 export function matches(item: StatusItem, filter: DashboardFilter): boolean {
     const s = itemStatus(item);
     if (filter === "all")
         return true;
+    if (filter === "review") return s === "awaiting_review";
+    if (filter === "failed") return item.reason_codes.some(reason => reason.includes("failed") || reason.includes("rejected") || reason.includes("returned"));
+    if (filter === "held") return item.reason_codes.some(reason => reason.includes("hold"));
+    if (filter === "corrupt") return !!item.diagnostic || s === "corrupt";
     if (filter === "active")
         return ["claimed", "in_progress", "needs_verification", "awaiting_review", "complete"].includes(s);
     if (filter === "expired")
