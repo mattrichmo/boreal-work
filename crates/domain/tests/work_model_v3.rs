@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use boreal_domain::work_model_v3::{
     evaluate_container_closeout, evaluate_schedule, validate_container_dispositions,
@@ -7,8 +7,8 @@ use boreal_domain::work_model_v3::{
     ContainerDisposition, Cycle, CycleAssignment, CycleAssignmentState, CycleId, DecompositionKind,
     DirectDependency, DispositionKind, ExecutionMode, FoldPolicy, GapPolicy, IntakeBucketId,
     IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle, IntakePromotion, IntakeStatus,
-    LocalDate, LocalDateTime, LocalTime, PromotionId, PromotionTargetKind, RecurrenceEnd,
-    TimeResolution, WeeklyRecurrence, WorkNode, WorkSchedule,
+    LocalDate, LocalDateTime, LocalTime, ModelError, PromotionId, PromotionTargetKind,
+    RecurrenceEnd, TimeResolution, WeeklyRecurrence, WorkNode, WorkSchedule,
 };
 use boreal_domain::{ProjectId, TimestampMs, WorkId};
 
@@ -393,19 +393,217 @@ fn container_closeout_requires_current_dispositions_and_own_summary() {
         supersedes_id: None,
     };
     assert!(validate_container_dispositions(&container, &[child], &[disposition]).is_ok());
-    let accepted = HashSet::from([work("t")])
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let make_deferred = |id: &str, supersedes_id: &str| ContainerDisposition {
+        id: CloseoutDispositionId::new(id),
+        container_id: container.id.clone(),
+        descendant_id: work("t"),
+        project_id: project(),
+        kind: DispositionKind::Deferred,
+        descendant_revision: 8,
+        descendant_outcome_digest: "sha256:deferred".into(),
+        replacement_id: None,
+        reason: Some("deferred with reason".into()),
+        supersedes_id: Some(CloseoutDispositionId::new(supersedes_id)),
+    };
+    assert!(matches!(
+        validate_container_dispositions(
+            &container,
+            &[WorkNode::task(
+                project(),
+                work("t"),
+                ExecutionMode::Direct,
+                Some(work("m")),
+                "Task",
+            )],
+            &[
+                make_deferred("disp-a", "disp-b"),
+                make_deferred("disp-b", "disp-a")
+            ],
+        ),
+        Err(ModelError::DispositionSupersessionCycle(_))
+    ));
+    let descendants = [WorkNode::task(
+        project(),
+        work("t"),
+        ExecutionMode::Direct,
+        Some(work("m")),
+        "Task",
+    )];
+    let revisions = BTreeMap::from([(work("t"), 8)]);
+    let accepted = BTreeSet::from([work("t")]);
     assert_eq!(
-        evaluate_container_closeout(&[work("t")], &accepted, false, false, false),
+        evaluate_container_closeout(
+            &container,
+            &descendants,
+            &[],
+            &revisions,
+            &accepted,
+            false,
+            false,
+            false,
+        )
+        .unwrap()
+        .readiness,
         ContainerCloseoutReadiness::Closing
     );
     assert_eq!(
-        evaluate_container_closeout(&[work("t")], &accepted, false, true, true),
+        evaluate_container_closeout(
+            &container,
+            &descendants,
+            &[],
+            &revisions,
+            &accepted,
+            false,
+            true,
+            true,
+        )
+        .unwrap()
+        .readiness,
         ContainerCloseoutReadiness::ReadyToClose
     );
     assert_eq!(
-        evaluate_container_closeout(&[work("t"), work("missing")], &accepted, false, true, true),
+        evaluate_container_closeout(
+            &container,
+            &[
+                descendants[0].clone(),
+                WorkNode::task(
+                    project(),
+                    work("missing"),
+                    ExecutionMode::Direct,
+                    Some(work("m")),
+                    "Missing",
+                ),
+            ],
+            &[],
+            &revisions,
+            &accepted,
+            false,
+            true,
+            true,
+        )
+        .unwrap()
+        .readiness,
         ContainerCloseoutReadiness::Attention
     );
+}
+
+#[test]
+fn replacement_scope_waits_for_replacement_and_never_forges_task_acceptance() {
+    let container = WorkNode::milestone(project(), work("m"), "Milestone");
+    let old = WorkNode::task(
+        project(),
+        work("old"),
+        ExecutionMode::Direct,
+        Some(work("m")),
+        "Old task",
+    );
+    let replacement = WorkNode::task(
+        project(),
+        work("replacement"),
+        ExecutionMode::Direct,
+        Some(work("m")),
+        "Replacement task",
+    );
+    let descendants = [old.clone(), replacement.clone()];
+    let revisions = BTreeMap::from([(work("old"), 3), (work("replacement"), 1)]);
+    let replaced = ContainerDisposition {
+        id: CloseoutDispositionId::new("disp-replaced"),
+        container_id: work("m"),
+        descendant_id: work("old"),
+        project_id: project(),
+        kind: DispositionKind::Replaced,
+        descendant_revision: 3,
+        descendant_outcome_digest: "sha256:old-state".into(),
+        replacement_id: Some(work("replacement")),
+        reason: Some("superseded by replacement task".into()),
+        supersedes_id: None,
+    };
+
+    let pending = evaluate_container_closeout(
+        &container,
+        &descendants,
+        &[replaced.clone()],
+        &revisions,
+        &BTreeSet::new(),
+        false,
+        true,
+        true,
+    )
+    .unwrap();
+    assert_eq!(pending.readiness, ContainerCloseoutReadiness::Attention);
+    assert_eq!(pending.unresolved, vec![work("replacement")]);
+    assert!(pending.accepted_closed.is_empty());
+    assert!(!pending.scope_reconciled);
+
+    let closed = evaluate_container_closeout(
+        &container,
+        &descendants,
+        &[replaced],
+        &revisions,
+        &BTreeSet::from([work("replacement")]),
+        false,
+        true,
+        true,
+    )
+    .unwrap();
+    assert_eq!(closed.readiness, ContainerCloseoutReadiness::ReadyToClose);
+    assert!(closed.scope_reconciled);
+    assert!(closed.all_successful);
+    assert_eq!(closed.accepted_closed, vec![work("replacement")]);
+    assert_eq!(closed.effective_scope, vec![work("replacement")]);
+}
+
+#[test]
+fn deferral_reconciles_scope_but_is_not_success_and_stale_disposition_is_ignored() {
+    let container = WorkNode::milestone(project(), work("m"), "Milestone");
+    let child = WorkNode::task(
+        project(),
+        work("deferred"),
+        ExecutionMode::Direct,
+        Some(work("m")),
+        "Deferred",
+    );
+    let deferred = ContainerDisposition {
+        id: CloseoutDispositionId::new("disp-deferred"),
+        container_id: work("m"),
+        descendant_id: work("deferred"),
+        project_id: project(),
+        kind: DispositionKind::Deferred,
+        descendant_revision: 4,
+        descendant_outcome_digest: "sha256:deferred-state".into(),
+        replacement_id: None,
+        reason: Some("moved out of current milestone scope".into()),
+        supersedes_id: None,
+    };
+    let report = evaluate_container_closeout(
+        &container,
+        &[child.clone()],
+        &[deferred.clone()],
+        &BTreeMap::from([(work("deferred"), 4)]),
+        &BTreeSet::new(),
+        false,
+        true,
+        true,
+    )
+    .unwrap();
+    assert_eq!(report.readiness, ContainerCloseoutReadiness::ReadyToClose);
+    assert!(report.scope_reconciled);
+    assert!(!report.all_successful);
+    assert_eq!(report.settled_non_success, vec![work("deferred")]);
+    assert!(report.accepted_closed.is_empty());
+
+    let stale = evaluate_container_closeout(
+        &container,
+        &[child],
+        &[deferred],
+        &BTreeMap::from([(work("deferred"), 5)]),
+        &BTreeSet::new(),
+        false,
+        true,
+        true,
+    )
+    .unwrap();
+    assert_eq!(stale.readiness, ContainerCloseoutReadiness::Attention);
+    assert_eq!(stale.stale_dispositions, vec![work("deferred")]);
+    assert_eq!(stale.unresolved, vec![work("deferred")]);
 }

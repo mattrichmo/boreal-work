@@ -1,3 +1,4 @@
+use boreal_application::cycle_runtime::ContainerDispositionInput;
 use boreal_application::{
     CycleAssignment, CycleAssignmentState, CycleId, CycleInstance, CycleLifecycle, CycleSeries,
     CycleSeriesLifecycle, CycleTemplate, ExecutionMode, FoldPolicy, GapPolicy, IntakeBucket,
@@ -6,7 +7,8 @@ use boreal_application::{
     WorkApplication, WorkNode,
 };
 use boreal_domain::{
-    AcceptanceProfile, DispatchPolicy, PersistedLifecycle, ProjectId, SessionId, WorkId, WorkItem,
+    work_model_v3::DispositionKind, AcceptanceProfile, DispatchPolicy, PersistedLifecycle,
+    ProjectId, SessionId, WorkId, WorkItem,
 };
 use boreal_store::SqliteStore;
 
@@ -36,6 +38,125 @@ fn work(
 fn scope(store: &SqliteStore, project_id: &ProjectId) -> PlanningScope {
     PlanningScope::new(project_id.clone(), "agent-1")
         .at_revision(store.project_revision(project_id.as_str()).unwrap().0)
+}
+
+#[test]
+fn container_readiness_uses_scope_dispositions_without_minting_task_acceptance() {
+    let store = SqliteStore::open_in_memory(SCHEMA_V2).unwrap();
+    let app = WorkApplication::new(&store);
+    let project = ProjectId::new("container-closeout");
+    app.init_project(
+        &project,
+        "agent-1",
+        "agent",
+        "cred",
+        "Agent",
+        "unix-ms:1",
+        "op-init",
+    )
+    .unwrap();
+    for (id, kind, parent_id) in [
+        ("milestone", boreal_domain::WorkKind::Milestone, None),
+        ("old-task", boreal_domain::WorkKind::Task, Some("milestone")),
+        (
+            "replacement-task",
+            boreal_domain::WorkKind::Task,
+            Some("milestone"),
+        ),
+    ] {
+        app.create_work_as(
+            &work(&project, id, kind, parent_id),
+            "agent-1",
+            "unix-ms:2",
+            &format!("op-{id}"),
+        )
+        .unwrap();
+    }
+    app.ensure_work_model_v3().unwrap();
+    store
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS boreal_accepted_outcome (
+                 outcome_id TEXT, project_id TEXT, work_id TEXT, submission_id TEXT,
+                 close_intent_id TEXT, proof_revision INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS boreal_submission (
+                 submission_id TEXT, project_id TEXT, work_id TEXT, proof_revision INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS close_intent (close_intent_id TEXT, work_id TEXT, state TEXT);
+             CREATE TABLE IF NOT EXISTS boreal_outcome_invalidation (outcome_id TEXT);",
+        )
+        .unwrap();
+
+    let initial = app
+        .container_scope_readiness_v3(&project, "milestone")
+        .unwrap();
+    assert_eq!(
+        initial.decision.readiness,
+        boreal_domain::work_model_v3::ContainerCloseoutReadiness::Attention
+    );
+    assert_eq!(initial.decision.unresolved.len(), 2);
+    assert_eq!(
+        initial.closeout_inputs_pending,
+        vec!["container planning profile", "container summary"]
+    );
+
+    let old_revision = store
+        .work_revisions(project.as_str(), "old-task")
+        .unwrap()
+        .0;
+    app.append_planning_disposition(
+        &scope(&store, &project),
+        "op-replace-old",
+        &ContainerDispositionInput {
+            disposition_id: "replace-old".into(),
+            container_work_id: "milestone".into(),
+            descendant_work_id: "old-task".into(),
+            kind: DispositionKind::Replaced,
+            expected_descendant_entity_revision: old_revision,
+            replacement_work_id: Some("replacement-task".into()),
+            reason: Some("replacement task owns the remaining scope".into()),
+            supersedes_id: None,
+        },
+        "unix-ms:5",
+    )
+    .unwrap();
+    let after_replacement = app
+        .container_scope_readiness_v3(&project, "milestone")
+        .unwrap();
+    assert_eq!(
+        after_replacement.decision.unresolved,
+        vec![WorkId::new("replacement-task")]
+    );
+    assert!(!store
+        .has_accepted_outcome(project.as_str(), "old-task")
+        .unwrap());
+    assert!(!store
+        .has_accepted_outcome(project.as_str(), "replacement-task")
+        .unwrap());
+
+    let revision = store
+        .work_revisions(project.as_str(), "replacement-task")
+        .unwrap()
+        .0;
+    let fake_close = app.append_planning_disposition(
+        &scope(&store, &project),
+        "op-fake-task-close",
+        &ContainerDispositionInput {
+            disposition_id: "fake-close".into(),
+            container_work_id: "milestone".into(),
+            descendant_work_id: "replacement-task".into(),
+            kind: DispositionKind::AcceptedClosed,
+            expected_descendant_entity_revision: revision,
+            replacement_work_id: None,
+            reason: None,
+            supersedes_id: None,
+        },
+        "unix-ms:6",
+    );
+    assert!(fake_close.is_err());
+    assert!(!store
+        .has_accepted_outcome(project.as_str(), "replacement-task")
+        .unwrap());
 }
 
 #[test]

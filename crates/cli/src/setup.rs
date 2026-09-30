@@ -320,6 +320,7 @@ pub(super) fn prepare(parsed: &ParsedCommand) -> Result<SetupPlan, CliError> {
     } else {
         PathBuf::from(&parsed.options.db)
     };
+    let database = super::project_context::confined_path(&project_root, &database, true)?;
     let mut memory_layout = parsed
         .options
         .setup
@@ -850,7 +851,7 @@ fn project_config(plan: &SetupPlan, existing: &Path) -> Result<String, CliError>
 
 fn project_gitignore_block() -> String {
     format!(
-        "{GITIGNORE_MARKER}\n.boreal/runtime/\n.boreal/cache/\n.boreal/tmp/\n.boreal/results/\n.boreal/gates/\n.boreal/boreal.sqlite\n.boreal/boreal.sqlite-*\n"
+        "{GITIGNORE_MARKER}\n.boreal/credentials/\n.boreal/runtime/\n.boreal/cache/\n.boreal/tmp/\n.boreal/results/\n.boreal/gates/\n.boreal/boreal.sqlite\n.boreal/boreal.sqlite-*\n"
     )
 }
 

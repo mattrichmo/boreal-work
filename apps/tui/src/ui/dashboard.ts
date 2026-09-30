@@ -105,11 +105,11 @@ function queue(screen: Screen, r: Rect, view: MountedView, state: DashboardState
         if (p.height > 1) screen.text(p.x, p.y + 1, clip(view.monitoring?.has_more ? "] next page · v views" : "n new work · v views", p.width), "muted", p.width);
     }
     items.slice(start, start + p.height).forEach((item, i) => {
-        const selected = item.work_id === state.selectedId, rt: Tone = selected ? "selected" : "text", y = p.y + i;
+        const selected = item.work_id === state.selectedId, rt: Tone = item.diagnostic ? (selected ? "selected_danger" : "danger") : selected ? "selected" : "text", y = p.y + i;
         screen.text(p.x, y, fit(`${selected ? "> " : "  "}${clip(item.title ?? item.work_id, tw)}`, p.width), rt, p.width);
-        const stateLabel = sw < 10 ? ({ in_progress: "Active", needs_verification: "Verify", expired_review: "Review", awaiting_review: "Review" }[itemStatus(item)] ?? label(itemStatus(item))) : label(itemStatus(item));
+        const stateLabel = item.diagnostic ? (sw < 10 ? "Damaged" : "Quarantined") : sw < 10 ? ({ in_progress: "Active", needs_verification: "Verify", expired_review: "Review", awaiting_review: "Review" }[itemStatus(item)] ?? label(itemStatus(item))) : label(itemStatus(item));
         let x = p.x + 2 + tw + gap;
-        screen.text(x, y, fit(stateLabel, sw), selected ? "selected" : tone(itemStatus(item)), sw); x += sw;
+        screen.text(x, y, fit(stateLabel, sw), item.diagnostic ? rt : selected ? "selected" : tone(itemStatus(item)), sw); x += sw;
         screen.text(x, y, fit(item.work_id, iw), selected ? "selected" : "muted", iw); x += iw;
         screen.text(x, y, fit(item.priority ?? "—", pw), selected ? "selected" : "muted", pw); x += pw;
         screen.text(x, y, fit(item.kind ?? "work", kw), selected ? "selected" : "muted", kw); x += kw;

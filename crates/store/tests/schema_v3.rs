@@ -4,6 +4,7 @@
 //! boundary and direct SQL constraint fixtures.  The v2 tables remain
 //! compatible while the store validates the complete v3 extension.
 
+use boreal_store::cycle_commands::ContainerDispositionV3Request;
 use boreal_store::{
     AuditEventRecord, ContainerDispositionV3Input, CycleAssignmentV3Input, CycleSeriesV3Input,
     CycleTemplateV3Input, CycleV3Input, IntakeBucketV3Input, IntakeItemV3Input,
@@ -203,6 +204,7 @@ fn store_v3_mutations_use_revisions_audit_and_typed_replay() {
     let context = |operation_id: &str, request_digest: &str| V3MutationContext {
         project_id: "p1".to_owned(),
         actor_id: "agent-1".to_owned(),
+        session_id: None,
         operation_id: operation_id.to_owned(),
         request_digest: request_digest.to_owned(),
         expected_revision: None,
@@ -430,6 +432,7 @@ fn v3_replay_requires_actor_session_subject_and_revision_identity() {
     let context = |actor_id: &str, expected_revision: Option<u64>| V3MutationContext {
         project_id: "p1".to_owned(),
         actor_id: actor_id.to_owned(),
+        session_id: None,
         operation_id: "op-identity".to_owned(),
         request_digest: "sha256:identity".to_owned(),
         expected_revision,
@@ -1017,4 +1020,139 @@ fn container_dispositions_are_append_only_chain_tips() {
                  'accepted_closed', 1, 'sha256:bad', 'direct-a', 't3');",
         "CHECK constraint failed",
     );
+}
+
+#[test]
+fn checked_container_dispositions_bind_scope_revision_and_accepted_outcome() {
+    let store = store_v3();
+    seed_base(&store);
+    seed_nodes(&store);
+    store
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS boreal_accepted_outcome (
+                 outcome_id TEXT, project_id TEXT, work_id TEXT, submission_id TEXT,
+                 close_intent_id TEXT, proof_revision INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS boreal_submission (
+                 submission_id TEXT, project_id TEXT, work_id TEXT, proof_revision INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS close_intent (close_intent_id TEXT, work_id TEXT, state TEXT);
+             CREATE TABLE IF NOT EXISTS boreal_outcome_invalidation (outcome_id TEXT);
+             INSERT INTO boreal_entity_revision
+                 (project_id, work_id, entity_revision, proof_revision, updated_at)
+             SELECT project_id, work_id, 1, 1, 't0' FROM work_item WHERE project_id = 'p1';",
+        )
+        .expect("canonical work revision cursors seed");
+    let context = |operation_id: &str| V3MutationContext {
+        project_id: "p1".to_owned(),
+        actor_id: "agent-1".to_owned(),
+        session_id: None,
+        operation_id: operation_id.to_owned(),
+        request_digest: format!("sha256:{operation_id}"),
+        expected_revision: None,
+        now: "t1".to_owned(),
+    };
+
+    let snapshot = store
+        .container_closeout_snapshot_v3("p1", "container-1")
+        .expect("container scope snapshot reads");
+    assert_eq!(snapshot.container.work_id, "container-1");
+    assert_eq!(
+        snapshot
+            .descendants
+            .iter()
+            .map(|node| node.work_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["container-2", "direct-a", "direct-b"]
+    );
+    assert!(!snapshot.unresolved_holds);
+    assert!(!store.has_accepted_outcome("p1", "direct-a").unwrap());
+
+    let revision = store.work_revisions("p1", "direct-a").unwrap().0;
+    let deferred = ContainerDispositionV3Request {
+        disposition_id: "defer-direct-a".to_owned(),
+        container_work_id: "container-1".to_owned(),
+        descendant_work_id: "direct-a".to_owned(),
+        kind: "deferred".to_owned(),
+        expected_descendant_entity_revision: revision,
+        replacement_work_id: None,
+        reason: Some("carry this item into a later milestone".to_owned()),
+        supersedes_id: None,
+    };
+    store
+        .append_container_disposition_checked_v3(&context("op-defer-a"), &deferred)
+        .expect("reasoned in-scope deferral is recorded");
+    assert_eq!(
+        store
+            .current_container_disposition_v3("p1", "container-1", "direct-a")
+            .unwrap()
+            .unwrap()
+            .kind,
+        "deferred"
+    );
+    assert!(!store.has_accepted_outcome("p1", "direct-a").unwrap());
+
+    let accepted_without_outcome = ContainerDispositionV3Request {
+        disposition_id: "fake-closed-a".to_owned(),
+        container_work_id: "container-1".to_owned(),
+        descendant_work_id: "direct-a".to_owned(),
+        kind: "accepted_closed".to_owned(),
+        expected_descendant_entity_revision: revision,
+        replacement_work_id: None,
+        reason: None,
+        supersedes_id: Some("defer-direct-a".to_owned()),
+    };
+    assert!(store
+        .append_container_disposition_checked_v3(
+            &context("op-fake-closed-a"),
+            &accepted_without_outcome,
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .current_container_disposition_v3("p1", "container-1", "direct-a")
+            .unwrap()
+            .unwrap()
+            .disposition_id,
+        "defer-direct-a",
+        "a rejected closeout must leave the previous append-only tip intact"
+    );
+
+    let replacement = ContainerDispositionV3Request {
+        disposition_id: "replace-direct-a".to_owned(),
+        container_work_id: "container-1".to_owned(),
+        descendant_work_id: "direct-a".to_owned(),
+        kind: "replaced".to_owned(),
+        expected_descendant_entity_revision: revision,
+        replacement_work_id: Some("direct-b".to_owned()),
+        reason: Some("direct-b now owns this scope".to_owned()),
+        supersedes_id: Some("defer-direct-a".to_owned()),
+    };
+    store
+        .append_container_disposition_checked_v3(&context("op-replace-a"), &replacement)
+        .expect("replacement remains in the same container scope");
+    assert_eq!(
+        store
+            .current_container_disposition_v3("p1", "container-1", "direct-a")
+            .unwrap()
+            .unwrap()
+            .disposition_id,
+        "replace-direct-a"
+    );
+    assert!(!store.has_accepted_outcome("p1", "direct-a").unwrap());
+
+    let outside_scope = ContainerDispositionV3Request {
+        disposition_id: "replace-outside".to_owned(),
+        container_work_id: "container-2".to_owned(),
+        descendant_work_id: "direct-b".to_owned(),
+        kind: "replaced".to_owned(),
+        expected_descendant_entity_revision: store.work_revisions("p1", "direct-b").unwrap().0,
+        replacement_work_id: Some("direct-a".to_owned()),
+        reason: Some("out of scope replacement".to_owned()),
+        supersedes_id: None,
+    };
+    assert!(store
+        .append_container_disposition_checked_v3(&context("op-replace-outside"), &outside_scope)
+        .is_err());
+    assert!(!store.has_accepted_outcome("p1", "direct-b").unwrap());
 }

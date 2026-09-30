@@ -8,6 +8,11 @@ The baseline is `boreal-v2-reference-20260921T195305840Z.zip`, SHA-256 `09d72813
 
 ## Start here
 
+For the current implementation pass, start with the [lean implementation
+handoff](BWRK_IMPLEMENTATION_HANDOFF.md) and the [model prompt](MODEL_IMPLEMENTATION_PROMPT.md).
+Those files are the active execution request for a complete code pass; the
+larger plan below is retained as reference context and historical rationale.
+
 1. Read [MASTER_PLAN.md](MASTER_PLAN.md), [release scope](RELEASE_SCOPE.md), [owner decisions](reference/DECISION_REGISTER.md), and [parallel dispatch rules](execution/PARALLEL_DISPATCH.md).
 2. Read the [multi-agent stream plan](execution/MULTI_AGENT_STREAM_PLAN.md) before dispatching concurrent work. It is the operational overlay for wave scheduling, stream ownership, checkpoints, and merge order; it does not replace the machine-readable graph.
 3. Read the current [STATE.json](execution/STATE.json) and run the plan helper's graph-readiness check. Resume from accepted, rejected, and blocked evidence; do not reset the ledger to the original empty-state example.

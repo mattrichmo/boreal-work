@@ -2065,14 +2065,17 @@ fn parse_legacy_work(
     let title = optional_string(map, &["title", "name"])
         .filter(|value| !value.is_empty())
         .ok_or_else(|| LegacyRecordError::Unsupported("work title is required".to_owned()))?;
-    let lifecycle = match optional_string(map, &["lifecycle", "status"])
-        .unwrap_or_else(|| "open".to_owned())
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    let historical_status =
+        optional_string(map, &["lifecycle", "status"]).unwrap_or_else(|| "open".to_owned());
+    let historical_completion = matches!(
+        historical_status.to_ascii_lowercase().as_str(),
+        "closed" | "done" | "complete" | "completed" | "archived"
+    );
+    let lifecycle = match historical_status.to_ascii_lowercase().as_str() {
         "draft" | "planned" => Lifecycle::Draft,
         "open" | "active" | "ready" | "in_progress" => Lifecycle::Open,
-        "closed" | "done" | "complete" | "completed" | "archived" => Lifecycle::Closed,
+        // v1 completion has no source-bound v2 submission/accepted outcome.
+        "closed" | "done" | "complete" | "completed" | "archived" => Lifecycle::Draft,
         "cancelled" | "canceled" => Lifecycle::Cancelled,
         other => {
             return Err(LegacyRecordError::Unsupported(format!(
@@ -2080,13 +2083,23 @@ fn parse_legacy_work(
             )))
         }
     };
+    let mut description = optional_string(map, &["description"]).unwrap_or_default();
+    if historical_completion {
+        description.push_str("\n\n[Historical import disposition] ");
+        description.push_str(
+            &serde_json::json!({"legacy_status": historical_status,
+            "v2_disposition": "draft_requires_acceptance", "accepted_outcome": false,
+            "reason": "Historical completion is retained as provenance, not accepted v2 proof."})
+            .to_string(),
+        );
+    }
     Ok(WorkRecord {
         id,
         project_id: record_project,
         kind,
         parent_id,
         title,
-        description: optional_string(map, &["description"]).unwrap_or_default(),
+        description,
         lifecycle,
     })
 }

@@ -529,6 +529,12 @@ pub struct Publisher {
 }
 
 impl Publisher {
+    /// Construct a read-only/deferred handle. Filesystem preparation belongs to
+    /// the admitted publication callback, not request validation or readback.
+    pub fn deferred(root: MemoryRoot) -> Self {
+        Self { root }
+    }
+
     pub fn new(root: MemoryRoot) -> Result<Self, PublishError> {
         // Construction may create the managed directories and initialize the
         // Git repository. Those are publication-root mutations too, so they
@@ -574,10 +580,17 @@ impl Publisher {
     where
         J: PublicationJobPort,
     {
-        let expected = self
-            .publication_request_identity(draft, &request.operation_id)
-            .map_err(|error| error.to_string())?;
-        validate_publication_request(request, &expected)?;
+        // Stable per-entry identity is checked before admission; the merged
+        // manifest is checked only when this caller wins the side effect.
+        // Replaying an old job must not recompute its plan from today's manifest.
+        let stable =
+            publication_identity(draft, &request.operation_id).map_err(|e| e.to_string())?;
+        if stable.project_id != request.project_id
+            || stable.entry_id != request.entry_id
+            || stable.content_digest != request.content_digest
+        {
+            return Err("publication subject differs from admitted content".into());
+        }
         if draft.state != DraftState::Accepted {
             return Err("only an accepted memory draft may enter publication admission".into());
         }
@@ -586,6 +599,10 @@ impl Publisher {
         let observed_at = observed_at.to_owned();
         let expected_manifest_identity = expected_manifest_identity.map(str::to_owned);
         run_with_durable_job(jobs, &request, started_at, |_running| {
+            let expected = self
+                .publication_request_identity(draft, &request.operation_id)
+                .map_err(|e| e.to_string())?;
+            validate_publication_request(&request, &expected)?;
             let receipt = match self.publish_with_expected_base(
                 draft,
                 &request.operation_id,
@@ -693,7 +710,7 @@ impl Publisher {
         self.publish_with_expected_base(draft, operation_id, None)
     }
 
-    fn publication_request_identity(
+    pub fn publication_request_identity(
         &self,
         draft: &Draft,
         operation_id: &str,

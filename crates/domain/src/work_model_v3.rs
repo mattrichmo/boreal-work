@@ -990,7 +990,16 @@ pub fn validate_container_dispositions(
         .iter()
         .map(|node| node.id.clone())
         .collect::<BTreeSet<_>>();
-    let mut current = BTreeSet::new();
+    let by_disposition = dispositions
+        .iter()
+        .map(|disposition| (disposition.id.clone(), disposition))
+        .collect::<BTreeMap<_, _>>();
+    if by_disposition.len() != dispositions.len() {
+        return Err(ModelError::DuplicateIdentifier(
+            "container disposition id".to_owned(),
+        ));
+    }
+    let mut superseded = BTreeSet::new();
     for disposition in dispositions {
         if disposition.project_id != container.project_id
             || disposition.container_id != container.id
@@ -1001,15 +1010,58 @@ pub fn validate_container_dispositions(
                 disposition.id.clone(),
             ));
         }
-        if !current.insert(disposition.descendant_id.clone()) && disposition.supersedes_id.is_none()
-        {
-            return Err(ModelError::DuplicateCurrentDisposition(
-                disposition.descendant_id.clone(),
+        let descendant = descendants
+            .iter()
+            .find(|node| node.id == disposition.descendant_id)
+            .ok_or_else(|| ModelError::InvalidDispositionSubject(disposition.id.clone()))?;
+        if descendant.project_id != container.project_id {
+            return Err(ModelError::InvalidDispositionSubject(
+                disposition.id.clone(),
             ));
         }
+        if let Some(replacement_id) = &disposition.replacement_id {
+            let replacement = descendants.iter().find(|node| node.id == *replacement_id);
+            if replacement_id == &disposition.descendant_id
+                || replacement.is_none_or(|node| node.project_id != container.project_id)
+            {
+                return Err(ModelError::InvalidDispositionSubject(
+                    disposition.id.clone(),
+                ));
+            }
+        }
+        if let Some(supersedes_id) = &disposition.supersedes_id {
+            let prior = by_disposition
+                .get(supersedes_id)
+                .ok_or_else(|| ModelError::InvalidDispositionSubject(disposition.id.clone()))?;
+            if prior.descendant_id != disposition.descendant_id
+                || prior.container_id != disposition.container_id
+                || prior.project_id != disposition.project_id
+                || prior.id == disposition.id
+                || !superseded.insert(prior.id.clone())
+            {
+                return Err(ModelError::InvalidDispositionSubject(
+                    disposition.id.clone(),
+                ));
+            }
+        }
         match disposition.kind {
-            DispositionKind::AcceptedClosed | DispositionKind::AcceptedCancelled => {
-                if disposition.replacement_id.is_some() {
+            DispositionKind::AcceptedClosed => {
+                if disposition.replacement_id.is_some()
+                    || disposition.descendant_outcome_digest.trim().is_empty()
+                {
+                    return Err(ModelError::InvalidDispositionShape);
+                }
+            }
+            DispositionKind::AcceptedCancelled => {
+                if disposition.replacement_id.is_some()
+                    || disposition.descendant_outcome_digest.trim().is_empty()
+                    || disposition
+                        .reason
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty()
+                {
                     return Err(ModelError::InvalidDispositionShape);
                 }
             }
@@ -1039,6 +1091,32 @@ pub fn validate_container_dispositions(
             }
         }
     }
+    for disposition in dispositions {
+        let mut seen = BTreeSet::new();
+        let mut cursor = Some(disposition);
+        while let Some(current) = cursor {
+            if !seen.insert(current.id.clone()) {
+                return Err(ModelError::DispositionSupersessionCycle(
+                    disposition.descendant_id.clone(),
+                ));
+            }
+            cursor = current
+                .supersedes_id
+                .as_ref()
+                .and_then(|prior_id| by_disposition.get(prior_id).copied());
+        }
+    }
+    let mut current_by_descendant = BTreeSet::new();
+    for disposition in dispositions
+        .iter()
+        .filter(|disposition| !superseded.contains(&disposition.id))
+    {
+        if !current_by_descendant.insert(disposition.descendant_id.clone()) {
+            return Err(ModelError::DuplicateCurrentDisposition(
+                disposition.descendant_id.clone(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1049,25 +1127,252 @@ pub enum ContainerCloseoutReadiness {
     ReadyToClose,
 }
 
+/// A scope result is not a work outcome. Only IDs in `accepted_closed` may
+/// satisfy ordinary task dependencies; cancellation, deferral and replacement
+/// remain visible as non-success dispositions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContainerCloseoutReport {
+    pub readiness: ContainerCloseoutReadiness,
+    pub scope_reconciled: bool,
+    pub effective_scope: Vec<WorkId>,
+    pub accepted_closed: Vec<WorkId>,
+    pub settled_non_success: Vec<WorkId>,
+    pub stale_dispositions: Vec<WorkId>,
+    pub unresolved: Vec<WorkId>,
+    pub all_successful: bool,
+}
+
 pub fn evaluate_container_closeout(
-    required_descendants: &[WorkId],
-    accepted_dispositions: &BTreeSet<WorkId>,
+    container: &WorkNode,
+    descendants: &[WorkNode],
+    current_dispositions: &[ContainerDisposition],
+    current_entity_revisions: &BTreeMap<WorkId, u64>,
+    accepted_closed_outcomes: &BTreeSet<WorkId>,
     unresolved_holds: bool,
     gates_satisfied: bool,
     summary_present: bool,
-) -> ContainerCloseoutReadiness {
-    if unresolved_holds
-        || !required_descendants
-            .iter()
-            .all(|id| accepted_dispositions.contains(id))
-    {
-        return ContainerCloseoutReadiness::Attention;
+) -> Result<ContainerCloseoutReport, ModelError> {
+    if !container.is_container() {
+        return Err(ModelError::ContainerRequired(container.id.clone()));
     }
-    if gates_satisfied && summary_present {
+    let descendant_ids = descendants
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    let current_ids = current_dispositions
+        .iter()
+        .map(|disposition| disposition.descendant_id.clone())
+        .collect::<BTreeSet<_>>();
+    if current_ids.len() != current_dispositions.len() {
+        return Err(ModelError::DuplicateCurrentDisposition(
+            current_dispositions
+                .iter()
+                .find(|disposition| {
+                    current_dispositions
+                        .iter()
+                        .filter(|other| other.descendant_id == disposition.descendant_id)
+                        .count()
+                        > 1
+                })
+                .map(|disposition| disposition.descendant_id.clone())
+                .unwrap_or_else(|| container.id.clone()),
+        ));
+    }
+    for disposition in current_dispositions {
+        if disposition.project_id != container.project_id
+            || disposition.container_id != container.id
+            || !descendant_ids.contains(&disposition.descendant_id)
+            || disposition.descendant_id == container.id
+        {
+            return Err(ModelError::InvalidDispositionSubject(
+                disposition.id.clone(),
+            ));
+        }
+        if matches!(
+            disposition.kind,
+            DispositionKind::Deferred | DispositionKind::Replaced
+        ) && disposition
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            return Err(ModelError::InvalidDispositionShape);
+        }
+        if disposition.kind == DispositionKind::Replaced {
+            let replacement = disposition
+                .replacement_id
+                .as_ref()
+                .ok_or(ModelError::InvalidDispositionShape)?;
+            if replacement == &disposition.descendant_id || !descendant_ids.contains(replacement) {
+                return Err(ModelError::InvalidDispositionSubject(
+                    disposition.id.clone(),
+                ));
+            }
+        } else if disposition.replacement_id.is_some() {
+            return Err(ModelError::InvalidDispositionShape);
+        }
+    }
+
+    let mut dispositions = BTreeMap::new();
+    let node_by_id = descendants
+        .iter()
+        .map(|node| (node.id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut report = ContainerCloseoutReport {
+        readiness: ContainerCloseoutReadiness::Closing,
+        scope_reconciled: false,
+        effective_scope: Vec::new(),
+        accepted_closed: Vec::new(),
+        settled_non_success: Vec::new(),
+        stale_dispositions: Vec::new(),
+        unresolved: Vec::new(),
+        all_successful: false,
+    };
+    let mut effective_seen = BTreeSet::new();
+    let mut accepted_seen = BTreeSet::new();
+    let mut non_success_seen = BTreeSet::new();
+    let mut unresolved_seen = BTreeSet::new();
+    for disposition in current_dispositions {
+        match current_entity_revisions.get(&disposition.descendant_id) {
+            Some(revision) if *revision == disposition.descendant_revision => {
+                dispositions.insert(disposition.descendant_id.clone(), disposition);
+            }
+            _ => report
+                .stale_dispositions
+                .push(disposition.descendant_id.clone()),
+        }
+    }
+
+    fn resolve(
+        id: &WorkId,
+        node_by_id: &BTreeMap<WorkId, &WorkNode>,
+        dispositions: &BTreeMap<WorkId, &ContainerDisposition>,
+        accepted_closed_outcomes: &BTreeSet<WorkId>,
+        active: &mut BTreeSet<WorkId>,
+        report: &mut ContainerCloseoutReport,
+        effective_seen: &mut BTreeSet<WorkId>,
+        accepted_seen: &mut BTreeSet<WorkId>,
+        non_success_seen: &mut BTreeSet<WorkId>,
+        unresolved_seen: &mut BTreeSet<WorkId>,
+    ) -> Result<(), ModelError> {
+        if !active.insert(id.clone()) {
+            return Err(ModelError::DispositionReplacementCycle(id.clone()));
+        }
+        let node = node_by_id
+            .get(id)
+            .ok_or_else(|| ModelError::MissingWork(id.clone()))?;
+        if let Some(disposition) = dispositions.get(id) {
+            match disposition.kind {
+                DispositionKind::AcceptedClosed => {
+                    if effective_seen.insert(id.clone()) {
+                        report.effective_scope.push(id.clone());
+                    }
+                    if !node.is_direct() {
+                        return Err(ModelError::InvalidDispositionShape);
+                    }
+                    if accepted_closed_outcomes.contains(id) {
+                        if accepted_seen.insert(id.clone()) {
+                            report.accepted_closed.push(id.clone());
+                        }
+                    } else if unresolved_seen.insert(id.clone()) {
+                        report.unresolved.push(id.clone());
+                    }
+                }
+                DispositionKind::AcceptedCancelled | DispositionKind::Deferred => {
+                    if effective_seen.insert(id.clone()) {
+                        report.effective_scope.push(id.clone());
+                    }
+                    if non_success_seen.insert(id.clone()) {
+                        report.settled_non_success.push(id.clone());
+                    }
+                }
+                DispositionKind::Replaced => {
+                    let replacement = disposition
+                        .replacement_id
+                        .as_ref()
+                        .ok_or(ModelError::InvalidDispositionShape)?;
+                    resolve(
+                        replacement,
+                        node_by_id,
+                        dispositions,
+                        accepted_closed_outcomes,
+                        active,
+                        report,
+                        effective_seen,
+                        accepted_seen,
+                        non_success_seen,
+                        unresolved_seen,
+                    )?;
+                }
+            }
+        } else if node.is_container() {
+            // A nested scope is not implicitly accepted merely because its
+            // tasks happen to be closed; it needs its own scope disposition.
+            if unresolved_seen.insert(id.clone()) {
+                report.unresolved.push(id.clone());
+            }
+            if effective_seen.insert(id.clone()) {
+                report.effective_scope.push(id.clone());
+            }
+        } else if accepted_closed_outcomes.contains(id) {
+            if effective_seen.insert(id.clone()) {
+                report.effective_scope.push(id.clone());
+            }
+            if accepted_seen.insert(id.clone()) {
+                report.accepted_closed.push(id.clone());
+            }
+        } else if unresolved_seen.insert(id.clone()) {
+            if effective_seen.insert(id.clone()) {
+                report.effective_scope.push(id.clone());
+            }
+            report.unresolved.push(id.clone());
+        }
+        active.remove(id);
+        Ok(())
+    }
+
+    let mut required = descendants
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    required.sort();
+    for id in &required {
+        resolve(
+            id,
+            &node_by_id,
+            &dispositions,
+            accepted_closed_outcomes,
+            &mut BTreeSet::new(),
+            &mut report,
+            &mut effective_seen,
+            &mut accepted_seen,
+            &mut non_success_seen,
+            &mut unresolved_seen,
+        )?;
+    }
+
+    report.accepted_closed.sort();
+    report.settled_non_success.sort();
+    report.stale_dispositions.sort();
+    report.stale_dispositions.dedup();
+    report.unresolved.sort();
+    report.effective_scope.sort();
+    report.scope_reconciled = report.unresolved.is_empty() && !unresolved_holds;
+    report.all_successful = report.unresolved.is_empty()
+        && report.settled_non_success.is_empty()
+        && !unresolved_holds
+        && gates_satisfied
+        && summary_present;
+    report.readiness = if !report.scope_reconciled {
+        ContainerCloseoutReadiness::Attention
+    } else if gates_satisfied && summary_present {
         ContainerCloseoutReadiness::ReadyToClose
     } else {
         ContainerCloseoutReadiness::Closing
-    }
+    };
+    Ok(report)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1110,6 +1415,8 @@ pub enum ModelError {
     InvalidDispositionSubject(CloseoutDispositionId),
     DuplicateCurrentDisposition(WorkId),
     InvalidDispositionShape,
+    DispositionReplacementCycle(WorkId),
+    DispositionSupersessionCycle(WorkId),
 }
 
 impl fmt::Display for ModelError {
@@ -1175,6 +1482,12 @@ impl fmt::Display for ModelError {
                 write!(f, "duplicate current disposition: {id}")
             }
             Self::InvalidDispositionShape => f.write_str("invalid disposition shape"),
+            Self::DispositionReplacementCycle(id) => {
+                write!(f, "container disposition replacement cycle at {id}")
+            }
+            Self::DispositionSupersessionCycle(id) => {
+                write!(f, "container disposition supersession cycle at {id}")
+            }
         }
     }
 }
@@ -1220,4 +1533,53 @@ fn civil_from_days(days: i64) -> (i32, u8, u8) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year as i32, month as u8, day as u8)
+}
+
+/// Shared role boundary for project planning. A reviewer or publisher cannot
+/// silently acquire planning authority merely by supplying a valid actor ID.
+pub const fn planning_role_allowed(role: crate::ActorRole) -> bool {
+    matches!(role, crate::ActorRole::Agent | crate::ActorRole::Operator)
+}
+
+/// Commitment history is monotone. Reassignment/carry-over creates a new row;
+/// it never resets the state of an earlier commitment.
+pub fn assignment_transition_allowed(prior: &str, next: &str) -> bool {
+    matches!(
+        (prior, next),
+        (
+            "planned",
+            "committed" | "removed" | "carried_over" | "completed"
+        ) | ("committed", "removed" | "carried_over" | "completed")
+    )
+}
+
+/// Project planning permission returned by reads and repeated by transaction writers.
+/// This is distinct from a task's execution/proof action descriptor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectPlanningAction {
+    pub action: &'static str,
+    pub project_id: crate::ProjectId,
+    pub actor_id: crate::ActorId,
+    pub session_id: Option<crate::SessionId>,
+    pub expected_project_revision: crate::Revision,
+    pub allowed: bool,
+    pub denial_reason: Option<&'static str>,
+    pub confirmation: &'static str,
+}
+
+pub fn project_planning_actions(
+    project: &crate::ProjectId,
+    actor: &crate::ActorContext,
+    session: Option<&crate::SessionId>,
+    revision: crate::Revision,
+) -> Vec<ProjectPlanningAction> {
+    ["create_project", "create_work", "cycle_create", "cycle_change", "dependency_edit"].into_iter().map(|action| {
+        let denial=if action=="create_project" {Some("Initialize a separate workspace with bwrk init; this connection already belongs to one project.")}
+            else if session.is_none() {Some("A current authenticated project session is required.")}
+            else if !planning_role_allowed(actor.role) {Some("The current project principal cannot edit planning.")}
+            else {None};
+        ProjectPlanningAction {action,project_id:project.clone(),actor_id:actor.actor_id.clone(),session_id:session.cloned(),
+            expected_project_revision:revision,allowed:denial.is_none(),denial_reason:denial,
+            confirmation:"Confirm the project-scoped planning change at this revision."}
+    }).collect()
 }
