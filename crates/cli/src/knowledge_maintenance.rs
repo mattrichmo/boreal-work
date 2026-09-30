@@ -373,6 +373,7 @@ fn apply_published_memory(
     let title = input.get("title").and_then(Value::as_str).filter(|s| !s.trim().is_empty())
         .unwrap_or("Consolidated memory");
     if let Some(existing) = store.memory_draft(project, &draft_id).map_err(map_store_error)? {
+        let draft_revision = existing.project_revision;
         let supplied_ids = input.get("source_citations").and_then(Value::as_array)
             .ok_or_else(|| CliError::invalid("published memory apply requires source_citations from its plan"))?;
         let ids = supplied_ids.iter().map(|v| v.as_str().ok_or_else(|| CliError::invalid("source_citations must contain strings"))).collect::<Result<Vec<_>, _>>()?;
