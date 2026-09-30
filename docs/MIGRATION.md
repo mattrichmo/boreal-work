@@ -24,6 +24,24 @@ is not a runtime dependency.
 - Legacy vault/knowledge implementations, directives, and broad workflow
   verticals. The product memory bank is redesigned in v2 rather than copied.
 
+## Global manager extension
+
+The legacy [Global Manager Layer](../v1/docs/product/GLOBAL_MANAGER_DESIGN.md)
+is the behavioral reference for the new
+[v2 global-manager contract](../project/GLOBAL_MANAGER.md). Port its machine-level
+registry/global-record/derived-rollup separation, stable references, reversible
+linking, inbox provenance and freshness behavior behind the Rust API. Do not
+import legacy runtime orchestration or make the TypeScript TUI run project CLI
+refresh processes.
+
+The 2026-09-30 user requirements replace optional `global init` setup with
+automatic installation of a separate global SQLite schema, and replace
+workspace-required registry records with management projects that can have no
+folder, a folder association, or an existing Boreal workspace association.
+Existing global records and registry IDs must be preserved through an explicit
+import with a loss ledger; they must not be inserted into a local project store
+or treated as authoritative linked-project work. This import is not implemented.
+
 ## Import format
 
 The bounded P4-04 slice is implemented by the dependency-light
@@ -140,3 +158,12 @@ in-memory materialization; a public `migration apply` adapter must stage the
 document under one durable operation, checkpoint batches, verify the expected
 source/document fingerprint, and provide a rollback/restore path before
 committing store rows.
+
+## Restored CLI workflows
+
+The v1 CLI behavior selected for the 2026-09-30 parity work is ported behind
+the v2 application/store boundary. See [CLI_PARITY.md](CLI_PARITY.md),
+[CLI_WORKFLOWS.md](CLI_WORKFLOWS.md), and [CLI_KNOWLEDGE.md](CLI_KNOWLEDGE.md).
+Use the executable `commands compatibility` report for spelling and workflow
+mappings. A replacement is not a promise of identical v1 flags or data format;
+legacy file stores and runtime orchestration are not imported.

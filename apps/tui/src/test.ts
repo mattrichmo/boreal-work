@@ -906,7 +906,7 @@ try {
   assert(outerMismatch, "Unix transport rejects a mismatched Rust response request_id");
   let rendered = "";
   await mountAndRender(parseTerminalArgs(["--socket", socketPath, "--project", "project_test"]), (value) => { rendered += value; });
-  assert(rendered.includes("BOREAL / WORK DASHBOARD") && rendered.includes("socket-task: ready"), "entrypoint mounts and renders the controller");
+  assert(rendered.includes("BOREAL / WORK DASHBOARD") && rendered.includes("socket-task: Ready"), "entrypoint mounts and renders the controller");
   const dashboardArgs = parseTerminalArgs(["--socket", socketPath, "--project", "project_test", "--interactive"]);
   assert(dashboardArgs.interactive === true, "entrypoint parses explicit interactive mode");
   assert(dashboardArgs.actor.length > 0 && dashboardArgs.harness.startsWith("tui_") && dashboardArgs.session.startsWith("session_tui_"), "entrypoint creates one explicit mounted dashboard identity");

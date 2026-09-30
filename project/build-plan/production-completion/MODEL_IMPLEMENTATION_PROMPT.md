@@ -1,4 +1,36 @@
-# Prompt for the implementation model
+# Execute the final production plan
+
+Current authority: [FINAL_PRODUCTION_PLAN.md](FINAL_PRODUCTION_PLAN.md) and
+[execution/FINAL_STATE.json](execution/FINAL_STATE.json). Read and execute
+those files. The earlier prompt below is retained as history; its instruction
+to finish with an implementation report/archive is superseded.
+
+Use a coordinator plus three parallel agents: A starts F2 then F1, B owns F3/F6,
+C owns F4, and the coordinator integrates shared F5 changes. Follow exact file
+ownership, dispatch complete user paths, and immediately reassign available
+workers to unresolved work. Run comprehensive checks after implementation is
+integrated, then repair actual failures in parallel and repeat affected checks.
+Do not stop after a successful slice or generate another plan.
+
+First agree the fenced final-result snapshot/proof interface: current evidence
+runs the preclaim snapshot, so the agent's changed code is not yet bound through
+the complete public workflow. F2/F5 repair that, F3 supplies capture/policy
+storage, F1 guides the worker through it, and F4 exposes the same result in the
+dashboard. The final agent task must actually fix starting code that fails its
+verifier and prove the changed result.
+
+Continue through F8: qualify exact artifacts, resolve/back up the intended
+live project, activate the same package into the actual user prefix, verify
+the real dashboard and agent workflows, finish supported platform delivery,
+and verify the published installation/update channel. Obtain any actually
+required publication approval once with the prepared payload; finish all
+independent work while it is pending.
+
+Track integrated, qualified, installed and published states separately.
+Overall completion requires J1–J13 on the final product and actual activation.
+A build, temporary install or source handoff is not the finish line.
+
+# Historical implementation-only prompt
 
 You are receiving a current Boreal v2 source archive. Read
 `BWRK_IMPLEMENTATION_HANDOFF.md` first. Treat it as the active implementation

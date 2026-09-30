@@ -79,6 +79,7 @@ fn claim_reuses_registered_session_and_first_claim_registration_replays_stably()
         root,
         &[
             "init",
+            "--project",
             PROJECT,
             "--actor",
             OPERATOR,

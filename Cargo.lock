@@ -12,6 +12,7 @@ dependencies = [
  "boreal-service",
  "boreal-source",
  "boreal-store",
+ "serde",
  "serde_json",
 ]
 
@@ -21,6 +22,7 @@ version = "0.2.0"
 dependencies = [
  "boreal-application",
  "boreal-domain",
+ "boreal-memory",
  "boreal-migration",
  "boreal-protocol",
  "boreal-service",
@@ -37,6 +39,10 @@ version = "0.2.0"
 [[package]]
 name = "boreal-memory"
 version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "boreal-migration"

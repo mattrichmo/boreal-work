@@ -12,11 +12,61 @@ pub(super) fn run(
     project_context::validate_store(&context, store)?;
     let command = parsed.path.get(1).map(String::as_str).unwrap_or("");
     if command == "key" {
-        credentials::create(&context.root, &context.project_id, &parsed.options.actor)?;
+        let credential =
+            credentials::create(&context.root, &context.project_id, &parsed.options.actor)?;
+        let role = parsed.options.actor_role.as_deref().unwrap_or("agent");
+        let digest = boreal_store::checksum(parsed.options.actor.as_bytes()).replace(':', "-");
+        let enrollment = project_context::confined_path(
+            &context.root,
+            &PathBuf::from(format!(".boreal/credentials/{digest}.enrollment.json")),
+            true,
+        )?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&enrollment) {
+            Ok(mut file) => {
+                use std::io::Write;
+                let body = json!({"schema_version":"boreal.local-enrollment.v1", "project_id":context.project_id, "actor_id":parsed.options.actor, "role":role, "display_name":parsed.options.actor, "credential":credential});
+                file.write_all(
+                    serde_json::to_string(&body)
+                        .map_err(|e| CliError::invalid(e.to_string()))?
+                        .as_bytes(),
+                )
+                .and_then(|_| file.sync_all())
+                .map_err(|_| CliError::invalid("cannot persist the private enrollment file"))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                credentials::check_owner(&enrollment)?;
+                let saved: Value =
+                    serde_json::from_slice(&fs::read(&enrollment).map_err(|_| {
+                        CliError::invalid("cannot read the private enrollment file")
+                    })?)
+                    .map_err(|_| CliError::invalid("invalid private enrollment file"))?;
+                if saved["project_id"].as_str() != Some(&context.project_id)
+                    || saved["actor_id"].as_str() != Some(&parsed.options.actor)
+                    || saved["role"].as_str() != Some(role)
+                    || saved["credential"].as_str() != Some(&credential)
+                {
+                    return Err(CliError::invalid(
+                        "existing enrollment differs; review it before granting authority",
+                    ));
+                }
+            }
+            Err(_) => {
+                return Err(CliError::invalid(
+                    "cannot create the private enrollment file",
+                ));
+            }
+        }
         return Ok(CliResult {
             outcome: ApplicationOutcome::Unchanged,
             data: Some(
-                json!({"command":"auth.key","project_id":context.project_id,"actor_id":parsed.options.actor,"credential_created_or_present":true,"authority_granted":false}),
+                json!({"command":"auth.key","project_id":context.project_id,"actor_id":parsed.options.actor,"enrollment_path":enrollment,"credential_created_or_present":true,"authority_granted":false}),
             ),
             ..CliResult::default()
         });
@@ -116,6 +166,15 @@ pub(super) fn run(
                 &fs::read(path).map_err(|e| CliError::invalid(e.to_string()))?,
             )
             .map_err(|_| CliError::invalid("invalid enrollment JSON"))?;
+            if body
+                .get("project_id")
+                .and_then(Value::as_str)
+                .is_some_and(|project| project != context.project_id)
+            {
+                return Err(CliError::invalid(
+                    "enrollment belongs to a different project",
+                ));
+            }
             let field = |name: &str| {
                 body.get(name)
                     .and_then(Value::as_str)

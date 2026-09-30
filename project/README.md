@@ -46,6 +46,13 @@ Read in this order:
 
 ## Rules for implementation agents
 
+The installation-wide global-manager extension is specified in
+[GLOBAL_MANAGER.md](GLOBAL_MANAGER.md). It incorporates the legacy product
+design and the 2026-09-30 user requirements: automatic separate SQLite
+provisioning, folderless management projects, optional folder/workspace links,
+personal todos/notes, and a distinct global TUI. It is not implemented launch
+parity and does not replace the production execution plan.
+
 - Treat the explicit invariants and acceptance tests here as the design
   contract. Verify a failure against implementation before claiming its root
   cause or patching it.

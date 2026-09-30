@@ -648,26 +648,34 @@ fn build_attention_queues(
                     ReviewOutcome::Rejected | ReviewOutcome::Returned | ReviewOutcome::Revoked
                 )
             })
-            || decision.reason_codes.iter().any(|reason| {
-                matches!(reason, ReasonCode::ReviewRejected(_))
-            })
+            || decision
+                .reason_codes
+                .iter()
+                .any(|reason| matches!(reason, ReasonCode::ReviewRejected(_)))
         {
             queues.rejected_review.push(item.clone());
         }
         if decision.display_status == DerivedStatus::ExpiredReview
-            || decision.reason_codes.iter().any(|reason| {
-                matches!(reason, ReasonCode::ExpiryReviewRequired)
-            })
+            || decision
+                .reason_codes
+                .iter()
+                .any(|reason| matches!(reason, ReasonCode::ExpiryReviewRequired))
         {
             queues.expiry.push(item.clone());
         }
         if canonical
             .and_then(|facts| facts.recovery.as_present())
-            .is_some_and(|recovery| recovery.unresolved && recovery.reason == RecoveryReason::Failed)
+            .is_some_and(|recovery| {
+                recovery.unresolved && recovery.reason == RecoveryReason::Failed
+            })
         {
             queues.failed_execution.push(item.clone());
         }
-        if input.work.hard_holds.iter().any(|hold| matches!(hold, ReasonCode::HardHold(_)))
+        if input
+            .work
+            .hard_holds
+            .iter()
+            .any(|hold| matches!(hold, ReasonCode::HardHold(_)))
             || canonical
                 .and_then(|facts| facts.holds.as_present())
                 .is_some_and(|holds| holds.holds.iter().any(|hold| hold.active))
@@ -839,12 +847,15 @@ pub fn project_status_from_store_for_session(
         .collect();
     for diagnostic in &diagnostics {
         if is_planning_diagnostic(&diagnostic.code) {
-            snapshot.attention_queues.damaged_planning.push(AttentionQueueItem {
-                work_id: diagnostic.work_id.clone(),
-                title: diagnostic.title.clone().unwrap_or_default(),
-                display_status: DerivedStatus::Blocked,
-                reason_codes: vec![format!("integrity:{}", diagnostic.code)],
-            });
+            snapshot
+                .attention_queues
+                .damaged_planning
+                .push(AttentionQueueItem {
+                    work_id: diagnostic.work_id.clone(),
+                    title: diagnostic.title.clone().unwrap_or_default(),
+                    display_status: DerivedStatus::Blocked,
+                    reason_codes: vec![format!("integrity:{}", diagnostic.code)],
+                });
         }
     }
     snapshot.diagnostics = diagnostics
@@ -863,7 +874,9 @@ fn is_planning_diagnostic(code: &str) -> bool {
         || code.contains("corrupt")
 }
 
-pub(crate) fn status_input_from_store_row(row: &StatusWorkRecord) -> Result<StatusWorkInput, String> {
+pub(crate) fn status_input_from_store_row(
+    row: &StatusWorkRecord,
+) -> Result<StatusWorkInput, String> {
     let mut input = status_input(row.work.clone());
     input.retry_not_before = row
         .status_retry_not_before()

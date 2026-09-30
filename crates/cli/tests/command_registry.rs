@@ -82,6 +82,85 @@ fn deep_commands_resolves_a_concrete_unavailable_route() {
 }
 
 #[test]
+fn global_manager_routes_are_discovered_and_dashboard_uses_isolated_global_state() {
+    let (success, envelope) = invoke(&["commands", "global", "--json"]);
+    assert!(success);
+    assert!(envelope["data"]["available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|route| route["path"] == "global status"));
+
+    let root = std::env::temp_dir().join(format!("boreal-global-registry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let output = Command::new(env!("CARGO_BIN_EXE_bwrk"))
+        .args(["dashboard", "global", "--json"])
+        .env("BOREAL_GLOBAL_ROOT", &root)
+        .output()
+        .expect("bwrk should run global dashboard snapshot");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let dashboard: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(dashboard["data"]["projects"].is_array());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn global_bootstrap_and_cli_commands_use_the_global_store() {
+    let root = std::env::temp_dir().join(format!("boreal-global-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_bwrk"))
+            .args(args)
+            .env("BOREAL_GLOBAL_ROOT", &root)
+            .output()
+            .expect("bwrk should run global command");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+                panic!(
+                    "expected JSON output: {}",
+                    String::from_utf8_lossy(&output.stdout)
+                )
+            });
+        (output.status.success(), envelope)
+    };
+
+    let (bootstrapped, bootstrap) = run(&["global", "bootstrap", "--json"]);
+    assert!(bootstrapped, "{bootstrap}");
+    assert_eq!(bootstrap["data"]["provisioned"], true);
+
+    let (created, project) = run(&[
+        "global",
+        "project",
+        "add",
+        "--name",
+        "Planning",
+        "--labels",
+        "personal,roadmap",
+        "--priority",
+        "3",
+        "--json",
+    ]);
+    assert!(created, "{project}");
+    let project_id = project["data"]["id"].as_str().expect("created project id");
+
+    let (listed, snapshot) = run(&["global", "snapshot", "--json"]);
+    assert!(listed, "{snapshot}");
+    let saved = snapshot["data"]["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == project_id)
+        .expect("created project should be in global snapshot");
+    assert_eq!(saved["labels"], serde_json::json!(["personal", "roadmap"]));
+    assert_eq!(saved["priority"], 3);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn commands_report_dependency_reads_as_service_capable() {
     let (success, envelope) = invoke(&["commands", "dep", "--json"]);
     assert!(success);
@@ -241,17 +320,41 @@ fn version_reports_the_linked_sqlite_runtime_identity() {
 }
 
 #[test]
-fn commands_reports_source_routes_as_direct_only() {
+fn commands_report_source_route_adapters_accurately() {
     let (success, envelope) = invoke(&["commands", "source", "--json"]);
     assert!(success);
     let data = &envelope["data"];
     let routes = data["available"].as_array().unwrap();
-    assert_eq!(routes.len(), 4);
-    assert!(routes.iter().all(|route| {
-        route["availability"] == "available"
-            && route["adapters"]["direct"] == true
-            && route["adapters"]["service"] == false
-    }));
+    let mut paths = routes
+        .iter()
+        .map(|route| route["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    paths.sort_unstable();
+    assert_eq!(
+        paths,
+        [
+            "source add",
+            "source list",
+            "source search",
+            "source show",
+            "source verify",
+        ]
+    );
+    for (path, service_supported) in [
+        ("source add", true),
+        ("source list", false),
+        ("source search", true),
+        ("source show", false),
+        ("source verify", false),
+    ] {
+        let route = routes
+            .iter()
+            .find(|route| route["path"] == path)
+            .expect("expected source route is advertised");
+        assert_eq!(route["availability"], "available", "{path}");
+        assert_eq!(route["adapters"]["direct"], true, "{path}");
+        assert_eq!(route["adapters"]["service"], service_supported, "{path}");
+    }
     assert!(data["unavailable_routes"].as_array().unwrap().is_empty());
 }
 

@@ -40,18 +40,22 @@ pub(super) fn payload(parsed: &ParsedCommand) -> Result<Value, CliError> {
         ("work_id", json!(work)),
         (
             "expected_revision",
-            json!(parsed
-                .options
-                .expected_revision
-                .ok_or_else(|| CliError::invalid("completion requires --expected-revision"))?),
+            json!(
+                parsed
+                    .options
+                    .expected_revision
+                    .ok_or_else(|| CliError::invalid("completion requires --expected-revision"))?
+            ),
         ),
         (
             "reason",
-            json!(parsed
-                .options
-                .reason
-                .as_deref()
-                .ok_or_else(|| CliError::invalid("completion requires --reason"))?),
+            json!(
+                parsed
+                    .options
+                    .reason
+                    .as_deref()
+                    .ok_or_else(|| CliError::invalid("completion requires --reason"))?
+            ),
         ),
         ("confirmed", json!(parsed.options.setup.yes)),
     ] {

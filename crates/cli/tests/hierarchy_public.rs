@@ -13,12 +13,13 @@ static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn public_cli_builds_and_reads_a_typed_work_hierarchy() {
     let root = temporary_root();
     fs::create_dir_all(&root).unwrap();
-    let database = root.join("boreal.sqlite");
+    let database = root.join(".boreal/boreal.sqlite");
 
     let initialized = Command::new(binary())
         .current_dir(&root)
         .args([
             "init",
+            "--project",
             "hierarchy-project",
             "--actor",
             "hierarchy-agent",
@@ -202,12 +203,13 @@ fn public_cli_builds_and_reads_a_typed_work_hierarchy() {
 fn public_cli_replays_identical_work_create_as_unchanged() {
     let root = temporary_root();
     fs::create_dir_all(&root).unwrap();
-    let database = root.join("boreal.sqlite");
+    let database = root.join(".boreal/boreal.sqlite");
 
     let initialized = Command::new(binary())
         .current_dir(&root)
         .args([
             "init",
+            "--project",
             "replay-project",
             "--actor",
             "suite-agent",

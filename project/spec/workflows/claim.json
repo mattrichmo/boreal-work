@@ -1,6 +1,6 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.1.0",
+  "asset_version": "1.2.0",
   "ref": "boreal.workflow.claim.v1",
   "kind": "claim",
   "title": "Claim, resume, and checkpoint one fenced attempt",
@@ -13,12 +13,12 @@
   "allowed_commands": [
     "bwrk session show --session <session_id> --json",
     "bwrk agent guide --json",
-    "bwrk agent start <work_id> --expected-revision <revision> --json",
-    "bwrk work accept <work_id> --json",
-    "bwrk work heartbeat <work_id> --json",
+    "bwrk agent start <work_id> --source-version <source_version_id> --config-identity <config_identity> --expected-revision <revision> --json",
+    "bwrk work accept <work_id> --attempt <attempt_id> --fence <fence> --json",
+    "bwrk work heartbeat <work_id> --attempt <attempt_id> --fence <fence> --json",
     "bwrk work checkpoint --work <work_id> --input <input_path> --expected-revision <revision> --reason <reason> --yes --json",
-    "bwrk work renew <work_id> --json",
-    "bwrk work release <work_id> --json"
+    "bwrk work renew <work_id> --attempt <attempt_id> --fence <fence> --json",
+    "bwrk work release <work_id> --attempt <attempt_id> --fence <fence> --json"
   ],
   "typed_inputs": [
     {

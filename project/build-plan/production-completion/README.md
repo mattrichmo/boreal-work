@@ -1,4 +1,17 @@
-# Boreal Work — production-completion execution plan
+# Current final production execution
+
+Start with [FINAL_PRODUCTION_PLAN.md](FINAL_PRODUCTION_PLAN.md), then
+[execution/FINAL_STATE.json](execution/FINAL_STATE.json). This is the single
+current dispatch plan requested on 2026-09-26: parallel implementation, final
+qualification and repair, actual local activation, and supported release
+delivery. [MODEL_IMPLEMENTATION_PROMPT.md](MODEL_IMPLEMENTATION_PROMPT.md)
+contains its execution prompt.
+
+The 48-item queue records an earlier implementation pass. The original PF
+22-sprint plan below remains historical context. Neither claims that the
+installed product is finished, and neither controls the new execution loop.
+
+# Historical Boreal Work — production-completion execution plan
 
 **Issue:** 2026-09-21 · **Plan ID:** `PF-production-completion-2026-09-21` · **State:** proposed execution plan; the local ledger contains 35 accepted task records, but no release or cutover acceptance.
 

@@ -38,10 +38,7 @@ struct PtyOutput {
 fn one_command_dashboard_supervises_private_service_and_tui() {
     let root = temporary_root();
     fs::create_dir_all(&root).unwrap();
-    // Keep the database outside the workspace metadata directory. This
-    // proves that dashboard discovery uses the current workspace even when
-    // --db points at an external state location.
-    let database = root.join("external-state/boreal.sqlite");
+    let database = root.join(".boreal/boreal.sqlite");
     fs::write(
         root.join("project.json"),
         r#"{"project_id":"project-smoke"}"#,
@@ -56,7 +53,14 @@ fn one_command_dashboard_supervises_private_service_and_tui() {
 
     let initialized = Command::new(binary())
         .current_dir(&root)
-        .args(["init", "project-smoke", "--actor", "bootstrap", "--db"])
+        .args([
+            "init",
+            "--project",
+            "project-smoke",
+            "--actor",
+            "bootstrap",
+            "--db",
+        ])
         .arg(&database)
         .arg("--json")
         .output()
@@ -197,6 +201,47 @@ fn one_command_dashboard_supervises_private_service_and_tui() {
 }
 
 #[test]
+fn global_dashboard_supervises_its_service_and_interactive_tui() {
+    let root = temporary_root();
+    fs::create_dir_all(&root).unwrap();
+    let fixture = root.join("global-fixture.js");
+    let invocation_log = root.join("global-invocation.log");
+    write_global_fixture_tui(&fixture);
+
+    let mut command = Command::new(binary());
+    command
+        .current_dir(root.join("uninitialized"))
+        .env("BOREAL_GLOBAL_ROOT", root.join("state"))
+        .env("BOREAL_GLOBAL_TUI_ENTRYPOINT", &fixture)
+        .env("BOREAL_GLOBAL_INVOCATION_LOG", &invocation_log)
+        .args(["dashboard", "global"]);
+    fs::create_dir(root.join("uninitialized")).unwrap();
+    let output = run_in_pty(command, None);
+    if output.stderr.contains("Operation not permitted")
+        || output.stderr.contains("Permission denied")
+    {
+        let _ = fs::remove_dir_all(&root);
+        return;
+    }
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.contains("global-fixture-tui"));
+    let invocation: Value =
+        serde_json::from_slice(&fs::read(&invocation_log).expect("TUI invocation log")).unwrap();
+    assert!(invocation["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|arg| arg == "--interactive"));
+    let socket = PathBuf::from(invocation["socket"].as_str().unwrap());
+    assert!(!socket.exists(), "global dashboard left its socket behind");
+    assert!(
+        !socket.parent().unwrap().exists(),
+        "global dashboard left its private runtime directory behind"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn dashboard_requires_initialization_in_an_uninitialized_directory() {
     let root = temporary_root();
     fs::create_dir_all(&root).unwrap();
@@ -227,7 +272,14 @@ fn dashboard_keeps_two_project_roots_with_overlapping_ids_local() {
     for root in [&first, &second] {
         let initialized = Command::new(binary())
             .current_dir(root)
-            .args(["init", "shared-project", "--actor", "bootstrap", "--json"])
+            .args([
+                "init",
+                "--project",
+                "shared-project",
+                "--actor",
+                "bootstrap",
+                "--json",
+            ])
             .output()
             .unwrap();
         assert!(initialized.status.success(), "init failed: {initialized:?}");
@@ -298,7 +350,7 @@ fn dashboard_rejects_plausible_metadata_with_a_mismatched_stored_workspace_bindi
 
     let initialized = Command::new(binary())
         .current_dir(&source)
-        .args(["init", "identity-project", "--yes", "--json"])
+        .args(["init", "--project", "identity-project", "--yes", "--json"])
         .output()
         .unwrap();
     assert!(initialized.status.success(), "init failed: {initialized:?}");
@@ -463,6 +515,47 @@ client.on("error", (error) => {
   console.error(error);
   process.exit(99);
 });
+"#,
+    )
+    .unwrap();
+}
+
+fn write_global_fixture_tui(path: &Path) {
+    fs::write(
+        path,
+        r#"const fs = require("node:fs");
+const net = require("node:net");
+const args = process.argv.slice(2);
+const socketPath = args[args.indexOf("--socket") + 1];
+fs.writeFileSync(process.env.BOREAL_GLOBAL_INVOCATION_LOG, JSON.stringify({ args, socket: socketPath }));
+if (!args.includes("--interactive") || !socketPath || !fs.statSync(socketPath).isSocket()) process.exit(97);
+const operationId = "op_global_dashboard_fixture";
+const request = JSON.stringify({ request_id: operationId, payload: {
+  api_version: "2",
+  schema_version: "boreal.global.request.v1",
+  operation_id: operationId,
+  command: "snapshot",
+  payload: {},
+} });
+const body = Buffer.from(request);
+const frame = Buffer.allocUnsafe(body.length + 4);
+frame.writeUInt32BE(body.length, 0);
+body.copy(frame, 4);
+let received = Buffer.alloc(0);
+const client = net.createConnection(socketPath, () => client.write(frame));
+client.on("data", (chunk) => {
+  received = Buffer.concat([received, chunk]);
+  if (received.length < 4) return;
+  const size = received.readUInt32BE(0);
+  if (received.length < size + 4) return;
+  const response = JSON.parse(received.subarray(4, size + 4).toString("utf8"));
+  const envelope = response.payload;
+  if (response.request_id !== operationId || envelope.transport !== "ok" || !envelope.data.projects) process.exit(98);
+  process.stdout.write("global-fixture-tui\n");
+  client.end();
+  process.exit(0);
+});
+client.on("error", (error) => { console.error(error); process.exit(99); });
 "#,
     )
     .unwrap();

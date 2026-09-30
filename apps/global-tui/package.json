@@ -1,0 +1,13 @@
+{
+  "name": "@boreal/global-tui",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20 <27" },
+  "bin": { "bwrk-global-tui": "./dist/entrypoint.js" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test tests/*.test.mjs",
+    "start": "tsc && node dist/entrypoint.js"
+  }
+}

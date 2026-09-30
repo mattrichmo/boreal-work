@@ -1,4 +1,10 @@
-# BWRK implementation handoff — lean product-completion plan
+# Historical BWRK implementation handoff
+
+Superseded for dispatch on 2026-09-26 by
+[FINAL_PRODUCTION_PLAN.md](FINAL_PRODUCTION_PLAN.md). Preserve the completed
+source-work record below. Current assignments and acceptance live exclusively
+in [execution/FINAL_STATE.json](execution/FINAL_STATE.json); an implementation
+handoff alone no longer satisfies the product finish line.
 
 This is the implementation plan for the next engineering pass over the supplied
 Boreal v2 source tree. It intentionally replaces the previous 22-sprint

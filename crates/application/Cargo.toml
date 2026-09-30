@@ -11,6 +11,7 @@ boreal-memory = { path = "../memory" }
 boreal-migration = { path = "../migration" }
 boreal-source = { path = "../source" }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 boreal-service = { path = "../service" }

@@ -13,7 +13,8 @@ Use this thin adapter to carry one work item through evidence, verification, rev
 - Confirm the active attempt, fence, current revision, required gates, and close intent before adding evidence or changing lifecycle state.
 - Use application-owned evidence, verification, summary, finish, close, release, sprint-close, and gate actions. Do not claim completion from prose, a green local command, or an unverified summary.
 - Preserve failed evidence and historical attempts. Attach evidence to the typed work/attempt and report its receipt.
-- Inspect `agentDirectives` and required gates after each action; execute only one state-changing action per response.
+- Inspect the returned trusted directive/action descriptors and required gates after each action; execute only one state-changing action per response.
+- Compose with `summary compose --work ID`; save immutable summary bodies with `summary create` bound to the current attempt, fence and expected revision. Historical `summary backfill` records cannot satisfy live proof.
 
 ## Completion
 

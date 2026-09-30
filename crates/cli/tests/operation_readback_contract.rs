@@ -9,12 +9,13 @@ use std::{
 #[test]
 fn operation_show_reads_completed_create_operation() {
     let temp = TempDir::new("operation-readback");
-    let database = temp.path().join("boreal.sqlite");
+    let database = temp.path().join(".boreal/boreal.sqlite");
 
     let initialized = Command::new(binary())
         .current_dir(temp.path())
         .args([
             "init",
+            "--project",
             "project-readback",
             "--actor",
             "readback-agent",
@@ -157,12 +158,13 @@ fn operation_show_reads_completed_create_operation() {
 #[test]
 fn operation_show_reports_missing_operation_through_public_error_envelope() {
     let temp = TempDir::new("operation-readback-missing");
-    let database = temp.path().join("boreal.sqlite");
+    let database = temp.path().join(".boreal/boreal.sqlite");
 
     let initialized = Command::new(binary())
         .current_dir(temp.path())
         .args([
             "init",
+            "--project",
             "project-readback",
             "--actor",
             "readback-agent",

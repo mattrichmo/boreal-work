@@ -32,3 +32,9 @@
 .boreal/gates/
 .boreal/boreal.sqlite
 .boreal/boreal.sqlite-*
+
+# Generated Node runtime caches
+**/node-compile-cache/
+
+# Project memory is maintained in its own Git repository
+/memory/

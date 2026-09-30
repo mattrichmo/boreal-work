@@ -66,6 +66,7 @@ Source builds are explicit: use --from-source or --allow-source-fallback.
 --no-dashboard installs only the CLI. --replace-existing authorizes replacing
 an existing bwrk without a v2 release manifest; otherwise it is protected.
 No project database or shell profile is changed by machine installation.
+The separate per-user global manager database is provisioned automatically.
 
 Environment:
   BOREAL_VERSION       release version, for example 0.2.0
@@ -1183,6 +1184,7 @@ bootstrap_from_source() {
   cargo build --manifest-path "$source_root/Cargo.toml" \
     --release --locked -p boreal-cli --bin bwrk
   npm --prefix "$source_root/apps/tui" run build
+  npm --prefix "$source_root/apps/global-tui" run build
   python3 "$source_root/scripts/release/build_release.py" \
     --root "$source_root" \
     --version "$source_version" \
@@ -1320,6 +1322,8 @@ cleanup() {
     rollback_item bin/bwrk binary || restore_failed=1
     rollback_item lib/boreal/tui tui || restore_failed=1
     rollback_item apps/tui tui_source || restore_failed=1
+    rollback_item lib/boreal/global-tui global_tui || restore_failed=1
+    rollback_item apps/global-tui global_tui_source || restore_failed=1
     rollback_item share/boreal/release.json manifest || restore_failed=1
     rollback_item share/boreal/LICENSE license || restore_failed=1
     rollback_item share/boreal/install.sh updater || restore_failed=1
@@ -1378,9 +1382,19 @@ PACKAGE_ROOT="$TEMP_ROOT/$ARCHIVE_ROOT_NAME"
 [ -x "$PACKAGE_ROOT/bin/bwrk" ] || die "release archive has no executable bin/bwrk"
 [ ! -L "$PACKAGE_ROOT/bin/bwrk" ] || die "release archive binary must not be a symlink"
 [ -s "$PACKAGE_ROOT/lib/boreal/tui/entrypoint.js" ] || die "release archive has no compiled TUI"
+[ -s "$PACKAGE_ROOT/lib/boreal/global-tui/entrypoint.js" ] || die "release archive has no compiled global TUI"
+[ "$(find "$PACKAGE_ROOT/lib/boreal/global-tui" -type l -print -quit)" = "" ] || die "global TUI must not contain symlinks"
 [ "$(find "$PACKAGE_ROOT/lib/boreal/tui" -type l -print -quit)" = "" ] || die "release archive TUI must not contain symlinks"
 [ -s "$PACKAGE_ROOT/share/boreal/release.json" ] || die "release archive has no release manifest"
 [ ! -L "$PACKAGE_ROOT/share/boreal/release.json" ] || die "release manifest must not be a symlink"
+# A release is usable only when it records the immutable workflow and skill
+# package identities that the binary embeds for agent onboarding.
+if ! grep -Eq '"workflow":\{[^}]*"identity":"sha256:[0-9a-f]{64}"' "$PACKAGE_ROOT/share/boreal/release.json"; then
+  die "release manifest has no valid workflow capability identity"
+fi
+if ! grep -Eq '"skill":\{[^}]*"identity":"sha256:[0-9a-f]{64}"' "$PACKAGE_ROOT/share/boreal/release.json"; then
+  die "release manifest has no valid skill capability identity"
+fi
 [ -s "$PACKAGE_ROOT/share/boreal/LICENSE" ] || die "release archive has no license"
 [ ! -L "$PACKAGE_ROOT/share/boreal/LICENSE" ] || die "release license must not be a symlink"
 [ -s "$PACKAGE_ROOT/share/boreal/install.sh" ] || die "release archive has no updater"
@@ -1398,6 +1412,11 @@ cp "$PACKAGE_ROOT/bin/bwrk" "$INSTALL_STAGE/bin/bwrk"
 chmod 755 "$INSTALL_STAGE/bin/bwrk"
 if [ "$INSTALL_TUI" -eq 1 ]; then
   cp -R "$PACKAGE_ROOT/lib/boreal/tui" "$INSTALL_STAGE/lib/boreal/tui"
+  cp -R "$PACKAGE_ROOT/lib/boreal/global-tui" "$INSTALL_STAGE/lib/boreal/global-tui"
+  if [ -d "$PACKAGE_ROOT/apps/global-tui" ]; then
+    [ "$(find "$PACKAGE_ROOT/apps/global-tui" -type l -print -quit)" = "" ] || die "global TUI source must not contain symlinks"
+    cp -R "$PACKAGE_ROOT/apps/global-tui" "$INSTALL_STAGE/apps/global-tui"
+  fi
   if [ -d "$PACKAGE_ROOT/apps/tui" ]; then
     [ "$(find "$PACKAGE_ROOT/apps/tui" -type l -print -quit)" = "" ] || die "TUI source tree must not contain symlinks"
     cp -R "$PACKAGE_ROOT/apps/tui" "$INSTALL_STAGE/apps/tui"
@@ -1407,6 +1426,106 @@ cp "$PACKAGE_ROOT/share/boreal/release.json" "$INSTALL_STAGE/share/boreal/releas
 cp "$PACKAGE_ROOT/share/boreal/LICENSE" "$INSTALL_STAGE/share/boreal/LICENSE"
 cp "$PACKAGE_ROOT/share/boreal/install.sh" "$INSTALL_STAGE/share/boreal/install.sh"
 chmod 755 "$INSTALL_STAGE/share/boreal/install.sh"
+
+# Exercise the exact staged binary before publication. Its build identity must
+# match the source snapshot recorded by the release manifest, and the embedded
+# workflow registry must enumerate trusted assets.
+verify_staged_capabilities() {
+if [ "$HAS_NODE" -eq 1 ]; then
+node - "$INSTALL_STAGE/bin/bwrk" "$INSTALL_STAGE/share/boreal/release.json" <<'BOREAL_VERIFY_STAGED'
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
+const [binary, manifestPath] = process.argv.slice(2);
+function fail(message) { console.error(`boreal install: staged capability check failed: ${message}`); process.exit(1); }
+function invoke(args) {
+  const result = spawnSync(binary, args, { encoding: 'utf8' });
+  if (result.error || result.status !== 0) fail(`${args.join(' ')} failed: ${result.error || result.stderr}`);
+  try { return JSON.parse(result.stdout); }
+  catch (error) { fail(`${args.join(' ')} returned invalid JSON: ${error.message}`); }
+}
+let manifest;
+try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); }
+catch (error) { fail(`cannot read release manifest: ${error.message}`); }
+const digest = 'sha256:' + crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex');
+if (manifest.binary?.sha256 !== digest) fail('binary digest does not match the release manifest');
+const version = invoke(['--version', '--json']);
+const info = version.data;
+if (!info || info.command !== 'version' || version.error) fail('version response has no valid data');
+if (!info.build_source_id || info.build_source_id === 'unknown' || info.build_source_id !== manifest.source_id)
+  fail('binary source identity does not match the release manifest');
+if (info.build_revision !== manifest.source_revision) fail('binary revision does not match the release manifest');
+if (info.workflow_assets !== 'boreal.workflow.assets.v1' || info.skill_assets !== 'boreal.core-skills')
+  fail('binary is missing the supported workflow or skill package');
+const listing = invoke(['workflows', 'list', '--json']);
+if (listing.error || listing.data?.trusted !== true || !Array.isArray(listing.data.assets) || listing.data.assets.length === 0)
+  fail('workflow registry is unavailable or untrusted');
+BOREAL_VERIFY_STAGED
+elif command -v python3 >/dev/null 2>&1; then
+  python3 - "$INSTALL_STAGE/bin/bwrk" "$INSTALL_STAGE/share/boreal/release.json" <<'BOREAL_VERIFY_STAGED_PY'
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+binary = Path(sys.argv[1])
+manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+if "sha256:" + hashlib.sha256(binary.read_bytes()).hexdigest() != manifest.get("binary", {}).get("sha256"):
+    raise SystemExit("boreal install: staged binary digest does not match manifest")
+def invoke(args):
+    result = subprocess.run([str(binary), *args], text=True, capture_output=True, check=False)
+    if result.returncode:
+        raise SystemExit(f"boreal install: {' '.join(args)} failed: {result.stderr.strip()}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"boreal install: {' '.join(args)} returned invalid JSON: {error}")
+version = invoke(["--version", "--json"])
+info = version.get("data") or {}
+if version.get("error") is not None or info.get("command") != "version":
+    raise SystemExit("boreal install: staged version response is invalid")
+if info.get("build_source_id") in (None, "unknown") or info.get("build_source_id") != manifest.get("source_id"):
+    raise SystemExit("boreal install: staged build source identity differs from manifest")
+if info.get("build_revision") != manifest.get("source_revision"):
+    raise SystemExit("boreal install: staged build revision differs from manifest")
+if info.get("workflow_assets") != "boreal.workflow.assets.v1" or info.get("skill_assets") != "boreal.core-skills":
+    raise SystemExit("boreal install: staged CLI lacks workflow or skill capabilities")
+listing = invoke(["workflows", "list", "--json"])
+data = listing.get("data") or {}
+if listing.get("error") is not None or data.get("trusted") is not True or not data.get("assets"):
+    raise SystemExit("boreal install: staged workflow registry is unavailable or untrusted")
+BOREAL_VERIFY_STAGED_PY
+else
+  staged_version=$("$INSTALL_STAGE/bin/bwrk" --version --json) || return 1
+  staged_workflows=$("$INSTALL_STAGE/bin/bwrk" workflows list --json) || return 1
+  manifest_source_id=$(sed -n 's/.*"source_id":"\([^"]*\)".*/\1/p' "$INSTALL_STAGE/share/boreal/release.json")
+  manifest_revision=$(sed -n 's/.*"source_revision":"\([^"]*\)".*/\1/p' "$INSTALL_STAGE/share/boreal/release.json")
+  manifest_binary_sha=$(sed -n 's/.*"binary":{[^}]*"sha256":"\([^"]*\)".*/\1/p' "$INSTALL_STAGE/share/boreal/release.json")
+  version_source_id=$(printf '%s\n' "$staged_version" | sed -n 's/.*"build_source_id":"\([^"]*\)".*/\1/p')
+  version_revision=$(printf '%s\n' "$staged_version" | sed -n 's/.*"build_revision":"\([^"]*\)".*/\1/p')
+  case "$manifest_source_id" in sha256:*) source_digest=${manifest_source_id#sha256:} ;; *) return 1 ;; esac
+  [ "${#source_digest}" -eq 64 ] || return 1
+  case "$source_digest" in *[!0-9a-f]*) return 1 ;; esac
+  if command -v sha256sum >/dev/null 2>&1; then
+    staged_binary_sha=$(sha256sum "$INSTALL_STAGE/bin/bwrk" | awk '{print "sha256:" $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    staged_binary_sha=$(shasum -a 256 "$INSTALL_STAGE/bin/bwrk" | awk '{print "sha256:" $1}')
+  else
+    return 1
+  fi
+  [ "$staged_binary_sha" = "$manifest_binary_sha" ] || return 1
+  [ "$version_source_id" = "$manifest_source_id" ] && [ "$version_revision" = "$manifest_revision" ] || return 1
+  printf '%s\n' "$staged_version" | grep -Fq '"command":"version"' || return 1
+  printf '%s\n' "$staged_version" | grep -Fq '"error":null' || return 1
+  printf '%s\n' "$staged_workflows" | grep -Fq '"error":null' || return 1
+  printf '%s\n' "$staged_version" | grep -Fq '"workflow_assets":"boreal.workflow.assets.v1"' || return 1
+  printf '%s\n' "$staged_version" | grep -Fq '"skill_assets":"boreal.core-skills"' || return 1
+  printf '%s\n' "$staged_workflows" | grep -Fq '"trusted":true' || return 1
+  printf '%s\n' "$staged_workflows" | grep -Eq '"assets":\[\{' || return 1
+fi
+}
+verify_staged_capabilities || die "staged workflow/skill capability validation failed"
 
 if [ "$VERIFY_INSTALL" -eq 1 ]; then
   "$INSTALL_STAGE/bin/bwrk" --version || die "staged binary verification failed; existing install is unchanged"
@@ -1430,6 +1549,8 @@ phase 4 "Publish installation"
 publish_item bin/bwrk binary
 publish_item lib/boreal/tui tui
 publish_item apps/tui tui_source
+publish_item lib/boreal/global-tui global_tui
+publish_item apps/global-tui global_tui_source
 publish_item share/boreal/release.json manifest
 publish_item share/boreal/LICENSE license
 publish_item share/boreal/install.sh updater
@@ -1444,12 +1565,18 @@ if [ "$VERIFY_INSTALL" -eq 1 ]; then
     done < "$TEMP_ROOT/tui-assets"
   fi
 fi
+# Provision through the Rust application even when only the CLI was selected.
+# A failure keeps binary rollback enabled; global data is never deleted during
+# binary rollback, so existing personal records remain recoverable.
+"$PREFIX/bin/bwrk" global bootstrap --json > "$TEMP_ROOT/global-bootstrap.json" \
+  || die "global manager provisioning failed; restoring prior installation"
 ROLLBACK_NEEDED=0
 
 echo "Boreal ${REQUESTED_VERSION} installed to $PREFIX"
 echo "  binary: $PREFIX/bin/bwrk"
 if [ "$INSTALL_TUI" -eq 1 ]; then echo "  TUI:    $PREFIX/lib/boreal/tui/entrypoint.js";
 else echo "  TUI:    not selected (a previous installed dashboard was removed)"; fi
+echo "  global: provisioned (run bwrk dashboard global)"
 if [ "$INSTALL_TUI" -eq 1 ] && [ "$HAS_NODE" -ne 1 ]; then
   echo "  note: a supported Node.js 20–26 is not on PATH; CLI commands work, but bwrk dashboard needs Node.js" >&2
 fi
@@ -1458,4 +1585,4 @@ case ":${PATH:-}:" in
   *) echo "  add $PREFIX/bin to PATH to invoke bwrk" ;;
 esac
 
-printf "  Next: open your repository and run bwrk init, then bwrk dashboard.\n"
+printf "  Next: run bwrk dashboard global; for code projects run bwrk init, then bwrk dashboard.\n"

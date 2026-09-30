@@ -5,17 +5,19 @@
 //! planning-only APIs remain explicit for edits and graph operations whose
 //! transactional store methods are not available yet.
 
-use boreal_domain::work_model_v3::{
-    ActivationPolicy, Cycle, CycleAssignment, CycleAssignmentState, CycleId, CycleInstance, CycleLifecycle,
-    CycleSeries, CycleSeriesLifecycle, CycleTemplate, DispositionKind, FoldPolicy, GapPolicy,
-    ExecutionMode, IntakeBucket, IntakeItem, IntakeKind, IntakeLifecycle, IntakePromotion,
-    PromotionTargetKind,
+use boreal_domain::decision_inputs::{
+    ContentDigest, EntityIdentity, EntityRevision, ProofRevision,
 };
-use boreal_domain::decision_inputs::{ContentDigest, EntityIdentity, EntityRevision, ProofRevision};
 use boreal_domain::rollups::{
     evaluate_container_rollup, evaluate_cycle_rollup, AcceptedOutcome, ContainerRollup,
     ContainerRollupInput, CycleAssignmentRollupInput, CycleRollup, CycleRollupInput,
     DescendantIntegrity, RollupBlocker, RollupScope, ScopeDisposition, TaskRollupInput,
+};
+use boreal_domain::work_model_v3::{
+    ActivationPolicy, Cycle, CycleAssignment, CycleAssignmentState, CycleId, CycleInstance,
+    CycleLifecycle, CycleSeries, CycleSeriesLifecycle, CycleTemplate, DispositionKind,
+    ExecutionMode, FoldPolicy, GapPolicy, IntakeBucket, IntakeItem, IntakeKind, IntakeLifecycle,
+    IntakePromotion, PromotionTargetKind,
 };
 use boreal_domain::{ProjectId, SessionId, TimestampMs, WorkId};
 use boreal_store::{
@@ -174,7 +176,10 @@ impl WorkApplication<'_> {
                     work_id: edge.dependent_id.to_string(),
                     title: None,
                     code: "rollup_dependency_unreadable".to_owned(),
-                    detail: format!("dependency prerequisite {} is unreadable", edge.prerequisite_id),
+                    detail: format!(
+                        "dependency prerequisite {} is unreadable",
+                        edge.prerequisite_id
+                    ),
                 });
             }
         }
@@ -182,7 +187,10 @@ impl WorkApplication<'_> {
         let mut projected = BTreeMap::new();
         let mut offset = 0;
         while offset < total || (total == 0 && offset == 0) {
-            let limit = total.saturating_sub(offset).min(crate::status::MAX_STATUS_ROWS).max(1);
+            let limit = total
+                .saturating_sub(offset)
+                .min(crate::status::MAX_STATUS_ROWS)
+                .max(1);
             let page = crate::status::project_status(
                 project_id,
                 &snapshot.actor,
@@ -203,12 +211,14 @@ impl WorkApplication<'_> {
             }
             offset += returned;
         }
-        let work = snapshot.status
+        let work = snapshot
+            .status
             .works
             .iter()
             .map(|row| (row.work.id.to_string(), row.work.clone()))
             .collect::<BTreeMap<_, _>>();
-        let assignments = snapshot.assignments
+        let assignments = snapshot
+            .assignments
             .iter()
             .cloned()
             .map(|assignment| {
@@ -226,18 +236,30 @@ impl WorkApplication<'_> {
             })
             .collect();
         let cycle = cycle_model(&snapshot.cycle)?;
-        let node_by_work = snapshot.work_nodes.iter().map(|node| (node.work_id.as_str(), node)).collect::<BTreeMap<_, _>>();
-        let input_by_work = inputs.iter().map(|input| (input.work.id.as_str(), input)).collect::<BTreeMap<_, _>>();
+        let node_by_work = snapshot
+            .work_nodes
+            .iter()
+            .map(|node| (node.work_id.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+        let input_by_work = inputs
+            .iter()
+            .map(|input| (input.work.id.as_str(), input))
+            .collect::<BTreeMap<_, _>>();
         let mut rollup_assignments = Vec::new();
         for assignment in &snapshot.assignments {
             let id = assignment.work_id.as_str();
             let Some(item) = projected.get(id) else {
-                let source_row = snapshot.status.works.iter().find(|row| row.work.id.as_str() == id);
+                let source_row = snapshot
+                    .status
+                    .works
+                    .iter()
+                    .find(|row| row.work.id.as_str() == id);
                 diagnostics.push(boreal_store::StatusRecordDiagnostic {
                     work_id: id.to_owned(),
                     title: work.get(id).map(|work| work.title.clone()),
                     code: "rollup_work_unavailable".to_owned(),
-                    detail: "assigned work is missing from the canonical status snapshot".to_owned(),
+                    detail: "assigned work is missing from the canonical status snapshot"
+                        .to_owned(),
                 });
                 // Keep the assignment in the rollup denominator even when its
                 // decision facts cannot be projected. The corrupt integrity
@@ -257,22 +279,30 @@ impl WorkApplication<'_> {
                     WorkId::new(id),
                     EntityRevision::new(row.action_facts.entity_revision.unwrap_or(0)),
                 );
-                let accepted_outcome = outcome.map(|outcome| AcceptedOutcome::new(
-                    EntityIdentity::new(
-                        ProjectId::new(outcome.project_id.clone()),
-                        WorkId::new(outcome.work_id.clone()),
-                        EntityRevision::new(outcome.entity_revision),
-                    ),
-                    ProofRevision::new(outcome.proof_revision),
-                    ContentDigest::new(outcome.summary_digest.clone()),
-                ));
+                let accepted_outcome = outcome.map(|outcome| {
+                    AcceptedOutcome::new(
+                        EntityIdentity::new(
+                            ProjectId::new(outcome.project_id.clone()),
+                            WorkId::new(outcome.work_id.clone()),
+                            EntityRevision::new(outcome.entity_revision),
+                        ),
+                        ProofRevision::new(outcome.proof_revision),
+                        ContentDigest::new(outcome.summary_digest.clone()),
+                    )
+                });
                 let disposition = match assignment.state.as_str() {
-                    "completed" => outcome.map(|outcome| boreal_domain::rollups::ScopeDisposition::AcceptedClosed {
-                        entity_revision: EntityRevision::new(outcome.entity_revision),
-                        outcome_digest: ContentDigest::new(outcome.summary_digest.clone()),
+                    "completed" => outcome.map(|outcome| {
+                        boreal_domain::rollups::ScopeDisposition::AcceptedClosed {
+                            entity_revision: EntityRevision::new(outcome.entity_revision),
+                            outcome_digest: ContentDigest::new(outcome.summary_digest.clone()),
+                        }
                     }),
-                    "removed" | "carried_over" => snapshot.assignment_reasons.get(&assignment.assignment_id)
-                        .map(|reason| boreal_domain::rollups::ScopeDisposition::deferred(reason.clone())),
+                    "removed" | "carried_over" => snapshot
+                        .assignment_reasons
+                        .get(&assignment.assignment_id)
+                        .map(|reason| {
+                            boreal_domain::rollups::ScopeDisposition::deferred(reason.clone())
+                        }),
                     _ => None,
                 };
                 let mut task = TaskRollupInput::new(
@@ -280,10 +310,18 @@ impl WorkApplication<'_> {
                     ExecutionMode::Direct,
                     row.work.lifecycle,
                     match row.work.lifecycle {
-                        boreal_domain::PersistedLifecycle::Draft => boreal_domain::DerivedStatus::Draft,
-                        boreal_domain::PersistedLifecycle::Open => boreal_domain::DerivedStatus::Ready,
-                        boreal_domain::PersistedLifecycle::Closed => boreal_domain::DerivedStatus::Closed,
-                        boreal_domain::PersistedLifecycle::Cancelled => boreal_domain::DerivedStatus::Cancelled,
+                        boreal_domain::PersistedLifecycle::Draft => {
+                            boreal_domain::DerivedStatus::Draft
+                        }
+                        boreal_domain::PersistedLifecycle::Open => {
+                            boreal_domain::DerivedStatus::Ready
+                        }
+                        boreal_domain::PersistedLifecycle::Closed => {
+                            boreal_domain::DerivedStatus::Closed
+                        }
+                        boreal_domain::PersistedLifecycle::Cancelled => {
+                            boreal_domain::DerivedStatus::Cancelled
+                        }
                     },
                 );
                 task.accepted_outcome = accepted_outcome;
@@ -314,69 +352,122 @@ impl WorkApplication<'_> {
             };
             let source_input = input_by_work.get(id).copied();
             let node = node_by_work.get(id).copied();
-            let (execution_mode, node_integrity) = match node.map(|node| node.execution_mode.as_str()) {
-                Some("container") => (ExecutionMode::Container, None),
-                Some("direct") => (ExecutionMode::Direct, None),
-                Some(value) => (ExecutionMode::Direct, Some(format!("invalid_execution_mode:{value}"))),
-                None => (ExecutionMode::Direct, Some("work_node_missing".to_owned())),
-            };
-            let identity = item.canonical_inputs.as_ref().map(|facts| facts.subject.clone()).or_else(|| {
-                source_input.and_then(|input| input.action_facts.as_ref()?.entity_revision.map(|entity_revision| {
-                    EntityIdentity::new(project_id.clone(), WorkId::new(id), EntityRevision::new(entity_revision))
-                }))
-            }).unwrap_or_else(|| EntityIdentity::new(
-                project_id.clone(),
-                WorkId::new(id),
-                EntityRevision::new(0),
-            ));
+            let (execution_mode, node_integrity) =
+                match node.map(|node| node.execution_mode.as_str()) {
+                    Some("container") => (ExecutionMode::Container, None),
+                    Some("direct") => (ExecutionMode::Direct, None),
+                    Some(value) => (
+                        ExecutionMode::Direct,
+                        Some(format!("invalid_execution_mode:{value}")),
+                    ),
+                    None => (ExecutionMode::Direct, Some("work_node_missing".to_owned())),
+                };
+            let identity = item
+                .canonical_inputs
+                .as_ref()
+                .map(|facts| facts.subject.clone())
+                .or_else(|| {
+                    source_input.and_then(|input| {
+                        input
+                            .action_facts
+                            .as_ref()?
+                            .entity_revision
+                            .map(|entity_revision| {
+                                EntityIdentity::new(
+                                    project_id.clone(),
+                                    WorkId::new(id),
+                                    EntityRevision::new(entity_revision),
+                                )
+                            })
+                    })
+                })
+                .unwrap_or_else(|| {
+                    EntityIdentity::new(project_id.clone(), WorkId::new(id), EntityRevision::new(0))
+                });
             let stored_outcome = snapshot.accepted_outcomes.get(id);
-            let accepted_outcome = stored_outcome.map(|outcome| AcceptedOutcome::new(
-                EntityIdentity::new(
-                    ProjectId::new(outcome.project_id.clone()),
-                    WorkId::new(outcome.work_id.clone()),
-                    EntityRevision::new(outcome.entity_revision),
-                ),
-                ProofRevision::new(outcome.proof_revision),
-                ContentDigest::new(outcome.summary_digest.clone()),
-            ));
+            let accepted_outcome = stored_outcome.map(|outcome| {
+                AcceptedOutcome::new(
+                    EntityIdentity::new(
+                        ProjectId::new(outcome.project_id.clone()),
+                        WorkId::new(outcome.work_id.clone()),
+                        EntityRevision::new(outcome.entity_revision),
+                    ),
+                    ProofRevision::new(outcome.proof_revision),
+                    ContentDigest::new(outcome.summary_digest.clone()),
+                )
+            });
             let disposition = match assignment.state.as_str() {
-                "completed" => stored_outcome.map(|outcome| boreal_domain::rollups::ScopeDisposition::AcceptedClosed {
-                    entity_revision: EntityRevision::new(outcome.entity_revision),
-                    outcome_digest: ContentDigest::new(outcome.summary_digest.clone()),
+                "completed" => stored_outcome.map(|outcome| {
+                    boreal_domain::rollups::ScopeDisposition::AcceptedClosed {
+                        entity_revision: EntityRevision::new(outcome.entity_revision),
+                        outcome_digest: ContentDigest::new(outcome.summary_digest.clone()),
+                    }
                 }),
-                "removed" | "carried_over" => snapshot.assignment_reasons.get(&assignment.assignment_id)
-                    .map(|reason| boreal_domain::rollups::ScopeDisposition::deferred(reason.clone())),
+                "removed" | "carried_over" => snapshot
+                    .assignment_reasons
+                    .get(&assignment.assignment_id)
+                    .map(|reason| {
+                        boreal_domain::rollups::ScopeDisposition::deferred(reason.clone())
+                    }),
                 _ => None,
             };
-            let canonical_integrity = item.canonical_inputs.as_ref().map(|facts| facts.integrity.level);
+            let canonical_integrity = item
+                .canonical_inputs
+                .as_ref()
+                .map(|facts| facts.integrity.level);
             let integrity = if let Some(code) = node_integrity {
                 DescendantIntegrity::Corrupt { code }
             } else {
                 match canonical_integrity {
-                    Some(boreal_domain::decision_inputs::IntegrityLevel::Valid) => DescendantIntegrity::Valid,
-                    Some(boreal_domain::decision_inputs::IntegrityLevel::Degraded) => DescendantIntegrity::Degraded { code: "decision_facts_degraded".into() },
-                    Some(boreal_domain::decision_inputs::IntegrityLevel::Quarantined) | None => DescendantIntegrity::Corrupt { code: "decision_facts_unavailable".into() },
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Valid) => {
+                        DescendantIntegrity::Valid
+                    }
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Degraded) => {
+                        DescendantIntegrity::Degraded {
+                            code: "decision_facts_degraded".into(),
+                        }
+                    }
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Quarantined) | None => {
+                        DescendantIntegrity::Corrupt {
+                            code: "decision_facts_unavailable".into(),
+                        }
+                    }
                 }
             };
-            let gate_gaps = item.gates.missing.iter().map(|gate| gate.clone().into()).collect();
-            let overdue = source_input.and_then(|input| input.schedule).and_then(|schedule| schedule.due_at).is_some_and(|due| as_of >= due);
-            let blockers = item.decision.reason_codes.iter().filter_map(|reason| match reason {
-                boreal_domain::ReasonCode::HardHold(_)
-                | boreal_domain::ReasonCode::PrerequisiteOpen(_)
-                | boreal_domain::ReasonCode::AttemptActive
-                | boreal_domain::ReasonCode::NotPublished
-                | boreal_domain::ReasonCode::GateFailed(_)
-                | boreal_domain::ReasonCode::GateMissing(_)
-                | boreal_domain::ReasonCode::GateInvalid(_)
-                | boreal_domain::ReasonCode::ReviewRejected(_)
-                | boreal_domain::ReasonCode::ExpiryReviewRequired
-                | boreal_domain::ReasonCode::VerificationRequired
-                | boreal_domain::ReasonCode::ReviewRequired
-                | boreal_domain::ReasonCode::CloseoutPending
-                | boreal_domain::ReasonCode::LeaseElapsed
-                | boreal_domain::ReasonCode::HardBudgetElapsed => Some(RollupBlocker::new(WorkId::new(id), reason.stable_code())),
-                _ => None,
-            }).collect();
+            let gate_gaps = item
+                .gates
+                .missing
+                .iter()
+                .map(|gate| gate.clone().into())
+                .collect();
+            let overdue = source_input
+                .and_then(|input| input.schedule)
+                .and_then(|schedule| schedule.due_at)
+                .is_some_and(|due| as_of >= due);
+            let blockers = item
+                .decision
+                .reason_codes
+                .iter()
+                .filter_map(|reason| match reason {
+                    boreal_domain::ReasonCode::HardHold(_)
+                    | boreal_domain::ReasonCode::PrerequisiteOpen(_)
+                    | boreal_domain::ReasonCode::AttemptActive
+                    | boreal_domain::ReasonCode::NotPublished
+                    | boreal_domain::ReasonCode::GateFailed(_)
+                    | boreal_domain::ReasonCode::GateMissing(_)
+                    | boreal_domain::ReasonCode::GateInvalid(_)
+                    | boreal_domain::ReasonCode::ReviewRejected(_)
+                    | boreal_domain::ReasonCode::ExpiryReviewRequired
+                    | boreal_domain::ReasonCode::VerificationRequired
+                    | boreal_domain::ReasonCode::ReviewRequired
+                    | boreal_domain::ReasonCode::CloseoutPending
+                    | boreal_domain::ReasonCode::LeaseElapsed
+                    | boreal_domain::ReasonCode::HardBudgetElapsed => {
+                        Some(RollupBlocker::new(WorkId::new(id), reason.stable_code()))
+                    }
+                    _ => None,
+                })
+                .collect();
             let mut task = TaskRollupInput::new(
                 identity,
                 execution_mode,
@@ -412,7 +503,11 @@ impl WorkApplication<'_> {
             });
         }
         let rollup = evaluate_cycle_rollup(&CycleRollupInput {
-            scope: RollupScope::cycle(project_id.clone(), cycle.id.clone(), EntityRevision::new(revision)),
+            scope: RollupScope::cycle(
+                project_id.clone(),
+                cycle.id.clone(),
+                EntityRevision::new(revision),
+            ),
             cycle,
             assignments: rollup_assignments,
             gate_gaps: Vec::new(),
@@ -523,7 +618,10 @@ impl WorkApplication<'_> {
             let parents = frontier;
             frontier = BTreeSet::new();
             for node in &snapshot.work_nodes {
-                if node.parent_id.as_ref().is_some_and(|parent| parents.contains(parent))
+                if node
+                    .parent_id
+                    .as_ref()
+                    .is_some_and(|parent| parents.contains(parent))
                     && descendant_ids.insert(node.work_id.clone())
                 {
                     frontier.insert(node.work_id.clone());
@@ -553,10 +651,9 @@ impl WorkApplication<'_> {
             let projected_item = projected.get(&id);
             let node = node_by_work.get(id.as_str()).copied();
             let work = source.map(|row| &row.work);
-            let lifecycle = work.map_or(
-                boreal_domain::PersistedLifecycle::Open,
-                |work| work.lifecycle,
-            );
+            let lifecycle = work.map_or(boreal_domain::PersistedLifecycle::Open, |work| {
+                work.lifecycle
+            });
             let revision_for_work = source
                 .and_then(|row| row.action_facts.entity_revision)
                 .unwrap_or(0);
@@ -570,16 +667,24 @@ impl WorkApplication<'_> {
                         EntityRevision::new(revision_for_work),
                     )
                 });
-            let (execution_mode, invalid_mode) = match node.map(|node| node.execution_mode.as_str()) {
+            let (execution_mode, invalid_mode) = match node.map(|node| node.execution_mode.as_str())
+            {
                 Some("container") => (ExecutionMode::Container, None),
                 Some("direct") => (ExecutionMode::Direct, None),
-                Some(value) => (ExecutionMode::Direct, Some(format!("invalid_execution_mode:{value}"))),
+                Some(value) => (
+                    ExecutionMode::Direct,
+                    Some(format!("invalid_execution_mode:{value}")),
+                ),
                 None => (ExecutionMode::Direct, Some("work_node_missing".to_owned())),
             };
-            let status = projected_item.map_or(boreal_domain::DerivedStatus::Blocked, |item| item.decision.display_status);
-            let mut task = TaskRollupInput::new(identity.clone(), execution_mode, lifecycle, status);
+            let status = projected_item.map_or(boreal_domain::DerivedStatus::Blocked, |item| {
+                item.decision.display_status
+            });
+            let mut task =
+                TaskRollupInput::new(identity.clone(), execution_mode, lifecycle, status);
             task.requires_reconciliation = true;
-            task.claimable_for_actor = projected_item.is_some_and(|item| item.claimable_for_actor());
+            task.claimable_for_actor =
+                projected_item.is_some_and(|item| item.claimable_for_actor());
             task.active_execution = projected_item.is_some_and(|item| item.attempt.is_some());
             task.accepted_outcome = snapshot.accepted_outcomes.get(&id).map(|outcome| {
                 AcceptedOutcome::new(
@@ -597,11 +702,15 @@ impl WorkApplication<'_> {
                 match disposition.kind.as_str() {
                     "accepted_closed" => Some(ScopeDisposition::AcceptedClosed {
                         entity_revision: EntityRevision::new(disposition.descendant_revision),
-                        outcome_digest: ContentDigest::new(disposition.descendant_outcome_digest.clone()),
+                        outcome_digest: ContentDigest::new(
+                            disposition.descendant_outcome_digest.clone(),
+                        ),
                     }),
                     "accepted_cancelled" => Some(ScopeDisposition::AcceptedCancelled {
                         entity_revision: EntityRevision::new(disposition.descendant_revision),
-                        outcome_digest: ContentDigest::new(disposition.descendant_outcome_digest.clone()),
+                        outcome_digest: ContentDigest::new(
+                            disposition.descendant_outcome_digest.clone(),
+                        ),
                     }),
                     "deferred" => Some(ScopeDisposition::deferred(reason)),
                     "replaced" => disposition.replacement_work_id.as_ref().map(|replacement| {
@@ -616,31 +725,53 @@ impl WorkApplication<'_> {
                     .and_then(|row| row.schedule)
                     .and_then(|schedule| schedule.due_at)
                     .is_some_and(|due| as_of >= due);
-                task.blockers = item.decision.reason_codes.iter().filter_map(|reason| match reason {
-                    boreal_domain::ReasonCode::HardHold(_)
-                    | boreal_domain::ReasonCode::PrerequisiteOpen(_)
-                    | boreal_domain::ReasonCode::AttemptActive
-                    | boreal_domain::ReasonCode::NotPublished
-                    | boreal_domain::ReasonCode::GateFailed(_)
-                    | boreal_domain::ReasonCode::GateMissing(_)
-                    | boreal_domain::ReasonCode::GateInvalid(_)
-                    | boreal_domain::ReasonCode::ReviewRejected(_)
-                    | boreal_domain::ReasonCode::ExpiryReviewRequired
-                    | boreal_domain::ReasonCode::VerificationRequired
-                    | boreal_domain::ReasonCode::ReviewRequired
-                    | boreal_domain::ReasonCode::CloseoutPending
-                    | boreal_domain::ReasonCode::LeaseElapsed
-                    | boreal_domain::ReasonCode::HardBudgetElapsed => Some(RollupBlocker::new(WorkId::new(id.clone()), reason.stable_code())),
-                    _ => None,
-                }).collect();
-                task.integrity = match item.canonical_inputs.as_ref().map(|facts| facts.integrity.level) {
-                    Some(boreal_domain::decision_inputs::IntegrityLevel::Valid) if invalid_mode.is_none() => DescendantIntegrity::Valid,
-                    Some(boreal_domain::decision_inputs::IntegrityLevel::Degraded) => DescendantIntegrity::Degraded { code: "decision_facts_degraded".into() },
-                    _ => DescendantIntegrity::Corrupt { code: invalid_mode.unwrap_or_else(|| "decision_facts_unavailable".into()) },
+                task.blockers =
+                    item.decision
+                        .reason_codes
+                        .iter()
+                        .filter_map(|reason| match reason {
+                            boreal_domain::ReasonCode::HardHold(_)
+                            | boreal_domain::ReasonCode::PrerequisiteOpen(_)
+                            | boreal_domain::ReasonCode::AttemptActive
+                            | boreal_domain::ReasonCode::NotPublished
+                            | boreal_domain::ReasonCode::GateFailed(_)
+                            | boreal_domain::ReasonCode::GateMissing(_)
+                            | boreal_domain::ReasonCode::GateInvalid(_)
+                            | boreal_domain::ReasonCode::ReviewRejected(_)
+                            | boreal_domain::ReasonCode::ExpiryReviewRequired
+                            | boreal_domain::ReasonCode::VerificationRequired
+                            | boreal_domain::ReasonCode::ReviewRequired
+                            | boreal_domain::ReasonCode::CloseoutPending
+                            | boreal_domain::ReasonCode::LeaseElapsed
+                            | boreal_domain::ReasonCode::HardBudgetElapsed => Some(
+                                RollupBlocker::new(WorkId::new(id.clone()), reason.stable_code()),
+                            ),
+                            _ => None,
+                        })
+                        .collect();
+                task.integrity = match item
+                    .canonical_inputs
+                    .as_ref()
+                    .map(|facts| facts.integrity.level)
+                {
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Valid)
+                        if invalid_mode.is_none() =>
+                    {
+                        DescendantIntegrity::Valid
+                    }
+                    Some(boreal_domain::decision_inputs::IntegrityLevel::Degraded) => {
+                        DescendantIntegrity::Degraded {
+                            code: "decision_facts_degraded".into(),
+                        }
+                    }
+                    _ => DescendantIntegrity::Corrupt {
+                        code: invalid_mode.unwrap_or_else(|| "decision_facts_unavailable".into()),
+                    },
                 };
             } else {
                 task.integrity = DescendantIntegrity::Corrupt {
-                    code: invalid_mode.unwrap_or_else(|| "status_projection_unavailable".to_owned()),
+                    code: invalid_mode
+                        .unwrap_or_else(|| "status_projection_unavailable".to_owned()),
                 };
                 diagnostics.push(boreal_store::StatusRecordDiagnostic {
                     work_id: id.clone(),
@@ -1337,7 +1468,11 @@ fn cycle_model(record: &boreal_store::CycleV3Record) -> Result<Cycle, Applicatio
         "active" => CycleLifecycle::Active,
         "completed" => CycleLifecycle::Completed,
         "cancelled" => CycleLifecycle::Cancelled,
-        value => return Err(ApplicationError::Invalid(format!("unknown cycle lifecycle {value}"))),
+        value => {
+            return Err(ApplicationError::Invalid(format!(
+                "unknown cycle lifecycle {value}"
+            )))
+        }
     };
     let timestamp = |value: i64| -> Result<TimestampMs, ApplicationError> {
         u64::try_from(value)
@@ -1373,26 +1508,29 @@ fn cycle_assignment_model(
             ActivationPolicy::AtCycleStart
         }
     };
-    let activation_at = record.activation_at_utc_ms.and_then(|value| {
-        match u64::try_from(value) {
+    let activation_at = record
+        .activation_at_utc_ms
+        .and_then(|value| match u64::try_from(value) {
             Ok(value) => Some(TimestampMs::from_millis(value)),
             Err(_) => {
                 diagnostics.push("assignment activation timestamp is negative".to_owned());
                 None
             }
-        }
-    });
-    (CycleAssignment {
-        id: record.assignment_id.clone(),
-        cycle_id: CycleId::new(record.cycle_id.clone()),
-        work_id: WorkId::new(record.work_id.clone()),
-        project_id: ProjectId::new(record.project_id.clone()),
-        state,
-        activation_policy,
-        activation_at,
-        predecessor_id: record.predecessor_id.clone(),
-        successor_id: record.successor_id.clone(),
-    }, diagnostics)
+        });
+    (
+        CycleAssignment {
+            id: record.assignment_id.clone(),
+            cycle_id: CycleId::new(record.cycle_id.clone()),
+            work_id: WorkId::new(record.work_id.clone()),
+            project_id: ProjectId::new(record.project_id.clone()),
+            state,
+            activation_policy,
+            activation_at,
+            predecessor_id: record.predecessor_id.clone(),
+            successor_id: record.successor_id.clone(),
+        },
+        diagnostics,
+    )
 }
 
 fn find_dependency_cycles(edges: &[DependencyEdgeView]) -> Vec<Vec<String>> {

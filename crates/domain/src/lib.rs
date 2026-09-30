@@ -14,6 +14,7 @@ pub mod completion;
 pub mod decision_api;
 pub mod decision_inputs;
 pub mod dependencies;
+pub mod global_manager;
 pub mod rollups;
 pub mod time_policy;
 

@@ -373,6 +373,8 @@ pub fn guided_action(item: &crate::StatusWork) -> Option<boreal_domain::actions:
         ActionKind::AcceptAttempt,
         ActionKind::StartAttempt,
         ActionKind::FinishClose,
+        ActionKind::AttachEvidence,
+        ActionKind::Checkpoint,
         ActionKind::Review,
         ActionKind::Recover,
         ActionKind::Inspect,

@@ -8,6 +8,7 @@ use std::{fmt, str::FromStr};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+pub mod global_manager;
 pub mod models;
 
 /// The current API major version, as it appears on the wire.

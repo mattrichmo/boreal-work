@@ -15,8 +15,8 @@ use std::{
 
 #[cfg(unix)]
 use boreal_service::{
-    JsonRequest, TransportConfig, UnixSocketClient, APPLICATION_API_VERSION,
-    APPLICATION_SCHEMA_VERSION,
+    APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION, JsonRequest, TransportConfig,
+    UnixSocketClient,
 };
 
 const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -581,7 +581,9 @@ fn private_socket_directory(role: &str) -> Result<(PathBuf, PathBuf), CliError> 
         .len()
         > 100
     {
-        return Err(CliError::invalid("project path is too long for a Unix service socket; use a shorter canonical workspace path"));
+        return Err(CliError::invalid(
+            "project path is too long for a Unix service socket; use a shorter canonical workspace path",
+        ));
     }
     for attempt in 0..16_u8 {
         let name = if attempt == 0 {
@@ -601,7 +603,7 @@ fn private_socket_directory(role: &str) -> Result<(PathBuf, PathBuf), CliError> 
                         "cannot create private dashboard runtime directory {}: {error}",
                         directory.display()
                     ),
-                ))
+                ));
             }
         }
     }
@@ -1345,9 +1347,11 @@ mod tests {
         let path = guard.path().to_owned();
         fs::write(&path, "fixture").unwrap();
         let error = guard.cleanup().unwrap_err();
-        assert!(error
-            .message
-            .contains("refusing to remove a non-socket endpoint"));
+        assert!(
+            error
+                .message
+                .contains("refusing to remove a non-socket endpoint")
+        );
         assert!(path.exists());
         fs::remove_file(path).unwrap();
         guard.cleanup().unwrap();

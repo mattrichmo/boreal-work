@@ -21,8 +21,8 @@ const FIXTURE_HARNESS: &str = "outcome-exit-test";
 fn no_ready_is_unchanged_json_and_exits_zero() {
     let root = temporary_root("no-ready");
     fs::create_dir_all(&root).unwrap();
-    let database = root.join("boreal.sqlite");
-    assert_success(run(&root, ["init", "p", "--db", path(&database), "--json"]));
+    let database = root.join(".boreal/boreal.sqlite");
+    assert_success(run(&root, ["init", "--project", "p", "--json"]));
 
     let output = run(
         &root,
@@ -41,13 +41,14 @@ fn no_ready_is_unchanged_json_and_exits_zero() {
 fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
     let root = temporary_root("rejected-close");
     fs::create_dir_all(&root).unwrap();
-    let database = root.join("boreal.sqlite");
+    let database = root.join(".boreal/boreal.sqlite");
     let receipt = root.join("receipt.json");
     let summary = root.join("summary.txt");
     assert_success(run(
         &root,
         [
             "init",
+            "--project",
             "p",
             "--actor",
             BOOTSTRAP_OPERATOR,
@@ -226,11 +227,12 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
 fn direct_claim_conflict_emits_error_and_nonzero_exit() {
     let root = temporary_root("claim-conflict");
     fs::create_dir_all(&root).unwrap();
-    let database = root.join("boreal.sqlite");
+    let database = root.join(".boreal/boreal.sqlite");
     assert_success(run(
         &root,
         [
             "init",
+            "--project",
             "p",
             "--actor",
             BOOTSTRAP_OPERATOR,
@@ -359,9 +361,14 @@ fn socket_busy_and_unknown_outcomes_have_documented_exits() {
 }
 
 fn assert_socket_outcome(outcome: &str, code: &str, expected_exit: i32, readback: bool) {
-    let root = temporary_root(outcome);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = PathBuf::from("/tmp").join(format!("boe{}{}", std::process::id(), nonce));
     fs::create_dir_all(&root).unwrap();
-    let socket = short_socket(outcome);
+    let socket = root.join("s.sock");
+    assert_success(run(&root, ["init", "--project", "p", "--json"]));
     let _ = fs::remove_file(&socket);
     let listener = match UnixListener::bind(&socket) {
         Ok(listener) => listener,
@@ -421,6 +428,7 @@ fn assert_socket_outcome(outcome: &str, code: &str, expected_exit: i32, readback
         &root,
         [
             "status",
+            "--project",
             "p",
             "--socket",
             path(&socket),
@@ -614,14 +622,6 @@ fn temporary_root(label: &str) -> PathBuf {
         "boreal-cli-outcome-{label}-{}-{nonce}",
         std::process::id()
     ))
-}
-
-fn short_socket(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    PathBuf::from("/tmp").join(format!("boe-{label}-{}-{nonce}.sock", std::process::id()))
 }
 
 fn path(path: &Path) -> &str {

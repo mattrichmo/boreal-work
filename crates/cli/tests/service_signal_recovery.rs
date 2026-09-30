@@ -29,7 +29,7 @@ unsafe extern "C" {
 #[test]
 fn service_run_handles_sigterm_and_removes_socket() {
     let temp = TempDir::new("service-signal");
-    let database = temp.path().join("boreal.sqlite");
+    let database = temp.path().join(".boreal/boreal.sqlite");
     let socket = short_socket_path(temp.path());
     let Some(child) = start_service(temp.path(), &database, &socket) else {
         return;
@@ -54,7 +54,7 @@ fn service_run_handles_sigterm_and_removes_socket() {
 #[test]
 fn service_run_recovers_a_stale_socket_after_sigkill_without_breaking_live_service() {
     let temp = TempDir::new("service-sigkill");
-    let database = temp.path().join("boreal.sqlite");
+    let database = temp.path().join(".boreal/boreal.sqlite");
     let socket = short_socket_path(temp.path());
     let Some(mut child) = start_service(temp.path(), &database, &socket) else {
         return;
@@ -105,7 +105,7 @@ fn service_run_recovers_a_stale_socket_after_sigkill_without_breaking_live_servi
 #[test]
 fn direct_mutation_is_rejected_while_the_service_owns_the_database() {
     let temp = TempDir::new("service-direct-owner");
-    let database = temp.path().join("boreal.sqlite");
+    let database = temp.path().join(".boreal/boreal.sqlite");
     let socket = short_socket_path(temp.path());
     let Some(service) = start_service(temp.path(), &database, &socket) else {
         return;
@@ -115,9 +115,10 @@ fn direct_mutation_is_rejected_while_the_service_owns_the_database() {
         .current_dir(temp.path())
         .args([
             "init",
-            "direct-owner-project",
+            "--project",
+            "service-test-project",
             "--actor",
-            "direct-owner-operator",
+            "service-operator",
             "--operation-id",
             "op-direct-owner-init",
             "--db",
@@ -140,7 +141,7 @@ fn direct_mutation_is_rejected_while_the_service_owns_the_database() {
 #[test]
 fn recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protocol_error() {
     let temp = TempDir::new("service-recovery");
-    let database = temp.path().join("boreal.sqlite");
+    let database = temp.path().join(".boreal/boreal.sqlite");
     let socket = short_socket_path(temp.path());
 
     assert_success(
@@ -148,6 +149,7 @@ fn recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protoc
             .current_dir(temp.path())
             .args([
                 "init",
+                "--project",
                 "recovery-project",
                 "--actor",
                 BOOTSTRAP_OPERATOR,
@@ -333,7 +335,9 @@ fn recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protoc
             "--socket",
         ])
         .arg(&socket)
-        .args(["--db", "unused-local.sqlite", "--json"])
+        .arg("--db")
+        .arg(&database)
+        .arg("--json")
         .output()
         .expect("evidence retry launches");
     let _ = stop_service(service, &socket, SIGINT);
@@ -523,6 +527,7 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
             .current_dir(root)
             .args([
                 "init",
+                "--project",
                 "service-test-project",
                 "--actor",
                 "service-operator",

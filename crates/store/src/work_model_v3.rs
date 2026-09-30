@@ -229,6 +229,113 @@ pub struct ContainerDispositionV3Input {
 }
 
 impl SqliteStore {
+    /// Atomically create a draft work target and attach current intake
+    /// provenance under one canonical operation, revision, and audit event.
+    pub fn create_work_and_promote_intake_v3(
+        &self,
+        context: &V3MutationContext,
+        input: &IntakePromotionV3Input,
+        work: &boreal_domain::WorkItem,
+    ) -> Result<MutationResult, StoreError> {
+        if input.target_kind != "draft_work"
+            || input.target_id != work.id.as_str()
+            || input.project_id != work.project_id.as_str()
+            || input.project_id != context.project_id
+            || input.actor_id != context.actor_id
+            || input.operation_id != context.operation_id
+        {
+            return Err(StoreError::Invalid(
+                "work creation and intake promotion identity do not match".into(),
+            ));
+        }
+        let bound = context.with_payload(json!({
+            "promotion": {
+                "project_id": input.project_id,
+                "promotion_id": input.promotion_id,
+                "intake_id": input.intake_id,
+                "intake_revision": input.intake_revision,
+                "intake_digest": input.intake_digest,
+                "target_kind": input.target_kind,
+                "target_id": input.target_id,
+            },
+            "work": {
+                "work_id": work.id.as_str(),
+                "kind": format!("{:?}", work.kind).to_ascii_lowercase(),
+                "parent_id": work.parent_id.as_ref().map(|id| id.as_str()),
+                "title": work.title,
+                "description": work.description,
+                "lifecycle": format!("{:?}", work.lifecycle).to_ascii_lowercase(),
+                "priority": work.priority,
+                "dispatch_policy": format!("{:?}", work.dispatch_policy).to_ascii_lowercase(),
+                "hard_holds": work.hard_holds.iter().map(|hold| hold.stable_code()).collect::<Vec<_>>(),
+                "acceptance_profile": {
+                    "id": work.acceptance_profile.id.as_str(),
+                    "version": work.acceptance_profile.version,
+                    "gates": work.acceptance_profile.gates.iter().map(|gate| json!({
+                        "id": gate.id.as_str(),
+                        "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
+                        "required": gate.required,
+                        "state": format!("{:?}", gate.state).to_ascii_lowercase(),
+                    })).collect::<Vec<_>>(),
+                },
+            }
+        }));
+        let context = &bound;
+        self.fact_mutation(
+            context,
+            "intake.promote.create_work",
+            "intake",
+            &input.intake_id,
+            &[boreal_domain::ActorRole::Operator],
+            || {
+                if work.lifecycle != boreal_domain::PersistedLifecycle::Draft
+                    || work.title.trim().is_empty()
+                    || work.title.len() > 512
+                    || work.description.len() > 65_536
+                {
+                    return Err(StoreError::Invalid(
+                        "promoted work must be a bounded draft with a non-empty title".into(),
+                    ));
+                }
+                if let Some(parent_id) = &work.parent_id {
+                    let parent = self
+                        .work(&input.project_id, parent_id.as_str())?
+                        .ok_or_else(|| StoreError::Invalid("work parent is not in this project".into()))?;
+                    let compatible = matches!(
+                        (parent.kind.as_str(), work.kind),
+                        ("milestone", boreal_domain::WorkKind::Sprint)
+                            | ("sprint", boreal_domain::WorkKind::Task)
+                    );
+                    if !compatible {
+                        return Err(StoreError::Invalid(
+                            "work parent kind is incompatible with the promoted work kind".into(),
+                        ));
+                    }
+                } else if work.kind == boreal_domain::WorkKind::Sprint {
+                    return Err(StoreError::Invalid("sprints require a parent".into()));
+                }
+                self.create_work_in_transaction(work, &input.created_at)?;
+                let mut statement = self.prepare(
+                    "INSERT INTO intake_promotion_v3
+                     (promotion_id, project_id, intake_id, intake_revision,
+                      intake_digest, target_kind, target_id, actor_id, operation_id,
+                      created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'draft_work', ?6, ?7, ?8, ?9)",
+                )?;
+                statement.bind_text(1, &input.promotion_id)?;
+                statement.bind_text(2, &input.project_id)?;
+                statement.bind_text(3, &input.intake_id)?;
+                statement.bind_i64(4, input.intake_revision)?;
+                statement.bind_text(5, &input.intake_digest)?;
+                statement.bind_text(6, &input.target_id)?;
+                statement.bind_text(7, &context.actor_id)?;
+                statement.bind_text(8, &context.operation_id)?;
+                statement.bind_text(9, &input.created_at)?;
+                statement.run()
+            },
+        )
+    }
+
     pub fn create_work_node_v3(
         &self,
         context: &V3MutationContext,
@@ -1034,21 +1141,13 @@ impl SqliteStore {
             boreal_domain::ActorRole::Agent,
             boreal_domain::ActorRole::Operator,
         ];
-        let roles = if command.starts_with("cycle.")
-            || command.starts_with("container.disposition")
+        let roles = if command.starts_with("cycle.") || command.starts_with("container.disposition")
         {
             &planning_roles[..]
         } else {
             &ordinary_roles[..]
         };
-        self.fact_mutation(
-            context,
-            command,
-            subject_type,
-            subject_id,
-            roles,
-            write,
-        )
+        self.fact_mutation(context, command, subject_type, subject_id, roles, write)
     }
 
     /// Shared canonical fact transaction: role/session, replay, revision, write,

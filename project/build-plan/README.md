@@ -1,4 +1,13 @@
-# Boreal v2 build-out plan
+# Current production completion
+
+Use [FINAL_PRODUCTION_PLAN.md](production-completion/FINAL_PRODUCTION_PLAN.md)
+and [FINAL_STATE.json](production-completion/execution/FINAL_STATE.json) for
+current execution. The 2026-09-26 user instruction supersedes the older
+implementation-only queues and per-leaf validation ceremony: parallel feature
+integration, final qualification/repair loop, actual installation and release.
+Existing vertical handoffs and accepted architecture remain applicable.
+
+# Historical Boreal v2 build-out plan
 
 Status: proposed execution plan, 2026-09-14. Planning depth: **granular**.
 This product spans concurrent storage, guided agent workflows, conditional

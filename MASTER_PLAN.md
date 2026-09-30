@@ -1,4 +1,18 @@
-# M01 — Build the standalone Boreal Work v2 product
+# Current dispatch: finish the production product
+
+As of 2026-09-26, use [FINAL_PRODUCTION_PLAN.md](project/build-plan/production-completion/FINAL_PRODUCTION_PLAN.md)
+and its [single execution state](project/build-plan/production-completion/execution/FINAL_STATE.json).
+The user's current instruction is parallel implementation in a continuous agent
+loop, comprehensive qualification at the end, repair of actual failures, and
+activation/delivery of the finished product. That plan controls current scope,
+ownership, sequencing and completion; do not resume the historical wave below
+or stop after an implementation-only handoff.
+
+The original M01 plan below is retained as history and contract context. Its
+references to current waves, dispatch authority and per-phase gates describe
+that historical execution, not the current assignment.
+
+# Historical M01 — Build the standalone Boreal Work v2 product
 
 Status: file-based execution plan. This is **not** a `bwrk` milestone and no
 legacy Boreal state is used for dispatch. The current Rust implementation has

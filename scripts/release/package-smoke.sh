@@ -4,6 +4,8 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/boreal-package-smoke.XXXXXX")
+BOREAL_GLOBAL_ROOT="$scratch/global"
+export BOREAL_GLOBAL_ROOT
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 
 python3 "$root/scripts/release/build_release.py" --output-dir "$scratch/release"
@@ -23,11 +25,16 @@ PY
 )
 manifest_version=${manifest_identity%%|*}
 manifest_api=${manifest_identity#*|}
-[ "$version" = "bwrk $manifest_version (api $manifest_api)" ] || {
+case "$version" in
+  "bwrk $manifest_version (api $manifest_api)"|"bwrk $manifest_version (api $manifest_api; source "*")") ;;
+  *)
   echo "package smoke: unexpected version: $version" >&2
   exit 1
-}
+  ;;
+esac
 [ -s "$scratch/prefix/lib/boreal/tui/entrypoint.js" ]
+[ -s "$scratch/prefix/lib/boreal/global-tui/entrypoint.js" ]
+[ -s "$scratch/global/global.sqlite" ]
 [ -s "$scratch/prefix/share/boreal/release.json" ]
 python3 - "$scratch/prefix/share/boreal/release.json" "$scratch/prefix" <<'PY'
 import hashlib
@@ -51,5 +58,24 @@ print("package smoke: release manifest and asset digests verified")
 PY
 
 python3 "$root/scripts/release/two-project-smoke.py" --prefix "$scratch/prefix"
+python3 "$root/scripts/validation/global/smoke.py" \
+  --binary "$scratch/prefix/bin/bwrk" \
+  --tui "$scratch/prefix/lib/boreal/global-tui/entrypoint.js"
+
+# A global project works without a repository, and installing the same archive
+# again preserves both its identity and the global database's personal records.
+"$scratch/prefix/bin/bwrk" global project add --name Life --json > "$scratch/life-created.json"
+"$scratch/prefix/bin/bwrk" dashboard global --json > "$scratch/global-before.json"
+sh "$root/install.sh" --archive "$archive" --prefix "$scratch/prefix" --yes
+"$scratch/prefix/bin/bwrk" dashboard global --json > "$scratch/global-after.json"
+python3 - "$scratch/global-before.json" "$scratch/global-after.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+before, after = [json.loads(Path(path).read_text())["data"] for path in sys.argv[1:]]
+assert before["projects"] == after["projects"], "reinstallation changed global projects"
+assert any(row["name"] == "Life" for row in after["projects"])
+print("package smoke: automatic global provisioning and reinstall preservation verified")
+PY
 
 echo "package smoke: PASS ($archive)"

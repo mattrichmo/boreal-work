@@ -1,6 +1,6 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.1.0",
+  "asset_version": "1.2.0",
   "ref": "boreal.workflow.finish.v1",
   "kind": "finish",
   "title": "Attach evidence, verify, and close or release work",
@@ -15,9 +15,11 @@
   "allowed_commands": [
     "bwrk agent guide --json",
     "bwrk work show <work_id> --json",
-    "bwrk evidence run <gate_id> --input <input_path> --json",
-    "bwrk agent finish <work_id> --close --expected-revision <revision> --json",
-    "bwrk operation show <operation_id> --json"
+    "bwrk evidence run --work <work_id> --gate <gate_id> --attempt <attempt_id> --fence <fence> --json",
+    "bwrk agent finish <work_id> --close --attempt <attempt_id> --fence <fence> --receipt <receipt_path> --summary <summary_path> --expected-revision <revision> --json",
+    "bwrk operation show <operation_id> --json",
+    "bwrk summary compose --work <work_id> --json",
+    "bwrk summary create --work <work_id> --input <input_path> --attempt <attempt_id> --fence <fence> --expected-revision <revision> --json"
   ],
   "typed_inputs": [
     {

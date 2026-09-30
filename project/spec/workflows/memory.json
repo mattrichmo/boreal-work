@@ -1,6 +1,6 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.1.0",
+  "asset_version": "1.2.0",
   "ref": "boreal.workflow.memory.v1",
   "kind": "memory",
   "title": "Ingest, triage, cite, review, and publish project memory",
@@ -13,9 +13,9 @@
     "bwrk source list --json",
     "bwrk source show <source_id> --json",
     "bwrk memory draft --input <input_path> --expected-revision <revision> --yes --json",
-    "bwrk memory review --input <input_path> --expected-revision <revision> --yes --json",
-    "bwrk memory publish --input <input_path> --expected-revision <revision> --yes --json",
-    "bwrk memory search --json",
+    "bwrk memory review <draft_id> --input <input_path> --expected-revision <revision> --yes --json",
+    "bwrk memory publish <review_id> --input <input_path> --expected-revision <revision> --yes --json",
+    "bwrk memory search <query> --json",
     "bwrk memory readback <operation_id> --json"
   ],
   "typed_inputs": [

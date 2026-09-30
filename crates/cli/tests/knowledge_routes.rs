@@ -31,7 +31,7 @@ fn run(root: &std::path::Path, args: &[&str]) -> serde_json::Value {
 fn source_routes_capture_register_read_list_and_verify() {
     let root = unique_root();
     fs::create_dir_all(&root).expect("create test root");
-    let db = root.join("project.sqlite");
+    let db = root.join(".boreal/boreal.sqlite");
     let input = root.join("notes.md");
     fs::write(&input, b"a durable source\n").expect("write source");
 
@@ -39,7 +39,14 @@ fn source_routes_capture_register_read_list_and_verify() {
     let input_string = input.to_string_lossy().into_owned();
     run(
         &root,
-        &["init", "knowledge-project", "--db", &db_string, "--json"],
+        &[
+            "init",
+            "--project",
+            "knowledge-project",
+            "--db",
+            &db_string,
+            "--json",
+        ],
     );
     let added = run(
         &root,

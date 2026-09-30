@@ -1,0 +1,89 @@
+import type { Item, Note, Project, Status, Association, LinkedProject } from "./client.js";
+import { GlobalController, isDone, isOverdue, type Row, type Route } from "./model.js";
+import { clip, fit, wrapWords } from "./terminal/cells.js";
+
+export const ROUTE_MENU: Array<[Route,string]> = [["overview","Home"],["projects","Projects"],["board","Board"],["list","List"],["todos","Today / open"],["notes","Notes"],["workflow","Workflow"],["links","Linked"],["planning","Plan"],["archive","Archive"],["history","History"],["inbox","Inbox"]];
+const routes=ROUTE_MENU;
+export function render(c:GlobalController,width=100,height=40):string {
+  width=Math.max(20,Math.floor(width));height=Math.max(8,Math.floor(height));
+  const snap=c.snapshot;if(!snap)return fit("Loading global manager…",width)+"\n";
+  const wide=width>=112, medium=width>=76;
+  const inspectorOnly=!wide&&c.focus==="inspector";
+  const navigationOnly=!medium&&c.focus==="navigation";
+  const navWidth=medium&&!inspectorOnly?19:0, inspectorWidth=wide?30:inspectorOnly?width:0;
+  const workWidth=inspectorOnly?0:Math.max(18,width-navWidth-inspectorWidth-(navWidth?3:0)-(inspectorWidth?3:0));
+  const head=header(c,width);
+  const bodyHeight=Math.max(1,height-head.length-1);
+  const nav=navWidth?navigation(c,navWidth,bodyHeight):[];
+  const inspector=inspectorWidth?inspect(c,inspectorWidth,height-3):[];
+  let work:string[];
+  if(inspectorOnly)work=[];
+  else if(navigationOnly)work=navigation(c,width,bodyHeight);
+  else if(c.route==="board")work=board(c,workWidth,bodyHeight);
+  else if(c.route==="overview")work=overview(c,workWidth,bodyHeight);
+  else if(c.route==="planning")work=planning(c,workWidth,bodyHeight);
+  else if(c.route==="history")work=history(c,workWidth,bodyHeight);
+  else work=list(c,workWidth,bodyHeight);
+  const body:string[]=[];
+  for(let i=0;i<bodyHeight;i++){
+    const left=navWidth?fit(nav[i]??"",navWidth):"";
+    const center=fit(work[i]??"",workWidth);
+    const right=inspectorWidth?fit(inspector[i]??"",inspectorWidth):"";
+    body.push(inspectorOnly?right:navWidth?`${left} │ ${center}${inspectorWidth?` │ ${right}`:""}`:center);
+  }
+  return [...head,...body].slice(0,height).map(line=>fit(line,width)).join("\n");
+}
+function header(c:GlobalController,width:number):string[]{
+ const p=c.route==="overview"?undefined:c.snapshot?.projects.find(x=>x.id===c.projectId);const snap=c.snapshot!;const open=snap.items.filter(i=>!i.archived&&!isDone(c.statusFor(i)));const overdue=open.filter(i=>isOverdue(i));
+ const sampled=c.sampledAt?`${Math.max(0,Math.floor((Date.now()-c.sampledAt)/1000))}s ago`:"not sampled";
+ const freshness=c.refreshing?"refreshing…":c.lastRefreshError?`stale · ${c.lastRefreshError}`:`fresh · ${sampled}`;
+ return [fit(`BOREAL  ${p?clip(p.name,width-20):"Portfolio"}  /  ${label(c.route)}${c.route==="todos"?` · ${c.todoFilter.replace("_"," ")}`:""}`,width),fit(`${c.route==="overview"||!c.projectId?"All projects":c.route==="inbox"?`Project + Personal inbox · ${p?.name??"project"}`:"Project scope"} · rev ${snap.revision} · ${c.projects.length} projects · ${open.length} open · ${overdue.length} overdue · ${freshness}`,width),fit(`${c.notice|| (c.searchQuery?`Filter: ${c.searchQuery}`:"Tab focus · ←/→ board columns · Enter inspect · ? help")}${c.unresolvedOperation?`  ·  WRITE FROZEN: ${c.unresolvedOperation}`:""}`,width),"─".repeat(width)];
+}
+function navigation(c:GlobalController,w:number,h:number):string[]{const menu=["YOUR WORK",...routes.map(([r,name])=>`${c.route===r?(c.focus==="navigation"?"▸":"›"):" "} ${name}`),"","PROJECT SCOPE",...(c.projectId?[`› ${c.activeProject?.name??"Archived project"}`,"  Space · change scope"]:["› All projects",...c.projects.map(p=>`  ${p.name}`)])];const active=1+Math.max(0,routes.findIndex(([r])=>r===c.route));const start=Math.max(0,Math.min(menu.length-Math.max(1,h),active-Math.floor(h/2)));const page=menu.slice(start,start+Math.max(1,h));if(start>0&&page.length)page[0]="↑ Views and scope";if(start+page.length<menu.length&&page.length)page[page.length-1]="↓ More views";return page.map(x=>clip(x,w));}
+function list(c:GlobalController,w:number,h:number):string[]{const rows=c.rows();const title=`${label(c.route)}  ${rows.length} records${c.searchQuery?`  ·  “${c.searchQuery}”`:""}`;const lines=[title,"─".repeat(w)];const rendered=rows.flatMap((row,i)=>rowLines(c,row,i===c.selected,w));const sel=c.route==="board"?c.boardSelected?.id:c.selectedId;let ix=rendered.findIndex(line=>line.startsWith(`@${sel}@`));if(ix<0)ix=0;const avail=Math.max(1,h-lines.length);const start=Math.max(0,Math.min(rendered.length-avail,ix-Math.floor(avail/2)));lines.push(...rendered.slice(start,start+avail));return lines.map(x=>clip(x.replace(/^@[^@]*@/,""),w));}
+function rowLines(c:GlobalController,row:Row,selected:boolean,w:number):string[]{const mark=selected?"›":" ";
+ if("operation_id" in row)return [`@${row.id}@${mark} r${row.revision} · ${formatDate(row.created_at)} · ${row.title??row.command}`,`@${row.id}@   ${row.summary}`];
+ if("name" in row)return [`@${row.id}@${mark} ◇ ${row.name}`,`@${row.id}@   ${row.lifecycle??"active"} · ${row.health??"health unknown"}${row.description?` · ${row.description}`:""}`];
+ if("title" in row && "status_id" in row){const i=row as Item;const status=c.statusFor(i);const overdue=isOverdue(i)&&!isDone(status);return [`@${i.id}@${mark} ${status?.label??i.status_id}${overdue?" · OVERDUE":""}${i.priority===null?"":` · P${i.priority}`}  ${i.title}`,...(i.description?wrapWords(`   ${i.description}`,Math.max(10,w)).map(x=>`@${i.id}@${x}`):[]),...(i.parent_id?[`@${i.id}@   ↳ parent ${parentTitle(c,i.parent_id)}`]:[])];}
+ if("body" in row){const n=row as Note;return [`@${n.id}@${mark} ▤ ${n.title}`,...wrapWords(n.body,Math.max(10,w-3)).slice(0,3).map(x=>`@${n.id}@   ${x}`)];}
+ if("position" in row && "status_id" in row){const s=row as Status;return [`@${s.status_id}@${mark} ${s.position+1}. ${s.label} · ${s.category}`];}
+ const a=row as Association;const roll=linked(c,a);return [`@${a.identity}@${mark} ${a.kind} · ${a.identity}`,...(roll?[`@${a.identity}@   ${roll.counts?`${Object.entries(roll.counts).map(([k,v])=>`${k} ${v}`).join(" / ")} · `:""}${roll.availability} · rev ${roll.revision??"?"} · as of ${roll.as_of?formatDate(roll.as_of):"time unavailable"}`,`@${a.identity}@   ${a.path??"No folder path"}`,...(roll.items??[]).slice(0,6).map(item=>`@${a.identity}@     ${item.display_status} · ${item.title}`)]:[`@${a.identity}@   ${a.path??"No folder path"}`])];}
+function board(c:GlobalController,w:number,h:number):string[]{const statuses=c.boardStatuses;if(!statuses.length){const links=c.projectId?c.snapshot!.associations.filter(a=>a.project_id===c.projectId&&a.kind==="workspace"):[];return ["Board", "", "No personal items in this scope.",...links.map(a=>{const roll=linked(c,a);return rollupShort(c,a);})];}
+ const colsFit=Math.max(1,Math.floor(w/22));const count=Math.min(statuses.length,colsFit);let start=Math.max(0,Math.min(statuses.length-count,c.boardColumn-Math.floor(count/2)));if(c.boardColumn<start)start=c.boardColumn;
+ const shown=statuses.slice(start,start+count);const cw=Math.floor(w/count);const out=[`${c.projectId?c.activeProject?.name:"All projects"} · board  [${c.boardColumn+1}/${statuses.length}]`,"─".repeat(w)];
+ const cards=shown.map(s=>c.items.filter(i=>i.project_id===s.project_id&&i.status_id===s.status_id));const links=c.projectId?c.snapshot!.associations.filter(a=>a.project_id===c.projectId&&a.kind==="workspace"):[];const rows=Math.max(0,h-out.length-links.length);const cardLines=Math.max(0,rows-1);
+ const starts=cards.map((list,index)=>{if(start+index!==c.boardColumn)return 0;return Math.max(0,Math.min(list.length-cardLines,c.boardCard-Math.floor(cardLines/2)));});
+ for(let y=0;y<rows;y++){
+   const cells=shown.map((s,index)=>{const list=cards[index];if(y===0)return clip(`${s.project_id!==c.projectId?`${projectName(c,s.project_id)} · `:""}${s.label} (${list.length})`,cw-1);const item=list[starts[index]+y-1];if(!item)return "";const selected=item.id===c.boardSelected?.id;return clip(`${selected?"›":" "} ${item.kind==="subtask"?"↳ ":""}${item.title}`,cw-2);});out.push(cells.map(x=>fit(x,cw)).join(" ").slice(0,w));}
+ if(statuses.length>count)out[0]=`${out[0]} · ←/→ columns`;
+ for(const a of links)out.push(rollupShort(c,a));
+ return out;}
+function overview(c:GlobalController,w:number,h:number):string[]{const s=c.snapshot!;const open=s.items.filter(i=>!i.archived&&!isDone(c.statusFor(i)));const selected=c.selectedId;const out=["Portfolio  ·  work across your projects","─".repeat(w),"OPEN / OVERDUE"];const items=open.sort((a,b)=>(isOverdue(b)?1:0)-(isOverdue(a)?1:0)||a.position-b.position);const maxItems=Math.max(0,h-8);let ix=items.findIndex(item=>item.id===selected);if(ix<0)ix=0;const start=Math.max(0,Math.min(items.length-maxItems,ix-Math.floor(maxItems/2)));for(const item of items.slice(start,start+maxItems))out.push(`${item.id===selected?"›":" "} ${isOverdue(item)?"OVERDUE · ":""}${item.title}  · ${projectName(c,item.project_id)}  · ${c.statusFor(item)?.label??item.status_id}`);out.push("","PROJECT PORTFOLIO");for(const p of c.projects.slice(0,Math.max(0,h-out.length)))out.push(`${p.id===selected?"›":" "} ${p.name}  · ${s.items.filter(i=>i.project_id===p.id&&!i.archived).length} items${s.associations.some(a=>a.project_id===p.id&&a.kind==="workspace")?" · linked work":""}`);return out;}
+function planning(c:GlobalController,w:number,h:number):string[]{const items=c.items;const flat:Item[]=[];const add=(item:Item,depth:number)=>{flat.push(Object.assign({...item},{__depth:depth}));for(const child of items.filter(x=>x.parent_id===item.id))add(child,depth+1);};for(const item of items.filter(i=>!i.parent_id))add(item,0);const out=[`Planning hierarchy · ${items.length} items`,`─`.repeat(w)];let ix=flat.findIndex(i=>i.id===c.selectedId);if(ix<0)ix=0;const cap=Math.max(0,h-out.length);const start=Math.max(0,Math.min(flat.length-cap,ix-Math.floor(cap/2)));for(const item of flat.slice(start,start+cap)){const depth=(item as Item&{__depth:number}).__depth;out.push(`${item.id===c.selectedId?"›":" "}${"  ".repeat(Math.min(depth,8))}${item.kind==="milestone"?"◆":item.kind==="subtask"?"↳":"•"} ${item.title}  · ${c.statusFor(item)?.label??item.status_id}`);}return out;}
+function history(c:GlobalController,w:number,h:number):string[]{const records=c.rows().filter((r):r is import("./model.js").ActivityRow=>"operation_id" in r);const out=[`Activity timeline · ${c.historyTotal||records.length} events · revision ${c.snapshot?.revision??"?"}`,"─".repeat(w)];const selected=records.findIndex(e=>e.id===c.selectedId);const cap=Math.max(0,h-out.length);const start=Math.max(0,Math.min(records.length-cap,selected<0?0:selected-Math.floor(cap/2)));for(const e of records.slice(start,start+cap)){out.push(`${e.id===c.selectedId?"›":" "} r${e.revision} · ${formatDate(e.created_at)} · ${e.title??e.command}`,`   ${e.summary}`);}if(!records.length)out.push(c.historyError?`Activity unavailable · ${c.historyError}`:"No activity events are available.");if(c.historyHasMore)out.push("More history available; page down to load more.");return out;}
+function inspect(c:GlobalController,w:number,h:number):string[]{const r=c.selectedRow();const tabs:[GlobalController["inspectorTab"],string][]=[["details","Details"],["relationships","Links"],["history","History"],["linked","Execution"]];const out=[`INSPECT · ${c.focus==="inspector"?"focused":""}`,tabs.map(([id,name])=>id===c.inspectorTab?`[${name}]`:name).join("  "),"─".repeat(w)];const content:string[]=[];if(!r)content.push("Select a record to inspect.");
+ else if("operation_id" in r)content.push(r.title??r.command,`Revision ${r.revision} · ${formatDate(r.created_at)}`,r.summary,`Operation ${r.operation_id}`);
+ else if("title" in r&&"status_id" in r){const i=r as Item;
+   if(c.inspectorTab==="details")content.push(i.title,`Status: ${c.statusFor(i)?.label??i.status_id}`,`Project: ${projectName(c,i.project_id)}`,`Kind: ${i.kind} · ${i.id}`,`Priority: ${i.priority??"none"}`,`Due: ${i.due_at?formatDate(i.due_at):"none"}`,`Parent: ${i.parent_id?parentTitle(c,i.parent_id):"none"}`,"",...wrapWords(i.description||"No description.",w));
+   if(c.inspectorTab==="relationships"){const rel=c.relationshipsFor(i);content.push(i.title,"Relationships and dependencies");if(!rel.length)content.push("No relationships recorded.");for(const x of rel)content.push(`${x.kind} · ${relatedTitle(c,x.source_id===i.id?x.target_id:x.source_id)}`);}
+   if(c.inspectorTab==="history"){const events=c.statusHistoryFor(i);content.push(i.title,"Status changes");for(const e of events)content.push(`r${e.revision} · ${formatDate(e.changed_at)} · ${e.from_status_id??"created"} → ${e.to_status_id}`);for(const e of c.historyEvents.filter(e=>e.entity_id===i.id))content.push(`r${e.revision} · ${formatDate(e.created_at)} · ${e.summary}`);if(!events.length&&!c.historyEvents.some(e=>e.entity_id===i.id))content.push("No retained activity for this item.");}
+   if(c.inspectorTab==="linked"){content.push(i.title,`Management project: ${projectName(c,i.project_id)}`);const associations=c.snapshot!.associations.filter(a=>a.project_id===i.project_id&&a.kind==="workspace");if(!associations.length)content.push("No linked execution workspaces.");for(const a of associations){const roll=linked(c,a);content.push(a.identity,a.path??"path unavailable",roll?`${roll.availability} · revision ${roll.revision??"?"} · sampled ${formatDate(roll.as_of??"")}${roll.counts?` · ${Object.entries(roll.counts).map(([k,v])=>`${k} ${v}`).join(" / ")}`:""}`:"Execution progress unavailable",...(roll?.items??[]).slice(0,8).map(x=>`${x.display_status} · ${x.title}`));}}
+ }
+ else if("name" in r){const p=r as Project;
+   if(c.inspectorTab==="details")content.push(p.name,p.description||"No description.",`Lifecycle: ${p.lifecycle??"active"}`,`Health: ${p.health??"unknown"}`,`Items: ${c.snapshot!.items.filter(i=>i.project_id===p.id&&!i.archived).length}`);
+   if(c.inspectorTab==="relationships")for(const a of c.snapshot!.associations.filter(a=>a.project_id===p.id)){const roll=linked(c,a);content.push(`${a.kind} · ${a.identity}`,roll?`${roll.availability} · revision ${roll.revision??"?"} · ${formatDate(roll.as_of??"")}${roll.counts?` · ${Object.entries(roll.counts).map(([k,v])=>`${k} ${v}`).join(" / ")}`:""}`:"Progress unavailable");}
+   if(c.inspectorTab==="history")content.push(...c.historyEvents.filter(e=>e.entity_id===p.id).map(e=>`r${e.revision} · ${formatDate(e.created_at)} · ${e.summary}`));
+   if(c.inspectorTab==="linked")for(const a of c.snapshot!.associations.filter(a=>a.project_id===p.id&&a.kind==="workspace")){const roll=linked(c,a);content.push(a.identity,a.path??"path unavailable",roll?`${roll.availability} · rev ${roll.revision??"?"} · sampled ${formatDate(roll.as_of??"")}`:"Progress unavailable",...(roll?.items??[]).slice(0,8).map(x=>`${x.display_status} · ${x.title}`));}if(!content.length)content.push("No linked workspaces.");
+ }
+ else if("body" in r){const n=r as Note;if(c.inspectorTab==="details")content.push(n.title,`Updated ${formatDate(n.updated_at)}`,"",...wrapWords(n.body,w));else if(c.inspectorTab==="history")content.push(...c.historyEvents.filter(e=>e.entity_id===n.id).map(e=>`r${e.revision} · ${formatDate(e.created_at)} · ${e.summary}`));else content.push("No additional information for this note.");}
+ else if("position" in r&&"status_id" in r)content.push(r.label,`Category: ${r.category}`,`Position: ${r.position+1}`,`Status ID: ${r.status_id}`);
+ else {const a=r as Association;const roll=linked(c,a);content.push(a.kind,a.identity,a.path??"path unavailable",roll?`${roll.availability} · source revision ${roll.revision??"?"} · sampled ${formatDate(roll.as_of??"")}`:"Progress unavailable",...(roll?.counts?[Object.entries(roll.counts).map(([k,v])=>`${k}: ${v}`).join(" · ")]:[]),...(roll?.items??[]).slice(0,10).map(item=>`${item.display_status} · ${item.title}`));}
+ const contentHeight=Math.max(0,h-out.length);const wrapped=content.flatMap(line=>wrapWords(line,w));return [...out,...wrapped.slice(c.inspectorOffset,c.inspectorOffset+contentHeight)].map(x=>clip(x,w));}
+function label(route:Route):string{return routes.find(x=>x[0]===route)?.[1]??route;}
+function updated(r:Row):string{return "updated_at" in r?r.updated_at:"";}
+function formatDate(value:string):string{if(!value)return "time unavailable";const date=new Date(value);return Number.isNaN(date.getTime())?value:date.toLocaleString(undefined,{dateStyle:"medium",timeStyle:"short"});}
+function parentTitle(c:GlobalController,id:string):string{return c.snapshot?.items.find(i=>i.id===id)?.title??id;}
+function relatedTitle(c:GlobalController,id:string):string{return parentTitle(c,id);}
+function projectName(c:GlobalController,id:string|null):string{return c.snapshot?.projects.find(p=>p.id===id)?.name??(id?"Unknown project":"Personal");}
+function linked(c:GlobalController,a:Association):LinkedProject|undefined{return c.snapshot?.linked_projects?.find(x=>x.management_project_id===a.project_id&&x.project_id===a.identity&&(!a.path||x.path===a.path));}
+function rollupShort(c:GlobalController,a:Association):string{const r=linked(c,a);return `${a.identity}${r?.counts?` · ${Object.entries(r.counts).map(([k,v])=>`${k} ${v}`).join(" / ")}`:""} · ${r?.availability??"progress unavailable"}${r?.revision==null?"":` · rev ${r.revision}`}`;}

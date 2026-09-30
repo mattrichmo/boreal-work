@@ -1,6 +1,6 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.1.0",
+  "asset_version": "1.2.0",
   "ref": "boreal.workflow.context.v1",
   "kind": "context",
   "title": "Build a bounded project, work, decision, and source context capsule",
@@ -16,7 +16,13 @@
     "bwrk work list --json",
     "bwrk source list --json",
     "bwrk source show <source_id> --json",
-    "bwrk memory search --json"
+    "bwrk memory search <query> --json",
+    "bwrk context show --json",
+    "bwrk context show --work <work_id> --json",
+    "bwrk context search --query <query> --json",
+    "bwrk decision list --json",
+    "bwrk claim list --json",
+    "bwrk intake show <intake_id> --json"
   ],
   "typed_inputs": [
     {

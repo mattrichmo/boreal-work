@@ -31,13 +31,14 @@ fn envelope(output: &std::process::Output) -> Value {
 fn doctor_reports_schema_runtime_and_bounded_status_payload() {
     let root = temporary_root();
     fs::create_dir_all(&root).expect("temporary root");
-    let database = root.join("boreal.sqlite");
+    let database = root.join(".boreal/boreal.sqlite");
     let binary = env!("CARGO_BIN_EXE_bwrk");
 
     let initialized = Command::new(binary)
         .current_dir(&root)
         .args([
             "init",
+            "--project",
             "release-project",
             "--actor",
             "release-agent",

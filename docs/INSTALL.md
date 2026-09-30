@@ -3,7 +3,9 @@
 The supported release artifact is a platform-specific archive containing the
 `bwrk` executable, compiled TUI files, release identity, and license. Project
 databases are not part of the install and are never created as an install side
-effect. The initial binary matrix is macOS ARM64, macOS Intel, and Linux
+effect. Installation automatically provisions a separate per-user global
+manager SQLite database, including CLI-only installations. The global manager
+is independent of the installation prefix and any project folder. The initial binary matrix is macOS ARM64, macOS Intel, and Linux
 x86_64; Linux ARM64 and Windows remain unsupported until their transport and
 SQLite runtime builds are verified.
 
@@ -21,12 +23,9 @@ bwrk --version
 The final `| sh` is required. Without it, `curl` only prints the installer
 script to the terminal.
 
-If GitHub's latest release is an older incompatible package, the installer
-automatically falls back to the `main` source ref rather than failing on a
-missing v2 archive. That fallback needs Git, Rust, Node.js, npm, Python, and
-`tsc`. Once a v2 release exists, it downloads and verifies the matching
-platform archive without requiring the Rust toolchain. Run the command again
-to update.
+The installer verifies the matching platform archive. Source builds require
+an explicit `--from-source` or `--allow-source-fallback` choice and Git, Rust,
+Node.js, npm, Python, and `tsc`. Run the command again to update.
 
 After the first v2 release, installed release builds also support the shorter
 update commands:
@@ -48,6 +47,29 @@ The default prefix is `~/.local`. Use `BOREAL_PREFIX=/usr/local` or
 `--prefix /usr/local` for a system prefix. The installer replaces the CLI,
 TUI, and release metadata atomically; it does not modify a project database.
 
+## Global project manager
+
+Open the global manager from any directory:
+
+```sh
+bwrk dashboard global
+bwrk global project add --name Life --json
+```
+
+Global projects can exist without folders. They can also have folder
+associations or links to existing Boreal code projects, while keeping personal
+and business tasks, configurable workflow statuses, milestones and notes in
+the separate global store. `bwrk dashboard` inside an initialized code project
+continues to open that project's dashboard.
+
+The default global database is `~/Library/Application Support/Boreal/global.sqlite`
+on macOS and `${XDG_STATE_HOME:-~/.local/state}/boreal/global.sqlite` on Linux.
+`BOREAL_GLOBAL_ROOT` selects an explicit alternative data directory, useful for
+isolated tests or portable use. Reinstallation preserves this data; do not
+store it beneath the binary prefix or delete it when removing installed files.
+The global dashboard is packaged separately at
+`lib/boreal/global-tui/entrypoint.js` and uses the versioned Rust service API.
+
 ## Initialize a project
 
 After installing `bwrk`, change into the repository that should use Boreal and
@@ -58,11 +80,19 @@ cd your-project
 bwrk init
 ```
 
+Or pass the project folder directly:
+
+```sh
+bwrk init /path/to/your-project
+```
+
 It asks which agent tools should receive the checked-in Boreal skills, then
 creates `.boreal/project.json`, the `memory/` layout, Git-safe runtime ignores,
 and the selected `.agents/skills` and/or `.claude/skills` adapters. The project
-identifier defaults to the current folder name. `bwrk setup` and `bwrk install`
-are equivalent aliases.
+identifier defaults to the selected folder name. The local database, memory,
+and assistant skills are all installed under that selected folder. Use
+`--project ID` only when the project identifier must differ from the folder
+name. `bwrk setup` and `bwrk install` are equivalent aliases.
 
 For noninteractive use:
 
@@ -72,8 +102,40 @@ bwrk init --agents codex,claude --yes
 bwrk init --dry-run
 ```
 
-The setup is safe to repeat after updating the global binary. Existing memory
-content is preserved while managed metadata and skill files are reconciled.
+The setup is safe to repeat after updating the global binary. Omitted options
+reuse the saved identity, database, operator, memory layout, and skill targets.
+Local skill edits are preserved and reported; unchanged managed skills can be
+upgraded using the saved package digests. Identity and memory-layout changes
+require migration rather than another init.
+
+`.boreal/` contains ignored machine-local configuration, credentials, the
+transactional database, sources, and runtime state. `memory/` contains published
+curated notes in `notes/` and their `manifest.json`. The default memory layout
+has its own Git repository and a clean initial scaffold commit. With
+`--memory-layout in-repo`, an existing enclosing Git repository is required;
+memory is committed under that repository without creating a nested `.git`.
+Existing user changes remain yours to commit before memory publication.
+
+The saved operator is used for subsequent commands in this project. Enroll
+separate worker actors with `bwrk auth key` and `bwrk auth grant`, and use distinct `--actor` and
+`--session` values for each worker. An empty project has no claimable work until
+you create and launch its plan. Run `bwrk doctor` after initialization.
+
+`auth key --actor WORKER --actor-role agent --json` returns an
+`enrollment_path` to a private file; it does not grant authority or print the
+secret. As the saved operator, pass that path to `auth grant --input PATH
+--expected-revision REVISION --reason TEXT --yes`, using the current revision
+from `bwrk status --json`. The worker can then run `session start --actor WORKER
+--session UNIQUE_SESSION`. Keep the enrollment file inside the ignored
+`.boreal/credentials/` directory.
+
+Interrupted setup keeps `.boreal/setup-pending.json`; running init again resumes
+the saved choices. A project-wide setup lock prevents simultaneous initializers
+from binding different databases to the same folder. Destination collisions and symlinks are rejected before
+credentials or database creation. `bwrk version --json` reports the build
+revision and source fingerprint so installations with the same package version
+can be distinguished. Fresh projects use an `operator` identity and an operator
+session; existing projects retain their saved identity and session.
 
 ## Homebrew
 

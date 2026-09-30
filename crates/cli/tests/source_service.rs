@@ -4,9 +4,10 @@ use boreal_store::SqliteStore;
 use serde_json::Value;
 use std::{
     fs,
+    io::Read,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Child, Command, Output},
+    process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -22,7 +23,7 @@ fn unique_root() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    std::env::temp_dir().join(format!("bwrk-source-service-{stamp}"))
+    std::env::temp_dir().join(format!("bwrk-{stamp}"))
 }
 
 fn binary() -> &'static str {
@@ -39,11 +40,24 @@ fn json(output: &Output) -> Value {
     })
 }
 
+fn output_text(output: &Output) -> String {
+    format!(
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
 fn assert_success(output: &Output, label: &str) -> Value {
     assert!(
         output.status.success(),
         "{label} failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.stdout.is_empty(),
+        "{label} succeeded without a response envelope; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     json(output)
@@ -56,7 +70,9 @@ fn start_service(project_root: &Path, database: &Path, socket: &Path) -> Child {
         .arg(database)
         .args(["--socket"])
         .arg(socket)
-        .args(["--max-requests", "7", "--json"])
+        .args(["--max-requests", "8", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("service starts");
     for _ in 0..200 {
@@ -64,7 +80,11 @@ fn start_service(project_root: &Path, database: &Path, socket: &Path) -> Child {
             return child;
         }
         if let Some(status) = child.try_wait().expect("service status reads") {
-            panic!("service exited before binding the socket: {status}");
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            let _ = child.stdout.take().unwrap().read_to_string(&mut stdout);
+            let _ = child.stderr.take().unwrap().read_to_string(&mut stderr);
+            panic!("service exited before binding the socket: {status}\nstdout: {stdout}\nstderr: {stderr}");
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -88,7 +108,12 @@ fn source_add(
         .current_dir(project_root)
         .args(["source", "add", PROJECT, "--input"])
         .arg(input)
-        .args(["--origin", "integration/source.md", "--media-type", "text/markdown"])
+        .args([
+            "--origin",
+            "integration/source.md",
+            "--media-type",
+            "text/markdown",
+        ])
         .args(["--actor", actor, "--harness", harness, "--session", session])
         .args(["--expected-revision", &expected_revision.to_string()])
         .args(["--operation-id", operation_id, "--socket"])
@@ -103,15 +128,18 @@ fn source_add(
 #[test]
 fn source_add_uses_authenticated_service_context_and_durable_readback() {
     let root = unique_root();
-    let project_root = root.join("project");
+    let project_root = root.join("p");
     fs::create_dir_all(project_root.join(".boreal")).expect("create project root");
     let database = project_root.join(".boreal/boreal.sqlite");
-    let socket = project_root.join(".boreal/s.sock");
+    let socket = project_root.join("s.sock");
     let input = project_root.join("notes.md");
     fs::write(&input, b"service captured source bytes\n").expect("write source input");
     let outside = root.join("outside.md");
-    fs::write(&outside, b"must not be captured across the workspace boundary\n")
-        .expect("write outside source");
+    fs::write(
+        &outside,
+        b"must not be captured across the workspace boundary\n",
+    )
+    .expect("write outside source");
     let oversized = project_root.join("oversized.md");
     fs::File::create(&oversized)
         .expect("create oversized sparse fixture")
@@ -120,9 +148,9 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
 
     let init = Command::new(binary())
         .current_dir(&project_root)
-        .args(["init", PROJECT, "--actor", ACTOR, "--db"])
+        .args(["init", "--project", PROJECT, "--actor", ACTOR, "--db"])
         .arg(&database)
-        .args(["--operation-id", "op-source-service-init", "--json"])
+        .args(["--operation-id", "op_source_service_init", "--json"])
         .output()
         .expect("project init launches");
     assert_success(&init, "project init");
@@ -141,7 +169,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
             "--session",
             SESSION,
             "--operation-id",
-            "op-source-service-session",
+            "op_source_service_session",
             "--db",
         ])
         .arg(&database)
@@ -172,10 +200,15 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         HARNESS,
         SESSION,
         expected_revision + 1,
-        "op-source-service-stale",
+        "op_source_service_stale",
     );
     assert!(!stale.status.success(), "stale revision must be rejected");
-    assert_eq!(json(&stale)["error"]["code"], "revision_conflict");
+    assert_eq!(
+        json(&stale)["error"]["code"],
+        "revision_conflict",
+        "{}",
+        output_text(&stale)
+    );
 
     let wrong_session = source_add(
         &project_root,
@@ -186,7 +219,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         HARNESS,
         "unregistered-session",
         expected_revision,
-        "op-source-service-wrong-session",
+        "op_source_service_wrong_session",
     );
     assert!(
         !wrong_session.status.success(),
@@ -203,7 +236,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         HARNESS,
         SESSION,
         expected_revision,
-        "op-source-service-path-escape",
+        "op_source_service_path_escape",
     );
     assert!(!escaped.status.success(), "outside path must be rejected");
 
@@ -216,9 +249,12 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         HARNESS,
         SESSION,
         expected_revision,
-        "op-source-service-too-large",
+        "op_source_service_too_large",
     );
-    assert!(!too_large.status.success(), "oversized source must be rejected");
+    assert!(
+        !too_large.status.success(),
+        "oversized source must be rejected"
+    );
 
     let added = assert_success(
         &source_add(
@@ -230,7 +266,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
             HARNESS,
             SESSION,
             expected_revision,
-            "op-source-service-capture",
+            "op_source_service_capture",
         ),
         "service source add",
     );
@@ -246,7 +282,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     );
     assert_eq!(
         added["data"]["request_context"]["operation_id"],
-        "op-source-service-capture"
+        "op_source_service_capture"
     );
     let source_id = added["data"]["source"]["source_version_id"]
         .as_str()
@@ -263,16 +299,13 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
             HARNESS,
             SESSION,
             expected_revision,
-            "op-source-service-capture",
+            "op_source_service_capture",
         ),
         "same-operation source replay",
     );
     assert_eq!(replay["outcome"], "unchanged");
     assert_eq!(replay["data"]["registration"]["replayed"], true);
-    assert_eq!(
-        replay["data"]["source"]["source_version_id"],
-        source_id
-    );
+    assert_eq!(replay["data"]["source"]["source_version_id"], source_id);
 
     let readback = Command::new(binary())
         .current_dir(&project_root)
@@ -280,7 +313,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
             "operation",
             "show",
             PROJECT,
-            "op-source-service-capture",
+            "op_source_service_capture",
             "--actor",
             ACTOR,
             "--harness",
@@ -292,7 +325,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         .arg(&socket)
         .args(["--db"])
         .arg(&database)
-        .args(["--operation-id", "op-source-service-readback", "--json"])
+        .args(["--operation-id", "op_source_service_readback", "--json"])
         .output()
         .expect("source operation readback launches");
     let readback = assert_success(&readback, "source operation readback");
@@ -300,14 +333,25 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         readback["data"]["operation"]["result"]["source_version_id"],
         source_id
     );
-    assert_eq!(
-        readback["data"]["operation"]["project_id"],
-        PROJECT
-    );
-    assert_eq!(
-        readback["data"]["operation"]["actor_id"],
-        ACTOR
-    );
+    assert_eq!(readback["data"]["operation"]["project_id"], PROJECT);
+    assert_eq!(readback["data"]["operation"]["actor_id"], ACTOR);
+
+    let search = Command::new(binary())
+        .current_dir(&project_root)
+        .args(["source", "search", PROJECT, "service captured source bytes"])
+        .args(["--actor", ACTOR, "--harness", HARNESS, "--session", SESSION])
+        .args(["--socket"])
+        .arg(&socket)
+        .args(["--db"])
+        .arg(&database)
+        .args(["--json"])
+        .output()
+        .expect("service source search launches");
+    let search = assert_success(&search, "service source search");
+    assert_eq!(search["data"]["project_id"], PROJECT);
+    assert_eq!(search["data"]["query"], "service captured source bytes");
+    assert!(search["data"]["index_lag"].as_u64().unwrap_or_default() > 0);
+    assert!(search["data"]["items"].as_array().unwrap().is_empty());
 
     let service_output = child
         .wait_with_output()
@@ -321,14 +365,14 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     .expect("project database reopens");
     assert!(
         store
-            .operation("op-source-service-stale")
+            .operation("op_source_service_stale")
             .expect("stale operation lookup succeeds")
             .is_none(),
         "stale request must not register a durable source operation"
     );
     assert!(
         store
-            .operation("op-source-service-capture")
+            .operation("op_source_service_capture")
             .expect("successful operation lookup succeeds")
             .is_some(),
         "successful source capture must retain its durable registration"

@@ -6,14 +6,46 @@
 //! commands retain the same versioned protocol envelope as direct commands.
 
 use super::*;
+fn parity_supported(path: &[String]) -> bool {
+    matches!(
+        path.iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["agent", "guide" | "next"]
+            | ["next"]
+            | ["work", "create"]
+            | ["cycle" | "sprint", "current"]
+    ) || super::directive_commands::supported(path)
+        || super::discovery_commands::supported(path)
+        || super::history_commands::supported(path)
+        || super::knowledge_maintenance::supported(path)
+        || (super::operational_commands::supported(path)
+            && path != ["storage", "rotate-log"]
+            && path != ["lock", "inspect"])
+        || (super::diagnostic_commands::supported(path) && path == ["schema", "validate"])
+        || super::work_split::supported(path)
+        || super::knowledge_parity::supported(path)
+        || super::summary_commands::supported(path)
+        || super::template_commands::supported(path)
+        || super::orchestration_commands::supported(path)
+}
 
 pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
     let path = &parsed.path;
+    if parsed.options.extra.contains_key("--dispatch-now")
+        || path.ends_with(&["daemon".into(), "run".into()])
+    {
+        return false;
+    }
     // A lower-level handler is not enough to advertise a public service
     // route. Registry gaps remain fail-closed until their DTO and operation
     // contract are complete; explicit --socket must not bypass that status.
     if crate::command_registry::is_unavailable_path(path) {
         return false;
+    }
+    if parity_supported(path) {
+        return true;
     }
     if super::memory_commands::supported(path) {
         return true;
@@ -748,17 +780,40 @@ mod unix {
         request_data: &Value,
         response: &ApplicationResponse,
     ) {
-        if !matches!(
-            request_data.get("command").and_then(Value::as_str),
-            Some("claim" | "start" | "renew")
-        ) {
+        let feature_tick = request_data.get("command").and_then(Value::as_str)
+            == Some("cli_feature_v1")
+            && request_data
+                .pointer("/feature/path")
+                .and_then(Value::as_array)
+                .is_some_and(|path| {
+                    path.last().and_then(Value::as_str) == Some("tick")
+                        && path
+                            .first()
+                            .and_then(Value::as_str)
+                            .is_some_and(|v| v == "orchestrate" || v == "orchestration")
+                });
+        if !feature_tick
+            && !matches!(
+                request_data.get("command").and_then(Value::as_str),
+                Some("claim" | "start" | "renew")
+            )
+        {
             return;
         }
         let Ok(envelope) = serde_json::from_str::<Value>(&response.data) else {
             return;
         };
-        let Some(data) = envelope.get("data") else {
+        let Some(result_data) = envelope.get("data") else {
             return;
+        };
+        let data = if feature_tick {
+            result_data
+                .pointer("/result/claim")
+                .filter(|v| v.is_object())
+                .or_else(|| result_data.pointer("/result/tick/claim"))
+                .unwrap_or(&Value::Null)
+        } else {
+            result_data
         };
         let Some(project) = request_data.get("project_id").and_then(Value::as_str) else {
             return;
@@ -1101,6 +1156,7 @@ mod unix {
                         "command": "operation_show",
                         "project_id": project,
                         "actor_id": parsed.options.actor,
+                        "credential_ref": super::super::credentials::for_command(parsed)?,
                         "harness_id": parsed.options.harness,
                         "session_id": parsed.options.session,
                         "target_operation_id": operation,
@@ -1239,10 +1295,21 @@ mod unix {
                 envelope.detail_ref,
             ));
         }
+        let mut response_data = envelope.data;
+        if let Some(data) = response_data.as_mut() {
+            for pointer in ["/next_action/safe_argv", "/guide/next_action/safe_argv"] {
+                if let Some(argv) = data.pointer_mut(pointer).and_then(Value::as_array_mut) {
+                    if !argv.iter().any(|arg| arg.as_str() == Some("--socket")) {
+                        argv.push(json!("--socket"));
+                        argv.push(json!(socket));
+                    }
+                }
+            }
+        }
         Ok(CliResult {
             outcome: envelope.outcome,
             revision: envelope.revision,
-            data: envelope.data,
+            data: response_data,
             human: None,
             as_of: Some(envelope.as_of),
             next_status_change_at: envelope.next_status_change_at,
@@ -1251,6 +1318,9 @@ mod unix {
     }
 
     fn is_mutating_command(parsed: &ParsedCommand) -> bool {
+        if super::parity_supported(&parsed.path) {
+            return super::super::command_registry::is_mutating_path(&parsed.path);
+        }
         let path = parsed.path.iter().map(String::as_str).collect::<Vec<_>>();
         !matches!(
             path.as_slice(),
@@ -1356,37 +1426,47 @@ mod unix {
                 "project bootstrap is local-only; run bwrk init in the intended workspace",
             ));
         }
-        let project = if matches!(
-            path.as_slice(),
-            ["workflows", "list"] | ["workflows", "show"]
-        ) {
-            // Workflow assets are embedded, versioned application guidance;
-            // discovery must remain available before a project/database
-            // exists and must not inherit a caller's project context.
-            String::new()
-        } else if matches!(path.as_slice(), ["backup"]) {
-            parsed.options.project.clone().ok_or_else(|| {
-                CliError::invalid("service backup requires an explicit --project")
-            })?
-        } else if parsed.path == ["doctor".to_owned()] {
-            parsed
-                .options
-                .project
-                .clone()
-                .or_else(|| parsed.options.positionals.first().cloned())
-                .unwrap_or_default()
-        } else if matches!(path.as_slice(), ["update"] | ["upgrade"]) {
-            parsed.options.project.clone().unwrap_or_default()
-        } else {
-            project_argument(parsed, 0)?
-        };
+        let project =
+            if matches!(
+                path.as_slice(),
+                ["workflows", "list"] | ["workflows", "show"]
+            ) {
+                // Workflow assets are embedded, versioned application guidance;
+                // discovery must remain available before a project/database
+                // exists and must not inherit a caller's project context.
+                String::new()
+            } else if matches!(path.as_slice(), ["backup"]) {
+                parsed.options.project.clone().ok_or_else(|| {
+                    CliError::invalid("service backup requires an explicit --project")
+                })?
+            } else if parsed.path == ["doctor".to_owned()] {
+                parsed
+                    .options
+                    .project
+                    .clone()
+                    .or_else(|| parsed.options.positionals.first().cloned())
+                    .unwrap_or_default()
+            } else if matches!(path.as_slice(), ["update"] | ["upgrade"]) {
+                parsed.options.project.clone().unwrap_or_default()
+            } else {
+                project_argument(parsed, 0)?
+            };
         let mut data = json!({
             "project_id": if project.is_empty() { Value::Null } else { json!(project) },
             "actor_id": parsed.options.actor,
             "credential_ref": Value::Null,
             "harness_id": parsed.options.harness,
             "session_id": parsed.options.session,
+            "operation_id": operation,
         });
+        if super::parity_supported(&parsed.path) {
+            data["command"] = json!("cli_feature_v1");
+            let mut forwarded = parsed.clone();
+            forwarded.options.socket = None;
+            data["feature"] =
+                serde_json::to_value(forwarded).map_err(|e| CliError::invalid(e.to_string()))?;
+            return Ok(data);
+        }
         if super::super::memory_commands::supported(&parsed.path) {
             data["command"] = json!("memory_command");
             data["memory"] = super::super::memory_commands::payload(parsed)?;
@@ -1413,9 +1493,10 @@ mod unix {
         if matches!(path.as_slice(), ["work", "rollup"]) {
             let work_index = usize::from(parsed.options.project.is_none());
             data["command"] = json!("container_rollup");
-            data["work_id"] = json!(parsed.options.positionals.get(work_index).ok_or_else(|| {
-                CliError::invalid("work rollup requires a container identifier")
-            })?);
+            data["work_id"] =
+                json!(parsed.options.positionals.get(work_index).ok_or_else(|| {
+                    CliError::invalid("work rollup requires a container identifier")
+                })?);
             return Ok(data);
         }
         if matches!(path.as_slice(), ["review", "list"]) {
@@ -1435,9 +1516,10 @@ mod unix {
         }
         if matches!(path.as_slice(), ["maintenance", "show"]) {
             data["command"] = json!("maintenance_show");
-            data["target_operation_id"] = json!(parsed.options.positionals.first().ok_or_else(|| {
-                CliError::invalid("maintenance show requires an operation ID")
-            })?);
+            data["target_operation_id"] =
+                json!(parsed.options.positionals.first().ok_or_else(|| {
+                    CliError::invalid("maintenance show requires an operation ID")
+                })?);
             if let Some(package_path) = parsed.options.input.as_deref() {
                 data["package_path"] = json!(package_path);
             }
@@ -1445,9 +1527,7 @@ mod unix {
         }
         if matches!(
             path.as_slice(),
-            ["migration", "dry-run"]
-                | ["migration", "verify"]
-                | ["migration", "apply"]
+            ["migration", "dry-run"] | ["migration", "verify"] | ["migration", "apply"]
         ) {
             let input = parsed
                 .options
@@ -1455,12 +1535,15 @@ mod unix {
                 .as_deref()
                 .ok_or_else(|| CliError::invalid("migration requires --input PATH"))?;
             let context = project_context::resolve(parsed)?;
-            let input_path = project_context::confined_path(&context.root, Path::new(input), false)?;
+            let input_path =
+                project_context::confined_path(&context.root, Path::new(input), false)?;
             let bytes = fs::read(&input_path).map_err(|error| {
                 CliError::invalid(format!("cannot read migration input: {error}"))
             })?;
             if bytes.len() as u64 > MAX_SOURCE_INPUT_BYTES {
-                return Err(CliError::invalid("migration input exceeds the source bound"));
+                return Err(CliError::invalid(
+                    "migration input exceeds the source bound",
+                ));
             }
             let source = String::from_utf8(bytes).map_err(|error| {
                 CliError::invalid(format!("migration input is not UTF-8: {error}"))
@@ -1520,9 +1603,11 @@ mod unix {
         if matches!(path.as_slice(), ["source", "search"]) {
             let query_index = usize::from(parsed.options.project.is_none());
             data["command"] = json!("source_search");
-            data["query"] = json!(parsed.options.positionals.get(query_index).ok_or_else(|| {
-                CliError::invalid("source search requires a query")
-            })?);
+            data["query"] = json!(parsed
+                .options
+                .positionals
+                .get(query_index)
+                .ok_or_else(|| { CliError::invalid("source search requires a query") })?);
             data["limit"] = json!(parsed.options.limit.unwrap_or(20));
             return Ok(data);
         }
@@ -1971,9 +2056,10 @@ mod unix {
             }
             ["gate", "policy", "publish"] => {
                 data["command"] = json!("gate_policy_publish");
-                data["gate_id"] = json!(parsed.options.gate.clone().ok_or_else(|| {
-                    CliError::invalid("gate policy publish requires --gate")
-                })?);
+                data["gate_id"] =
+                    json!(parsed.options.gate.clone().ok_or_else(|| {
+                        CliError::invalid("gate policy publish requires --gate")
+                    })?);
                 data["input"] = json!(parsed.options.input.clone().ok_or_else(|| {
                     CliError::invalid("gate policy publish requires --input")
                 })?);
@@ -2035,7 +2121,10 @@ mod unix {
             }
             .handle(request)?;
             if let Some(request_data) = request_data.as_ref() {
-                if matches!(command.as_str(), "claim" | "start" | "renew") {
+                if matches!(
+                    command.as_str(),
+                    "claim" | "start" | "renew" | "cli_feature_v1"
+                ) {
                     schedule_deadline_from_response(&self.timers, request_data, &response);
                 } else if matches!(command.as_str(), "release" | "submit" | "finish_close") {
                     cancel_deadline_from_response(&self.timers, request_data, &response);
@@ -2298,6 +2387,55 @@ mod unix {
             }
             let data = &authenticated_data;
             match request.command.as_str() {
+                "cli_feature_v1" => {
+                    let mut parsed: ParsedCommand = serde_json::from_value(
+                        data.get("feature")
+                            .cloned()
+                            .ok_or_else(|| CliError::invalid("feature payload required"))?,
+                    )
+                    .map_err(|e| CliError::invalid(e.to_string()))?;
+                    if !super::parity_supported(&parsed.path) || parsed.options.socket.is_some() {
+                        return Err(CliError::invalid("unsupported feature command"));
+                    }
+                    if parsed.options.extra.contains_key("--dispatch-now")
+                        || parsed.path.ends_with(&["daemon".into(), "run".into()])
+                    {
+                        return Err(CliError::invalid(
+                            "process dispatch and daemon workers require a local CLI worker",
+                        ));
+                    }
+                    let project = string(data, "project_id")?;
+                    parsed.options.project = Some(project.clone());
+                    parsed.options.actor = string(data, "actor_id")?;
+                    parsed.options.session = string(data, "session_id")?;
+                    parsed.options.harness = string(data, "harness_id")?;
+                    parsed.options.operation_id = Some(request.operation_id.clone());
+                    let binding = IdentityStore::new(&self.store)
+                        .workspace_binding(&project)
+                        .map_err(|e| CliError::invalid(e.to_string()))?;
+                    parsed.options.service_workspace = Some(PathBuf::from(binding.canonical_root()));
+                    parsed.options.db = self
+                        .store
+                        .database_path()
+                        .ok_or_else(|| {
+                            CliError::invalid(
+                                "feature commands require a file-backed service store",
+                            )
+                        })?
+                        .to_string_lossy()
+                        .into_owned();
+                    super::super::validate_command(&parsed.path, &parsed.options)?;
+                    let app = WorkApplication::new(&self.store);
+                    let adapter = SqliteAttemptAdapter::new(&self.store);
+                    let result = super::super::dispatch(
+                        &parsed,
+                        &request.operation_id,
+                        &app,
+                        &adapter,
+                        &self.store,
+                    )?;
+                    Ok((result.outcome, result.revision, result.data))
+                }
                 "memory_command" => {
                     let result = super::super::memory_commands::apply(
                         &self.store,
@@ -2499,14 +2637,8 @@ mod unix {
             }
             let project = required_trimmed(request.project_id, "project_id")?;
             let actor = required_trimmed(request.actor_id, "actor_id")?;
-            let harness = required_trimmed(
-                request.harness_id.unwrap_or_default(),
-                "harness_id",
-            )?;
-            let session = required_trimmed(
-                request.session_id.unwrap_or_default(),
-                "session_id",
-            )?;
+            let harness = required_trimmed(request.harness_id.unwrap_or_default(), "harness_id")?;
+            let session = required_trimmed(request.session_id.unwrap_or_default(), "session_id")?;
             let expected_revision = request.expected_revision.ok_or_else(|| {
                 CliError::invalid("service source add requires expected_revision")
             })?;
@@ -2614,7 +2746,9 @@ mod unix {
             let database = self
                 .store
                 .database_location()
-                .ok_or_else(|| CliError::invalid("gate policy publication needs a project database"))?
+                .ok_or_else(|| {
+                    CliError::invalid("gate policy publication needs a project database")
+                })?
                 .to_string_lossy()
                 .into_owned();
             let parsed = ParsedCommand {
@@ -2637,11 +2771,7 @@ mod unix {
                     ..CliOptions::default()
                 },
             };
-            let result = super::super::gate_policy_publish_result(
-                &parsed,
-                operation,
-                &self.store,
-            )?;
+            let result = super::super::gate_policy_publish_result(&parsed, operation, &self.store)?;
             Ok((result.outcome, result.revision, result.data))
         }
 
@@ -2689,15 +2819,19 @@ mod unix {
             let project = string(data, "project_id")?;
             let actor = string(data, "actor_id")?;
             let target = string(data, "target_operation_id")?;
-            let database = self.store.database_location()
-                .ok_or_else(|| CliError::invalid("maintenance readback requires a project database"))?;
+            let database = self.store.database_location().ok_or_else(|| {
+                CliError::invalid("maintenance readback requires a project database")
+            })?;
             let mut parsed = ParsedCommand {
                 path: vec!["maintenance".to_owned(), "show".to_owned()],
                 options: CliOptions {
                     db: database.to_string_lossy().into_owned(),
                     project: Some(project),
                     actor,
-                    input: data.get("package_path").and_then(Value::as_str).map(ToOwned::to_owned),
+                    input: data
+                        .get("package_path")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
                     json: true,
                     ..CliOptions::default()
                 },
@@ -2726,11 +2860,16 @@ mod unix {
                 .database_location()
                 .ok_or_else(|| CliError::invalid("service backup needs a project database"))?
                 .canonicalize()
-                .map_err(|error| CliError::invalid(format!("database path unavailable: {error}")))?;
+                .map_err(|error| {
+                    CliError::invalid(format!("database path unavailable: {error}"))
+                })?;
             let storage_root = database
                 .parent()
                 .ok_or_else(|| CliError::invalid("project database has no parent directory"))?;
-            let workspace_root = if storage_root.file_name().is_some_and(|name| name == ".boreal") {
+            let workspace_root = if storage_root
+                .file_name()
+                .is_some_and(|name| name == ".boreal")
+            {
                 storage_root.parent().unwrap_or(storage_root)
             } else {
                 storage_root
@@ -2808,14 +2947,16 @@ mod unix {
             let report = match self.store.backup_package_to(&package) {
                 Ok(report) => report,
                 Err(error) => {
-                    let _ = self.store.transition_maintenance_job(&MaintenanceJobTransition {
-                        operation_id: operation.to_owned(),
-                        expected_stage: "running".to_owned(),
-                        next_stage: "rejected".to_owned(),
-                        at: super::super::now(),
-                        result_json: None,
-                        error_message: Some(error.to_string()),
-                    });
+                    let _ = self
+                        .store
+                        .transition_maintenance_job(&MaintenanceJobTransition {
+                            operation_id: operation.to_owned(),
+                            expected_stage: "running".to_owned(),
+                            next_stage: "rejected".to_owned(),
+                            at: super::super::now(),
+                            result_json: None,
+                            error_message: Some(error.to_string()),
+                        });
                     return Err(map_store_error(error));
                 }
             };
@@ -2855,7 +2996,11 @@ mod unix {
             let parsed = ParsedCommand {
                 path: vec![
                     "migration".to_owned(),
-                    if verify { "verify".to_owned() } else { "dry-run".to_owned() },
+                    if verify {
+                        "verify".to_owned()
+                    } else {
+                        "dry-run".to_owned()
+                    },
                 ],
                 options: CliOptions {
                     db: self
@@ -2880,7 +3025,11 @@ mod unix {
         }
 
         fn migration_apply(&self, data: &Value, operation_id: &str) -> ServiceResult {
-            if !data.get("confirmed").and_then(Value::as_bool).unwrap_or(false) {
+            if !data
+                .get("confirmed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 return Err(CliError::invalid(
                     "migration apply requires explicit confirmation",
                 ));
@@ -3712,10 +3861,8 @@ mod unix {
             parsed.options.actor = string(data, "actor_id")?;
             parsed.options.session = string(data, "session_id")?;
             parsed.options.positionals.push(string(data, "work_id")?);
-            let result = super::super::container_rollup_result(
-                &parsed,
-                &WorkApplication::new(&self.store),
-            )?;
+            let result =
+                super::super::container_rollup_result(&parsed, &WorkApplication::new(&self.store))?;
             Ok((result.outcome, result.revision, result.data))
         }
 
@@ -5212,18 +5359,99 @@ mod tests {
         let metadata = root.join(".boreal");
         fs::create_dir_all(&metadata).expect("project metadata directory creates");
         let database = metadata.join("boreal.sqlite");
+        let canonical_root = root
+            .canonicalize()
+            .expect("test project root canonicalizes");
         fs::write(
             metadata.join("project.json"),
             serde_json::to_vec(&json!({
                 "project_id": "service-project",
-                "project_root": ".",
+                "project_root": canonical_root,
                 "database": ".boreal/boreal.sqlite",
             }))
             .expect("test project metadata serializes"),
         )
         .expect("test project metadata writes");
-        seed_store(&database)
+        let store = SqliteStore::open(&database, super::super::PRODUCTION_SCHEMA)
+            .expect("production test schema opens");
+        let identity_store = boreal_store::identity::IdentityStore::new(&store);
+        let database_identity = identity_store
+            .database_identity()
+            .expect("production schema installs database identity");
+        identity_store
+            .install(&database_identity, "unix-ms:1")
+            .expect("identity tables install");
+        let root_text = canonical_root.to_string_lossy().into_owned();
+        let binding = boreal_store::identity::WorkspaceBinding::new(
+            root_text.clone(),
+            root_text,
+            "sha256:service-test-workspace",
+        )
+        .expect("workspace binding is valid");
+        let app = WorkApplication::new(&store);
+        app.init_project_with_workspace(
+            &ProjectId::new("service-project"),
+            DEFAULT_ACTOR,
+            "operator",
+            SERVICE_TEST_CREDENTIAL,
+            "CLI service test",
+            &binding,
+            "unix-ms:1",
+            "op_service_init",
+        )
+        .expect("project initializes with production identity");
+        store
+            .grant_principal(&boreal_store::principals::PrincipalGrantRequest {
+                project_id: "service-project".to_owned(),
+                actor_id: DEFAULT_ACTOR.to_owned(),
+                session_id: None,
+                principal_actor_id: "agent-1".to_owned(),
+                role: boreal_domain::ActorRole::Agent,
+                independent: false,
+                credential: SERVICE_TEST_AGENT_CREDENTIAL.to_owned(),
+                expires_at_ms: None,
+                display_name: "Service test agent".to_owned(),
+                reason: "fixture evidence execution".to_owned(),
+                expected_revision: store.project_revision("service-project").unwrap().0,
+                operation_id: "op_service_agent".to_owned(),
+                at: "unix-ms:2".to_owned(),
+            })
+            .expect("agent credential grants evidence authority");
+        let session_revision = register_fixture_session(
+            &store,
+            "service-project",
+            DEFAULT_ACTOR,
+            "service-test-session",
+            "op_service_session",
+        );
+        app.create_work_as_session_checked(
+            &WorkItem {
+                id: WorkId::new("service-work"),
+                project_id: ProjectId::new("service-project"),
+                kind: WorkKind::Task,
+                parent_id: None,
+                title: "Service work".to_owned(),
+                description: String::new(),
+                lifecycle: PersistedLifecycle::Open,
+                priority: 0,
+                dispatch_policy: DispatchPolicy::Automatic,
+                hard_holds: Vec::new(),
+                acceptance_profile: AcceptanceProfile::focused(),
+            },
+            DEFAULT_ACTOR,
+            "service-test-session",
+            Some(session_revision),
+            "unix-ms:3",
+            "op_service_work",
+        )
+        .expect("work creates");
+        store
     }
+
+    const SERVICE_TEST_CREDENTIAL: &str =
+        "bwrk1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const SERVICE_TEST_AGENT_CREDENTIAL: &str =
+        "bwrk1_fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
     fn seed_store_with_schema(path: &Path, schema: &str) -> SqliteStore {
         let store = SqliteStore::open(path, schema).expect("temporary schema opens");
@@ -5408,8 +5636,7 @@ mod tests {
                     project_id: project.to_owned(),
                     origin: format!("gate-policy:{gate_id}:1"),
                     media_type: "application/vnd.boreal.gate-policy+json".to_owned(),
-                    bytes: serde_json::to_vec(&declaration)
-                        .expect("test gate policy serializes"),
+                    bytes: serde_json::to_vec(&declaration).expect("test gate policy serializes"),
                 },
                 DEFAULT_ACTOR,
                 &now(),
@@ -5457,7 +5684,6 @@ mod tests {
             1_000,
         );
         let revision = store.project_revision("service-project").unwrap().0;
-
         let mut handler = make_handler_at(store, gate_root);
         handler
             .claim(
@@ -5465,9 +5691,9 @@ mod tests {
                     "command": "claim",
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
-                    "session_id": "session-witnessed-finish",
+                    "session_id": "session-cli",
                     "attempt_id": "attempt-witnessed-finish",
                     "expected_revision": revision,
                     "source_version_id": source_version_id,
@@ -5482,9 +5708,9 @@ mod tests {
                     "command": "start",
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
-                    "session_id": "session-witnessed-finish",
+                    "session_id": "session-cli",
                     "attempt_id": "attempt-witnessed-finish",
                     "fence": 1,
                 }),
@@ -5498,9 +5724,9 @@ mod tests {
                     "command": "evidence_run",
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
-                    "session_id": "session-witnessed-finish",
+                    "session_id": "session-cli",
                     "attempt_id": "attempt-witnessed-finish",
                     "fence": 1,
                     "gate_id": "verification",
@@ -5520,9 +5746,9 @@ mod tests {
             "command": "finish_close",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
-            "session_id": "session-witnessed-finish",
+            "session_id": "session-cli",
             "attempt_id": "attempt-witnessed-finish",
             "fence": 1,
             "expected_revision": Value::Null,
@@ -5812,6 +6038,8 @@ mod tests {
             json!({
                 "command": "operation_show",
                 "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
                 "target_operation_id": evidence_operation,
             }),
         );
@@ -6356,7 +6584,7 @@ mod tests {
             &socket,
             make_handler(store),
             ServiceHostConfig::default()
-                .with_max_requests(Some(2))
+                .with_max_requests(Some(3))
                 .expect("positive request bound"),
         ) {
             Ok(host) => host,
@@ -6387,6 +6615,21 @@ mod tests {
             "socket-project"
         );
 
+        let session = socket_envelope(
+            &socket,
+            "request-start-session",
+            "op_start_session_socket",
+            json!({
+                "command": "session_start",
+                "project_id": "socket-project",
+                "actor_id": "socket-creator",
+                "harness_id": "cli",
+                "session_id": "socket-session",
+            }),
+        )
+        .expect("socket remains available for session_start");
+        assert_eq!(session.outcome, ApplicationOutcome::Changed);
+
         let work = socket_envelope(
             &socket,
             "request-create-work",
@@ -6401,6 +6644,9 @@ mod tests {
                 "dispatch": "paused",
                 "profile": "focused",
                 "actor_id": "socket-creator",
+                "harness_id": "cli",
+                "session_id": "socket-session",
+                "expected_revision": session.revision,
             }),
         )
         .expect("socket remains available for create_work");
@@ -6428,7 +6674,7 @@ mod tests {
             std::process::id(),
             now_ms_u64()
         ));
-        let gate_root = root.join(super::GATE_COMMANDS_DIR);
+        let gate_root = root.join(".boreal").join(super::GATE_COMMANDS_DIR);
         fs::create_dir_all(&gate_root).expect("gate directory creates");
         let store = seed_project_store(&root);
         let (_catalog, source_version_id) = capture_service_test_workspace(
@@ -6457,7 +6703,7 @@ mod tests {
                     "command": "claim",
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
                     "session_id": "session-production-concurrent",
                     "attempt_id": "attempt-production-concurrent",
@@ -6474,7 +6720,7 @@ mod tests {
                     "command": "start",
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
                     "session_id": "session-production-concurrent",
                     "attempt_id": "attempt-production-concurrent",
@@ -6513,9 +6759,10 @@ mod tests {
                 "op_production_concurrent_evidence",
                 json!({
                     "command": "evidence_run",
+                    "credential_ref": SERVICE_TEST_AGENT_CREDENTIAL,
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
                     "session_id": "session-production-concurrent",
                     "attempt_id": "attempt-production-concurrent",
@@ -6527,12 +6774,18 @@ mod tests {
             (result, started.elapsed())
         });
 
-        let evidence_dir = root.join("evidence");
+        let evidence_dir = root.join(".boreal").join("evidence");
         let wait_deadline = Instant::now() + Duration::from_secs(2);
         while !evidence_dir.exists() && Instant::now() < wait_deadline {
             thread::sleep(Duration::from_millis(5));
         }
-        assert!(evidence_dir.exists(), "slow evidence reached execution");
+        if !evidence_dir.exists() {
+            let result = evidence.join().expect("evidence thread joins");
+            panic!(
+                "slow evidence did not reach execution; response={:?}",
+                result.0
+            );
+        }
         assert!(
             !evidence_completed.load(Ordering::Acquire),
             "slow evidence must still be running before status"
@@ -6545,6 +6798,7 @@ mod tests {
             "op_production_concurrent_status",
             json!({
                 "command": "status",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
                 "project_id": "service-project",
                 "actor_id": DEFAULT_ACTOR,
                 "harness_id": DEFAULT_HARNESS,
@@ -7688,9 +7942,9 @@ mod tests {
                     "command": "claim",
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
-                    "session_id": "session-evidence-failure",
+                    "session_id": "session-cli",
                     "attempt_id": "attempt-evidence-failure",
                     "claimed_at": stamp(now),
                     "lease_deadline": stamp(now + 60_000),
@@ -7708,9 +7962,9 @@ mod tests {
                     "command": "start",
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
-                    "session_id": "session-evidence-failure",
+                    "session_id": "session-cli",
                     "attempt_id": "attempt-evidence-failure",
                     "fence": 1,
                 }),
@@ -7721,9 +7975,9 @@ mod tests {
             "command": "evidence_run",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
-            "session_id": "session-evidence-failure",
+            "session_id": "session-cli",
             "attempt_id": "attempt-evidence-failure",
             "fence": 1,
             "gate_id": "verification",

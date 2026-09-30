@@ -222,6 +222,10 @@ pub(super) fn apply(
             review_id,
             expected_manifest_identity,
         } => {
+            let root = boreal_memory::MemoryRoot::new(memory_root.clone())
+                .map_err(|e| CliError::invalid(e.to_string()))?;
+            root.validate_existing_repository()
+                .map_err(|e| CliError::invalid(e.to_string()))?;
             let result = app
                 .publish_durable_memory(
                     store,

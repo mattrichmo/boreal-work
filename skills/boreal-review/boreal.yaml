@@ -3,7 +3,7 @@ system: boreal
 skill: boreal-review
 display_name: Boreal v2 Review
 workflow_package: boreal.core-workflows
-workflow_package_version: 1.0.0
+workflow_package_version: 1.2.0
 state_authority: boreal.application.v2
 harness_neutral: true
 workflows:

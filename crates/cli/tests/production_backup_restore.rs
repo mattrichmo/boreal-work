@@ -27,15 +27,14 @@ fn json(output: std::process::Output) -> Value {
 fn cli_backup_and_restore_use_manifest_and_new_restore_epoch() {
     let root = temporary_root();
     fs::create_dir_all(&root).expect("temporary root");
-    let database = root.join("source.sqlite");
+    let database = root.join(".boreal/boreal.sqlite");
     let package = root.join("backup-package");
     let binary = env!("CARGO_BIN_EXE_bwrk");
 
     json(
         Command::new(binary)
             .current_dir(&root)
-            .args(["init", "cli-backup-project", "--db"])
-            .arg(&database)
+            .args(["init", "--project", "cli-backup-project"])
             .args(["--json"])
             .output()
             .expect("init starts"),

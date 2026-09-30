@@ -56,7 +56,7 @@ pub(super) fn confined_path(
                 return Err(CliError::invalid(format!(
                     "project path may not traverse a symlink: {}",
                     checked.display()
-                )))
+                )));
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_missing => {}
@@ -64,7 +64,7 @@ pub(super) fn confined_path(
                 return Err(CliError::invalid(format!(
                     "project path unavailable {}: {error}",
                     checked.display()
-                )))
+                )));
             }
         }
     }
@@ -97,6 +97,9 @@ fn relative_below_root(root: &Path, target: &Path) -> Option<PathBuf> {
 }
 
 pub(super) fn resolve(parsed: &ParsedCommand) -> Result<ProjectContext, CliError> {
+    if let Some(root)=parsed.options.service_workspace.as_deref() {
+        return resolve_from(parsed,root);
+    }
     #[cfg(test)]
     if let Some(fixture_root) = super::test_fixture_project_root(parsed) {
         return resolve_from(parsed, &fixture_root);
@@ -114,17 +117,37 @@ pub(super) fn resolve_from(
     working_directory: &Path,
 ) -> Result<ProjectContext, CliError> {
     let cwd = fs::canonicalize(working_directory).map_err(|e| CliError::invalid(e.to_string()))?;
-    let root = cwd
-        .ancestors()
-        .find(|p| p.join(".boreal/project.json").exists())
-        .ok_or_else(|| {
-            CliError::with(
-                ErrorCode::NotFound,
-                ApplicationOutcome::Rejected,
-                "this directory is not initialized for Boreal; run `bwrk init` here first",
-            )
-        })?
-        .to_path_buf();
+    // The nearest Boreal marker owns this subtree, even when its metadata is
+    // incomplete. Likewise, a nested Git checkout/worktree is an independent
+    // workspace boundary and must not silently inherit an ancestor project.
+    let mut selected_root = None;
+    for ancestor in cwd.ancestors() {
+        let boreal_marker = ancestor.join(".boreal");
+        if boreal_marker.exists() {
+            if !boreal_marker.join("project.json").is_file() {
+                return Err(CliError::with(
+                    ErrorCode::NotFound,
+                    ApplicationOutcome::Rejected,
+                    format!(
+                        "incomplete Boreal project marker at {}; run `bwrk init` here to finish initialization",
+                        boreal_marker.display()
+                    ),
+                ));
+            }
+            selected_root = Some(ancestor.to_path_buf());
+            break;
+        }
+        if ancestor.join(".git").exists() {
+            break;
+        }
+    }
+    let root = selected_root.ok_or_else(|| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            "this directory is not initialized for Boreal; run `bwrk init` here first",
+        )
+    })?;
     let metadata_path = confined_path(&root, Path::new(".boreal/project.json"), false)?;
     let metadata: Metadata = serde_json::from_slice(
         &fs::read(metadata_path).map_err(|e| CliError::invalid(e.to_string()))?,
@@ -222,4 +245,89 @@ pub(super) fn validate_store(
     }
     let _ = identity; // Reading it also validates database instance and restore epoch.
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestTree(PathBuf);
+
+    impl TestTree {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos();
+            let path = env::temp_dir().join(format!("boreal-project-context-{nonce}"));
+            fs::create_dir_all(&path).expect("create test tree");
+            Self(path)
+        }
+
+        fn init_project(&self, root: &Path) {
+            let metadata = root.join(".boreal/project.json");
+            fs::create_dir_all(metadata.parent().unwrap()).expect("create marker directory");
+            fs::write(
+                &metadata,
+                serde_json::json!({
+                    "project_id": "project-a",
+                    "project_root": root,
+                    "database": ".boreal/boreal.sqlite"
+                })
+                .to_string(),
+            )
+            .expect("write project metadata");
+            fs::write(root.join(".boreal/boreal.sqlite"), b"").expect("create database fixture");
+        }
+    }
+
+    impl Drop for TestTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn command() -> ParsedCommand {
+        ParsedCommand {
+            path: vec!["status".to_owned()],
+            options: CliOptions::default(),
+        }
+    }
+
+    #[test]
+    fn ordinary_subdirectories_inherit_initialized_project() {
+        let tree = TestTree::new();
+        let root = tree.0.join("workspace");
+        let child = root.join("src/module");
+        fs::create_dir_all(&child).unwrap();
+        tree.init_project(&root);
+
+        let context = resolve_from(&command(), &child).expect("ordinary folder inherits project");
+        assert_eq!(context.root, fs::canonicalize(root).unwrap());
+    }
+
+    #[test]
+    fn nested_git_repository_stops_parent_project_search() {
+        let tree = TestTree::new();
+        let root = tree.0.join("workspace");
+        let nested = root.join("vendor/independent");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        tree.init_project(&root);
+
+        let error = resolve_from(&command(), &nested).expect_err("nested repository is isolated");
+        assert!(error.message.contains("not initialized for Boreal"));
+    }
+
+    #[test]
+    fn incomplete_nested_boreal_marker_stops_parent_project_search() {
+        let tree = TestTree::new();
+        let root = tree.0.join("workspace");
+        let nested = root.join("nested");
+        fs::create_dir_all(nested.join(".boreal")).unwrap();
+        tree.init_project(&root);
+
+        let error = resolve_from(&command(), &nested).expect_err("incomplete marker is isolated");
+        assert!(error.message.contains("incomplete Boreal project marker"));
+    }
 }

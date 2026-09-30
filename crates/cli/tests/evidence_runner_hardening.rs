@@ -4,7 +4,7 @@ use boreal_application::sha256_content_digest;
 use boreal_store::SqliteStore;
 use serde_json::{json, Value};
 use std::{
-    fs,
+    env, fs,
     io::{Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -20,12 +20,11 @@ const AGENT: &str = "evidence-agent";
 const HARNESS: &str = "evidence-harness";
 const SESSION: &str = "evidence-session";
 const SETUP_SESSION: &str = "evidence-setup-session";
-const SOURCE: &str = "source-hardening";
 const CONFIG: &str = "config-hardening";
 
 #[test]
 fn evidence_run_retains_streams_and_hashes_exact_combined_reference() {
-    let fixture = Fixture::new(
+    let mut fixture = Fixture::new(
         "streams",
         "./emit-streams",
         vec!["./emit-streams"],
@@ -91,7 +90,7 @@ fn evidence_run_retains_streams_and_hashes_exact_combined_reference() {
 
 #[test]
 fn evidence_run_rejects_a_declared_observable_that_was_not_measured() {
-    let fixture = Fixture::new(
+    let mut fixture = Fixture::new(
         "missing-observable",
         "printf",
         vec!["printf", "actual-output"],
@@ -120,7 +119,7 @@ fn evidence_run_rejects_a_declared_observable_that_was_not_measured() {
 
 #[test]
 fn evidence_run_caps_capture_before_an_unbounded_file_can_grow() {
-    let fixture = Fixture::new("output-bound", "yes", vec!["yes", "x"], vec!["x"]);
+    let mut fixture = Fixture::new("output-bound", "yes", vec!["yes", "x"], vec!["x"]);
 
     let output = fixture.evidence_run("op_output_bound");
     assert_eq!(output.status.code(), Some(11), "{}", text(&output));
@@ -156,6 +155,7 @@ fn evidence_run_caps_capture_before_an_unbounded_file_can_grow() {
 struct Fixture {
     root: PathBuf,
     database: PathBuf,
+    source_version: Option<String>,
     executable: String,
     argv: Vec<String>,
     observables: Vec<String>,
@@ -171,11 +171,12 @@ impl Fixture {
             "boreal-cli-evidence-{label}-{}-{nonce}",
             std::process::id()
         ));
-        fs::create_dir_all(root.join("gates")).unwrap();
-        let database = root.join("boreal.sqlite");
+        fs::create_dir_all(root.join(".boreal/gates")).unwrap();
+        let database = root.join(".boreal/boreal.sqlite");
         let fixture = Self {
             root,
             database,
+            source_version: None,
             executable: executable.to_owned(),
             argv: argv.into_iter().map(str::to_owned).collect(),
             observables: observables.into_iter().map(str::to_owned).collect(),
@@ -190,6 +191,7 @@ impl Fixture {
                 &self.root,
                 &vec![
                     "init".to_owned(),
+                    "--project".to_owned(),
                     PROJECT.to_owned(),
                     "--db".to_owned(),
                     path(&self.database),
@@ -203,16 +205,6 @@ impl Fixture {
             "init",
         );
         let store = SqliteStore::open(&self.database, SCHEMA).unwrap();
-        store
-            .execute_batch(&format!(
-                "INSERT INTO source_version
-                 (source_version_id, project_id, origin, access_scope, content_digest,
-                  media_type, byte_count, captured_at, parser_identity, availability, citation_json)
-                 VALUES ('{SOURCE}', '{PROJECT}', 'fixture', 'project',
-                         'sha256:source-hardening', 'text/plain', 0, 'unix-ms:1',
-                         'fixture/1', 'available', '[]');"
-            ))
-            .unwrap();
         assert_success(
             &run(
                 &self.root,
@@ -305,11 +297,46 @@ impl Fixture {
         assert_eq!(agent.project_id, PROJECT);
         assert_eq!(agent.actor_id, AGENT);
         assert_eq!(agent.role, boreal_domain::ActorRole::Agent);
+    }
 
-        assert_success(
-            &run(
-                &self.root,
-                &vec![
+    fn start_attempt(&mut self) {
+        let source_output = run(
+            &self.root,
+            &vec![
+                "source".to_owned(),
+                "add".to_owned(),
+                PROJECT.to_owned(),
+                "--input".to_owned(),
+                ".".to_owned(),
+                "--origin".to_owned(),
+                "evidence-hardening/workspace".to_owned(),
+                "--actor".to_owned(),
+                OPERATOR.to_owned(),
+                "--harness".to_owned(),
+                HARNESS.to_owned(),
+                "--session".to_owned(),
+                SETUP_SESSION.to_owned(),
+                "--db".to_owned(),
+                path(&self.database),
+                "--operation-id".to_owned(),
+                "op_evidence_source".to_owned(),
+                "--json".to_owned(),
+            ],
+        );
+        assert_success(&source_output, "Operator workspace snapshot capture");
+        self.source_version = Some(
+            envelope(&source_output)["data"]["source"]["source_version_id"]
+                .as_str()
+                .expect("source add returns a registered workspace snapshot")
+                .to_owned(),
+        );
+
+        for (command, operation) in [
+            ("work", "op_evidence_claim"),
+            ("agent", "op_evidence_start"),
+        ] {
+            let args = if command == "work" {
+                vec![
                     "work".to_owned(),
                     "claim".to_owned(),
                     PROJECT.to_owned(),
@@ -321,22 +348,17 @@ impl Fixture {
                     "--session".to_owned(),
                     SESSION.to_owned(),
                     "--source-version".to_owned(),
-                    SOURCE.to_owned(),
+                    self.source_version.clone().unwrap(),
                     "--config-identity".to_owned(),
                     CONFIG.to_owned(),
                     "--db".to_owned(),
                     path(&self.database),
                     "--operation-id".to_owned(),
-                    "op_evidence_claim".to_owned(),
+                    operation.to_owned(),
                     "--json".to_owned(),
-                ],
-            ),
-            "work claim",
-        );
-        assert_success(
-            &run(
-                &self.root,
-                &vec![
+                ]
+            } else {
+                vec![
                     "agent".to_owned(),
                     "start".to_owned(),
                     WORK.to_owned(),
@@ -351,12 +373,13 @@ impl Fixture {
                     "--db".to_owned(),
                     path(&self.database),
                     "--operation-id".to_owned(),
-                    "op_evidence_start".to_owned(),
+                    operation.to_owned(),
                     "--json".to_owned(),
-                ],
-            ),
-            "agent start",
-        );
+                ]
+            };
+            let output = run(&self.root, &args);
+            assert_success(&output, command);
+        }
     }
 
     fn executable(&self, name: &str, contents: &str) {
@@ -365,19 +388,29 @@ impl Fixture {
         let mut permissions = fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).unwrap();
-        self.write_gate();
     }
 
     fn write_gate(&self) {
+        let executable_path = if self.executable.contains('/') {
+            self.root.join(self.executable.trim_start_matches("./"))
+        } else {
+            env::split_paths(&env::var_os("PATH").unwrap_or_default())
+                .map(|directory| directory.join(&self.executable))
+                .find(|candidate| candidate.is_file())
+                .expect("PATH contains the declared verifier executable")
+        };
+        let verifier_digest = sha256_content_digest(&fs::read(executable_path).unwrap());
         fs::write(
-            self.root.join("gates/verification.json"),
+            self.root.join(".boreal/gates/verification.json"),
             serde_json::to_vec(&json!({
                 "gate_id": "verification",
+                "policy_revision": 1,
                 "kind": "verification",
                 "executable": self.executable,
+                "verifier_digest": verifier_digest,
                 "argv": self.argv,
                 "cwd": ".",
-                "source_snapshot_hash": SOURCE,
+                "source_snapshot_hash": self.source_version,
                 "config_identity": CONFIG,
                 "environment_fingerprint": "env-hardening",
                 "observables": self.observables,
@@ -388,8 +421,47 @@ impl Fixture {
         .unwrap();
     }
 
-    fn evidence_run(&self, operation: &str) -> Output {
+    fn publish_gate(&self) {
+        let revision = SqliteStore::open(&self.database, SCHEMA)
+            .unwrap()
+            .project_revision(PROJECT)
+            .unwrap()
+            .0;
+        let output = run(
+            &self.root,
+            &vec![
+                "gate".to_owned(),
+                "policy".to_owned(),
+                "publish".to_owned(),
+                "--project".to_owned(),
+                PROJECT.to_owned(),
+                "--gate".to_owned(),
+                "verification".to_owned(),
+                "--input".to_owned(),
+                ".boreal/gates/verification.json".to_owned(),
+                "--expected-revision".to_owned(),
+                revision.to_string(),
+                "--yes".to_owned(),
+                "--actor".to_owned(),
+                OPERATOR.to_owned(),
+                "--harness".to_owned(),
+                HARNESS.to_owned(),
+                "--session".to_owned(),
+                SETUP_SESSION.to_owned(),
+                "--operation-id".to_owned(),
+                "op_evidence_gate_policy".to_owned(),
+                "--db".to_owned(),
+                path(&self.database),
+                "--json".to_owned(),
+            ],
+        );
+        assert_success(&output, "gate policy publish");
+    }
+
+    fn evidence_run(&mut self, operation: &str) -> Output {
+        self.start_attempt();
         self.write_gate();
+        self.publish_gate();
         run(
             &self.root,
             &vec![

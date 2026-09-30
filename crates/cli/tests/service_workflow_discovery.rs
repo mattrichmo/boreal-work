@@ -21,13 +21,12 @@ unsafe extern "C" {
 #[test]
 fn service_workflow_queries_match_direct_assets_without_project_context() {
     let temp = TempDir::new("workflow-discovery");
-    let database = temp.path().join("boreal.sqlite");
+    let database = temp.path().join(".boreal/boreal.sqlite");
     let socket = temp.path().join("s.sock");
 
     let initialized = Command::new(binary())
         .current_dir(temp.path())
-        .args(["init", "workflow-discovery-project", "--db"])
-        .arg(&database)
+        .args(["init", "--project", "workflow-discovery-project"])
         .args(["--actor", "workflow-discovery-agent", "--json"])
         .output()
         .expect("disposable service project initializes");

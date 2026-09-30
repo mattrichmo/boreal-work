@@ -1,4 +1,22 @@
-# M01 agent dispatch and handoff
+# Current production agent assignment
+
+Use [FINAL_PRODUCTION_PLAN.md](project/build-plan/production-completion/FINAL_PRODUCTION_PLAN.md)
+and [FINAL_STATE.json](project/build-plan/production-completion/execution/FINAL_STATE.json).
+Read `project/README.md`, the current build-plan entry, and the applicable
+existing vertical handoff once before implementation. The final plan supplies
+the current work packages and dependency rules in place of the historical
+sprint/leaf gate sequence below.
+
+Each assignment must name: F-package ID; current source/diff identity; exact
+exclusive files; shared files reserved to the coordinator; required user
+behavior; integration requests; and final J-journey IDs. Workers implement
+complete paths, preserve existing data/history, and report concrete progress.
+Comprehensive testing belongs to F7 after the integrated implementation batch.
+The coordinator immediately redispatches idle workers to open packages or
+repairs and continues through actual installation and supported release delivery.
+Workers cannot mark qualification or release complete from source inspection.
+
+# Historical M01 agent dispatch and handoff
 
 This is the copy-ready assignment contract for the
 [master plan](MASTER_PLAN.md). It is file-based; **do not run `bwrk`** to

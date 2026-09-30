@@ -1,0 +1,49 @@
+{
+  "schema": "boreal.final-production-execution/1",
+  "plan": "project/build-plan/production-completion/FINAL_PRODUCTION_PLAN.md",
+  "date": "2026-09-26",
+  "baseline_commit": "dcfae1196e2732bec3228169ee28044a54f9493c",
+  "overall_state": "planned",
+  "source_investigation": "completed_by_coordinator_and_three_agents",
+  "plan_review": "three_agent_review_completed_and_amendments_integrated",
+  "first_integration_contract": "fenced_final_result_capture_and_binding_before_verification",
+  "implementation_started": false,
+  "packages": {
+    "F1": {"title": "Agent onboarding and guidance", "owner": "agent_a", "state": "ready", "evidence": []},
+    "F2": {"title": "Final-result binding, lifecycle and canonical review readback", "owner": "agent_a", "state": "ready", "evidence": []},
+    "F3": {"title": "Planning, intake, context and memory", "owner": "agent_b", "state": "ready", "evidence": []},
+    "F4": {"title": "Operational dashboard", "owner": "agent_c", "state": "ready", "evidence": []},
+    "F5": {"title": "Shared service and CLI integration", "owner": "coordinator", "state": "ready", "evidence": []},
+    "F6": {"title": "Data continuity and release preparation", "owner": "agent_b", "state": "ready", "evidence": []},
+    "F7": {"title": "Final qualification and repair loop", "owner": "coordinator_and_agents", "state": "ready", "entry_requires": ["F1", "F2", "F3", "F4", "F5", "F6"], "evidence": []},
+    "F8": {"title": "Activation and supported release delivery", "owner": "coordinator", "state": "ready", "entry_requires": ["native_artifact_qualified"], "evidence": []}
+  },
+  "acceptance": {
+    "J1": {"state": "not_run", "evidence": []},
+    "J2": {"state": "not_run", "evidence": []},
+    "J3": {"state": "not_run", "evidence": []},
+    "J4": {"state": "not_run", "evidence": []},
+    "J5": {"state": "not_run", "evidence": []},
+    "J6": {"state": "not_run", "evidence": []},
+    "J7": {"state": "not_run", "evidence": []},
+    "J8": {"state": "not_run", "evidence": []},
+    "J9": {"state": "not_run", "evidence": []},
+    "J10": {"state": "not_run", "evidence": []},
+    "J11": {"state": "not_run", "evidence": []},
+    "J12": {"state": "not_run", "evidence": []},
+    "J13": {"state": "not_run", "evidence": []}
+  },
+  "active_assignments": [],
+  "exclusive_write_owners": {},
+  "repair_queue": [],
+  "external_blockers": [],
+  "candidate": {"source_identity": null, "version": null, "archive": null, "sha256": null},
+  "activation": {"state": "not_installed", "prefix": null, "binding_resolution": "required_before_live_activation", "evidence": []},
+  "distribution": {
+    "state": "not_published",
+    "targets": {"aarch64-apple-darwin": "not_run", "x86_64-apple-darwin": "not_run", "x86_64-unknown-linux-gnu": "not_run"},
+    "release_url": null,
+    "channel_verification": "not_run"
+  },
+  "note": "Planning/source inspection only. Prior implementation claims are preserved in historical documents and do not pre-fill final qualification. No product test suite was run to create this plan."
+}

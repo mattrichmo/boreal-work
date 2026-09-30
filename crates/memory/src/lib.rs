@@ -13,6 +13,7 @@ pub use publisher::{
     PublicationJobRequest, PublicationJobState,
 };
 
+use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -177,6 +178,15 @@ impl PublicationState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryRoot {
     path: PathBuf,
+    layout: MemoryLayout,
+    runtime_root: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MemoryLayout {
+    #[default]
+    Child,
+    InRepo,
 }
 
 impl MemoryRoot {
@@ -189,8 +199,12 @@ impl MemoryRoot {
         {
             return Err(MemoryError::InvalidPath);
         }
+        let canonical_path = canonicalize_with_existing_parent(&path)?;
+        let (layout, runtime_root) = project_memory_layout(&canonical_path)?;
         Ok(Self {
-            path: canonicalize_with_existing_parent(&path)?,
+            path: canonical_path,
+            layout,
+            runtime_root,
         })
     }
 
@@ -199,11 +213,41 @@ impl MemoryRoot {
         if project_root.as_os_str().is_empty() || has_parent_component(project_root) {
             return Err(MemoryError::InvalidPath);
         }
-        Self::new(project_root.join(".boreal-memory"))
+        let mut root = Self::new(project_root.join("memory"))?;
+        root.runtime_root = Some(canonicalize_with_existing_parent(project_root)?);
+        Ok(root)
+    }
+
+    pub fn for_project_with_layout(
+        project_root: impl AsRef<Path>,
+        layout: MemoryLayout,
+    ) -> Result<Self, MemoryError> {
+        let project_root = project_root.as_ref();
+        if project_root.as_os_str().is_empty() || has_parent_component(project_root) {
+            return Err(MemoryError::InvalidPath);
+        }
+        let mut root = Self::new(project_root.join("memory"))?;
+        if root.runtime_root.is_some() && root.layout != layout {
+            return Err(MemoryError::InvalidManifest(
+                "requested memory layout disagrees with project metadata".into(),
+            ));
+        }
+        root.layout = layout;
+        root.runtime_root = Some(canonicalize_with_existing_parent(project_root)?);
+        Ok(root)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Validate an explicitly selected in-repository layout without creating
+    /// or modifying a Git repository.
+    pub fn validate_existing_repository(&self) -> Result<(), PublishError> {
+        if self.layout == MemoryLayout::InRepo {
+            ensure_git_repository(self)?;
+        }
+        Ok(())
     }
 
     pub fn manifest_path(&self) -> PathBuf {
@@ -215,6 +259,9 @@ impl MemoryRoot {
     }
 
     fn lock_path(&self) -> PathBuf {
+        if let Some(project_root) = &self.runtime_root {
+            return project_root.join(".boreal").join("memory.publication.lock");
+        }
         let name = self
             .path
             .file_name()
@@ -261,6 +308,72 @@ impl MemoryRoot {
         }
         Ok(())
     }
+}
+
+#[derive(Deserialize)]
+struct ProjectSetupMetadata {
+    schema_version: String,
+    project_root: PathBuf,
+    memory_layout: String,
+}
+
+fn project_memory_layout(path: &Path) -> Result<(MemoryLayout, Option<PathBuf>), MemoryError> {
+    if path.file_name().is_none_or(|name| name != "memory") {
+        return Ok((MemoryLayout::Child, None));
+    }
+    let Some(project_root) = path.parent() else {
+        return Ok((MemoryLayout::Child, None));
+    };
+    let runtime_dir = project_root.join(".boreal");
+    match fs::symlink_metadata(&runtime_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => return Err(MemoryError::InvalidPath),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((MemoryLayout::Child, None));
+        }
+        Err(error) => return Err(MemoryError::Io(error.to_string())),
+    }
+    let metadata_path = runtime_dir.join("project.json");
+    match fs::symlink_metadata(&metadata_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => return Err(MemoryError::InvalidPath),
+        Ok(metadata) if !metadata.is_file() => return Err(MemoryError::InvalidPath),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((MemoryLayout::Child, None));
+        }
+        Err(error) => return Err(MemoryError::Io(error.to_string())),
+    }
+    let bytes = fs::read(&metadata_path).map_err(|error| MemoryError::Io(error.to_string()))?;
+    let metadata: ProjectSetupMetadata = serde_json::from_slice(&bytes).map_err(|error| {
+        MemoryError::InvalidManifest(format!("project metadata is invalid: {error}"))
+    })?;
+    if metadata.schema_version != "boreal.project-setup.v2" {
+        return Err(MemoryError::InvalidManifest(
+            "project metadata schema is unsupported".into(),
+        ));
+    }
+    let declared_root = if metadata.project_root.is_absolute() {
+        metadata.project_root
+    } else {
+        project_root.join(metadata.project_root)
+    };
+    if fs::canonicalize(declared_root).ok().as_deref()
+        != fs::canonicalize(project_root).ok().as_deref()
+    {
+        return Err(MemoryError::InvalidManifest(
+            "project metadata root does not match memory root".into(),
+        ));
+    }
+    let layout = match metadata.memory_layout.as_str() {
+        "child" => MemoryLayout::Child,
+        "in-repo" => MemoryLayout::InRepo,
+        _ => {
+            return Err(MemoryError::InvalidManifest(
+                "project memory_layout is unsupported".into(),
+            ));
+        }
+    };
+    Ok((layout, Some(project_root.to_path_buf())))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -387,7 +500,12 @@ fn render_markdown_as(draft: &Draft, state: &str) -> Result<String, MemoryError>
         .join("\n");
     Ok(format!(
         "---\nschema_version: {}\nproject_id: {}\nentry_id: {}\nstate: {}\n---\n\n# {}\n\n{}\n\n## Sources\n{}\n",
-        ENTRY_SCHEMA_VERSION, draft.project_id, draft.entry_id, state, draft.title, draft.body,
+        ENTRY_SCHEMA_VERSION,
+        draft.project_id,
+        draft.entry_id,
+        state,
+        draft.title,
+        draft.body,
         source_lines
     ))
 }
@@ -542,7 +660,7 @@ impl Publisher {
         // concurrent constructors can race inside `create_dir` or `git init`.
         let _publication_lock = PublicationLock::acquire(&root)?;
         root.prepare().map_err(io_publish)?;
-        ensure_git_repository(root.path())?;
+        ensure_git_repository(&root)?;
         Ok(Self { root })
     }
 
@@ -752,7 +870,7 @@ impl Publisher {
             return Err(PublishError::DraftNotAccepted);
         }
         self.root.prepare().map_err(io_publish)?;
-        ensure_git_repository(self.root.path())?;
+        ensure_git_repository(&self.root)?;
         validate_segment(operation_id)?;
         let markdown = render_published_markdown(draft)?;
         let content_digest = digest(markdown.as_bytes());
@@ -867,8 +985,9 @@ impl Publisher {
             ));
         }
         let status_is_clean = status.trim().is_empty();
-        let exact_interrupted_publication =
-            !status_is_clean && files_match && status_only_managed(&status, &note_name);
+        let exact_interrupted_publication = !status_is_clean
+            && files_match
+            && status_only_managed(&status, &note_name, &git_prefix(self.root.path())?);
         if !status_is_clean && !exact_interrupted_publication {
             return Err(PublishError::Conflict(
                 "managed memory root has uncommitted changes".into(),
@@ -926,13 +1045,24 @@ impl Publisher {
             Some(&revision),
         )
         .map_err(io_publish_io)?;
+        let git_prefix = git_prefix(self.root.path())?;
         if git_output(
             self.root.path(),
-            &["show", &format!("{}:manifest.json", revision)],
+            &[
+                "show",
+                &format!(
+                    "{}:{}",
+                    revision,
+                    git_scoped_path(&git_prefix, "manifest.json")
+                ),
+            ],
         )? != manifest_text
             || git_output(
                 self.root.path(),
-                &["show", &format!("{}:{}", revision, note_name)],
+                &[
+                    "show",
+                    &format!("{}:{}", revision, git_scoped_path(&git_prefix, &note_name)),
+                ],
             )? != markdown
         {
             return Err(PublishError::Git(
@@ -1223,7 +1353,13 @@ fn committed_entry_proof(
     }
     let note = git_output(
         root.path(),
-        &["show", &format!("{revision}:{}", entry.manifest_path)],
+        &[
+            "show",
+            &format!(
+                "{revision}:{}",
+                git_scoped_path(&git_prefix(root.path())?, &entry.manifest_path)
+            ),
+        ],
     )?;
     Ok(digest(note.as_bytes()) == entry.content_digest)
 }
@@ -1238,14 +1374,27 @@ fn verify_staged_bytes(
     if staged.is_empty() {
         return Ok(false);
     }
-    let expected = ["manifest.json".to_owned(), note_name.to_owned()];
+    let prefix = git_prefix(root.path())?;
+    let expected = [
+        git_scoped_path(&prefix, "manifest.json"),
+        git_scoped_path(&prefix, note_name),
+    ];
     if staged != expected {
         return Err(PublishError::Conflict(
             "staged memory files include unrelated or user-authored changes".into(),
         ));
     }
-    let staged_manifest = git_output(root.path(), &["show", ":manifest.json"])?;
-    let staged_note = git_output(root.path(), &["show", &format!(":{note_name}")])?;
+    let staged_manifest = git_output(
+        root.path(),
+        &[
+            "show",
+            &format!(":{}", git_scoped_path(&prefix, "manifest.json")),
+        ],
+    )?;
+    let staged_note = git_output(
+        root.path(),
+        &["show", &format!(":{}", git_scoped_path(&prefix, note_name))],
+    )?;
     if staged_manifest != manifest_text || staged_note != markdown {
         return Err(PublishError::Conflict(
             "staged memory bytes do not match the requested publication".into(),
@@ -1263,7 +1412,10 @@ fn stage_exact(root: &Path, relative_path: &str, bytes: &[u8]) -> Result<(), Pub
             "git hash-object returned no blob identity".into(),
         ));
     }
-    let cacheinfo = format!("100644,{blob},{relative_path}");
+    let cacheinfo = format!(
+        "100644,{blob},{}",
+        git_scoped_path(&git_prefix(root)?, relative_path)
+    );
     git_output(root, &["update-index", "--add", "--cacheinfo", &cacheinfo])?;
     Ok(())
 }
@@ -1280,8 +1432,12 @@ fn read_publication_journal(root: &MemoryRoot) -> Result<PublicationRecovery, Pu
     };
     let status = git_worktree_status(root.path())?;
     let staged = staged_paths(root.path())?;
-    let managed = status_only_managed(&status, &journal.note_name);
-    let expected = vec!["manifest.json".to_owned(), journal.note_name.clone()];
+    let prefix = git_prefix(root.path())?;
+    let managed = status_only_managed(&status, &journal.note_name, &prefix);
+    let expected = vec![
+        git_scoped_path(&prefix, "manifest.json"),
+        git_scoped_path(&prefix, &journal.note_name),
+    ];
     // The journal update itself can be the operation's crash boundary. When
     // it still says `staged`, prove a commit by inspecting HEAD rather than
     // manufacturing a second commit from an uncertain result.
@@ -1291,22 +1447,28 @@ fn read_publication_journal(root: &MemoryRoot) -> Result<PublicationRecovery, Pu
             .map(|value| value.trim().to_owned())
     });
     let committed_proof = checked_revision.as_deref().is_some_and(|revision| {
-        git_output(root.path(), &["show", &format!("{revision}:manifest.json")])
-            .ok()
-            .and_then(|text| {
-                let manifest = parse_existing_manifest(&text).ok()?;
-                if manifest.identity() != journal.manifest_identity
-                    || manifest.operation_id != journal.operation_id
-                {
-                    return None;
-                }
-                let entry = manifest.entries.iter().find(|entry| {
-                    entry.operation_id == journal.operation_id
-                        && entry.manifest_path == journal.note_name
-                })?;
-                committed_entry_proof(root, revision, &text, &manifest, entry).ok()
-            })
-            .unwrap_or(false)
+        git_output(
+            root.path(),
+            &[
+                "show",
+                &format!("{revision}:{}", git_scoped_path(&prefix, "manifest.json")),
+            ],
+        )
+        .ok()
+        .and_then(|text| {
+            let manifest = parse_existing_manifest(&text).ok()?;
+            if manifest.identity() != journal.manifest_identity
+                || manifest.operation_id != journal.operation_id
+            {
+                return None;
+            }
+            let entry = manifest.entries.iter().find(|entry| {
+                entry.operation_id == journal.operation_id
+                    && entry.manifest_path == journal.note_name
+            })?;
+            committed_entry_proof(root, revision, &text, &manifest, entry).ok()
+        })
+        .unwrap_or(false)
     });
     let material_matches = journal_material_matches(root, &journal);
     let committed_material_ok =
@@ -1368,11 +1530,11 @@ fn recovery_state_from_str(value: &str) -> Option<PublicationRecoveryState> {
     })
 }
 
-/// Cross-process publication exclusion. The lock lives beside the managed
-/// Git repository so it can never appear as a staged memory file. We do not
-/// remove a lock owned by another process: a stale lock is an explicit
-/// operator/recovery condition rather than a reason to risk concurrent Git
-/// writes.
+/// Cross-process publication exclusion. Project memory keeps the lock in the
+/// ignored `.boreal` runtime directory; standalone roots keep it beside the
+/// root. It never enters the memory publication file set. We do not remove a
+/// lock owned by another process: a stale lock is an explicit recovery
+/// condition rather than a reason to risk concurrent Git writes.
 struct PublicationLock {
     path: PathBuf,
     token: String,
@@ -1382,6 +1544,25 @@ struct PublicationLock {
 impl PublicationLock {
     fn acquire(root: &MemoryRoot) -> Result<Self, PublishError> {
         let path = root.lock_path();
+        if let Some(project_root) = &root.runtime_root {
+            if fs::canonicalize(project_root).ok().as_deref() != Some(project_root.as_path()) {
+                return Err(PublishError::InvalidInput(MemoryError::InvalidPath));
+            }
+            let runtime_dir = project_root.join(".boreal");
+            if fs::symlink_metadata(&runtime_dir)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(PublishError::InvalidInput(MemoryError::InvalidPath));
+            }
+            fs::create_dir_all(&runtime_dir).map_err(io_publish_io)?;
+            if fs::symlink_metadata(&runtime_dir)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(PublishError::InvalidInput(MemoryError::InvalidPath));
+            }
+        }
         let deadline = Instant::now() + LOCK_WAIT;
         let token = format!("{}-{}", std::process::id(), unique_stamp());
         let mut file = None;
@@ -1605,7 +1786,16 @@ fn replay_committed_publication(
     )?;
     let mut replay = None;
     for revision in revisions.lines().filter(|revision| !revision.is_empty()) {
-        let text = git_output(root.path(), &["show", &format!("{revision}:manifest.json")])?;
+        let text = git_output(
+            root.path(),
+            &[
+                "show",
+                &format!(
+                    "{revision}:{}",
+                    git_scoped_path(&git_prefix(root.path())?, "manifest.json")
+                ),
+            ],
+        )?;
         let manifest = parse_existing_manifest(&text)?;
         if manifest.operation_id != requested.operation_id {
             continue;
@@ -2493,6 +2683,8 @@ fn parse_tree_entries(text: &str, index_format: bool) -> BTreeMap<String, String
 }
 
 fn git_worktree_status(root: &Path) -> Result<String, PublishError> {
+    let repository = git_output(root, &["rev-parse", "--show-toplevel"])?;
+    let repository = PathBuf::from(repository.trim());
     let staged = staged_paths(root)?;
     let tracked = git_output(root, &["ls-files", "-z"])?;
     let untracked = git_output(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
@@ -2505,7 +2697,7 @@ fn git_worktree_status(root: &Path) -> Result<String, PublishError> {
         if relative.is_absolute() || has_parent_component(relative) {
             continue;
         }
-        let worktree = root.join(relative);
+        let worktree = repository.join(relative);
         let index_bytes = git_output(root, &["show", &format!(":{path}")])?;
         let worktree_bytes = fs::read(&worktree);
         if !worktree_bytes.is_ok_and(|bytes| bytes == index_bytes.as_bytes()) {
@@ -2934,10 +3126,11 @@ fn io_publish_io(error: io::Error) -> PublishError {
     PublishError::Io(error.to_string())
 }
 
-fn status_only_managed(status: &str, note_name: &str) -> bool {
+fn status_only_managed(status: &str, note_name: &str, prefix: &str) -> bool {
     status.lines().all(|line| {
         let path = line.get(3..).map(str::trim).unwrap_or_default();
-        path == "manifest.json" || path == note_name
+        path == git_scoped_path(prefix, "manifest.json")
+            || path == git_scoped_path(prefix, note_name)
     })
 }
 
@@ -2945,13 +3138,254 @@ fn import_io(error: io::Error) -> ImportError {
     ImportError::Io(error.to_string())
 }
 
-fn ensure_git_repository(root: &Path) -> Result<(), PublishError> {
-    if root.join(".git").exists() {
-        git_output(root, &["rev-parse", "--is-inside-work-tree"])?;
+fn ensure_git_repository(root: &MemoryRoot) -> Result<(), PublishError> {
+    if root.layout == MemoryLayout::InRepo {
+        let top = git_output(root.path(), &["rev-parse", "--show-toplevel"]).map_err(|_| {
+            PublishError::Git(
+                "--memory-layout in-repo requires an existing enclosing Git repository".into(),
+            )
+        })?;
+        let expected = root
+            .path()
+            .parent()
+            .ok_or_else(|| PublishError::Git("memory directory has no project parent".into()))?;
+        if fs::canonicalize(expected).ok().as_deref()
+            != fs::canonicalize(top.trim()).ok().as_deref()
+        {
+            return Err(PublishError::Git(
+                "in-repo memory must be inside the project's Git repository".into(),
+            ));
+        }
+    } else if root.path().join(".git").exists() {
+        git_output(root.path(), &["rev-parse", "--is-inside-work-tree"])?;
     } else {
-        git_output(root, &["init", "--quiet"])?;
+        git_output(root.path(), &["init", "--quiet"])?;
     }
     Ok(())
+}
+
+/// Create a clean baseline commit containing only newly scaffolded project
+/// files. A private temporary Git index preserves the user's current index,
+/// and blobs are written directly so attributes and clean filters cannot
+/// rewrite the selected bytes.
+pub fn initialize_scaffold_baseline(
+    project_root: impl AsRef<Path>,
+    files: &[PathBuf],
+) -> Result<String, PublishError> {
+    let project_root = project_root.as_ref();
+    let canonical_root =
+        fs::canonicalize(project_root).map_err(|error| PublishError::Io(error.to_string()))?;
+    let top = git_output(&canonical_root, &["rev-parse", "--show-toplevel"])?;
+    let canonical_git_root =
+        fs::canonicalize(top.trim()).map_err(|error| PublishError::Io(error.to_string()))?;
+    if !canonical_root.starts_with(&canonical_git_root) {
+        return Err(PublishError::Conflict(
+            "scaffold baseline project root is outside its Git repository".into(),
+        ));
+    }
+    if files.is_empty() {
+        return Err(PublishError::InvalidInput(MemoryError::EmptyIdentity));
+    }
+    let prefix = git_prefix(&canonical_root)?;
+    let mut paths = files.to_vec();
+    paths.sort();
+    paths.dedup();
+    let mut file_bytes = Vec::with_capacity(paths.len());
+    let mut index_repairs = Vec::new();
+    for path in &paths {
+        if path.is_absolute() || has_parent_component(path) || path.as_os_str().is_empty() {
+            return Err(PublishError::InvalidInput(MemoryError::InvalidPath));
+        }
+        let mut cursor = canonical_root.clone();
+        for component in path.components() {
+            let Component::Normal(part) = component else {
+                return Err(PublishError::InvalidInput(MemoryError::InvalidPath));
+            };
+            cursor.push(part);
+            reject_symlink(&cursor).map_err(io_publish)?;
+        }
+        let metadata =
+            fs::metadata(&cursor).map_err(|error| PublishError::Io(error.to_string()))?;
+        if !metadata.is_file() {
+            return Err(PublishError::InvalidInput(MemoryError::InvalidPath));
+        }
+        let local_git_path = path
+            .to_str()
+            .ok_or(PublishError::InvalidInput(MemoryError::InvalidPath))?;
+        let git_path = git_scoped_path(&prefix, local_git_path);
+        let full_git_path = format!("HEAD:{git_path}");
+        if git_output(&canonical_root, &["cat-file", "-e", &full_git_path]).is_ok() {
+            let bytes = fs::read(&cursor).map_err(|error| PublishError::Io(error.to_string()))?;
+            let committed = git_output(&canonical_root, &["show", &full_git_path])?;
+            if committed.as_bytes() != bytes {
+                return Err(PublishError::Conflict(format!(
+                    "scaffold baseline path was already tracked with different bytes: {}",
+                    path.display()
+                )));
+            }
+            match git_output(&canonical_root, &["show", &format!(":{git_path}")]) {
+                Ok(indexed) if indexed.as_bytes() == bytes => {}
+                Ok(_) => {
+                    return Err(PublishError::Conflict(format!(
+                        "scaffold baseline index path has different bytes: {}",
+                        path.display()
+                    )));
+                }
+                Err(_) => index_repairs.push((git_path, bytes)),
+            }
+            continue;
+        }
+        if git_output(&canonical_root, &["ls-files", "--error-unmatch", &git_path]).is_ok() {
+            return Err(PublishError::Conflict(format!(
+                "scaffold baseline path is already present in the index: {}",
+                path.display()
+            )));
+        }
+        file_bytes.push((
+            git_path,
+            fs::read(&cursor).map_err(|error| PublishError::Io(error.to_string()))?,
+        ));
+    }
+    if file_bytes.is_empty() {
+        if index_repairs.is_empty() {
+            return git_output(&canonical_root, &["rev-parse", "HEAD"])
+                .map(|revision| revision.trim().to_owned());
+        }
+        for (path, bytes) in &index_repairs {
+            let blob =
+                git_output_with_stdin(&canonical_root, &["hash-object", "-w", "--stdin"], bytes)?;
+            let cacheinfo = format!("100644,{},{}", blob.trim(), path);
+            git_output(
+                &canonical_root,
+                &["update-index", "--add", "--cacheinfo", &cacheinfo],
+            )?;
+        }
+        return git_output(&canonical_root, &["rev-parse", "HEAD"])
+            .map(|revision| revision.trim().to_owned());
+    }
+
+    let temp_index = std::env::temp_dir().join(format!(
+        "boreal-scaffold-index-{}-{}",
+        std::process::id(),
+        unique_stamp()
+    ));
+    let create_index = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_index)
+        .map_err(|error| PublishError::Io(error.to_string()))?;
+    drop(create_index);
+    let result = (|| {
+        let parent = git_output(&canonical_root, &["rev-parse", "--verify", "HEAD"])
+            .ok()
+            .map(|revision| revision.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if let Some(parent) = &parent {
+            git_output_with_index(&canonical_root, &["read-tree", parent], &temp_index)?;
+        } else {
+            git_output_with_index(&canonical_root, &["read-tree", "--empty"], &temp_index)?;
+        }
+        for (path, bytes) in &file_bytes {
+            let blob =
+                git_output_with_stdin(&canonical_root, &["hash-object", "-w", "--stdin"], bytes)?;
+            let blob = blob.trim();
+            if blob.is_empty() {
+                return Err(PublishError::Git(
+                    "git hash-object returned no blob identity".into(),
+                ));
+            }
+            let cacheinfo = format!("100644,{blob},{path}");
+            git_output_with_index(
+                &canonical_root,
+                &["update-index", "--add", "--cacheinfo", &cacheinfo],
+                &temp_index,
+            )?;
+        }
+        for (path, bytes) in &index_repairs {
+            let blob =
+                git_output_with_stdin(&canonical_root, &["hash-object", "-w", "--stdin"], bytes)?;
+            let cacheinfo = format!("100644,{},{}", blob.trim(), path);
+            git_output(
+                &canonical_root,
+                &["update-index", "--add", "--cacheinfo", &cacheinfo],
+            )?;
+        }
+        let tree = git_output_with_index(&canonical_root, &["write-tree"], &temp_index)?;
+        let tree = tree.trim();
+        if tree.is_empty() {
+            return Err(PublishError::Git(
+                "git write-tree returned no tree identity".into(),
+            ));
+        }
+        let mut args = vec!["commit-tree".to_owned(), tree.to_owned()];
+        if let Some(parent) = &parent {
+            args.extend(["-p".to_owned(), parent.clone()]);
+        }
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let revision = git_output_with_config_stdin(
+            &canonical_root,
+            &args,
+            b"Initialize Boreal project scaffold",
+        )?;
+        let revision = revision.trim().to_owned();
+        if revision.is_empty() {
+            return Err(PublishError::Git(
+                "git commit-tree returned no commit identity".into(),
+            ));
+        }
+        let current_parent = git_output(&canonical_root, &["rev-parse", "--verify", "HEAD"])
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if current_parent != parent {
+            return Err(PublishError::Conflict(
+                "Git HEAD changed while creating scaffold baseline".into(),
+            ));
+        }
+        let head_ref = git_output(&canonical_root, &["symbolic-ref", "-q", "HEAD"])
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "HEAD".to_owned());
+        let mut update = vec!["update-ref".to_owned(), head_ref, revision.clone()];
+        if let Some(parent) = &parent {
+            update.push(parent.clone());
+        } else {
+            let format = git_output(&canonical_root, &["rev-parse", "--show-object-format"])?;
+            update.push("0".repeat(if format.trim() == "sha256" { 64 } else { 40 }));
+        }
+        let update = update.iter().map(String::as_str).collect::<Vec<_>>();
+        git_output(&canonical_root, &update)?;
+        // Move only the committed scaffold entries into the user's real
+        // index so it remains based on the new HEAD while all prior staged
+        // changes stay exactly as they were.
+        for (path, bytes) in &file_bytes {
+            let blob =
+                git_output_with_stdin(&canonical_root, &["hash-object", "-w", "--stdin"], bytes)?;
+            let cacheinfo = format!("100644,{},{}", blob.trim(), path);
+            git_output(
+                &canonical_root,
+                &["update-index", "--add", "--cacheinfo", &cacheinfo],
+            )?;
+        }
+        Ok(revision)
+    })();
+    let _ = fs::remove_file(temp_index);
+    result
+}
+
+fn git_prefix(root: &Path) -> Result<String, PublishError> {
+    Ok(git_output(root, &["rev-parse", "--show-prefix"])?
+        .trim()
+        .to_owned())
+}
+
+fn git_scoped_path(prefix: &str, path: &str) -> String {
+    if prefix.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{prefix}{path}")
+    }
 }
 
 fn git_checked_out_revision(root: &Path) -> Result<String, ImportError> {
@@ -3009,6 +3443,17 @@ fn git_output_with_stdin(root: &Path, args: &[&str], input: &[u8]) -> Result<Str
     let mut command = Command::new("git");
     configure_git_command(&mut command, root, args);
     let output = run_child_with_input(command, GIT_COMMAND_TIMEOUT, Some(input))?;
+    if !output.status_success {
+        return Err(PublishError::Git(output.stderr.trim().to_owned()));
+    }
+    Ok(output.stdout)
+}
+
+fn git_output_with_index(root: &Path, args: &[&str], index: &Path) -> Result<String, PublishError> {
+    let mut command = Command::new("git");
+    configure_git_command(&mut command, root, args);
+    command.env("GIT_INDEX_FILE", index);
+    let output = run_child(command, GIT_COMMAND_TIMEOUT)?;
     if !output.status_success {
         return Err(PublishError::Git(output.stderr.trim().to_owned()));
     }
@@ -3351,14 +3796,14 @@ impl<'a> JsonParser<'a> {
                         _ => {
                             return Err(ImportError::InvalidManifest(
                                 "unsupported JSON escape".into(),
-                            ))
+                            ));
                         }
                     }
                 }
                 byte if byte.is_ascii_control() => {
                     return Err(ImportError::InvalidManifest(
                         "control byte in JSON string".into(),
-                    ))
+                    ));
                 }
                 _byte => {
                     let start = self.position - 1;
@@ -3406,7 +3851,7 @@ impl<'a> JsonParser<'a> {
                 _ => {
                     return Err(ImportError::InvalidManifest(
                         "invalid Unicode escape".into(),
-                    ))
+                    ));
                 }
             };
             value = (value << 4) | digit;
@@ -3467,7 +3912,7 @@ fn parse_manifest(text: &str) -> Result<ParsedManifest, ImportError> {
         _ => {
             return Err(ImportError::InvalidManifest(
                 "entries is not an array".into(),
-            ))
+            ));
         }
     };
     Ok(ParsedManifest {
@@ -3509,7 +3954,7 @@ fn parse_manifest_entry(value: &JsonValue) -> Result<ManifestEntry, ImportError>
         _ => {
             return Err(ImportError::InvalidManifest(
                 "unknown publication state".into(),
-            ))
+            ));
         }
     };
     let content_digest = required_string(object, "content_digest")?;
@@ -3526,7 +3971,7 @@ fn parse_manifest_entry(value: &JsonValue) -> Result<ManifestEntry, ImportError>
         _ => {
             return Err(ImportError::InvalidManifest(
                 "source citations are not an array".into(),
-            ))
+            ));
         }
     };
     let manifest_path = required_string(object, "manifest_path")?;
@@ -3536,7 +3981,7 @@ fn parse_manifest_entry(value: &JsonValue) -> Result<ManifestEntry, ImportError>
         _ => {
             return Err(ImportError::InvalidManifest(
                 "provenance flag is not boolean".into(),
-            ))
+            ));
         }
     };
     validate_segment(&memory_entry_id).map_err(|_| ImportError::InvalidPath)?;
@@ -3634,6 +4079,265 @@ mod tests {
         assert_eq!(readback, PublicationReadback::NoPublication);
         assert!(!readback.is_resolved());
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn in_repo_layout_publishes_under_prefixed_paths_without_nested_repository() {
+        let project = std::env::temp_dir().join(format!(
+            "boreal-memory-in-repo-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        fs::create_dir_all(project.join(".boreal")).unwrap();
+        fs::create_dir_all(project.join("memory/notes")).unwrap();
+        fs::write(
+            project.join(".gitignore"),
+            ".boreal/\n.memory.publication-recovery\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("memory/.gitignore"),
+            ".memory.publication-recovery\n*.tmp\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".boreal/project.json"),
+            serde_json::json!({
+                "schema_version": "boreal.project-setup.v2",
+                "project_root": project,
+                "memory_layout": "in-repo"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(project.join("README.md"), "baseline\n").unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&project)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["add", "README.md", ".gitignore", "memory/.gitignore"]);
+        git(&["commit", "--quiet", "-m", "baseline"]);
+
+        let root = MemoryRoot::for_project(&project).unwrap();
+        assert_eq!(root.layout, MemoryLayout::InRepo);
+        let publisher = Publisher::new(root).unwrap();
+        let receipt = publisher.publish(&draft().review(true), "op_1").unwrap();
+        assert_eq!(
+            fs::canonicalize(git(&["rev-parse", "--show-toplevel"]).trim()).unwrap(),
+            fs::canonicalize(&project).unwrap()
+        );
+        assert!(!project.join("memory/.git").exists());
+        assert!(!git(&[
+            "show",
+            &format!("{}:memory/manifest.json", receipt.git_revision)
+        ])
+        .is_empty());
+        assert_eq!(git(&["status", "--porcelain"]).trim(), "");
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn in_repo_layout_refuses_to_initialize_a_missing_enclosing_repository() {
+        let project = std::env::temp_dir().join(format!(
+            "boreal-memory-no-git-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        fs::create_dir_all(project.join(".boreal")).unwrap();
+        fs::write(
+            project.join(".boreal/project.json"),
+            serde_json::json!({
+                "schema_version": "boreal.project-setup.v2",
+                "project_root": project,
+                "memory_layout": "in-repo"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let root = MemoryRoot::new(project.join("memory")).unwrap();
+        assert!(root.validate_existing_repository().is_err());
+        assert!(!project.join(".git").exists());
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn project_layout_metadata_must_be_valid_and_bound_to_project_root() {
+        let project = std::env::temp_dir().join(format!(
+            "boreal-memory-metadata-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        fs::create_dir_all(project.join(".boreal")).unwrap();
+        let metadata_path = project.join(".boreal/project.json");
+        fs::write(&metadata_path, "not valid json").unwrap();
+        assert!(MemoryRoot::new(project.join("memory")).is_err());
+        fs::write(
+            &metadata_path,
+            serde_json::json!({
+                "schema_version": "boreal.project-setup.v2",
+                "project_root": project.join("other"),
+                "memory_layout": "in-repo"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(MemoryRoot::for_project(&project).is_err());
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_layout_metadata_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let project = std::env::temp_dir().join(format!(
+            "boreal-memory-metadata-link-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        fs::create_dir_all(project.join(".boreal")).unwrap();
+        let elsewhere = project.join("elsewhere.json");
+        fs::write(
+            &elsewhere,
+            serde_json::json!({
+                "schema_version": "boreal.project-setup.v2",
+                "project_root": project,
+                "memory_layout": "child"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        symlink(&elsewhere, project.join(".boreal/project.json")).unwrap();
+        assert!(MemoryRoot::new(project.join("memory")).is_err());
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn in_repo_layout_rejects_nested_memory_repository() {
+        let project = std::env::temp_dir().join(format!(
+            "boreal-memory-nested-git-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        fs::create_dir_all(project.join(".boreal")).unwrap();
+        fs::create_dir_all(project.join("memory")).unwrap();
+        fs::write(
+            project.join(".boreal/project.json"),
+            serde_json::json!({
+                "schema_version": "boreal.project-setup.v2",
+                "project_root": project,
+                "memory_layout": "in-repo"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let git = |directory: &Path| {
+            let output = Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        };
+        git(&project);
+        git(&project.join("memory"));
+        let root = MemoryRoot::for_project(&project).unwrap();
+        assert!(root.validate_existing_repository().is_err());
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn standalone_directory_named_memory_keeps_sibling_lock() {
+        let parent = std::env::temp_dir().join(format!(
+            "boreal-memory-lock-path-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        fs::create_dir_all(&parent).unwrap();
+        let root = MemoryRoot::new(parent.join("memory")).unwrap();
+        assert_eq!(
+            root.lock_path(),
+            fs::canonicalize(&parent)
+                .unwrap()
+                .join("memory.publication.lock")
+        );
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn scaffold_baseline_commits_only_selected_raw_files_and_preserves_index() {
+        let repository = std::env::temp_dir().join(format!(
+            "boreal-memory-baseline-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        let project = repository.join("subproject");
+        fs::create_dir_all(&project).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        fs::write(
+            repository.join(".gitattributes"),
+            "subproject/scaffold.txt filter=mutate\n",
+        )
+        .unwrap();
+        fs::write(repository.join("README.md"), "baseline\n").unwrap();
+        git(&["add", ".gitattributes", "README.md"]);
+        git(&["commit", "--quiet", "-m", "baseline"]);
+        fs::write(repository.join("user-change.txt"), "staged by user\n").unwrap();
+        git(&["add", "user-change.txt"]);
+        fs::write(project.join("scaffold.txt"), "raw scaffold bytes\n").unwrap();
+
+        let revision =
+            initialize_scaffold_baseline(&project, &[PathBuf::from("scaffold.txt")]).unwrap();
+        assert_eq!(
+            git(&["show", &format!("{revision}:subproject/scaffold.txt")]),
+            "raw scaffold bytes\n"
+        );
+        assert_eq!(
+            initialize_scaffold_baseline(&project, &[PathBuf::from("scaffold.txt")]).unwrap(),
+            revision
+        );
+        fs::write(project.join("scaffold.txt"), "user changed scaffold\n").unwrap();
+        assert!(initialize_scaffold_baseline(&project, &[PathBuf::from("scaffold.txt")]).is_err());
+        fs::write(project.join("scaffold.txt"), "raw scaffold bytes\n").unwrap();
+        assert!(!Command::new("git")
+            .args(["cat-file", "-e", &format!("{revision}:user-change.txt")])
+            .current_dir(&repository)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert_eq!(
+            git(&["diff", "--cached", "--name-only"]).trim(),
+            "user-change.txt"
+        );
+        let _ = fs::remove_dir_all(repository);
     }
 
     #[test]

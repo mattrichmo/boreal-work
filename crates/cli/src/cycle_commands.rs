@@ -26,6 +26,7 @@ pub(super) fn read_kind(path: &[String]) -> Option<&'static str> {
     }
     Some(match path[1].as_str() {
         "list" => "list",
+        "current" => "current",
         "board" => "board",
         "report" => "report",
         _ => return None,
@@ -219,6 +220,20 @@ pub(super) fn run(
     )
 }
 pub(super) fn read(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliError> {
+    if read_kind(&parsed.path) == Some("current") {
+        let value = store
+            .active_cycles_snapshot_v3(
+                &project_argument(parsed, 0)?,
+                parsed.options.limit.unwrap_or(50),
+                parsed.options.offset.unwrap_or(0),
+            )
+            .map_err(map_store_error)?;
+        let revision = value.get("revision").and_then(Value::as_u64);
+        return bounded_result(Some(value), revision).map(|mut r| {
+            r.outcome = ApplicationOutcome::Unchanged;
+            r
+        });
+    }
     if read_kind(&parsed.path) == Some("list") {
         let value = store
             .cycle_list_snapshot_v3(
@@ -228,7 +243,10 @@ pub(super) fn read(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliRes
             )
             .map_err(map_store_error)?;
         let revision = value.get("revision").and_then(Value::as_u64);
-        return bounded_result(Some(value), revision);
+        return bounded_result(Some(value), revision).map(|mut r| {
+            r.outcome = ApplicationOutcome::Unchanged;
+            r
+        });
     }
     cycle_board_result(parsed, &WorkApplication::new(store))
 }

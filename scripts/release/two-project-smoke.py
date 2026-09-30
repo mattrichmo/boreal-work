@@ -49,8 +49,8 @@ def main() -> None:
             return payload
         a, b, absent = (root/name for name in ('a', 'b', 'uninitialized'))
         for path in (a,b,absent): path.mkdir()
-        invoke(a, 'init', 'smoke-a', '--yes', '--agents', 'codex')
-        invoke(b, 'init', 'smoke-b', '--yes', '--agents', 'codex')
+        invoke(a, 'init', '--project', 'smoke-a', '--yes', '--agents', 'codex')
+        invoke(b, 'init', '--project', 'smoke-b', '--yes', '--agents', 'codex')
         for path, project in ((a,'smoke-a'),(b,'smoke-b')):
             result=invoke(path,'status')
             if result['data']['project_id'] != project:

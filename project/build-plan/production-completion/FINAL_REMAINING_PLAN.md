@@ -1,4 +1,11 @@
-# Boreal v2 — final implementation queue
+# Historical Boreal v2 implementation queue
+
+Superseded for dispatch on 2026-09-26 by
+[FINAL_PRODUCTION_PLAN.md](FINAL_PRODUCTION_PLAN.md) and
+[execution/FINAL_STATE.json](execution/FINAL_STATE.json). The checked items
+below record source implementation from the earlier pass. They are retained
+as history, not final production acceptance. Use the current plan through
+installed-product qualification, repairs, actual activation and release.
 
 **Updated:** 2026-09-25
 **Active scope:** `BWRK_IMPLEMENTATION_HANDOFF.md` — 8 sprints, 48 tasks.

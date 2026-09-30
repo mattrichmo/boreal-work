@@ -54,6 +54,24 @@ pub use migrations::{
 };
 pub use work_model_v3::*;
 
+mod inspection;
+pub mod knowledge_maintenance;
+mod work_split;
+pub use work_split::*;
+mod agent_tools;
+mod cli_features;
+pub use agent_tools::AGENT_TOOLS_SCHEMA;
+pub mod knowledge_parity;
+pub use knowledge_parity::*;
+pub mod summary_queries;
+pub use summary_queries::*;
+pub mod global_manager;
+pub mod orchestration;
+pub mod orchestration_runtime;
+pub use orchestration::{OrchestrationRun, ORCHESTRATION_SCHEMA_SQL, ORCHESTRATION_SCHEMA_VERSION};
+pub use orchestration_runtime::{OrchestrationProcessJob, OrchestrationWorker};
+pub mod template_planning;
+pub use template_planning::*;
 pub const SCHEMA_VERSION: i64 = 2;
 /// The additive hierarchy/intake extension is versioned independently from
 /// the original work-status schema.  The v2 tables remain canonical for
@@ -1449,6 +1467,10 @@ pub struct SqliteStore {
 unsafe impl Send for SqliteStore {}
 
 impl SqliteStore {
+    pub fn database_path(&self) -> Option<&Path> {
+        self.database_path.as_deref()
+    }
+
     /// Opens a database through the production migration boundary when the
     /// canonical v2 schema is requested. Existing production v2 databases are
     /// upgraded to the additive v3 work model before callers can mutate them;
@@ -1468,6 +1490,28 @@ impl SqliteStore {
                 WORK_MODEL_SCHEMA_VERSION => store.verify_work_model_v3_contract()?,
                 found => return Err(StoreError::UnsupportedSchema { found }),
             }
+        }
+        if canonical_production {
+            store.install_feature_schema(
+                "knowledge_maintenance",
+                1,
+                knowledge_maintenance::KNOWLEDGE_MAINTENANCE_SCHEMA,
+            )?;
+            store.install_feature_schema("work_split", 1, WORK_SPLIT_SCHEMA)?;
+            store.install_feature_schema("agent_tools", 1, AGENT_TOOLS_SCHEMA)?;
+            store.install_feature_schema("knowledge_parity", 1, KNOWLEDGE_PARITY_SCHEMA)?;
+            store.install_feature_schema(
+                "orchestration",
+                ORCHESTRATION_SCHEMA_VERSION as u64,
+                ORCHESTRATION_SCHEMA_SQL,
+            )?;
+            store.install_feature_schema(
+                "orchestration_runtime",
+                orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_VERSION as u64,
+                orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_SQL,
+            )?;
+            store.ensure_summary_body_schema()?;
+            store.ensure_legacy_summary_schema()?;
         }
         Ok(store)
     }
@@ -2513,17 +2557,14 @@ impl SqliteStore {
                     .database_identity()
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?
             };
-            if result.get("package_path").and_then(Value::as_str)
-                != Some(job.package_path.as_str())
+            if result.get("package_path").and_then(Value::as_str) != Some(job.package_path.as_str())
                 || result.get("destination_path").and_then(Value::as_str)
                     != Some(job.database_path.as_str())
                 || result
                     .get("current_database_instance_id")
                     .and_then(Value::as_str)
                     != Some(identity.database_instance_id.as_str())
-                || result
-                    .get("current_restore_epoch")
-                    .and_then(Value::as_u64)
+                || result.get("current_restore_epoch").and_then(Value::as_u64)
                     != Some(identity.restore_epoch.get())
             {
                 return Err(StoreError::Conflict(
@@ -2545,8 +2586,7 @@ impl SqliteStore {
         })?;
         let result: Value = serde_json::from_str(result_json)
             .map_err(|_| StoreError::Corrupt("staged restore receipt is invalid JSON".into()))?;
-        if result.get("package_path").and_then(Value::as_str)
-            != Some(job.package_path.as_str())
+        if result.get("package_path").and_then(Value::as_str) != Some(job.package_path.as_str())
             || result.get("destination_path").and_then(Value::as_str)
                 != Some(job.database_path.as_str())
         {
@@ -2581,13 +2621,12 @@ impl SqliteStore {
         reject_symlink(&package_database_path)?;
         let manifest = read_backup_manifest(&manifest_path)?;
         validate_backup_manifest(&manifest)?;
-        let package_database_digest = checksum(&fs::read(&package_database_path).map_err(
-            |error| {
+        let package_database_digest =
+            checksum(&fs::read(&package_database_path).map_err(|error| {
                 StoreError::Unavailable(format!(
                     "cannot read restore package database during reconciliation: {error}"
                 ))
-            },
-        )?);
+            })?);
         if manifest.get("database_digest").and_then(Value::as_str)
             != Some(package_database_digest.as_str())
         {
@@ -2600,9 +2639,7 @@ impl SqliteStore {
             .get("source_database_instance_id")
             .and_then(Value::as_str)
             != Some(source_identity.database_instance_id.as_str())
-            || result
-                .get("source_restore_epoch")
-                .and_then(Value::as_u64)
+            || result.get("source_restore_epoch").and_then(Value::as_u64)
                 != Some(source_identity.restore_epoch.get())
         {
             return Err(StoreError::Conflict(
@@ -3060,6 +3097,20 @@ impl SqliteStore {
                     current_database.database_instance_id,
                     current_database.restore_epoch,
                 )));
+            }
+
+            // A production workspace database is project-local. Enforce this
+            // while holding the bootstrap write transaction, before creating
+            // actors or mutating project/binding/operation state. Replays and
+            // retries for the already-bound project remain valid.
+            if self
+                .list_project_ids()?
+                .iter()
+                .any(|existing_project| existing_project != project_id)
+            {
+                return Err(StoreError::Conflict(
+                    "project-local database is already bound to a different project".to_owned(),
+                ));
             }
 
             // An existing operation is only replayable after its project and
@@ -12060,9 +12111,10 @@ fn maintenance_restore_staging_path(
         .ok_or_else(|| StoreError::Invalid("restore path must name a database file".into()))?
         .to_string_lossy();
     let operation_digest = checksum(operation_id.as_bytes()).replace(':', "-");
-    Ok(destination.parent().unwrap_or(Path::new(".")).join(format!(
-        ".{file_name}.restore-{operation_digest}.tmp"
-    )))
+    Ok(destination
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!(".{file_name}.restore-{operation_digest}.tmp")))
 }
 
 fn restore_previous_path(destination: &Path, epoch: u64) -> Result<PathBuf, StoreError> {

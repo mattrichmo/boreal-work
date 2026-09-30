@@ -90,7 +90,10 @@ impl SqliteStore {
                 let parents = frontier;
                 frontier = BTreeSet::new();
                 for node in &work_nodes {
-                    if node.parent_id.as_ref().is_some_and(|parent| parents.contains(parent))
+                    if node
+                        .parent_id
+                        .as_ref()
+                        .is_some_and(|parent| parents.contains(parent))
                         && descendants.insert(node.work_id.clone())
                     {
                         frontier.insert(node.work_id.clone());
@@ -461,8 +464,7 @@ impl SqliteStore {
                 })?;
             let (assignments, mut assignment_diagnostics) =
                 self.cycle_assignments_v3_scoped(project, cycle)?;
-            let mut linked_assignments: BTreeMap<String, CycleAssignmentV3Record> =
-                BTreeMap::new();
+            let mut linked_assignments: BTreeMap<String, CycleAssignmentV3Record> = BTreeMap::new();
             for assignment in &assignments {
                 let mut details = Vec::new();
                 if assignment.state == "carried_over" && assignment.successor_id.is_none() {
@@ -486,11 +488,14 @@ impl SqliteStore {
                                 record
                             }
                             Ok(None) => {
-                                details.push(format!("{link_kind} assignment {linked_id} is missing"));
+                                details
+                                    .push(format!("{link_kind} assignment {linked_id} is missing"));
                                 continue;
                             }
                             Err(error) => {
-                                details.push(format!("{link_kind} assignment {linked_id} is unreadable: {error}"));
+                                details.push(format!(
+                                    "{link_kind} assignment {linked_id} is unreadable: {error}"
+                                ));
                                 continue;
                             }
                         }
@@ -499,9 +504,15 @@ impl SqliteStore {
                         && linked.work_id == assignment.work_id
                         && linked.cycle_id != assignment.cycle_id
                         && match link_kind {
-                            "predecessor" => linked.state == "carried_over"
-                                && linked.successor_id.as_deref() == Some(assignment.assignment_id.as_str()),
-                            _ => linked.predecessor_id.as_deref() == Some(assignment.assignment_id.as_str()),
+                            "predecessor" => {
+                                linked.state == "carried_over"
+                                    && linked.successor_id.as_deref()
+                                        == Some(assignment.assignment_id.as_str())
+                            }
+                            _ => {
+                                linked.predecessor_id.as_deref()
+                                    == Some(assignment.assignment_id.as_str())
+                            }
                         };
                     if !coherent {
                         details.push(format!("{link_kind} assignment {linked_id} has inconsistent reciprocal or subject links"));
@@ -543,13 +554,17 @@ impl SqliteStore {
                                     work_id: assignment.work_id.clone(),
                                     title: None,
                                     code: "cycle_assignment_lineage_corrupt".to_owned(),
-                                    detail: format!("successor assignment {cursor} is unreadable: {error}"),
+                                    detail: format!(
+                                        "successor assignment {cursor} is unreadable: {error}"
+                                    ),
                                 });
                                 None
                             }
                         }
                     };
-                    let Some(next_id) = current.and_then(|record| record.successor_id) else { break };
+                    let Some(next_id) = current.and_then(|record| record.successor_id) else {
+                        break;
+                    };
                     cursor = next_id;
                 }
             }
@@ -607,6 +622,42 @@ impl SqliteStore {
         })();
         finish_transaction(self, result)
     }
+    pub fn active_cycles_snapshot_v3(
+        &self,
+        project: &str,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Value, StoreError> {
+        if !(1..=100).contains(&limit) {
+            return Err(StoreError::Invalid(
+                "cycle page limit must be 1..=100".into(),
+            ));
+        }
+        self.execute_batch("BEGIN")?;
+        let result = (|| {
+            let revision = self.project_revision(project)?.0;
+            let mut count = self.prepare(
+                "SELECT COUNT(*) FROM cycle_v3 WHERE project_id=?1 AND lifecycle='active'",
+            )?;
+            count.bind_text(1, project)?;
+            count.step()?;
+            let total = count.column_u64(0)?;
+            let mut rows = self.prepare("SELECT cycle_id,name,goal,scheduled_start_utc_ms,scheduled_end_utc_ms,timezone FROM cycle_v3 WHERE project_id=?1 AND lifecycle='active' ORDER BY scheduled_start_utc_ms,cycle_id LIMIT ?2 OFFSET ?3")?;
+            rows.bind_text(1, project)?;
+            rows.bind_i64(2, limit)?;
+            rows.bind_i64(3, offset)?;
+            let mut items = Vec::new();
+            while rows.step()? == SQLITE_ROW {
+                items.push(json!({"cycle_id":rows.column_text(0)?,"name":rows.column_text(1)?,"goal":rows.column_text(2)?,"lifecycle":"active","scheduled_start_utc_ms":rows.column_i64(3)?,"scheduled_end_utc_ms":rows.column_optional_signed_i64(4)?,"timezone":rows.column_text(5)?}));
+            }
+            let returned = items.len() as u64;
+            Ok(
+                json!({"project_id":project,"revision":revision,"total":total,"items":items,"returned":returned,"next_offset":if offset.saturating_add(returned)<total{Some(offset+returned)}else{None}}),
+            )
+        })();
+        finish_transaction(self, result)
+    }
+
     pub fn cycle_list_snapshot_v3(
         &self,
         project: &str,

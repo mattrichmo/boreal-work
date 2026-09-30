@@ -31,7 +31,7 @@ const CONFIG: &str = "executor-regression-config";
 
 #[test]
 fn standard_boreal_layout_runs_declared_command_from_workspace_root() {
-    let fixture = Fixture::new("workspace-root");
+    let mut fixture = Fixture::new("workspace-root");
     fs::write(
         fixture.root.join("workspace-marker.txt"),
         "workspace-root-marker",
@@ -41,6 +41,7 @@ fn standard_boreal_layout_runs_declared_command_from_workspace_root() {
         "check-workspace-root",
         "#!/bin/sh\ncat workspace-marker.txt\n",
     );
+    fixture.start_attempt();
     fixture.write_gate(
         "./check-workspace-root",
         vec!["./check-workspace-root"],
@@ -60,13 +61,14 @@ fn standard_boreal_layout_runs_declared_command_from_workspace_root() {
 
 #[test]
 fn full_service_gate_id_uses_only_the_scoped_local_policy_declaration() {
-    let fixture = Fixture::new("namespaced-gate");
+    let mut fixture = Fixture::new("namespaced-gate");
     // This verifier exists only in the disposable test fixture; its receipt is
     // not production verification evidence.
     fixture.executable(
         "test-only-verifier",
         "#!/bin/sh\nprintf namespaced-gate-marker\n",
     );
+    fixture.start_attempt();
     fixture.write_gate(
         "./test-only-verifier",
         vec!["./test-only-verifier"],
@@ -105,11 +107,12 @@ fn full_service_gate_id_uses_only_the_scoped_local_policy_declaration() {
 
 #[test]
 fn public_source_registration_and_evidence_execution_use_the_rust_service_socket() {
-    let fixture = Fixture::new("socket-evidence");
+    let mut fixture = Fixture::new("socket-evidence");
     fixture.executable(
         "socket-verifier",
         "#!/bin/sh\nprintf socket-evidence-marker\n",
     );
+    fixture.start_attempt();
     fixture.write_gate(
         "./socket-verifier",
         vec!["./socket-verifier"],
@@ -141,11 +144,12 @@ fn public_source_registration_and_evidence_execution_use_the_rust_service_socket
 
 #[test]
 fn executor_uses_allowlisted_environment_and_records_measured_fingerprint() {
-    let fixture = Fixture::new("environment");
+    let mut fixture = Fixture::new("environment");
     fixture.executable(
         "inspect-environment",
         "#!/bin/sh\nif [ -n \"${PATH:-}\" ]; then printf path-present; else printf path-missing; fi\nif [ -n \"${HOME:-}\" ]; then printf home-present; else printf home-absent; fi\n",
     );
+    fixture.start_attempt();
     fixture.write_gate(
         "./inspect-environment",
         vec!["./inspect-environment"],
@@ -172,30 +176,37 @@ fn executor_uses_allowlisted_environment_and_records_measured_fingerprint() {
     assert!(measured.starts_with("sha256:"), "fingerprint={measured}");
     assert_ne!(measured, receipt["declared_environment_fingerprint"]);
 
-    // A sensitive variable is rejected before admission, so an executor
-    // cannot opt back into credentials by editing a declaration.
-    fixture.write_gate(
+    // A sensitive variable is rejected while the Operator publishes policy,
+    // before it can become an immutable policy selected by an attempt.
+    fixture.write_gate_declaration(
         "./inspect-environment",
         vec!["./inspect-environment"],
         vec!["path-present"],
         30_000,
         Some(vec!["SECRET_TOKEN".to_owned()]),
+        2,
+        "executor-regression-sensitive-config",
     );
-    let rejected = fixture.evidence_run_without_rewriting("op_sensitive_environment");
+    let rejected = fixture.publish_gate("op_sensitive_gate_policy");
     assert_eq!(rejected.status.code(), Some(2), "{}", text(&rejected));
     let rejected_envelope = envelope(&rejected);
     assert_eq!(rejected_envelope["outcome"], "rejected");
     assert_eq!(rejected_envelope["error"]["code"], "unsafe_command");
     let store = SqliteStore::open(&fixture.database, SCHEMA).unwrap();
-    assert!(store
-        .evidence_execution("op_sensitive_environment")
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .list_source_versions(PROJECT, 100, 0)
+            .unwrap()
+            .iter()
+            .filter(|source| source.origin.starts_with("gate-policy:verification:"))
+            .count()
+            == 1
+    );
 }
 
 #[test]
 fn timeout_kills_descendants_in_the_declared_process_group() {
-    let fixture = Fixture::new("descendants");
+    let mut fixture = Fixture::new("descendants");
     let survivor = fixture.root.join("descendant-survived.txt");
     let survivor_literal = shell_literal(&survivor);
     fixture.executable(
@@ -204,6 +215,7 @@ fn timeout_kills_descendants_in_the_declared_process_group() {
             "#!/bin/sh\n(sleep 1; printf survived > {survivor_literal}) &\nprintf descendant-started\nwhile :; do sleep 1; done\n"
         ),
     );
+    fixture.start_attempt();
     fixture.write_gate(
         "./spawn-descendant",
         vec!["./spawn-descendant"],
@@ -229,13 +241,14 @@ fn timeout_kills_descendants_in_the_declared_process_group() {
 
 #[test]
 fn completed_evidence_operation_replays_without_relaunching_or_reading_policy() {
-    let fixture = Fixture::new("replay");
+    let mut fixture = Fixture::new("replay");
     let launch_count = fixture.root.join("launch-count.txt");
     let count_literal = shell_literal(&launch_count);
     fixture.executable(
         "count-launches",
         &format!("#!/bin/sh\nprintf x >> {count_literal}\nprintf replay-marker\n"),
     );
+    fixture.start_attempt();
     fixture.write_gate(
         "./count-launches",
         vec!["./count-launches"],
@@ -269,13 +282,14 @@ fn completed_evidence_operation_replays_without_relaunching_or_reading_policy() 
 
 #[test]
 fn failpoint_after_admission_recovers_as_unknown_on_service_restart() {
-    let fixture = Fixture::new("fault-after-admission");
+    let mut fixture = Fixture::new("fault-after-admission");
     let launch_count = fixture.root.join("launch-count.txt");
     let count_literal = shell_literal(&launch_count);
     fixture.executable(
         "fault-command",
         &format!("#!/bin/sh\nprintf x >> {count_literal}\nprintf should-not-run\n"),
     );
+    fixture.start_attempt();
     fixture.write_gate(
         "./fault-command",
         vec!["./fault-command"],
@@ -373,6 +387,7 @@ impl Fixture {
     fn initialize(&mut self) {
         let output = self.run(&[
             "init",
+            "--project",
             PROJECT,
             "--project-root",
             &path(&self.root),
@@ -384,37 +399,7 @@ impl Fixture {
         ]);
         assert_success(&output, "init");
 
-        fs::write(
-            self.root.join("source-input.txt"),
-            b"source-bound executor regression input\n",
-        )
-        .unwrap();
-        let source_output = self.run(&[
-            "source",
-            "add",
-            PROJECT,
-            "--input",
-            "source-input.txt",
-            "--origin",
-            "executor-regression/source-input.txt",
-            "--media-type",
-            "text/plain",
-            "--actor",
-            OPERATOR,
-            "--operation-id",
-            "op_executor_source",
-            "--json",
-        ]);
-        assert_success(&source_output, "project source add");
-        let source_version = envelope(&source_output)["data"]["source"]["source_version_id"]
-            .as_str()
-            .expect("source add returns a registered source version")
-            .to_owned();
-
         let store = SqliteStore::open(&self.database, SCHEMA).unwrap();
-        // Public source registration must be sufficient for the later claim;
-        // do not manufacture the source-version foreign-key row in SQLite.
-        self.source_version = source_version;
 
         let output = self.run(&[
             "session",
@@ -500,7 +485,31 @@ impl Fixture {
         assert_eq!(agent.project_id, PROJECT);
         assert_eq!(agent.actor_id, AGENT);
         assert_eq!(agent.role, boreal_domain::ActorRole::Agent);
+    }
 
+    fn start_attempt(&mut self) {
+        let source_output = self.run(&[
+            "source",
+            "add",
+            PROJECT,
+            "--input",
+            ".",
+            "--origin",
+            "executor-regression/workspace",
+            "--actor",
+            OPERATOR,
+            "--operation-id",
+            "op_executor_source",
+            "--json",
+        ]);
+        assert_success(&source_output, "Operator workspace snapshot capture");
+        self.source_version = envelope(&source_output)["data"]["source"]["source_version_id"]
+            .as_str()
+            .expect("source add returns a registered workspace snapshot")
+            .to_owned();
+
+        // Evidence executes against the immutable snapshot captured before
+        // claim. Tests must stage their verifier into the workspace first.
         let output = self.run(&[
             "work",
             "claim",
@@ -561,15 +570,44 @@ impl Fixture {
         max_runtime_ms: u64,
         environment_allowlist: Option<Vec<String>>,
     ) {
+        self.write_gate_declaration(
+            executable,
+            argv,
+            observables,
+            max_runtime_ms,
+            environment_allowlist,
+            1,
+            CONFIG,
+        );
+        let output = self.publish_gate("op_executor_gate_policy");
+        assert_success(&output, "gate policy publish");
+    }
+
+    fn write_gate_declaration(
+        &self,
+        executable: &str,
+        argv: Vec<&str>,
+        observables: Vec<&str>,
+        max_runtime_ms: u64,
+        environment_allowlist: Option<Vec<String>>,
+        policy_revision: u64,
+        config_identity: &str,
+    ) {
         let state_root = self.database.parent().unwrap();
+        let executable_path = self.root.join(executable.trim_start_matches("./"));
+        let verifier_digest = boreal_application::sha256_content_digest(
+            &fs::read(executable_path).expect("declared verifier exists in the workspace"),
+        );
         let mut declaration = json!({
             "gate_id": "verification",
+            "policy_revision": policy_revision,
             "kind": "verification",
             "executable": executable,
+            "verifier_digest": verifier_digest,
             "argv": argv,
             "cwd": ".",
             "source_snapshot_hash": self.source_version,
-            "config_identity": CONFIG,
+            "config_identity": config_identity,
             "environment_fingerprint": "declared-environment-fingerprint",
             "observables": observables,
             "max_runtime_ms": max_runtime_ms
@@ -582,6 +620,36 @@ impl Fixture {
             serde_json::to_vec(&declaration).unwrap(),
         )
         .unwrap();
+    }
+
+    fn publish_gate(&self, operation: &str) -> Output {
+        let store = SqliteStore::open(&self.database, SCHEMA).unwrap();
+        let revision = store.project_revision(PROJECT).unwrap().0;
+        self.run(&[
+            "gate",
+            "policy",
+            "publish",
+            "--project",
+            PROJECT,
+            "--gate",
+            "verification",
+            "--input",
+            ".boreal/gates/verification.json",
+            "--expected-revision",
+            &revision.to_string(),
+            "--yes",
+            "--actor",
+            OPERATOR,
+            "--harness",
+            HARNESS,
+            "--session",
+            SETUP_SESSION,
+            "--operation-id",
+            operation,
+            "--db",
+            &path(&self.database),
+            "--json",
+        ])
     }
 
     fn evidence_run(&self, operation: &str) -> Output {

@@ -32,7 +32,14 @@ pub(super) fn check_owner(path: &Path) -> Result<(), CliError> {
         || metadata.uid() != unsafe { geteuid() }
         || metadata.mode() & 0o077 != 0
     {
-        return Err(CliError::with(ErrorCode::PermissionDenied,ApplicationOutcome::Rejected,format!("credential/runtime path must be owned by this user and private (0700 directory or 0600 file): {}",path.display())));
+        return Err(CliError::with(
+            ErrorCode::PermissionDenied,
+            ApplicationOutcome::Rejected,
+            format!(
+                "credential/runtime path must be owned by this user and private (0700 directory or 0600 file): {}",
+                path.display()
+            ),
+        ));
     }
     Ok(())
 }

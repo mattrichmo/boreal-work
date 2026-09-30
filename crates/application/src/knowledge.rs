@@ -532,27 +532,28 @@ impl<'a> KnowledgeApplication<'a> {
             }),
         );
         let registration_input = SourceVersionRegistrationInput {
-                operation_id: operation.operation_id.clone(),
-                project_id: source.project_id.clone(),
-                actor_id: actor_id.to_owned(),
-                source_version_id: source.source_version_id.clone(),
-                origin: source.origin.clone(),
-                access_scope: "project".to_owned(),
-                content_digest: source.content_digest.clone(),
-                media_type: source.media_type.clone(),
-                byte_count: source.byte_count as u64,
-                captured_at: captured_at.to_owned(),
-                parser_identity: source
-                    .parser_identity
-                    .clone()
-                    .unwrap_or_else(|| boreal_source::DEFAULT_PARSER_IDENTITY.to_owned()),
-                availability: availability.to_owned(),
-                citation_json: "[]".to_owned(),
-                request_digest: request_digest.clone(),
-            };
+            operation_id: operation.operation_id.clone(),
+            project_id: source.project_id.clone(),
+            actor_id: actor_id.to_owned(),
+            source_version_id: source.source_version_id.clone(),
+            origin: source.origin.clone(),
+            access_scope: "project".to_owned(),
+            content_digest: source.content_digest.clone(),
+            media_type: source.media_type.clone(),
+            byte_count: source.byte_count as u64,
+            captured_at: captured_at.to_owned(),
+            parser_identity: source
+                .parser_identity
+                .clone()
+                .unwrap_or_else(|| boreal_source::DEFAULT_PARSER_IDENTITY.to_owned()),
+            availability: availability.to_owned(),
+            citation_json: "[]".to_owned(),
+            request_digest: request_digest.clone(),
+        };
         let stored: SourceVersionRegistrationResult = match expected_revision {
-            Some(expected) => store
-                .register_source_version_at_revision(&registration_input, expected)?,
+            Some(expected) => {
+                store.register_source_version_at_revision(&registration_input, expected)?
+            }
             None => store.register_source_version(&registration_input)?,
         };
         Ok(SourceStoreRegistrationResult {
@@ -1141,7 +1142,9 @@ impl<'a> KnowledgeApplication<'a> {
             ));
         }
 
-        let existing_operation = store.operation(operation_id).map_err(KnowledgeError::Store)?;
+        let existing_operation = store
+            .operation(operation_id)
+            .map_err(KnowledgeError::Store)?;
         if existing_operation.as_ref().is_some_and(|operation| {
             operation.command != "migration.apply"
                 || operation.project_id != project_id
@@ -1155,11 +1158,14 @@ impl<'a> KnowledgeApplication<'a> {
         let existing_capture_operation = store
             .operation(&capture_operation_id)
             .map_err(KnowledgeError::Store)?;
-        if existing_capture_operation.as_ref().is_some_and(|operation| {
-            operation.command != "source.register"
-                || operation.project_id != project_id
-                || operation.actor_id != actor_id
-        }) {
+        if existing_capture_operation
+            .as_ref()
+            .is_some_and(|operation| {
+                operation.command != "source.register"
+                    || operation.project_id != project_id
+                    || operation.actor_id != actor_id
+            })
+        {
             return Err(KnowledgeError::Invalid(
                 "migration source operation ID is already bound to another request".into(),
             ));
@@ -1177,10 +1183,12 @@ impl<'a> KnowledgeApplication<'a> {
             revision_before_capture
         };
         if existing_operation.is_none() && revision_before_capture != expected_before_capture {
-            return Err(KnowledgeError::Store(boreal_store::StoreError::StaleRevision {
-                expected: expected_before_capture,
-                actual: revision_before_capture,
-            }));
+            return Err(KnowledgeError::Store(
+                boreal_store::StoreError::StaleRevision {
+                    expected: expected_before_capture,
+                    actual: revision_before_capture,
+                },
+            ));
         }
         let capture = self.capture_source(SourceCaptureInput {
             operation_id: capture_operation_id,
@@ -1225,10 +1233,12 @@ impl<'a> KnowledgeApplication<'a> {
                     KnowledgeError::Invalid("project revision overflow during migration".into())
                 })?;
             if source_registration.revision != expected_after_source {
-                return Err(KnowledgeError::Store(boreal_store::StoreError::StaleRevision {
-                    expected: expected_after_source,
-                    actual: source_registration.revision,
-                }));
+                return Err(KnowledgeError::Store(
+                    boreal_store::StoreError::StaleRevision {
+                        expected: expected_after_source,
+                        actual: source_registration.revision,
+                    },
+                ));
             }
             expected_after_source
         };
@@ -1273,7 +1283,10 @@ impl<'a> KnowledgeApplication<'a> {
             .dependencies
             .iter()
             .map(|dependency| {
-                (dependency.from_work_id.clone(), dependency.to_work_id.clone())
+                (
+                    dependency.from_work_id.clone(),
+                    dependency.to_work_id.clone(),
+                )
             })
             .collect::<Vec<_>>();
         let request_digest = canonical_request_digest(

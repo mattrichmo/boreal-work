@@ -106,16 +106,16 @@ install -m 755 "$release_binary" "$local_versioned_binary"
 
 if [ ! -f "$database" ]; then
   echo "Initializing test-project database"
-  "$local_versioned_binary" init test-project \
-    --project-root "$project_root" \
+  (cd "$project_root" && "$local_versioned_binary" init \
+    --project test-project \
     --db "$database" \
     --actor agent-1 \
-    --json >/dev/null
+    --json >/dev/null)
   status_actor=agent-1
 else
   echo "Keeping existing test-project database"
   status_actor=agent-1
-  if ! "$local_versioned_binary" status test-project --db "$database" --actor "$status_actor" --json >/dev/null 2>&1; then
+  if ! (cd "$project_root" && "$local_versioned_binary" status test-project --db "$database" --actor "$status_actor" --json >/dev/null 2>&1); then
     status_actor=bootstrap
   fi
 fi
@@ -137,7 +137,7 @@ if ! cmp -s "$release_binary" "$local_versioned_binary"; then
 fi
 
 echo "Checking local status projection"
-if ! "$local_versioned_binary" status test-project --db "$database" --actor "$status_actor" --json >/dev/null; then
+if ! (cd "$project_root" && "$local_versioned_binary" status test-project --db "$database" --actor "$status_actor" --json >/dev/null); then
   echo "unable to read the test-project status projection as actor $status_actor" >&2
   exit 1
 fi
