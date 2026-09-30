@@ -11,9 +11,9 @@ const snapshot = () => ({ schema_version: 2, revision: 1,
   notes: [], statuses: [{ project_id: 'p1', status_id: 'todo', label: 'To do', category: 'todo', position: 0 }], relationships: [], associations: [] });
 function harness(options = {}) {
   const calls = [], historyCalls = [], linkedPageCalls=[]; let snapshotCalls = 0;
-  const client = { snapshot: async () => { snapshotCalls++; if(options.failSnapshotAfter!==undefined&&snapshotCalls>options.failSnapshotAfter)throw new Error('snapshot unavailable'); if(options.failFirstSnapshot&&snapshotCalls===1)throw new Error('service unavailable'); return options.snapshot ?? snapshot(); }, history: async args => { historyCalls.push(args); return options.history ? options.history(args) : { events: [], total: 0, has_more: false, next_offset: null }; }, linkedShow: async (projectId,identity) => options.linkedShow?.(projectId,identity), linkedPage: async (projectId,identity,args) => { linkedPageCalls.push({projectId,identity,...args}); return options.linkedPage?.(projectId,identity,args); }, execute: async (command, payload, mutation) => { if(mutation)calls.push({ command, payload }); if (options.fail&&mutation) throw new Error('write rejected for fixture'); if(options.conflict&&mutation)throw Object.assign(new Error('revision conflict'),{errorCode:'revision_conflict'}); if(!mutation&&/show$/.test(command))return options.snapshot?.items?.find(i=>i.id===payload.item_id)??snapshot().items[0]; return { operation_id: `op${calls.length}`, revision: calls.length+1 }; } };
+  const client = { snapshot: async () => { snapshotCalls++; if(options.failSnapshotAfter!==undefined&&snapshotCalls>options.failSnapshotAfter)throw new Error('snapshot unavailable'); if(options.failFirstSnapshot&&snapshotCalls===1)throw new Error('service unavailable'); return options.snapshot ?? snapshot(); }, history: async args => { historyCalls.push(args); return options.history ? options.history(args) : { events: [], total: 0, has_more: false, next_offset: null }; }, noteShow: async id => options.noteShow?.(id)??options.snapshot?.notes?.find(n=>n.id===id), linkedShow: async (projectId,identity) => options.linkedShow?.(projectId,identity), linkedPage: async (projectId,identity,args) => { linkedPageCalls.push({projectId,identity,...args}); return options.linkedPage?.(projectId,identity,args); }, linkedJobShow: async id => options.linkedJobShow?.(id), execute: async (command, payload, mutation) => { if(mutation)calls.push({ command, payload }); if (options.fail&&mutation) throw new Error('write rejected for fixture'); if(options.conflict&&mutation)throw Object.assign(new Error('revision conflict'),{errorCode:'revision_conflict'}); if(!mutation&&/show$/.test(command))return options.showItem?.(payload.item_id,command)??options.snapshot?.items?.find(i=>i.id===payload.item_id)??snapshot().items[0]; return { operation_id: `op${calls.length}`, revision: calls.length+1 }; } };
   const controller = new GlobalController(client); controller.setScope('p1'); controller.setRoute(options.route ?? 'list');
-  const terminal = { isTty: true, output: '', raw: false, listener: undefined, write(s) { this.output += s; }, setRawMode(v) { this.raw = v; }, onData(fn) { this.listener = fn; return () => { this.listener = undefined; }; }, dimensions() { return { width: 80, height: 18 }; }, openLinkedWorkspace: options.openLinkedWorkspace };
+  const terminal = { isTty: true, output: '', raw: false, listener: undefined, write(s) { this.output += s; }, setRawMode(v) { this.raw = v; }, onData(fn) { this.listener = fn; return () => { this.listener = undefined; }; }, dimensions() { return options.dimensions??{ width: 80, height: 18 }; }, openLinkedWorkspace: options.openLinkedWorkspace };
   const run = runInteractive(controller, terminal);
   return { calls, historyCalls, linkedPageCalls, controller, terminal, run, async key(s) { if (!terminal.listener) await new Promise(r => setTimeout(r, 0)); terminal.listener?.(s); await new Promise(r => setTimeout(r, 0)); } };
 }
@@ -109,6 +109,14 @@ test('focus navigation follows shared route order and inspector arrows change ta
   await h.key('\x03'); await h.run;
 });
 
+test('selection styling stays within the focused work pane', async () => {
+  const h=harness({dimensions:{width:140,height:30}});await new Promise(r=>setTimeout(r,0));
+  assert.match(h.terminal.output,/\x1b\[90m[^\n]*› List/);
+  assert.match(h.terminal.output,/\x1b\[7;1m[^\n]*▸ To do · UNSCHEDULED  A task/);
+  assert.match(h.terminal.output,/\x1b\[90m │ \x1b\[0mA task/);
+  await h.key('\x03');await h.run;
+});
+
 test('history reader pages through server history and reports page counts', async () => {
   const events = Array.from({ length: 110 }, (_, i) => ({ operation_id: `op${i}`, revision: i + 1, command: 'todo edit', entity_kind: 'item', entity_id: 'i1', title: `Event ${i + 1}`, summary: `Changed ${i + 1}`, created_at: '2026-09-30T00:00:00Z' }));
   const h = harness({ history: ({ offset = 0, limit = 50 }) => ({ events: events.slice(offset, offset + limit), total: events.length, has_more: offset + limit < events.length, next_offset: offset + limit < events.length ? offset + limit : null }) });
@@ -134,6 +142,88 @@ test('linked workspace reader labels partial detail and loads later pages on Ent
   assert.match(h.terminal.output,/Showing 63 of 63 linked work items · all available items shown/);
   assert.equal(h.controller.snapshot.linked_projects[0].items.length,63);
   assert.equal(h.controller.snapshot.linked_projects[0].items.at(-1).title,'Linked task 63');
+  await h.key('\x03');await h.run;
+});
+
+test('linked detail polls a refreshing page job and reports failed jobs without hiding cached rows', async () => {
+  const data=snapshot();data.associations.push({project_id:'p1',kind:'workspace',identity:'workspace-1',path:'/tmp/workspace',updated_at:''});
+  const first=Array.from({length:50},(_,i)=>({work_id:`w${i+1}`,project_id:'exec',title:`Cached ${i+1}`,kind:'task',parent_id:null,lifecycle:'active',display_status:'Open',status:'active',priority:0,reason_codes:[]}));
+  const next={items:[{...first[0],work_id:'w51',title:'New page item'}],items_total:51,items_has_more:false,next_offset:null,revision:5,as_of:'2026-09-30T12:01:00Z',availability:'available',error:null};
+  let polls=0;
+  const h=harness({snapshot:data,route:'links',linkedShow:async()=>({path:'/tmp/workspace',availability:'available',revision:4,as_of:'2026-09-30T12:00:00Z',counts:{items:51},items:first,items_total:51,items_has_more:true}),linkedPage:async()=>({items:[],items_total:51,availability:'refreshing',job_id:'job-1'}),linkedJobShow:async()=>++polls===1?({job_id:'job-1',state:'refreshing'}):({job_id:'job-1',state:'complete',page:next})});
+  await h.key('\r');await h.key('\x1b[6~');
+  assert.match(h.terminal.output,/Refreshing linked detail/);await h.key('\x1b[B');
+  await new Promise(r=>setTimeout(r,120));
+  assert.equal(h.controller.snapshot.linked_projects[0].items.length,51);
+  assert.equal(h.controller.snapshot.linked_projects[0].items.at(-1).title,'New page item');
+  assert.match(h.terminal.output,/all pages loaded/);
+  await h.key('\x03');await h.run;
+
+  const failed=harness({snapshot:data,route:'links',linkedShow:async()=>({path:'/tmp/workspace',availability:'available',revision:4,as_of:'2026-09-30T12:00:00Z',counts:{items:51},items:first,items_total:51,items_has_more:true}),linkedPage:async()=>({items:[],items_total:51,availability:'refreshing',job_id:'job-2'}),linkedJobShow:async()=>({job_id:'job-2',state:'failed',error:'workspace refresh failed'})});
+  await failed.key('\r');await failed.key('\x1b[6~');await new Promise(r=>setTimeout(r,10));
+  assert.equal(failed.controller.snapshot.linked_projects[0].items.length,50);
+  assert.match(failed.terminal.output,/Page failed · workspace refresh failed/);
+  await failed.key('\x03');await failed.run;
+});
+
+test('selected work links and unlinks a note through one service mutation', async () => {
+  const data=snapshot();data.notes=[{id:'n1',project_id:'p1',title:'Planning note',body:'',archived:false,created_at:'',updated_at:''}];
+  const linkedNote={...data.notes[0]};
+  const h=harness({snapshot:data,showItem:async()=>({...data.items[0],linked_notes:[linkedNote]})});
+  await h.key('\r');assert.match(h.terminal.output,/Linked notes \(1\)/);await h.key('\r');
+  await h.key('K');await h.key('\r');
+  assert.equal(h.calls[0].command,'note link add');assert.equal(h.calls[0].payload.note_id,'n1');assert.equal(h.calls[0].payload.item_id,'i1');
+  await h.key('W');await h.key('\r');
+  assert.equal(h.calls[1].command,'note link remove');assert.equal(h.calls[1].payload.note_id,'n1');assert.equal(h.calls[1].payload.item_id,'i1');
+  await h.key('\x03');await h.run;
+});
+
+test('note reader shows linked work backlinks from full note readback', async () => {
+  const data=snapshot();data.notes=[{id:'n1',project_id:'p1',title:'Planning note',body:'Keep this context.',archived:false,created_at:'',updated_at:''}];
+  const h=harness({snapshot:data,route:'notes',noteShow:async()=>({...data.notes[0],linked_items:[data.items[0]]})});
+  await h.key('\r');
+  assert.match(h.terminal.output,/Linked work \(1\)/);
+  assert.match(h.terminal.output,/A task/);
+  await h.key('\x03');await h.run;
+});
+
+test('bulk triage collects marked rows and sends one atomic changes command', async () => {
+  const data=snapshot();data.statuses.push({project_id:'p1',status_id:'inbox',label:'Inbox',category:'inbox',position:1});data.items[0].status_id='inbox';data.items.push({...data.items[0],id:'i2',title:'Second task',position:1});
+  const h=harness({snapshot:data,route:'inbox'});
+  await new Promise(r=>setTimeout(r,0));
+  await h.key('y');await h.key('\x1b[B');await h.key('y');await h.key('Y');
+  await h.key('\x1b[B');await h.key('\r');await h.key('\r');await h.key('\r');await h.key('\r');
+  assert.equal(h.calls.length,1);assert.equal(h.calls[0].command,'todo bulk triage');
+  assert.deepEqual(h.calls[0].payload.changes,[
+    {item_id:'i1',project_id:'p1',parent_id:null,status_id:'todo'},
+    {item_id:'i2',project_id:'p1',parent_id:null,status_id:'todo'}
+  ]);
+  assert.equal(h.controller.bulkSelectedIds.size,0);
+  await h.key('\x03');await h.run;
+});
+
+test('planning collapse, parent navigation, and breadcrumb use the selected hierarchy', async () => {
+  const data=snapshot();data.items.push({...data.items[0],id:'child',title:'Child task',kind:'subtask',parent_id:'i1',position:1});
+  const h=harness({snapshot:data,route:'planning'});
+  await new Promise(r=>setTimeout(r,0));
+  assert.equal(h.controller.rows().length,2);await h.key('z');assert.equal(h.controller.isCollapsed('i1'),true);assert.equal(h.controller.rows().length,1);
+  await h.key('z');await h.key('\x1b[B');assert.equal(h.controller.selectedId,'child');await h.key('P');assert.equal(h.controller.selectedId,'i1');
+  await h.key('\x1b[B');await h.key('\r');
+  assert.match(h.terminal.output,/Hierarchy: A task › Child task/);
+  await h.key('\x03');await h.run;
+});
+
+test('J jumps to a related item with dependency wording and Esc restores prior scope and selection', async () => {
+  const data=snapshot();data.projects.push({id:'p2',name:'Work',description:'',archived:false,created_at:'',updated_at:''});
+  data.items.push({...data.items[0],id:'target',title:'Prerequisite',project_id:'p1',position:1},{...data.items[0],id:'blocker',title:'Blocking item',project_id:'p2',position:0});
+  data.relationships=[{source_id:'i1',target_id:'target',kind:'depends_on'},{source_id:'blocker',target_id:'i1',kind:'depends_on'}];
+  const h=harness({snapshot:data,route:'list'});await new Promise(r=>setTimeout(r,0));
+  await h.key('J');
+  assert.match(h.terminal.output,/Waiting on Prerequisite/);assert.match(h.terminal.output,/Blocks Blocking item/);
+  await h.key('\x1b[B');await h.key('\r');
+  assert.equal(h.controller.selectedId,'blocker');assert.equal(h.controller.projectId,'p2');
+  await h.key('\x1b');await new Promise(r=>setTimeout(r,45));
+  assert.equal(h.controller.route,'list');assert.equal(h.controller.projectId,'p1');assert.equal(h.controller.selectedId,'i1');
   await h.key('\x03');await h.run;
 });
 

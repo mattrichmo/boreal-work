@@ -14,6 +14,9 @@ npm run build
 node dist/entrypoint.js --socket /path/to/boreal-global.sock --interactive
 ```
 
+Choose the terminal palette with `--theme dark`, `--theme light`, or
+`--theme mono`. When `NO_COLOR` is set, the default palette is monochrome.
+
 ## Full-screen use
 
 The views cover Home, Projects, Board, List, Todos, Notes, Workflow, Linked,

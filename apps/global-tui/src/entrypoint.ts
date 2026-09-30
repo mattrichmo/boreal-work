@@ -2,15 +2,20 @@
 import { GlobalServiceClient } from "./client.js";
 import { spawn } from "node:child_process";
 import { GlobalController, render, runInteractive, runLineInterface, type KeyTerminal } from "./interface.js";
+import type { Theme } from "./terminal/screen.js";
 
-export interface LaunchOptions { socket: string; interactive: boolean; timeoutMs: number }
+export interface LaunchOptions { socket: string; interactive: boolean; timeoutMs: number; theme: Theme }
 export function parseArgs(argv: readonly string[]): LaunchOptions {
   const at = argv.indexOf("--socket"); const socket = at < 0 ? undefined : argv[at + 1];
-  if (!socket || socket.startsWith("--")) throw new Error("usage: bwrk-global-tui --socket PATH [--interactive] [--timeout-ms N]");
+  if (!socket || socket.startsWith("--")) throw new Error("usage: bwrk-global-tui --socket PATH [--interactive] [--timeout-ms N] [--theme dark|light|mono]");
   const timeoutAt=argv.indexOf("--timeout-ms"); const timeoutMs=timeoutAt<0?10_000:Number(argv[timeoutAt+1]);
   if(!Number.isInteger(timeoutMs)||timeoutMs<=0) throw new Error("--timeout-ms must be a positive integer");
-  for(let i=0;i<argv.length;i++) if(argv[i].startsWith("--")&&!(["--socket","--interactive","--timeout-ms","--help","-h"].includes(argv[i]))) throw new Error(`unknown option ${argv[i]}`);
-  return {socket,interactive:argv.includes("--interactive"),timeoutMs};
+  const themeAt=argv.indexOf("--theme"); const requestedTheme=themeAt<0?undefined:argv[themeAt+1];
+  if(themeAt>=0&&(!requestedTheme||requestedTheme.startsWith("--"))) throw new Error("--theme requires dark, light, or mono");
+  const theme=(requestedTheme??(process.env.NO_COLOR?"mono":"dark")) as Theme;
+  if(!["dark","light","mono"].includes(theme)) throw new Error("--theme must be dark, light, or mono");
+  for(let i=0;i<argv.length;i++) if(argv[i].startsWith("--")&&!(["--socket","--interactive","--timeout-ms","--theme","--help","-h"].includes(argv[i]))) throw new Error(`unknown option ${argv[i]}`);
+  return {socket,interactive:argv.includes("--interactive"),timeoutMs,theme};
 }
 async function* inputLines(): AsyncIterable<string> {
   let rest="";
@@ -23,10 +28,10 @@ async function* inputLines(): AsyncIterable<string> {
   rest+=decoder.decode();
   if(rest) yield rest;
 }
-function terminal(): KeyTerminal {
+function terminal(theme: Theme): KeyTerminal {
   return {
     isTty:process.stdin.isTTY===true&&process.stdout.isTTY===true,
-    theme:process.env.NO_COLOR ? "mono" : "dark",
+    theme,
     dimensions:()=>({width:process.stdout.columns??100,height:process.stdout.rows??40}),
     write:value=>{process.stdout.write(value);},
     setRawMode:enabled=>{process.stdin.setRawMode?.(enabled); if(enabled)process.stdin.resume?.(); else process.stdin.pause?.();},
@@ -45,12 +50,12 @@ function terminal(): KeyTerminal {
   };
 }
 export async function main(argv: readonly string[]=process.argv.slice(2)): Promise<void> {
-  if(argv.includes("--help")||argv.includes("-h")){process.stdout.write("Usage: bwrk-global-tui --socket PATH [--interactive] [--timeout-ms N]\n");return;}
+  if(argv.includes("--help")||argv.includes("-h")){process.stdout.write("Usage: bwrk-global-tui --socket PATH [--interactive] [--timeout-ms N] [--theme dark|light|mono]\n");return;}
   let client:GlobalServiceClient|undefined;
   try {
     const options=parseArgs(argv); client=new GlobalServiceClient(options.socket,options.timeoutMs);
     const controller=new GlobalController(client);
-    if(options.interactive&&process.stdin.isTTY===true&&process.stdout.isTTY===true) await runInteractive(controller,terminal());
+    if(options.interactive&&process.stdin.isTTY===true&&process.stdout.isTTY===true) await runInteractive(controller,terminal(options.theme));
     else if(options.interactive) await runLineInterface(controller,inputLines(),value=>process.stdout.write(value));
     else {await controller.refresh();process.stdout.write(render(controller));}
   } catch(error) { process.stderr.write(`bwrk-global-tui: ${error instanceof Error?error.message:String(error)}\n`); process.exitCode=1; }

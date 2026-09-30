@@ -13,6 +13,8 @@ export class GlobalController {
   route: Route = "overview";
   selected = 0;
   selectedId: string | undefined;
+  readonly collapsedItemIds = new Set<string>();
+  readonly bulkSelectedIds = new Set<string>();
   projectId: string | undefined;
   /** Last deliberately chosen project, retained while viewing the portfolio. */
   lastProjectId: string | undefined;
@@ -26,6 +28,8 @@ export class GlobalController {
   historyHasMore = false;
   historyError: string | undefined;
   pageLoading = false;
+  linkedPageLoading = false;
+  linkedPageError: string | undefined;
   detailLoading = false;
   pageError: string | undefined;
   private pageOffsets = new Map<string,number>();
@@ -118,10 +122,28 @@ export class GlobalController {
 
   async loadMoreLinked():Promise<boolean>{
     const row=this.selectedRow();if(!row||!("identity" in row)||!this.snapshot)return false;const association=row as Association;const key=`${association.project_id}:${association.identity}`;const existing=this.snapshot.linked_projects?.find(x=>x.management_project_id===association.project_id&&x.project_id===association.identity);if(!existing)return false;
-    const client=this.client as GlobalServiceClient&{linkedPage?<T=unknown>(projectId:string,identity:string,options?:{limit?:number;offset?:number}):Promise<{items:T[];total:number;next_offset:number|null;availability:string;revision:number|null;as_of:string|null;error:string|null}>};if(!client.linkedPage)return false;
+    type Page={items:LinkedWorkItem[];total?:number|null;items_total?:number|null;next_offset?:number|null;availability:string;revision:number|null;as_of:string|null;error:string|null;job_id?:string|null};
+    const client=this.client as GlobalServiceClient&{linkedPage?(projectId:string,identity:string,options?:{limit?:number;offset?:number}):Promise<Page>;linkedJobShow?(jobId:string):Promise<{state:"refreshing"|"complete"|"failed";page?:Page;error?:string|null}>};if(!client.linkedPage)return false;
     const offset=this.linkedOffsets.get(key)??existing.items?.length??0;if(offset>=(existing.items_total??Infinity))return false;this.pageLoading=true;this.pageError=undefined;
-    try{const page=await client.linkedPage(association.project_id,association.identity,{limit:50,offset});existing.items=[...(existing.items??[]),...page.items as LinkedWorkItem[]];existing.items_total=page.total;existing.items_has_more=page.next_offset!==null;existing.availability=page.availability;existing.revision=page.revision;existing.as_of=page.as_of;existing.error=page.error;this.linkedOffsets.set(key,page.next_offset??page.items.length+offset);return page.items.length>0;}
-    catch(error){this.pageError=error instanceof Error?error.message:String(error);return false;}finally{this.pageLoading=false;}
+    this.linkedPageLoading=true;this.linkedPageError=undefined;
+    try{
+      let page=await client.linkedPage(association.project_id,association.identity,{limit:50,offset});
+      if(page.availability==="refreshing"&&page.job_id){
+        if(!client.linkedJobShow)throw new Error("linked workspace refresh is running but job status is unavailable");
+        const deadline=Date.now()+2500;let state:"refreshing"|"complete"|"failed"="refreshing";let result:Page|undefined;let error:string|undefined;
+        while(Date.now()<deadline&&state==="refreshing"){
+          const job=await client.linkedJobShow(page.job_id);state=job.state;result=job.page;error=job.error??undefined;
+          if(state==="refreshing")await new Promise(resolve=>setTimeout(resolve,100));
+        }
+        if(state==="refreshing")throw new Error("linked workspace page is still refreshing; load more to check again");
+        if(state==="failed"||!result)throw new Error(error??"linked workspace page failed");
+        page=result;
+      }
+      if(page.availability==="unavailable"||page.availability==="failed")throw new Error(page.error??"linked workspace page is unavailable");
+      const total=page.items_total??page.total??existing.items_total??0;const next=page.next_offset??null;
+      const known=new Set((existing.items??[]).map(item=>item.work_id));existing.items=[...(existing.items??[]),...page.items.filter(item=>!known.has(item.work_id))];existing.items_total=total;existing.items_has_more=next!==null;existing.availability=page.availability;existing.revision=page.revision;existing.as_of=page.as_of;existing.error=page.error;this.linkedOffsets.set(key,next??offset+page.items.length);return page.items.length>0;
+    }
+    catch(error){const message=error instanceof Error?error.message:String(error);this.linkedPageError=message;this.pageError=message;return false;}finally{this.linkedPageLoading=false;this.pageLoading=false;}
   }
 
   private appendPage(collection:string,rows:never[]):void{const snap=this.snapshot as unknown as Record<string,unknown>;const current=snap[collection];if(!Array.isArray(current))return;const key=(x:unknown):string=>{if(!x||typeof x!=="object")return JSON.stringify(x);const r=x as Record<string,unknown>;return String(r.id??r.identity??r.status_id??r.operation_id??JSON.stringify(x));};const known=new Set(current.map(key));snap[collection]=[...current,...rows.filter(row=>!known.has(key(row)))];}
@@ -212,8 +234,8 @@ export class GlobalController {
   get boardStatuses(): Status[] {
     const statuses=this.snapshot?.statuses??[];
     if(this.projectId)return statuses.filter(s=>s.project_id===this.projectId).sort((a,b)=>a.position-b.position);
-    const keys=new Set(this.items.map(i=>`${i.project_id??"personal"}\0${i.status_id}`));
-    return statuses.filter(s=>keys.has(`${s.project_id??"personal"}\0${s.status_id}`)).sort((a,b)=>String(a.project_id??"").localeCompare(String(b.project_id??""))||a.position-b.position);
+    const activeProjects=new Set(this.projects.map(p=>p.id));
+    return statuses.filter(s=>!s.project_id||activeProjects.has(s.project_id)).sort((a,b)=>String(a.project_id??"").localeCompare(String(b.project_id??""))||a.position-b.position);
   }
   boardCards(status=this.boardStatuses[this.boardColumn]):Item[]{return status?this.items.filter(i=>i.project_id===status.project_id&&i.status_id===status.status_id):[];}
   get boardSelected():Item|undefined{return this.boardCards()[this.boardCard];}
@@ -223,6 +245,10 @@ export class GlobalController {
   toggleScope():void{this.setScope(this.projectId?undefined:(this.lastProjectId&&this.projects.some(p=>p.id===this.lastProjectId)?this.lastProjectId:this.projects[0]?.id));}
   setTodoFilter(filter:TodoFilter):void{this.todoFilter=filter;this.selected=0;this.selectedId=undefined;this.reconcileSelection();}
   selectId(id:string|undefined):void{this.selectedId=id;this.reconcileSelection();}
+  toggleCollapsed(id:string):void{if(this.collapsedItemIds.has(id))this.collapsedItemIds.delete(id);else this.collapsedItemIds.add(id);this.reconcileSelection();}
+  isCollapsed(id:string):boolean{return this.collapsedItemIds.has(id);}
+  toggleBulkSelected(id:string):void{if(!this.rows().some(row=>keyOf(row)===id))return;if(this.bulkSelectedIds.has(id))this.bulkSelectedIds.delete(id);else this.bulkSelectedIds.add(id);}
+  clearBulkSelection():void{this.bulkSelectedIds.clear();}
   moveSelection(delta:number):void {
     if(this.route==="board") { this.moveBoard(delta); return; }
     this.selected=clamp(this.selected+delta,0,this.rows().length-1);this.selectedId=keyOf(this.rows()[this.selected]);
@@ -241,6 +267,7 @@ export class GlobalController {
   moveInspectorScroll(delta:number):void{this.inspectorOffset=Math.max(0,this.inspectorOffset+delta);}
   clampSelection():void{this.reconcileSelection();}
   reconcileSelection():void {
+    if(this.snapshot){const items=new Map(this.snapshot.items.map(i=>[i.id,i]));const archivedOwners=new Set(this.snapshot.projects.filter(p=>p.archived).map(p=>p.id));for(const id of this.bulkSelectedIds){const item=items.get(id);if(item&&(item.archived||!!item.project_id&&archivedOwners.has(item.project_id)))this.bulkSelectedIds.delete(id);}for(const id of this.collapsedItemIds)if(!items.has(id))this.collapsedItemIds.delete(id);}
     if(this.route==="board") {const cols=this.boardStatuses;this.boardColumn=clamp(this.boardColumn,0,cols.length-1);if(this.selectedId){const found=cols.findIndex(s=>this.items.some(i=>i.id===this.selectedId&&i.project_id===s.project_id&&i.status_id===s.status_id));if(found>=0)this.boardColumn=found;}const cards=this.boardCards();const ix=cards.findIndex(i=>i.id===this.selectedId);this.boardCard=ix>=0?ix:clamp(this.boardCard,0,cards.length-1);this.selectedId=keyOf(this.boardSelected);return;}
     const rows=this.rows();let index=this.selectedId?rows.findIndex(r=>keyOf(r)===this.selectedId):-1;if(index<0)index=clamp(this.selected,0,rows.length-1);this.selected=index;this.selectedId=keyOf(rows[index]);
   }
@@ -248,8 +275,11 @@ export class GlobalController {
   statusHistoryFor(item:Item):Array<{item_id:string;from_status_id:string|null;to_status_id:string;revision:number;changed_at:string}>{return (this.snapshot as (GlobalSnapshot & {status_history?:Array<{item_id:string;from_status_id:string|null;to_status_id:string;revision:number;changed_at:string}>})|undefined)?.status_history?.filter(h=>h.item_id===item.id)??[];}
   relationshipsFor(row:Row|undefined):Relationship[]{if(!row||!("title" in row&&"status_id" in row))return [];const item=row as Item;return (this.snapshot?.relationships??[]).filter(r=>r.source_id===item.id||r.target_id===item.id);}
   projectName(id:string|null):string{return this.snapshot?.projects.find(p=>p.id===id)?.name??(id?"Unknown project":"Personal inbox");}
-  projectNextAction(project:Project):Item|undefined{return (this.snapshot?.items??[]).filter(i=>i.project_id===project.id&&!i.archived&&!isDone(this.statusFor(i))).sort((a,b)=>urgency(a,Date.now())-urgency(b,Date.now())||(b.priority??-1)-(a.priority??-1)||a.position-b.position)[0];}
-  projectNextMilestone(project:Project):Item|undefined{return (this.snapshot?.items??[]).filter(i=>i.project_id===project.id&&i.kind==="milestone"&&!i.archived&&!isDone(this.statusFor(i))).sort((a,b)=>urgency(a,Date.now())-urgency(b,Date.now())||a.position-b.position)[0];}
+  projectAttention(project:Project):{next_action?:{item_id:string;title:string;due_at:string|null;priority:number|null;status_id:string;status_label:string;kind:string}|null;next_milestone?:{item_id:string;title:string;due_at:string|null;completed_children:number;total_children:number}|null}{return (((this.snapshot?.attention as unknown as {projects?:Record<string,unknown>}|undefined)?.projects?.[project.id])??{}) as ReturnType<GlobalController["projectAttention"]>;}
+  projectNextAction(project:Project):{id:string;title:string;due_at:string|null;priority:number|null;status_id:string;status_label:string;kind:string}|Item|undefined{const a=this.projectAttention(project).next_action;if(a)return{id:a.item_id,title:a.title,due_at:a.due_at,priority:a.priority,status_id:a.status_id,status_label:a.status_label,kind:a.kind};return (this.snapshot?.items??[]).filter(i=>i.project_id===project.id&&!i.archived&&!isDone(this.statusFor(i))).sort((x,y)=>urgency(x,Date.now())-urgency(y,Date.now())||(y.priority??-1)-(x.priority??-1)||x.position-y.position)[0];}
+  projectNextMilestone(project:Project):{id:string;title:string;due_at:string|null;completed_children:number;total_children:number}|Item|undefined{const m=this.projectAttention(project).next_milestone;if(m)return{id:m.item_id,title:m.title,due_at:m.due_at,completed_children:m.completed_children,total_children:m.total_children};return (this.snapshot?.items??[]).filter(i=>i.project_id===project.id&&i.kind==="milestone"&&!i.archived&&!isDone(this.statusFor(i))).sort((x,y)=>urgency(x,Date.now())-urgency(y,Date.now())||x.position-y.position)[0];}
+  itemBreadcrumb(item:Item):string[]{const byId=new Map((this.snapshot?.items??[]).map(i=>[i.id,i]));const parts:string[]=[];const seen=new Set<string>();let current:Item|undefined=item;while(current?.parent_id&&!seen.has(current.parent_id)){seen.add(current.parent_id);const parent=byId.get(current.parent_id);if(!parent)break;parts.unshift(parent.title);current=parent;}return parts;}
+  milestoneProgress(item:Item):{completed:number;total:number;visibleOnly:boolean}{const p=item.project_id?this.snapshot?.projects.find(x=>x.id===item.project_id):undefined;const m=p?this.projectAttention(p).next_milestone:undefined;if(m?.item_id===item.id)return{completed:m.completed_children,total:m.total_children,visibleOnly:false};const children=(this.snapshot?.items??[]).filter(i=>i.parent_id===item.id&&!i.archived);return{completed:children.filter(i=>this.statusFor(i)?.category==="completed").length,total:children.length,visibleOnly:true};}
   projectLastActivity(project:Project):ActivityRow|undefined{const entities=new Set([project.id,...(this.snapshot?.items??[]).filter(i=>i.project_id===project.id).map(i=>i.id),...(this.snapshot?.notes??[]).filter(n=>n.project_id===project.id).map(n=>n.id)]);return this.historyEvents.filter(e=>e.entity_id&&entities.has(e.entity_id)).sort((a,b)=>b.created_at.localeCompare(a.created_at))[0];}
   overviewRows():Row[]{
     const snap=this.snapshot;if(!snap)return[];const q=this.searchQuery.trim().toLocaleLowerCase();const match=(...v:string[])=>!q||v.some(x=>x.toLocaleLowerCase().includes(q));
@@ -265,8 +295,10 @@ export class GlobalController {
     const snap=this.snapshot;if(!snap)return[];const archivedOwners=new Set(snap.projects.filter(p=>p.archived).map(p=>p.id));const all=snap.items.filter(i=>!i.archived&&!(i.project_id&&archivedOwners.has(i.project_id))&&(!this.projectId||i.project_id===this.projectId)).sort((a,b)=>a.position-b.position||a.created_at.localeCompare(b.created_at));const q=this.searchQuery.trim().toLocaleLowerCase();
     const byId=new Map(all.map(i=>[i.id,i]));const included=new Set(all.filter(i=>!q||this.searchMatchedIds.has(i.id)||[i.title,i.description??"",...(i.labels??[]),this.statusFor(i)?.label??""].some(v=>v.toLocaleLowerCase().includes(q))).map(i=>i.id));
     for(const id of [...included]){let item=byId.get(id);while(item?.parent_id&&byId.has(item.parent_id)){included.add(item.parent_id);item=byId.get(item.parent_id);}}
-    const ordered:Item[]=[];const seen=new Set<string>();const visit=(item:Item)=>{if(seen.has(item.id)||!included.has(item.id))return;seen.add(item.id);ordered.push(item);for(const child of all.filter(x=>x.parent_id===item.id))visit(child);};
-    for(const item of all)if(!item.parent_id||!byId.has(item.parent_id))visit(item);for(const item of all)visit(item);return ordered;
+    const ordered:Item[]=[];const seen=new Set<string>();const visit=(item:Item)=>{if(seen.has(item.id)||!included.has(item.id))return;seen.add(item.id);ordered.push(item);if(this.collapsedItemIds.has(item.id)&&!q)return;for(const child of all.filter(x=>x.parent_id===item.id))visit(child);};
+    for(const item of all)if(!item.parent_id||!byId.has(item.parent_id))visit(item);
+    const hiddenByCollapsedAncestor=(item:Item):boolean=>{if(q)return false;let parent=item.parent_id;const chain=new Set<string>();while(parent&&!chain.has(parent)){if(this.collapsedItemIds.has(parent))return true;chain.add(parent);parent=byId.get(parent)?.parent_id??null;}return false;};
+    for(const item of all)if(!seen.has(item.id)&&!hiddenByCollapsedAncestor(item))visit(item);return ordered;
   }
 }
 

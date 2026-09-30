@@ -239,6 +239,7 @@ impl GlobalManagerApplication {
                         "notes",
                         "statuses",
                         "relationships",
+                        "note_links",
                         "associations",
                         "status_history",
                         "imported_history",
@@ -301,6 +302,7 @@ impl GlobalManagerApplication {
                     "notes",
                     "statuses",
                     "relationships",
+                    "note_links",
                     "associations",
                     "status_history",
                     "imported_history",
@@ -348,6 +350,7 @@ impl GlobalManagerApplication {
                     "notes",
                     "statuses",
                     "relationships",
+                    "note_links",
                     "associations",
                     "status_history",
                     "imported_history",
@@ -401,6 +404,17 @@ impl GlobalManagerApplication {
                         ))
                     })
                     .collect::<std::collections::BTreeMap<_, _>>();
+                let note_projects = arr(&state, "notes")
+                    .iter()
+                    .filter_map(|note| {
+                        Some((
+                            note.get("id")?.as_str()?.to_owned(),
+                            note.get("project_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                        ))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
                 let rows = source
                     .into_iter()
                     .filter(|row| {
@@ -412,12 +426,20 @@ impl GlobalManagerApplication {
                             .or_else(|| {
                                 let item_id = if collection == "status_history" {
                                     row.get("item_id").and_then(Value::as_str)
+                                } else if collection == "note_links" {
+                                    row.get("item_id").and_then(Value::as_str)
                                 } else if collection == "relationships" {
                                     row.get("source_id").and_then(Value::as_str)
                                 } else {
                                     None
                                 };
-                                item_id.and_then(|id| item_projects.get(id).cloned().flatten())
+                                if collection == "note_links" {
+                                    row.get("note_id")
+                                        .and_then(Value::as_str)
+                                        .and_then(|id| note_projects.get(id).cloned().flatten())
+                                } else {
+                                    item_id.and_then(|id| item_projects.get(id).cloned().flatten())
+                                }
                             });
                         (project_id.is_none() || owner.as_deref() == project_id)
                             && (kind.is_none() || row.get("kind").and_then(Value::as_str) == kind)
@@ -486,21 +508,62 @@ impl GlobalManagerApplication {
             "todo list" | "task list" | "milestone list" => {
                 Ok(filter_item_list(&state["items"], payload, command))
             }
-            "todo show" | "task show" | "milestone show" => Ok(one_from(
-                &state,
-                "items",
-                "id",
-                required_string(payload, "item_id")?,
-            )?),
+            "todo show" | "task show" | "milestone show" => {
+                let mut item =
+                    one_from(&state, "items", "id", required_string(payload, "item_id")?)?;
+                let item_id = item["id"].as_str().unwrap_or_default();
+                let links = arr(&state, "note_links")
+                    .iter()
+                    .filter(|link| link["item_id"] == item_id)
+                    .filter_map(|link| {
+                        let note_id = link["note_id"].as_str()?;
+                        arr(&state, "notes")
+                            .iter()
+                            .find(|note| note["id"] == note_id)
+                            .map(|note| compact_note_link(note))
+                    })
+                    .collect::<Vec<_>>();
+                item["linked_notes"] = json!(links);
+                Ok(item)
+            }
             "workflow status list" => Ok(filtered_statuses(&state["statuses"], payload)),
             "relationship list" => Ok(filter_project_list(&state["relationships"], payload)),
+            "association show" => {
+                let project_id = required_string(payload, "project_id")?;
+                let kind = required_string(payload, "kind")?;
+                let identity = required_string(payload, "identity")?;
+                arr(&state, "associations")
+                    .iter()
+                    .find(|row| {
+                        row["project_id"] == project_id
+                            && row["kind"] == kind
+                            && row["identity"] == identity
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        GlobalManagerError::NotFound("project association not found".into())
+                    })
+            }
+            "note link list" => Ok(filter_project_list(&state["note_links"], payload)),
             "note list" => Ok(filter_project_list(&state["notes"], payload)),
-            "note show" => Ok(one_from(
-                &state,
-                "notes",
-                "id",
-                required_string(payload, "note_id")?,
-            )?),
+            "note show" => {
+                let mut note =
+                    one_from(&state, "notes", "id", required_string(payload, "note_id")?)?;
+                let note_id = note["id"].as_str().unwrap_or_default();
+                let links = arr(&state, "note_links")
+                    .iter()
+                    .filter(|link| link["note_id"] == note_id)
+                    .filter_map(|link| {
+                        let item_id = link["item_id"].as_str()?;
+                        arr(&state, "items")
+                            .iter()
+                            .find(|item| item["id"] == item_id)
+                            .map(|item| compact_item_link(&state, item))
+                    })
+                    .collect::<Vec<_>>();
+                note["linked_items"] = json!(links);
+                Ok(note)
+            }
             _ => Err(GlobalManagerError::Invalid(format!(
                 "unsupported global command: {command}"
             ))),
@@ -621,6 +684,84 @@ impl GlobalManagerApplication {
                 .is_some_and(|v| v.trim().is_empty())
         {
             return Err(GlobalManagerError::Invalid("note body is required".into()));
+        }
+        if matches!(command, "note link add" | "note link remove") {
+            for field in ["note_id", "item_id"] {
+                let value = string(p, field)?;
+                boreal_domain::global_manager::validate_identifier(value)
+                    .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
+            }
+            boreal_domain::global_manager::ManagementNoteLink {
+                note_id: string(p, "note_id")?.to_owned(),
+                item_id: string(p, "item_id")?.to_owned(),
+                project_id: None,
+            }
+            .validate()
+            .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
+        }
+        if command == "todo bulk triage" {
+            if p.get("expected_revision").and_then(Value::as_u64).is_none() {
+                return Err(GlobalManagerError::Invalid(
+                    "bulk triage requires expected_revision".into(),
+                ));
+            }
+            let changes = p
+                .get("changes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| GlobalManagerError::Invalid("changes must be an array".into()))?;
+            if changes.is_empty() || changes.len() > 200 {
+                return Err(GlobalManagerError::Invalid(
+                    "bulk triage requires 1 to 200 changes".into(),
+                ));
+            }
+            let mut ids = std::collections::BTreeSet::new();
+            for change in changes {
+                let item_id = change
+                    .get("item_id")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.trim().is_empty())
+                    .ok_or_else(|| {
+                        GlobalManagerError::Invalid("each triage change requires item_id".into())
+                    })?;
+                boreal_domain::global_manager::validate_identifier(item_id)
+                    .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
+                if !ids.insert(item_id) {
+                    return Err(GlobalManagerError::Invalid(
+                        "bulk triage contains a duplicate item_id".into(),
+                    ));
+                }
+                for field in ["project_id", "parent_id"] {
+                    if change
+                        .get(field)
+                        .is_none_or(|v| !(v.is_null() || v.as_str().is_some()))
+                    {
+                        return Err(GlobalManagerError::Invalid(format!(
+                            "each triage change requires {field} as a string or null"
+                        )));
+                    }
+                    if let Some(value) = change.get(field).and_then(Value::as_str) {
+                        boreal_domain::global_manager::validate_identifier(value)
+                            .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
+                    }
+                }
+                let status = change
+                    .get("status_id")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.trim().is_empty())
+                    .ok_or_else(|| {
+                        GlobalManagerError::Invalid("each triage change requires status_id".into())
+                    })?;
+                boreal_domain::global_manager::validate_identifier(status)
+                    .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
+            }
+        }
+        if command == "association show" {
+            for field in ["project_id", "kind", "identity"] {
+                let value = string(p, field)?;
+                if value.trim().is_empty() {
+                    return Err(GlobalManagerError::Invalid(format!("{field} is required")));
+                }
+            }
         }
         if command == "project link" {
             boreal_domain::global_manager::validate_identifier(string(p, "identity")?)
@@ -842,6 +983,8 @@ fn is_mutation(command: &str) -> bool {
             | "milestone show"
             | "workflow status list"
             | "relationship list"
+            | "association show"
+            | "note link list"
             | "note list"
             | "note show"
             | "export"
@@ -898,6 +1041,9 @@ fn apply_mutation(
     revision: u64,
 ) -> Result<Value, StoreError> {
     let timestamp = now();
+    if command == "todo bulk triage" {
+        return apply_bulk_triage(p, s, revision, &timestamp);
+    }
     match command {
         "project add" => {
             let name = required_string(p, "name")?.trim();
@@ -1243,6 +1389,25 @@ fn apply_mutation(
                 ));
             }
             if new_owner != project_id
+                && arr(s, "note_links").iter().any(|link| {
+                    if link["item_id"] != iid {
+                        return false;
+                    }
+                    let note_id = link["note_id"].as_str();
+                    arr(s, "notes")
+                        .iter()
+                        .find(|note| note["id"].as_str() == note_id)
+                        .is_some_and(|note| {
+                            note["project_id"].as_str().map(str::to_owned) != new_owner
+                        })
+                })
+            {
+                return Err(StoreError::Invalid(
+                    "moving an item would split a note link; move or unlink the note atomically"
+                        .into(),
+                ));
+            }
+            if new_owner != project_id
                 && arr(s, "status_history").iter().any(|entry| {
                     entry["item_id"] == iid && entry.get("workflow_owner_id").is_none()
                 })
@@ -1504,6 +1669,42 @@ fn apply_mutation(
             }
             Ok(value)
         }
+        "note link add" | "note link remove" => {
+            let note_id = required_string(p, "note_id")?;
+            let item_id = required_string(p, "item_id")?;
+            let note = arr(s, "notes")
+                .iter()
+                .find(|row| row["id"] == note_id)
+                .ok_or_else(|| StoreError::Invalid("note not found".into()))?;
+            let item = arr(s, "items")
+                .iter()
+                .find(|row| row["id"] == item_id)
+                .ok_or_else(|| StoreError::Invalid("management item not found".into()))?;
+            if note["project_id"] != item["project_id"] {
+                return Err(StoreError::Invalid(
+                    "notes and linked items must belong to the same management project".into(),
+                ));
+            }
+            let owner = note["project_id"].clone();
+            let link = json!({"note_id":note_id,"item_id":item_id,"project_id":owner});
+            if command == "note link add" {
+                if !arr(s, "note_links")
+                    .iter()
+                    .any(|row| row["note_id"] == note_id && row["item_id"] == item_id)
+                {
+                    arr_mut(s, "note_links").push(link.clone());
+                }
+                Ok(link)
+            } else {
+                let links = arr_mut(s, "note_links");
+                let count = links.len();
+                links.retain(|row| !(row["note_id"] == note_id && row["item_id"] == item_id));
+                if count == links.len() {
+                    return Err(StoreError::Invalid("note link not found".into()));
+                }
+                Ok(json!({"removed":true,"note_id":note_id,"item_id":item_id,"project_id":owner}))
+            }
+        }
         "relationship remove" => {
             let source = required_string(p, "source_id")?;
             let target = required_string(p, "target_id")?;
@@ -1634,7 +1835,7 @@ fn apply_mutation(
                 validate_import_snapshot(&entry["snapshot"])?;
                 imported_history.push(json!({"source_revision":entry["revision"],"snapshot":entry["snapshot"],"created_at":entry["created_at"].clone(),"imported":true}));
             }
-            *s = json!({"projects":incoming["projects"],"items":incoming["items"],"notes":incoming["notes"],"statuses":incoming["statuses"],"relationships":incoming["relationships"],"associations":incoming["associations"],"status_history":incoming["status_history"],"imported_history":imported_history});
+            *s = json!({"projects":incoming["projects"],"items":incoming["items"],"notes":incoming["notes"],"statuses":incoming["statuses"],"relationships":incoming["relationships"],"note_links":incoming.get("note_links").cloned().unwrap_or(json!([])),"associations":incoming["associations"],"status_history":incoming["status_history"],"imported_history":imported_history});
             Ok(
                 json!({"imported":true,"counts":{"projects":arr(s,"projects").len(),"items":arr(s,"items").len(),"notes":arr(s,"notes").len()}}),
             )
@@ -1643,6 +1844,174 @@ fn apply_mutation(
             "unsupported global command: {command}"
         ))),
     }
+}
+
+fn apply_bulk_triage(
+    p: &Value,
+    state: &mut Value,
+    revision: u64,
+    timestamp: &str,
+) -> Result<Value, StoreError> {
+    let changes = p["changes"]
+        .as_array()
+        .ok_or_else(|| StoreError::Invalid("changes must be an array".into()))?;
+    let before = arr(state, "items").clone();
+    let mut updated_ids = Vec::with_capacity(changes.len());
+    for change in changes {
+        let item_id = required_string(change, "item_id")?;
+        let old = before
+            .iter()
+            .find(|item| item["id"] == item_id)
+            .cloned()
+            .ok_or_else(|| StoreError::Invalid(format!("management item {item_id} not found")))?;
+        let project_id = change["project_id"].as_str().map(str::to_owned);
+        if let Some(project_id) = project_id.as_deref() {
+            if !project_exists(state, project_id) {
+                return Err(StoreError::Invalid(format!(
+                    "management project {project_id} not found"
+                )));
+            }
+        }
+        let parent_id = change["parent_id"].as_str().map(str::to_owned);
+        let status_id = required_string(change, "status_id")?;
+        validate_status(state, project_id.as_deref(), status_id)?;
+        if project_id != old["project_id"].as_str().map(str::to_owned)
+            && arr(state, "status_history").iter().any(|entry| {
+                entry["item_id"] == item_id && entry.get("workflow_owner_id").is_none()
+            })
+        {
+            return Err(StoreError::Invalid(format!("item {item_id} cannot be transferred because historical workflow identity is missing")));
+        }
+        let row = arr_mut(state, "items")
+            .iter_mut()
+            .find(|item| item["id"] == item_id)
+            .unwrap();
+        row["project_id"] = project_id.clone().map_or(Value::Null, |value| json!(value));
+        row["parent_id"] = parent_id.clone().map_or(Value::Null, |value| json!(value));
+        row["status_id"] = json!(status_id);
+        row["updated_at"] = json!(timestamp);
+        updated_ids.push(item_id.to_owned());
+        let old_status = old["status_id"].as_str().unwrap_or_default();
+        let old_owner = old["project_id"].as_str();
+        if old_status != status_id || old_owner != project_id.as_deref() {
+            let from = status_record(state, old_owner, old_status);
+            let to = status_record(state, project_id.as_deref(), status_id);
+            arr_mut(state, "status_history").push(json!({"item_id":item_id,"workflow_owner_id":project_id,"from_workflow_owner_id":old_owner,"from_status_id":old_status,"from_status_label":from["label"],"from_status_category":from["category"],"to_status_id":status_id,"to_status_label":to["label"],"to_status_category":to["category"],"revision":revision,"changed_at":timestamp}));
+        }
+    }
+    let items = arr(state, "items").clone();
+    for item in &items {
+        let item_id = item["id"]
+            .as_str()
+            .ok_or_else(|| StoreError::Invalid("item id missing".into()))?;
+        let project_id = item["project_id"].as_str();
+        validate_status(
+            state,
+            project_id,
+            item["status_id"].as_str().unwrap_or_default(),
+        )?;
+        if let Some(parent_id) = item["parent_id"].as_str() {
+            let parent = items
+                .iter()
+                .find(|candidate| candidate["id"] == parent_id)
+                .ok_or_else(|| StoreError::Invalid(format!("parent item {parent_id} not found")))?;
+            if parent["project_id"].as_str() != project_id {
+                return Err(StoreError::Invalid(
+                    "parent and child must belong to the same management project".into(),
+                ));
+            }
+            let child_kind = ManagementItemKind::try_from(item["kind"].as_str().unwrap_or("task"))
+                .map_err(|e| StoreError::Invalid(e.to_string()))?;
+            let parent_kind =
+                ManagementItemKind::try_from(parent["kind"].as_str().unwrap_or("task"))
+                    .map_err(|e| StoreError::Invalid(e.to_string()))?;
+            boreal_domain::global_manager::validate_item_parent(child_kind, Some(parent_kind))
+                .map_err(|e| StoreError::Invalid(e.to_string()))?;
+            let mut cursor = Some(parent_id.to_owned());
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(id) = cursor {
+                if id == item_id {
+                    return Err(StoreError::Invalid(
+                        "item hierarchy cannot contain a cycle".into(),
+                    ));
+                }
+                if !seen.insert(id.clone()) {
+                    break;
+                }
+                cursor = items
+                    .iter()
+                    .find(|candidate| candidate["id"] == id)
+                    .and_then(|candidate| candidate["parent_id"].as_str())
+                    .map(str::to_owned);
+            }
+        }
+    }
+    for edge in arr(state, "relationships") {
+        let source = items
+            .iter()
+            .find(|item| item["id"] == edge["source_id"])
+            .ok_or_else(|| StoreError::Invalid("relationship source item missing".into()))?;
+        let target = items
+            .iter()
+            .find(|item| item["id"] == edge["target_id"])
+            .ok_or_else(|| StoreError::Invalid("relationship target item missing".into()))?;
+        if source["project_id"] != target["project_id"] {
+            return Err(StoreError::Invalid(
+                "bulk triage would split a relationship; map both endpoints to one project".into(),
+            ));
+        }
+    }
+    let owners = items
+        .iter()
+        .map(|item| {
+            (
+                item["id"].as_str().unwrap_or_default().to_owned(),
+                item["project_id"].clone(),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    for edge in arr_mut(state, "relationships") {
+        if let Some(owner) = owners.get(edge["source_id"].as_str().unwrap_or_default()) {
+            edge["project_id"] = owner.clone();
+        }
+    }
+    for link in arr(state, "note_links") {
+        let note = arr(state, "notes")
+            .iter()
+            .find(|row| row["id"] == link["note_id"])
+            .ok_or_else(|| StoreError::Invalid("note link note missing".into()))?;
+        let item = items
+            .iter()
+            .find(|row| row["id"] == link["item_id"])
+            .ok_or_else(|| StoreError::Invalid("note link item missing".into()))?;
+        if note["project_id"] != item["project_id"] {
+            return Err(StoreError::Invalid(
+                "bulk triage would split a note link; keep linked records in one project".into(),
+            ));
+        }
+    }
+    let changed = updated_ids
+        .into_iter()
+        .filter_map(|id| items.iter().find(|item| item["id"] == id).cloned())
+        .collect::<Vec<_>>();
+    let mut result = json!({"changed":changed.len(),"items":changed,"item_id":changed.first().and_then(|item| item["id"].as_str()),"item_ids":changed.iter().filter_map(|item| item["id"].as_str()).collect::<Vec<_>>()});
+    if let Some(first) = changed.first() {
+        if changed
+            .iter()
+            .all(|item| item["project_id"] == first["project_id"])
+        {
+            result["project_id"] = first["project_id"].clone();
+        }
+    }
+    Ok(result)
+}
+
+fn status_record(state: &Value, owner: Option<&str>, status_id: &str) -> Value {
+    arr(state, "statuses")
+        .iter()
+        .find(|row| row["project_id"].as_str() == owner && row["status_id"] == status_id)
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn validate_status(s: &Value, project: Option<&str>, status: &str) -> Result<(), StoreError> {
@@ -1683,7 +2052,10 @@ fn attention_summary(state: &Value) -> Value {
         .collect::<std::collections::BTreeSet<_>>();
     let categories = arr(state, "statuses");
     let mut portfolio = [0_u64; 5];
-    let mut projects = serde_json::Map::new();
+    let mut projects = arr(state, "projects").iter().filter_map(|project| {
+        let id = project["id"].as_str()?;
+        Some((id.to_owned(), json!({"open":0,"waiting":0,"overdue":0,"unscheduled":0,"due_today":0,"next_action":null,"next_milestone":null})))
+    }).collect::<serde_json::Map<_, _>>();
     for item in arr(state, "items") {
         if item["archived"] == true
             || item["project_id"]
@@ -1723,7 +2095,106 @@ fn attention_summary(state: &Value) -> Value {
             _ => {}
         }
     }
+    for (project_id, summary) in projects.iter_mut() {
+        if archived.contains(project_id.as_str()) {
+            continue;
+        }
+        let mut active_items = arr(state, "items")
+            .iter()
+            .filter(|item| {
+                item["project_id"] == project_id.as_str()
+                    && item["archived"] != true
+                    && !matches!(item_category(state, item), "completed" | "cancelled")
+            })
+            .collect::<Vec<_>>();
+        let mut actions = active_items
+            .iter()
+            .copied()
+            .filter(|item| matches!(item["kind"].as_str(), Some("task" | "subtask")))
+            .collect::<Vec<_>>();
+        actions.sort_by(|left, right| {
+            let due_key = |item: &Value| {
+                item["due_at"]
+                    .as_str()
+                    .and_then(utc_date_from_iso)
+                    .unwrap_or_else(|| "9999-99-99".into())
+            };
+            due_key(left)
+                .cmp(&due_key(right))
+                .then_with(|| {
+                    right["priority"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .cmp(&left["priority"].as_u64().unwrap_or(0))
+                })
+                .then_with(|| {
+                    left["position"]
+                        .as_i64()
+                        .unwrap_or(0)
+                        .cmp(&right["position"].as_i64().unwrap_or(0))
+                })
+                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+        });
+        if let Some(item) = actions.first() {
+            let status_id = item["status_id"].as_str().unwrap_or_default();
+            let label = arr(state, "statuses")
+                .iter()
+                .find(|status| {
+                    status["project_id"].as_str() == Some(project_id)
+                        && status["status_id"] == status_id
+                })
+                .and_then(|status| status["label"].as_str())
+                .unwrap_or(status_id);
+            summary["next_action"] = json!({"item_id":item["id"],"title":bound_text(item["title"].as_str().unwrap_or_default(),160),"due_at":item["due_at"],"priority":item["priority"],"status_id":status_id,"status_label":label,"kind":item["kind"]});
+        }
+        let mut milestones = active_items
+            .drain(..)
+            .filter(|item| item["kind"] == "milestone")
+            .collect::<Vec<_>>();
+        milestones.sort_by(|left, right| {
+            let due_key = |item: &Value| {
+                item["due_at"]
+                    .as_str()
+                    .and_then(utc_date_from_iso)
+                    .unwrap_or_else(|| "9999-99-99".into())
+            };
+            due_key(left)
+                .cmp(&due_key(right))
+                .then_with(|| {
+                    left["position"]
+                        .as_i64()
+                        .unwrap_or(0)
+                        .cmp(&right["position"].as_i64().unwrap_or(0))
+                })
+                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+        });
+        if let Some(milestone) = milestones.first() {
+            let children = arr(state, "items")
+                .iter()
+                .filter(|child| {
+                    child["parent_id"] == milestone["id"]
+                        && child["project_id"] == project_id.as_str()
+                        && child["archived"] != true
+                })
+                .collect::<Vec<_>>();
+            let completed = children
+                .iter()
+                .filter(|child| item_category(state, child) == "completed")
+                .count();
+            summary["next_milestone"] = json!({"item_id":milestone["id"],"title":bound_text(milestone["title"].as_str().unwrap_or_default(),160),"due_at":milestone["due_at"],"completed_children":completed,"total_children":children.len()});
+        }
+    }
     json!({"portfolio":{"open":portfolio[0],"waiting":portfolio[1],"overdue":portfolio[2],"unscheduled":portfolio[3],"due_today":portfolio[4]},"projects":projects})
+}
+
+fn item_category<'a>(state: &'a Value, item: &Value) -> &'a str {
+    arr(state, "statuses")
+        .iter()
+        .find(|status| {
+            status["project_id"] == item["project_id"] && status["status_id"] == item["status_id"]
+        })
+        .and_then(|status| status["category"].as_str())
+        .unwrap_or("open")
 }
 
 fn bound_summary_text(value: &mut Value, maximum_bytes: usize) {
@@ -2024,6 +2495,39 @@ fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
             return Err(error("note title missing"));
         }
     }
+    if snapshot
+        .get("note_links")
+        .is_some_and(|value| !value.is_array())
+    {
+        return Err(error("note_links must be an array"));
+    }
+    let mut note_link_keys = std::collections::BTreeSet::new();
+    for link in snapshot
+        .get("note_links")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let note_id = link["note_id"]
+            .as_str()
+            .ok_or_else(|| error("note link note_id missing"))?;
+        let item_id = link["item_id"]
+            .as_str()
+            .ok_or_else(|| error("note link item_id missing"))?;
+        let note = notes
+            .iter()
+            .find(|row| row["id"] == note_id)
+            .ok_or_else(|| error("note link note missing"))?;
+        let item = items_by_id
+            .get(item_id)
+            .ok_or_else(|| error("note link item missing"))?;
+        if note["project_id"] != item["project_id"] {
+            return Err(error("note link crosses management projects"));
+        }
+        if !note_link_keys.insert((note_id.to_owned(), item_id.to_owned())) {
+            return Err(error("duplicate note link"));
+        }
+    }
     for association in arr(snapshot, "associations") {
         if association["project_id"]
             .as_str()
@@ -2212,4 +2716,19 @@ fn one_from(s: &Value, array: &str, key: &str, value: &str) -> Result<Value, Sto
                 array.trim_end_matches('s')
             )))
         })
+}
+
+fn compact_item_link(state: &Value, item: &Value) -> Value {
+    let owner = item["project_id"].as_str();
+    let status_id = item["status_id"].as_str().unwrap_or_default();
+    let status_label = arr(state, "statuses")
+        .iter()
+        .find(|status| status["project_id"].as_str() == owner && status["status_id"] == status_id)
+        .and_then(|status| status["label"].as_str())
+        .unwrap_or(status_id);
+    json!({"id":item["id"],"project_id":item["project_id"],"parent_id":item["parent_id"],"kind":item["kind"],"title":bound_text(item["title"].as_str().unwrap_or_default(),160),"status_id":status_id,"status_label":status_label,"priority":item["priority"],"due_at":item["due_at"],"follow_up_at":item["follow_up_at"],"archived":item["archived"]})
+}
+
+fn compact_note_link(note: &Value) -> Value {
+    json!({"id":note["id"],"project_id":note["project_id"],"title":bound_text(note["title"].as_str().unwrap_or_default(),160),"archived":note["archived"],"updated_at":note["updated_at"]})
 }

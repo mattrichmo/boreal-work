@@ -1,8 +1,9 @@
 # Global management audit remediation — 2026-09-30
 
-This follow-up implements the first reliability and daily-use phases from the
-global management audit. It preserves the installation-wide management
-boundary and leaves project-scoped Boreal Work as the execution authority.
+This follow-up implements the reliability, integrity, daily-use, and core
+scale/presentation phases from the global management audit. It preserves the
+installation-wide management boundary and leaves project-scoped Boreal Work
+as the execution authority.
 
 ## Plan and disposition
 
@@ -46,29 +47,44 @@ boundary and leaves project-scoped Boreal Work as the execution authority.
   separately labeled.
 - Add linked workspace detail pagination and a quoted line-interface tokenizer.
 
-### 3. Scale and presentation — follow-up work remains
+### 3. Scale and presentation — core work implemented
 
-- Add an atomic bulk-triage command before exposing bulk project/parent/status
-  moves. Do not implement it as a loop of independent writes.
-- Move linked detail reads off the synchronous service dispatch path or add a
-  bounded asynchronous page/readback protocol. The client socket timeout does
-  not cancel a blocked SQLite read.
-- Measure retained full-snapshot history growth and define a safe retention or
-  compaction policy without deleting evidence before that policy is verified.
-- Make Home next-action/milestone summaries authoritative for records beyond
-  the capped summary sample, and measure portfolios with very many projects.
-- Continue pane-local styling, theme exposure, responsive help/inspector polish,
-  all-project workflow grouping, saved views, and broader terminal qualification.
+- Add atomic bulk triage with per-item destination, workflow, and parent
+  validation; expose it as one application/store mutation.
+- Run linked detail reads through a fixed-size worker pool with bounded queue,
+  per-job readback, page limits, and short result retention. Exact workspace
+  association reads work beyond the 100-row summary window.
+- Measure retained full-snapshot history growth in bytes across state size and
+  edit count. Keep lossless history; do not prune until a separately verified
+  archival and restore path can preserve evidence.
+- Compute project attention summaries from the full state before summary caps,
+  including next action and milestone progress.
+- Add note-to-item links and backlinks, hierarchy collapse and breadcrumbs,
+  all-project workflow grouping, pane-local selection styling, dark/light/mono
+  themes, grouped navigation, and compact responsive behavior.
+
+### Remaining follow-up — intentionally deferred
+
+- Add saved views after scope and filtering have been qualified with larger
+  portfolios. Bulk triage is available; broader bulk operations can follow user
+  feedback on that interaction.
+- Qualify in installed terminals and at the audit's full viewport matrix,
+  including Unicode, long labels, and terminal-specific resize behavior.
+- Measure real lifecycle history growth and service latency before setting a
+  retention/compaction policy. Preserve all history in the meantime.
+- Recurrence and reminders need explicit schedule and delivery semantics;
+  team sync, Gantt/resource planning, and rich document editing remain outside
+  this release.
 
 ## Verification
 
 Verification passed:
 
-- `cargo test -p boreal-application --test global_manager`: 11/11.
+- `cargo test -p boreal-application --test global_manager`: 16/16.
 - `cargo test -p boreal-cli --test global_service`: 6/6.
-- `cargo test -p boreal-cli --bin bwrk linked_failure`: 1/1 linked last-good
-  cache unit test.
-- `npm test` in `apps/global-tui`: 64/64 under Node 20.
+- `cargo test -p boreal-cli --bin bwrk global_commands::tests::linked_detail`:
+  2/2 bounded linked-detail job tests.
+- `npm test` in `apps/global-tui`: 80/80 under Node 20.
 - `rustfmt --check` on the changed Rust files and `git diff --check`.
 
 The TUI socket tests require a writable temporary directory; sandboxed Unix

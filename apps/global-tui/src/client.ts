@@ -6,8 +6,12 @@ export const ENVELOPE_SCHEMA = "boreal.protocol.envelope.v1";
 export const MAX_FRAME_BYTES = 1024 * 1024;
 
 export interface Project { id: string; name: string; description: string; labels?: string[]; priority?:number; lifecycle?:string; health?:string; archived: boolean; created_at: string; updated_at: string }
-export interface Item { id: string; project_id: string | null; parent_id: string | null; kind: string; title: string; description?: string; labels?:string[]; status_id: string; priority: number | null; due_at: string | null; follow_up_at?: string | null; archived: boolean; position: number; created_at: string; updated_at: string }
-export interface Note { id: string; project_id: string | null; title: string; body?: string; archived: boolean; created_at: string; updated_at: string }
+export interface Item { id: string; project_id: string | null; parent_id: string | null; kind: string; title: string; description?: string; labels?:string[]; status_id: string; priority: number | null; due_at: string | null; follow_up_at?: string | null; archived: boolean; position: number; created_at: string; updated_at: string; linked_notes?: Note[] }
+export interface Note { id: string; project_id: string | null; title: string; body?: string; archived: boolean; created_at: string; updated_at: string; linked_items?: Item[] }
+export interface NoteLink { note_id:string; item_id:string }
+export interface ProjectAttentionItem { item_id:string; title:string; due_at:string|null; priority:number|null; status_id:string; status_label:string; kind:string }
+export interface ProjectAttentionMilestone { item_id:string; title:string; due_at:string|null; completed_children:number; total_children:number }
+export interface ProjectAttention { open:number; waiting:number; overdue:number; unscheduled:number; due_today:number; next_action:ProjectAttentionItem|null; next_milestone:ProjectAttentionMilestone|null }
 export interface Status { project_id: string; status_id: string; label: string; category: string; position: number }
 export interface StatusHistoryEntry { item_id: string; workflow_owner_id?:string|null; from_workflow_owner_id?:string|null; from_status_id: string | null; from_status_label?:string|null; from_status_category?:string|null; to_status_id: string; to_status_label?:string|null; to_status_category?:string|null; revision: number; changed_at: string }
 export interface Relationship { source_id: string; target_id: string; kind: string }
@@ -17,9 +21,10 @@ export interface LinkedProject { management_project_id: string; project_id: stri
 export interface GlobalActivityEvent { operation_id: string; revision: number; command: string; entity_kind: string | null; entity_id: string | null; project_id?:string|null; source_id?:string|null; target_id?:string|null; title: string | null; summary: string; created_at: string }
 export interface GlobalHistory { events: GlobalActivityEvent[]; current_revision: number; total: number; limit: number; offset: number; has_more: boolean; next_offset: number | null }
 export interface TodoReorderResult extends Item { moved: boolean; ordered_ids: string[]; revision: number }
-export interface GlobalSnapshot { schema_version: number; revision: number; snapshot_limit?:number; totals?:Record<string,number>; attention?:{portfolio:Record<string,number>;projects:Record<string,Record<string,number>>}; projects: Project[]; items: Item[]; notes: Note[]; statuses: Status[]; status_history?: StatusHistoryEntry[]; relationships: Relationship[]; associations: Association[]; activity?: GlobalHistory; linked_projects?: LinkedProject[] }
+export interface GlobalSnapshot { schema_version: number; revision: number; snapshot_limit?:number; totals?:Record<string,number>; attention?:{portfolio:Record<string,number>;projects:Record<string,ProjectAttention>}; projects: Project[]; items: Item[]; notes: Note[]; note_links?:NoteLink[]; statuses: Status[]; status_history?: StatusHistoryEntry[]; relationships: Relationship[]; associations: Association[]; activity?: GlobalHistory; linked_projects?: LinkedProject[] }
 export interface GlobalPage<T> { rows:T[]; total:number; limit:number; offset:number; has_more:boolean; next_offset:number|null; revision:number }
-export interface LinkedPage { items:LinkedWorkItem[]; total:number; limit:number; offset:number; has_more:boolean; next_offset:number|null; revision:number|null; as_of:string|null; availability:string; error:string|null }
+export interface LinkedPage { items:LinkedWorkItem[]; total?:number|null; items_total?:number|null; limit?:number; items_limit?:number; offset?:number; items_offset?:number; has_more?:boolean; items_has_more?:boolean; next_offset?:number|null; revision:number|null; as_of:string|null; availability:string; error:string|null; job_id?:string|null }
+export interface LinkedJobResult { job_id:string; state:"refreshing"|"complete"|"failed"; page?:LinkedPage; error?:string|null }
 export interface GlobalEnvelopeError { code: string; message: string; operation_id?: string | null; operation_preserved?: boolean | null; readback_required?: boolean | null; retryable?: boolean | null }
 export interface GlobalEnvelope<T = unknown> { api_version: string; schema_version: string; operation_id: string; outcome: string; transport: string; data: T | null; error: GlobalEnvelopeError | null; revision?: number | null; as_of?: string; next_status_change_at?: string | null; detail_ref?: string | null }
 
@@ -127,6 +132,7 @@ export class GlobalServiceClient {
   linkedPage(projectId:string, identity:string, options:{limit?:number;offset?:number}={}): Promise<LinkedPage> {
     return this.execute<LinkedPage>("linked page",{project_id:projectId,identity,...(options.limit===undefined?{}:{limit:options.limit}),...(options.offset===undefined?{}:{offset:options.offset})});
   }
+  linkedJobShow(jobId:string): Promise<LinkedJobResult> { return this.execute<LinkedJobResult>("linked job show",{job_id:jobId}); }
   linkedShow(managementProjectId: string, workspaceProjectId: string): Promise<LinkedProject> {
     return this.execute<LinkedProject>("linked show", { project_id: managementProjectId, identity: workspaceProjectId });
   }

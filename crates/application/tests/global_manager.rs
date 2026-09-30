@@ -1,4 +1,5 @@
 use boreal_application::{GlobalManagerApplication, GlobalManagerError};
+use boreal_store::global_manager::GlobalManagerStore;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -190,6 +191,59 @@ fn bounded_snapshot_pages_search_and_preserves_large_notes_for_export() {
 }
 
 #[test]
+fn exact_association_read_reaches_records_beyond_snapshot_window() {
+    let path = db();
+    let app = GlobalManagerApplication::open(&path).unwrap();
+    let project = call(&app, "project add", json!({"name":"Portfolio"}), "project").unwrap();
+    let project_id = project["id"].as_str().unwrap();
+    let mut backup = call(&app, "export", json!({}), "export").unwrap();
+    backup["associations"] = json!((0..101)
+        .map(|n| json!({
+            "project_id": project_id,
+            "kind": "workspace",
+            "identity": format!("workspace-{n}"),
+            "path": format!("/workspaces/{n}"),
+            "updated_at": "2026-09-30T00:00:00Z"
+        }))
+        .collect::<Vec<_>>());
+    call(
+        &app,
+        "import",
+        json!({"snapshot":backup,"replace":true,"expected_revision":1}),
+        "import-large-association-set",
+    )
+    .unwrap();
+
+    let snapshot = call(&app, "snapshot", json!({}), "summary").unwrap();
+    assert_eq!(snapshot["totals"]["associations"], 101);
+    assert_eq!(snapshot["associations"].as_array().unwrap().len(), 100);
+    assert!(!snapshot["associations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["identity"] == "workspace-100"));
+
+    let association = call(
+        &app,
+        "association show",
+        json!({"project_id":project_id,"kind":"workspace","identity":"workspace-100"}),
+        "read-last-association",
+    )
+    .unwrap();
+    assert_eq!(association["path"], "/workspaces/100");
+    assert!(call(
+        &app,
+        "association show",
+        json!({"project_id":project_id,"kind":"workspace","identity":"missing"}),
+        "missing-association",
+    )
+    .is_err());
+
+    drop(app);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn waiting_follow_up_is_separate_from_due_date_and_survives_snapshot() {
     let path = db();
     let app = GlobalManagerApplication::open(&path).unwrap();
@@ -204,6 +258,249 @@ fn waiting_follow_up_is_separate_from_due_date_and_survives_snapshot() {
     assert_eq!(item["follow_up_at"], "2026-10-03");
     let snapshot = call(&app, "snapshot", json!({}), "snapshot").unwrap();
     assert_eq!(snapshot["items"][0]["follow_up_at"], "2026-10-03");
+    drop(app);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn bulk_triage_is_atomic_and_restorable_with_relationships() {
+    let source = db();
+    let target = db();
+    let app = GlobalManagerApplication::open(&source).unwrap();
+    let a = call(&app, "project add", json!({"name":"A"}), "a").unwrap();
+    let b = call(&app, "project add", json!({"name":"B"}), "b").unwrap();
+    let first = call(
+        &app,
+        "todo add",
+        json!({"project_id":a["id"],"title":"First"}),
+        "first",
+    )
+    .unwrap();
+    let second = call(
+        &app,
+        "todo add",
+        json!({"project_id":a["id"],"title":"Second"}),
+        "second",
+    )
+    .unwrap();
+    call(
+        &app,
+        "relationship add",
+        json!({"source_id":first["id"],"target_id":second["id"],"kind":"related"}),
+        "edge",
+    )
+    .unwrap();
+    let revision = app.revision().unwrap();
+    let split = call(
+        &app,
+        "todo bulk triage",
+        json!({"expected_revision":revision,"changes":[{"item_id":first["id"],"project_id":b["id"],"parent_id":null,"status_id":"todo"}]}),
+        "split",
+    );
+    assert!(split.is_err());
+    assert_eq!(app.revision().unwrap(), revision);
+    let bad_mapping = call(
+        &app,
+        "todo bulk triage",
+        json!({"expected_revision":revision,"changes":[{"item_id":first["id"],"project_id":b["id"],"parent_id":null,"status_id":"missing"},{"item_id":second["id"],"project_id":b["id"],"parent_id":null,"status_id":"todo"}]}),
+        "bad-map",
+    );
+    assert!(bad_mapping.is_err());
+    assert_eq!(app.revision().unwrap(), revision);
+    let moved = call(&app, "todo bulk triage", json!({"expected_revision":revision,"changes":[{"item_id":first["id"],"project_id":b["id"],"parent_id":null,"status_id":"todo"},{"item_id":second["id"],"project_id":b["id"],"parent_id":null,"status_id":"todo"}]}), "move-pair").unwrap();
+    assert_eq!(moved["changed"], 2);
+    assert_eq!(moved["project_id"], b["id"]);
+    assert_eq!(moved["item_id"], first["id"]);
+    let activity = call(&app, "history", json!({"entity_id":first["id"]}), "history").unwrap();
+    assert_eq!(activity["events"][0]["project_id"], b["id"]);
+    assert_eq!(activity["events"][0]["entity_id"], first["id"]);
+    let backup = call(&app, "export", json!({}), "backup").unwrap();
+    let restored = GlobalManagerApplication::open(&target).unwrap();
+    call(&restored, "import", json!({"snapshot":backup}), "restore").unwrap();
+    assert_eq!(
+        call(
+            &restored,
+            "relationship list",
+            json!({"project_id":b["id"]}),
+            "edges"
+        )
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .len(),
+        1
+    );
+    drop(restored);
+    drop(app);
+    let _ = std::fs::remove_file(source);
+    let _ = std::fs::remove_file(target);
+}
+
+#[test]
+fn note_links_are_owner_checked_readable_and_exportable() {
+    let source = db();
+    let target = db();
+    let app = GlobalManagerApplication::open(&source).unwrap();
+    let project = call(&app, "project add", json!({"name":"Notes"}), "p").unwrap();
+    let other = call(&app, "project add", json!({"name":"Other"}), "other").unwrap();
+    let item = call(
+        &app,
+        "todo add",
+        json!({"project_id":project["id"],"title":"Action"}),
+        "item",
+    )
+    .unwrap();
+    let note = call(
+        &app,
+        "note add",
+        json!({"project_id":project["id"],"title":"Context","body":"Full note body"}),
+        "note",
+    )
+    .unwrap();
+    let other_note = call(
+        &app,
+        "note add",
+        json!({"project_id":other["id"],"title":"Other","body":"body"}),
+        "other-note",
+    )
+    .unwrap();
+    call(
+        &app,
+        "note link add",
+        json!({"note_id":note["id"],"item_id":item["id"]}),
+        "link",
+    )
+    .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "note show",
+            json!({"note_id":note["id"]}),
+            "note-show"
+        )
+        .unwrap()["linked_items"][0]["id"],
+        item["id"]
+    );
+    assert_eq!(
+        call(
+            &app,
+            "todo show",
+            json!({"item_id":item["id"]}),
+            "item-show"
+        )
+        .unwrap()["linked_notes"][0]["id"],
+        note["id"]
+    );
+    let revision = app.revision().unwrap();
+    assert!(call(
+        &app,
+        "note link add",
+        json!({"note_id":other_note["id"],"item_id":item["id"]}),
+        "wrong-owner"
+    )
+    .is_err());
+    assert_eq!(app.revision().unwrap(), revision);
+    let moved = call(
+        &app,
+        "todo edit",
+        json!({"item_id":item["id"],"project_id":other["id"],"status_id":"todo"}),
+        "linked-transfer",
+    );
+    assert!(moved.is_err());
+    assert_eq!(app.revision().unwrap(), revision);
+    let snapshot = call(&app, "snapshot", json!({}), "snapshot").unwrap();
+    assert_eq!(snapshot["totals"]["note_links"], 1);
+    let backup = call(&app, "export", json!({}), "backup").unwrap();
+    let restored = GlobalManagerApplication::open(&target).unwrap();
+    call(&restored, "import", json!({"snapshot":backup}), "import").unwrap();
+    assert_eq!(
+        call(
+            &restored,
+            "note show",
+            json!({"note_id":note["id"]}),
+            "read"
+        )
+        .unwrap()["linked_items"][0]["id"],
+        item["id"]
+    );
+    drop(restored);
+    drop(app);
+    let _ = std::fs::remove_file(source);
+    let _ = std::fs::remove_file(target);
+}
+
+#[test]
+fn revision_history_growth_is_measured_and_every_snapshot_restores() {
+    let source = db();
+    let target = db();
+    let app = GlobalManagerApplication::open(&source).unwrap();
+    let project = call(&app, "project add", json!({"name":"Growth"}), "p").unwrap();
+    let store = GlobalManagerStore::open(&source).unwrap();
+    let start = store.revision_history_bytes().unwrap();
+    let description = "x".repeat(4_096);
+    let mut ids = Vec::new();
+    for index in 0..8 {
+        let item=call(&app,"todo add",json!({"project_id":project["id"],"title":format!("Item {index}"),"description":description}),&format!("add-{index}")).unwrap();
+        ids.push(item["id"].clone());
+    }
+    let after_adds = store.revision_history_bytes().unwrap();
+    for (index, id) in ids.iter().enumerate() {
+        call(
+            &app,
+            "todo edit",
+            json!({"item_id":id,"description":format!("{}-edit-{index}",description)}),
+            &format!("edit-{index}"),
+        )
+        .unwrap();
+    }
+    let after_edits = store.revision_history_bytes().unwrap();
+    eprintln!("lossless global revision snapshots: start={start} bytes, after_adds={after_adds} bytes, after_edits={after_edits} bytes");
+    assert!(after_adds > start && after_edits > after_adds);
+    let backup = call(&app, "export", json!({}), "backup").unwrap();
+    assert_eq!(
+        backup["revision_history"].as_array().unwrap().len() as u64,
+        app.revision().unwrap()
+    );
+    let restored = GlobalManagerApplication::open(&target).unwrap();
+    call(&restored, "import", json!({"snapshot":backup}), "restore").unwrap();
+    assert_eq!(restored.revision().unwrap(), 1);
+    drop(restored);
+    drop(store);
+    drop(app);
+    let _ = std::fs::remove_file(source);
+    let _ = std::fs::remove_file(target);
+}
+
+#[test]
+fn attention_next_action_and_milestone_are_computed_before_snapshot_cap() {
+    let path = db();
+    let app = GlobalManagerApplication::open(&path).unwrap();
+    let project = call(&app, "project add", json!({"name":"Portfolio"}), "p").unwrap();
+    let milestone=call(&app,"milestone add",json!({"project_id":project["id"],"item_id":"milestone-release","title":"Release","due_at":"2026-12-01"}),"milestone").unwrap();
+    let child=call(&app,"task add",json!({"project_id":project["id"],"parent_id":milestone["id"],"item_id":"milestone-child","title":"Ship notes"}),"child").unwrap();
+    call(
+        &app,
+        "todo complete",
+        json!({"item_id":child["id"]}),
+        "complete-child",
+    )
+    .unwrap();
+    for index in 0..100 {
+        call(&app,"todo add",json!({"project_id":project["id"],"item_id":format!("ordinary-{index:03}"),"title":format!("Ordinary {index}"),"due_at":"2026-11-01","position":index}),&format!("ordinary-{index}")).unwrap();
+    }
+    call(&app,"todo add",json!({"project_id":project["id"],"item_id":"best-action","title":"Urgent next action","due_at":"2026-10-01","priority":9,"position":500}),"best").unwrap();
+    let snapshot = call(&app, "snapshot", json!({}), "snapshot").unwrap();
+    assert_eq!(snapshot["items"].as_array().unwrap().len(), 100);
+    assert!(!snapshot["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == "best-action"));
+    let summary = &snapshot["attention"]["projects"][project["id"].as_str().unwrap()];
+    assert_eq!(summary["next_action"]["item_id"], "best-action");
+    assert_eq!(summary["next_milestone"]["item_id"], "milestone-release");
+    assert_eq!(summary["next_milestone"]["completed_children"], 1);
+    assert_eq!(summary["next_milestone"]["total_children"], 1);
     drop(app);
     let _ = std::fs::remove_file(path);
 }

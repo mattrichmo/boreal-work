@@ -21,6 +21,25 @@ pub struct GlobalActivityEvent {
     pub created_at: String,
 }
 
+/// A management note attached to one management item in the same project.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagementNoteLink {
+    pub note_id: String,
+    pub item_id: String,
+    pub project_id: Option<String>,
+}
+
+impl ManagementNoteLink {
+    pub fn validate(&self) -> Result<(), GlobalManagerDomainError> {
+        validate_identifier(&self.note_id)?;
+        validate_identifier(&self.item_id)?;
+        if let Some(project_id) = self.project_id.as_deref() {
+            validate_identifier(project_id)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatusCategory {
     Open,

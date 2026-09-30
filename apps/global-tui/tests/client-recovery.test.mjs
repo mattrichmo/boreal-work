@@ -64,6 +64,41 @@ function validResponse(request, changes = {}) {
   return response;
 }
 
+test("client exposes pollable linked-detail jobs and note backlinks", async t => {
+  const commands = [];
+  const service = await fakeService(request => {
+    const command = request.payload.command;
+    commands.push(command);
+    const response = validResponse(request);
+    if (command === "linked page") response.payload.data = {
+      availability: "refreshing", job_id: "job-1", items: [], items_total: null,
+      revision: null, as_of: null, error: null,
+    };
+    else if (command === "linked job show") response.payload.data = {
+      job_id: request.payload.payload.job_id, state: "complete", page: {
+        availability: "available", items: [{ work_id: "work-1", title: "Review" }],
+        items_total: 1, items_limit: 50, items_offset: 0, items_has_more: false,
+        revision: 7, as_of: "2026-09-30T00:00:00Z", error: null,
+      },
+    };
+    else if (command === "note show") response.payload.data = {
+      id: "note-1", project_id: "p1", title: "Planning", archived: false,
+      created_at: "now", updated_at: "now", linked_items: [{ id: "item-1", title: "Review" }],
+    };
+    return response;
+  });
+  t.after(service.close);
+  const client = new GlobalServiceClient(service.socketPath);
+  const pending = await client.linkedPage("p1", "workspace-1");
+  assert.equal(pending.availability, "refreshing");
+  assert.equal(pending.job_id, "job-1");
+  const completed = await client.linkedJobShow(pending.job_id);
+  assert.equal(completed.state, "complete");
+  assert.equal(completed.page.items[0].work_id, "work-1");
+  assert.equal((await client.noteShow("note-1")).linked_items[0].id, "item-1");
+  assert.deepEqual(commands, ["linked page", "linked job show", "note show"]);
+});
+
 test("malformed post-delivery envelopes freeze mutations with the original operation id", async t => {
   const brokenResponses = [
     ["outer correlation", request => ({ ...validResponse(request), request_id: "wrong-id" })],

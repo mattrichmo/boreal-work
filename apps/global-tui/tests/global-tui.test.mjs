@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GlobalProtocolError, GlobalServiceClient } from "../dist/client.js";
 import { GlobalController, render, runInteractive, validateSnapshot } from "../dist/interface.js";
+import { parseArgs } from "../dist/entrypoint.js";
 
 const snapshot = {
   schema_version: 2, revision: 12,
@@ -37,6 +38,13 @@ async function socketFixture(handler) {
   return {path,close:async()=>{await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});}};
 }
 function envelope(req,data,outcome="changed",overrides={}) { return {request_id:req.request_id,payload:{api_version:"2",schema_version:"boreal.protocol.envelope.v1",operation_id:req.payload.operation_id,transport:"ok",outcome,data,error:null,...overrides}}; }
+
+test("launch options expose all implemented color themes and reject unknown themes",()=>{
+  assert.equal(parseArgs(["--socket","/tmp/global.sock","--interactive","--theme","light"]).theme,"light");
+  assert.equal(parseArgs(["--socket","/tmp/global.sock","--theme","mono"]).theme,"mono");
+  assert.throws(()=>parseArgs(["--socket","/tmp/global.sock","--theme","solarized"]),/dark, light, or mono/);
+  assert.throws(()=>parseArgs(["--socket","/tmp/global.sock","--theme"]),/requires dark, light, or mono/);
+});
 
 test("client validates the outer framing and both versioned correlation envelopes",async t=>{
   const fixture=await socketFixture((req,socket)=>socket.end(encode(envelope(req,snapshot,"unchanged")))); t.after(fixture.close);

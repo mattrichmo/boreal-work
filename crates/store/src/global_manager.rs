@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS global_audit (
 );
 "#;
 
-const EMPTY_STATE: &str = r#"{"projects":[],"items":[],"notes":[],"statuses":[{"project_id":null,"status_id":"todo","label":"To do","category":"open","position":0},{"project_id":null,"status_id":"doing","label":"Doing","category":"active","position":1},{"project_id":null,"status_id":"waiting","label":"Waiting","category":"waiting","position":2},{"project_id":null,"status_id":"blocked","label":"Blocked","category":"blocked","position":3},{"project_id":null,"status_id":"done","label":"Done","category":"completed","position":4},{"project_id":null,"status_id":"cancelled","label":"Cancelled","category":"cancelled","position":5}],"relationships":[],"associations":[],"status_history":[],"imported_history":[]}"#;
+const EMPTY_STATE: &str = r#"{"projects":[],"items":[],"notes":[],"statuses":[{"project_id":null,"status_id":"todo","label":"To do","category":"open","position":0},{"project_id":null,"status_id":"doing","label":"Doing","category":"active","position":1},{"project_id":null,"status_id":"waiting","label":"Waiting","category":"waiting","position":2},{"project_id":null,"status_id":"blocked","label":"Blocked","category":"blocked","position":3},{"project_id":null,"status_id":"done","label":"Done","category":"completed","position":4},{"project_id":null,"status_id":"cancelled","label":"Cancelled","category":"cancelled","position":5}],"relationships":[],"note_links":[],"associations":[],"status_history":[],"imported_history":[]}"#;
 
 /// A connection to the separate installation-wide SQLite database.
 pub struct GlobalManagerStore {
@@ -191,6 +191,22 @@ impl GlobalManagerStore {
         self.load_state()
     }
 
+    /// Revision snapshots deliberately remain lossless and unpruned. Their
+    /// storage grows with state size times mutation count; any retention change
+    /// must first provide an independently verified, restorable archival path.
+    /// This helper reports serialized history bytes for operational measurement.
+    pub fn revision_history_bytes(&self) -> Result<u64, StoreError> {
+        let mut query = self
+            .inner
+            .prepare("SELECT COALESCE(SUM(length(state_json)),0) FROM global_revision_snapshot")?;
+        if query.step()? != SQLITE_ROW {
+            return Err(StoreError::Corrupt(
+                "global revision history size returned no row".into(),
+            ));
+        }
+        Ok(query.column_u64(0)?)
+    }
+
     /// Returns state and revision from one SQLite statement snapshot.
     pub fn snapshot(&self) -> Result<(Value, u64), StoreError> {
         let mut q = self.inner.prepare("SELECT s.state_json,g.revision FROM global_manager_state s CROSS JOIN global_schema g WHERE s.singleton=1 AND g.singleton=1")?;
@@ -199,8 +215,9 @@ impl GlobalManagerStore {
                 "global snapshot rows are missing".into(),
             ));
         }
-        let state = serde_json::from_str(&q.column_text(0)?)
+        let mut state = serde_json::from_str(&q.column_text(0)?)
             .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        ensure_compatible_state(&mut state)?;
         let revision = q.column_u64(1)?;
         Ok((state, revision))
     }
@@ -211,8 +228,9 @@ impl GlobalManagerStore {
         )?;
         let mut history = Vec::new();
         while q.step()? == SQLITE_ROW {
-            let state = serde_json::from_str::<Value>(&q.column_text(1)?)
+            let mut state = serde_json::from_str::<Value>(&q.column_text(1)?)
                 .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+            ensure_compatible_state(&mut state)?;
             history.push(json!({"revision":q.column_u64(0)?,"snapshot":state,"created_at":q.column_text(2)?}));
         }
         Ok(history)
@@ -405,8 +423,10 @@ impl GlobalManagerStore {
                 "global manager state row is missing".into(),
             ));
         }
-        serde_json::from_str(&q.column_text(0)?)
-            .map_err(|e| StoreError::Corrupt(format!("global manager state is invalid: {e}")))
+        let mut state = serde_json::from_str(&q.column_text(0)?)
+            .map_err(|e| StoreError::Corrupt(format!("global manager state is invalid: {e}")))?;
+        ensure_compatible_state(&mut state)?;
+        Ok(state)
     }
 
     fn operation(&self, id: &str) -> Result<Option<(String, Value)>, StoreError> {
@@ -545,6 +565,25 @@ fn request_digest(command: &str, payload: &Value) -> String {
         .as_bytes(),
     )
 }
+
+fn ensure_compatible_state(state: &mut Value) -> Result<(), StoreError> {
+    let object = state
+        .as_object_mut()
+        .ok_or_else(|| StoreError::Corrupt("global manager state must be an object".into()))?;
+    match object.get("note_links") {
+        None => {
+            object.insert("note_links".into(), json!([]));
+        }
+        Some(Value::Array(_)) => {}
+        Some(_) => {
+            return Err(StoreError::Corrupt(
+                "global manager note_links must be an array".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn now() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

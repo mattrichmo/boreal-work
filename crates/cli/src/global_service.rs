@@ -294,6 +294,14 @@ fn dispatch_request(
         )
         .map_err(|error| boreal_service::ProtocolError::new(error.code(), error.message()));
     }
+    if let Err(message) = parsed.validate() {
+        let response = envelope_failure(&parsed.operation_id, ErrorCode::InvalidArgument, &message);
+        return JsonResponse::success(
+            request_id,
+            serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_owned()),
+        )
+        .map_err(|error| boreal_service::ProtocolError::new(error.code(), error.message()));
+    }
     let result = if parsed.command == "service shutdown" {
         stopping.store(true, Ordering::SeqCst);
         Ok(json!({"stopping":true}))

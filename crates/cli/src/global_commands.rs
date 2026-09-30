@@ -540,6 +540,17 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
             )?);
             "note show".to_owned()
         }
+        ["note", "link", "add"] | ["note", "link", "remove"] => {
+            payload["note_id"] = json!(required(positional(0), "note link requires a note ID")?);
+            payload["item_id"] = json!(required(positional(1), "note link requires an item ID")?);
+            format!("note link {}", route[2])
+        }
+        ["note", "link", "list"] => {
+            if let Some(project) = parsed.options.project.clone() {
+                payload["project_id"] = json!(project);
+            }
+            "note link list".to_owned()
+        }
         ["note", "edit"] => {
             payload["note_id"] = json!(required(
                 positional(0),
@@ -739,6 +750,7 @@ pub(crate) fn execute_request(
                 "notes",
                 "statuses",
                 "relationships",
+                "note_links",
                 "associations",
             ] {
                 counts.insert(
@@ -752,6 +764,13 @@ pub(crate) fn execute_request(
         }
         return Ok(data);
     }
+    if command == "linked job show" {
+        let job_id = payload
+            .get("job_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::invalid("linked job show requires job_id"))?;
+        return linked_detail_job(job_id);
+    }
     if command == "linked show" || command == "linked page" {
         let management_project_id = payload
             .get("project_id")
@@ -761,26 +780,13 @@ pub(crate) fn execute_request(
             .get("identity")
             .and_then(Value::as_str)
             .ok_or_else(|| CliError::invalid("linked show requires identity"))?;
-        let snapshot = app
-            .execute("snapshot", &json!({}), &format!("{operation}-linked-show"))
+        let association = app
+            .execute(
+                "association show",
+                &json!({"project_id":management_project_id,"kind":"workspace","identity":identity}),
+                &format!("{operation}-linked-show"),
+            )
             .map_err(global_error)?;
-        let association = snapshot
-            .get("associations")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|row| {
-                row.get("project_id").and_then(Value::as_str) == Some(management_project_id)
-                    && row.get("kind").and_then(Value::as_str) == Some("workspace")
-                    && row.get("identity").and_then(Value::as_str) == Some(identity)
-            })
-            .ok_or_else(|| {
-                CliError::with(
-                    ErrorCode::NotFound,
-                    ApplicationOutcome::Rejected,
-                    "the linked workspace is not associated with that management project",
-                )
-            })?;
         let stored_path = association
             .get("path")
             .and_then(Value::as_str)
@@ -791,40 +797,10 @@ pub(crate) fn execute_request(
             .unwrap_or(50)
             .clamp(1, 50);
         let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0);
-        let mut detail = linked_workspace_detail(
-            management_project_id,
-            identity,
-            stored_path,
-            limit,
-            offset,
-            Instant::now() + Duration::from_secs(2),
-        )
-        .map_err(|error| {
-            CliError::with(
-                ErrorCode::ServiceUnavailable,
-                ApplicationOutcome::Failed,
-                format!("linked workspace is unavailable: {error}"),
-            )
-        })?;
-        if command == "linked page" {
-            let items = detail
-                .get("items")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let total = detail
-                .get("items_total")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let next = offset as u64 + items.len() as u64;
-            detail["limit"] = json!(limit);
-            detail["offset"] = json!(offset);
-            detail["has_more"] = json!(next < total);
-            detail["next_offset"] = if next < total {
-                json!(next)
-            } else {
-                Value::Null
-            };
+        let mut detail =
+            linked_detail_page(management_project_id, identity, stored_path, limit, offset)?;
+        if let Some(total) = detail.get("items_total").and_then(Value::as_u64) {
+            detail["total"] = json!(total);
         }
         return Ok(detail);
     }
@@ -912,6 +888,7 @@ fn is_mutation(command: &str) -> bool {
             | "todo list"
             | "todo show"
             | "note list"
+            | "note link list"
             | "note show"
             | "workflow status list"
             | "relationship list"
@@ -922,6 +899,8 @@ fn is_mutation(command: &str) -> bool {
             | "history"
             | "operation show"
             | "linked show"
+            | "linked page"
+            | "linked job show"
             | "export"
     )
 }
@@ -1125,16 +1104,47 @@ fn normalize_folder_path(input: &str) -> Result<String, CliError> {
 const LINKED_POOL_WORKERS: usize = 8;
 const LINKED_POOL_QUEUE: usize = 64;
 const LINKED_REFRESH_BUDGET: std::time::Duration = std::time::Duration::from_millis(75);
+const LINKED_DETAIL_RETENTION: std::time::Duration = std::time::Duration::from_secs(300);
+const LINKED_DETAIL_RESULT_CAPACITY: usize = 128;
+static LINKED_JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct LinkedRefreshJob {
     key: (String, String),
     path: String,
+    kind: LinkedRefreshKind,
+}
+
+enum LinkedRefreshKind {
+    Rollup,
+    Detail {
+        management_project_id: String,
+        limit: u64,
+        offset: u64,
+        job_id: String,
+    },
+    #[cfg(test)]
+    Block {
+        job_id: String,
+        started: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+        fail: bool,
+    },
+}
+
+type LinkedDetailKey = (String, String, String, u64, u64);
+
+struct LinkedDetailRecord {
+    key: LinkedDetailKey,
+    page: Option<Value>,
+    error: Option<String>,
+    changed_at: Instant,
 }
 
 #[derive(Default)]
 struct LinkedRefreshState {
     pending: std::collections::HashSet<(String, String)>,
     rows: std::collections::HashMap<(String, String), Value>,
+    details: std::collections::HashMap<String, LinkedDetailRecord>,
 }
 
 struct LinkedRefreshPool {
@@ -1168,55 +1178,291 @@ fn preserve_linked_sample_on_error(
 }
 
 fn linked_refresh_pool() -> &'static LinkedRefreshPool {
-    LINKED_REFRESH_POOL.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<LinkedRefreshJob>(LINKED_POOL_QUEUE);
-        let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
-        let state = std::sync::Arc::new(std::sync::Mutex::new(LinkedRefreshState::default()));
-        let changed = std::sync::Arc::new(std::sync::Condvar::new());
-        let pool = LinkedRefreshPool {
-            sender,
-            state: state.clone(),
-            changed: changed.clone(),
-        };
-        for _ in 0..LINKED_POOL_WORKERS {
-            let receiver = receiver.clone();
-            let state = state.clone();
-            let changed = changed.clone();
-            std::thread::spawn(move || loop {
-                let job = match receiver.lock().expect("linked job receiver poisoned").recv() {
-                    Ok(job) => job,
-                    Err(_) => break,
-                };
-                let started = Instant::now();
-                let result = linked_workspace_rollup(&job.key.1, &job.path, Instant::now());
-                let now = now_ms_u64();
-                let row = match result {
-                    Ok(value) => json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"refresh_duration_ms":started.elapsed().as_millis() as u64,"counts":value["counts"],"error":null}),
-                    Err(error) => json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"refresh_duration_ms":started.elapsed().as_millis() as u64,"counts":null,"error":error}),
-                };
-                let mut state = state.lock().expect("linked cache poisoned");
-                state.pending.remove(&job.key);
-                let row = preserve_linked_sample_on_error(
-                    state.rows.get(&job.key).cloned(),
-                    row,
-                    now,
-                    started.elapsed().as_millis() as u64,
-                );
-                state.rows.insert(job.key, row);
-                changed.notify_all();
-            });
+    LINKED_REFRESH_POOL.get_or_init(new_linked_refresh_pool)
+}
+
+fn new_linked_refresh_pool() -> LinkedRefreshPool {
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<LinkedRefreshJob>(LINKED_POOL_QUEUE);
+    let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
+    let state = std::sync::Arc::new(std::sync::Mutex::new(LinkedRefreshState::default()));
+    let changed = std::sync::Arc::new(std::sync::Condvar::new());
+    let pool = LinkedRefreshPool {
+        sender,
+        state: state.clone(),
+        changed: changed.clone(),
+    };
+    for _ in 0..LINKED_POOL_WORKERS {
+        let receiver = receiver.clone();
+        let state = state.clone();
+        let changed = changed.clone();
+        std::thread::spawn(move || loop {
+            let job = match receiver
+                .lock()
+                .expect("linked job receiver poisoned")
+                .recv()
+            {
+                Ok(job) => job,
+                Err(_) => break,
+            };
+            match job.kind {
+                LinkedRefreshKind::Rollup => {
+                    let started = Instant::now();
+                    let result = linked_workspace_rollup(&job.key.1, &job.path, Instant::now());
+                    let now = now_ms_u64();
+                    let row = match result {
+                        Ok(value) => {
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"refresh_duration_ms":started.elapsed().as_millis() as u64,"counts":value["counts"],"error":null})
+                        }
+                        Err(error) => {
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"refresh_duration_ms":started.elapsed().as_millis() as u64,"counts":null,"error":error})
+                        }
+                    };
+                    let mut state = state.lock().expect("linked cache poisoned");
+                    state.pending.remove(&job.key);
+                    let row = preserve_linked_sample_on_error(
+                        state.rows.get(&job.key).cloned(),
+                        row,
+                        now,
+                        started.elapsed().as_millis() as u64,
+                    );
+                    state.rows.insert(job.key, row);
+                    changed.notify_all();
+                }
+                LinkedRefreshKind::Detail {
+                    management_project_id,
+                    limit,
+                    offset,
+                    job_id,
+                } => {
+                    let result = linked_workspace_detail(
+                        &management_project_id,
+                        &job.key.1,
+                        &job.path,
+                        limit,
+                        offset,
+                        Instant::now() + Duration::from_secs(3),
+                    )
+                    .map(|mut page| {
+                        let items = page
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        let total = page.get("items_total").and_then(Value::as_u64).unwrap_or(0);
+                        let next = offset.saturating_add(items.len() as u64);
+                        page["limit"] = json!(limit);
+                        page["offset"] = json!(offset);
+                        page["has_more"] = json!(next < total);
+                        page["next_offset"] = if next < total {
+                            json!(next)
+                        } else {
+                            Value::Null
+                        };
+                        page["job_id"] = Value::Null;
+                        page
+                    });
+                    let mut state = state.lock().expect("linked cache poisoned");
+                    if let Some(record) = state.details.get_mut(&job_id) {
+                        match result {
+                            Ok(page) => {
+                                record.page = Some(page);
+                                record.error = None;
+                            }
+                            Err(error) => {
+                                record.error = Some(error);
+                                record.page = None;
+                            }
+                        }
+                        record.changed_at = Instant::now();
+                    }
+                    changed.notify_all();
+                }
+                #[cfg(test)]
+                LinkedRefreshKind::Block {
+                    job_id,
+                    started,
+                    release,
+                    fail,
+                } => {
+                    let _ = started.send(());
+                    let _ = release.recv();
+                    let mut state = state.lock().expect("linked cache poisoned");
+                    if let Some(record) = state.details.get_mut(&job_id) {
+                        if fail {
+                            record.error = Some("synthetic detail failure".into());
+                        } else {
+                            record.page = Some(
+                                json!({"availability":"available","items":[],"items_total":0,"total":0,"revision":7,"as_of":"test","job_id":null}),
+                            );
+                        }
+                        record.changed_at = Instant::now();
+                    }
+                    changed.notify_all();
+                }
+            }
+        });
+    }
+    pool
+}
+
+fn prune_linked_detail_results(state: &mut LinkedRefreshState, now: Instant) {
+    state.details.retain(|_, record| {
+        (record.page.is_none() && record.error.is_none())
+            || now.saturating_duration_since(record.changed_at) <= LINKED_DETAIL_RETENTION
+    });
+    let mut finished = state
+        .details
+        .iter()
+        .filter(|(_, record)| record.page.is_some() || record.error.is_some())
+        .map(|(id, record)| (id.clone(), record.changed_at))
+        .collect::<Vec<_>>();
+    if finished.len() > LINKED_DETAIL_RESULT_CAPACITY {
+        finished.sort_by_key(|(_, changed_at)| *changed_at);
+        for (id, _) in finished.into_iter().take(
+            state
+                .details
+                .len()
+                .saturating_sub(LINKED_DETAIL_RESULT_CAPACITY),
+        ) {
+            state.details.remove(&id);
         }
-        pool
-    })
+    }
+}
+
+fn schedule_linked_detail(
+    pool: &LinkedRefreshPool,
+    key: LinkedDetailKey,
+    management_project_id: String,
+    path: String,
+) -> Result<String, CliError> {
+    let mut state = pool.state.lock().expect("linked cache poisoned");
+    prune_linked_detail_results(&mut state, Instant::now());
+    if let Some((job_id, _)) = state
+        .details
+        .iter()
+        .find(|(_, record)| record.key == key && record.page.is_none() && record.error.is_none())
+    {
+        return Ok(job_id.clone());
+    }
+    let job_id = format!(
+        "linked-job-{}-{}",
+        std::process::id(),
+        LINKED_JOB_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let (project_id, identity, _, limit, offset) = key.clone();
+    state.details.insert(
+        job_id.clone(),
+        LinkedDetailRecord {
+            key: key.clone(),
+            page: None,
+            error: None,
+            changed_at: Instant::now(),
+        },
+    );
+    let job = LinkedRefreshJob {
+        key: (project_id, identity),
+        path,
+        kind: LinkedRefreshKind::Detail {
+            management_project_id,
+            limit,
+            offset,
+            job_id: job_id.clone(),
+        },
+    };
+    if pool.sender.try_send(job).is_err() {
+        state.details.remove(&job_id);
+        return Err(CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            "linked detail worker queue is full; retry the page request",
+        ));
+    }
+    Ok(job_id)
+}
+
+fn linked_detail_page(
+    management_project_id: &str,
+    identity: &str,
+    path: &str,
+    limit: u64,
+    offset: u64,
+) -> Result<Value, CliError> {
+    let pool = linked_refresh_pool();
+    let key = (
+        management_project_id.to_owned(),
+        identity.to_owned(),
+        path.to_owned(),
+        limit,
+        offset,
+    );
+    let job_id =
+        schedule_linked_detail(pool, key, management_project_id.to_owned(), path.to_owned())?;
+    let deadline = Instant::now() + LINKED_REFRESH_BUDGET;
+    let mut state = pool.state.lock().expect("linked cache poisoned");
+    while state
+        .details
+        .get(&job_id)
+        .is_some_and(|record| record.page.is_none() && record.error.is_none())
+        && Instant::now() < deadline
+    {
+        let (next, timeout) = pool
+            .changed
+            .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
+            .expect("linked cache poisoned");
+        state = next;
+        if timeout.timed_out() {
+            break;
+        }
+    }
+    let record = state.details.get(&job_id).ok_or_else(|| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            "linked detail job expired",
+        )
+    })?;
+    if let Some(page) = &record.page {
+        return Ok(page.clone());
+    }
+    let error = record.error.clone();
+    Ok(
+        json!({"management_project_id":management_project_id,"project_id":identity,"path":path,"availability":if error.is_some(){"unavailable"}else{"refreshing"},"job_id":job_id,"revision":null,"as_of":null,"counts":null,"items":[],"items_total":null,"items_has_more":null,"limit":limit,"offset":offset,"has_more":null,"next_offset":null,"error":error}),
+    )
+}
+
+fn linked_detail_job(job_id: &str) -> Result<Value, CliError> {
+    linked_detail_job_from_pool(linked_refresh_pool(), job_id)
+}
+
+fn linked_detail_job_from_pool(pool: &LinkedRefreshPool, job_id: &str) -> Result<Value, CliError> {
+    let mut state = pool.state.lock().expect("linked cache poisoned");
+    prune_linked_detail_results(&mut state, Instant::now());
+    let record = state.details.get(job_id).ok_or_else(|| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            "linked detail job was not found or has expired",
+        )
+    })?;
+    if let Some(error) = &record.error {
+        return Ok(json!({"job_id":job_id,"state":"failed","page":null,"error":error}));
+    }
+    if let Some(page) = &record.page {
+        return Ok(json!({"job_id":job_id,"state":"complete","page":page,"error":null}));
+    }
+    Ok(json!({"job_id":job_id,"state":"refreshing","page":null,"error":null}))
 }
 
 fn enrich_snapshot(snapshot: &mut Value) {
+    enrich_snapshot_with_pool(snapshot, linked_refresh_pool());
+}
+
+fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
     let associations = snapshot
         .get("associations")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let pool = linked_refresh_pool();
     let sources = associations
         .iter()
         .filter(|item| item.get("kind").and_then(Value::as_str) == Some("workspace"))
@@ -1255,6 +1501,7 @@ fn enrich_snapshot(snapshot: &mut Value) {
                 match pool.sender.try_send(LinkedRefreshJob {
                     key: key.clone(),
                     path: path.clone(),
+                    kind: LinkedRefreshKind::Rollup,
                 }) {
                     Ok(()) => {}
                     Err(_) => {
@@ -1440,6 +1687,7 @@ fn linked_workspace_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     #[test]
     fn linked_failure_keeps_last_good_counts_and_updates_sample_age() {
@@ -1457,5 +1705,163 @@ mod tests {
     #[test]
     fn global_path_uses_explicit_root_independent_of_cwd() {
         assert!(global_db_path().is_ok());
+    }
+
+    fn blocked_detail(
+        pool: &LinkedRefreshPool,
+        job_id: &str,
+        key: LinkedDetailKey,
+        fail: bool,
+    ) -> mpsc::Sender<()> {
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        pool.state.lock().unwrap().details.insert(
+            job_id.to_owned(),
+            LinkedDetailRecord {
+                key: key.clone(),
+                page: None,
+                error: None,
+                changed_at: Instant::now(),
+            },
+        );
+        pool.sender
+            .try_send(LinkedRefreshJob {
+                key: (key.0.clone(), key.1.clone()),
+                path: "synthetic".into(),
+                kind: LinkedRefreshKind::Block {
+                    job_id: job_id.to_owned(),
+                    started,
+                    release: release_rx,
+                    fail,
+                },
+            })
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        release
+    }
+
+    #[test]
+    fn linked_detail_jobs_dedupe_poll_complete_and_fail_without_blocking_snapshots() {
+        let pool = new_linked_refresh_pool();
+        let key = (
+            "management-a".into(),
+            "workspace-a".into(),
+            "synthetic".into(),
+            20,
+            0,
+        );
+        let release = blocked_detail(&pool, "job-complete", key.clone(), false);
+        assert_eq!(
+            linked_detail_job_from_pool(&pool, "job-complete").unwrap()["state"],
+            "refreshing"
+        );
+        assert_eq!(
+            schedule_linked_detail(&pool, key.clone(), key.0.clone(), "synthetic".into()).unwrap(),
+            "job-complete"
+        );
+
+        let start = Instant::now();
+        let mut snapshot = json!({"associations":[{"project_id":"management-healthy","kind":"workspace","identity":"workspace-healthy","path":"/missing/healthy/workspace"}]});
+        enrich_snapshot_with_pool(&mut snapshot, &pool);
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert_eq!(snapshot["linked_projects"].as_array().unwrap().len(), 1);
+
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let status = linked_detail_job_from_pool(&pool, "job-complete").unwrap();
+            if status["state"] == "complete" {
+                assert_eq!(status["page"]["revision"], 7);
+                break;
+            }
+            assert!(Instant::now() < deadline, "detail job did not complete");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let refreshed =
+            schedule_linked_detail(&pool, key.clone(), key.0.clone(), "synthetic".into()).unwrap();
+        assert_ne!(refreshed, "job-complete");
+        let changed_path_key = (
+            key.0.clone(),
+            key.1.clone(),
+            "updated-path".into(),
+            key.3,
+            key.4,
+        );
+        let changed_path = schedule_linked_detail(
+            &pool,
+            changed_path_key,
+            key.0.clone(),
+            "updated-path".into(),
+        )
+        .unwrap();
+        assert_ne!(changed_path, refreshed);
+
+        let fail_key = (
+            "management-b".into(),
+            "workspace-b".into(),
+            "synthetic".into(),
+            20,
+            20,
+        );
+        let fail_release = blocked_detail(&pool, "job-failed", fail_key, true);
+        assert_eq!(
+            linked_detail_job_from_pool(&pool, "job-failed").unwrap()["state"],
+            "refreshing"
+        );
+        fail_release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let status = linked_detail_job_from_pool(&pool, "job-failed").unwrap();
+            if status["state"] == "failed" {
+                assert_eq!(status["error"], "synthetic detail failure");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "failed detail result was not published"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn linked_detail_queue_rejects_saturation_and_result_cache_is_bounded() {
+        let (sender, receiver) = mpsc::sync_channel(0);
+        let _receiver = receiver;
+        let pool = LinkedRefreshPool {
+            sender,
+            state: std::sync::Arc::new(std::sync::Mutex::new(LinkedRefreshState::default())),
+            changed: std::sync::Arc::new(std::sync::Condvar::new()),
+        };
+        let error = schedule_linked_detail(
+            &pool,
+            ("p".into(), "i".into(), "path".into(), 10, 0),
+            "p".into(),
+            "path".into(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("queue is full"));
+
+        let mut state = LinkedRefreshState::default();
+        for index in 0..LINKED_DETAIL_RESULT_CAPACITY + 12 {
+            state.details.insert(
+                format!("job-{index}"),
+                LinkedDetailRecord {
+                    key: (
+                        format!("p-{index}"),
+                        format!("i-{index}"),
+                        format!("path-{index}"),
+                        10,
+                        0,
+                    ),
+                    page: Some(json!({"items":[]})),
+                    error: None,
+                    changed_at: Instant::now(),
+                },
+            );
+        }
+        prune_linked_detail_results(&mut state, Instant::now());
+        assert_eq!(state.details.len(), LINKED_DETAIL_RESULT_CAPACITY);
     }
 }
