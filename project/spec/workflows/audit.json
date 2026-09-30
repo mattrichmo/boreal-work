@@ -1,13 +1,99 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.0.0",
+  "asset_version": "1.1.0",
   "ref": "boreal.workflow.audit.v1",
   "kind": "audit",
   "title": "Inspect retained evidence and unresolved obligations",
-  "refs": {"route": "boreal.workflow.route.v1", "context": "boreal.workflow.context.v1", "review": "boreal.workflow.review.v1", "health": "boreal.workflow.health.v1", "finish": "boreal.workflow.finish.v1"},
-  "allowed_commands": ["bwrk agent guide --json", "bwrk work show <work_id> --json", "bwrk work review-candidates --json", "bwrk work recent-closed --json", "bwrk evidence add --json", "bwrk summary list <work_id> --json", "bwrk gate closeout --json", "bwrk operation show <operation_id> --json"],
-  "typed_inputs": [{"name": "project_id", "type": "project_id", "required": true, "source": "session", "validation": "project_scope"}, {"name": "work_id", "type": "nullable_work_id", "required": false, "source": "request", "validation": "project_scope"}, {"name": "revision", "type": "revision", "required": true, "source": "snapshot", "validation": "non_negative_integer"}, {"name": "obligation_ids", "type": "obligation_id_array", "required": true, "source": "guidance", "validation": "snapshot_bound"}, {"name": "operation_id", "type": "nullable_operation_id", "required": false, "source": "request", "validation": "project_bound"}],
-  "finish_criteria": [{"id": "audit.snapshot", "type": "one_revision_bound_snapshot", "required": true}, {"id": "audit.history", "type": "failed_and_open_evidence_are_retained", "required": true}, {"id": "audit.gates", "type": "open_satisfied_and_forced_gates_are_distinct", "required": true}, {"id": "audit.next", "type": "one_trusted_recovery_or_finish_action", "required": true}],
-  "next_refs": ["boreal.workflow.health.v1", "boreal.workflow.review.v1", "boreal.workflow.finish.v1", "boreal.workflow.route.v1"],
-  "state_transition_owner": "boreal.application.v2"
+  "refs": {
+    "route": "boreal.workflow.route.v1",
+    "context": "boreal.workflow.context.v1",
+    "review": "boreal.workflow.review.v1",
+    "health": "boreal.workflow.health.v1",
+    "finish": "boreal.workflow.finish.v1"
+  },
+  "allowed_commands": [
+    "bwrk status --json",
+    "bwrk work show <work_id> --json",
+    "bwrk operation show <operation_id> --json",
+    "bwrk doctor --json"
+  ],
+  "typed_inputs": [
+    {
+      "name": "project_id",
+      "type": "project_id",
+      "required": true,
+      "source": "session",
+      "validation": "project_scope"
+    },
+    {
+      "name": "work_id",
+      "type": "nullable_work_id",
+      "required": false,
+      "source": "request",
+      "validation": "project_scope"
+    },
+    {
+      "name": "revision",
+      "type": "revision",
+      "required": true,
+      "source": "snapshot",
+      "validation": "non_negative_integer"
+    },
+    {
+      "name": "obligation_ids",
+      "type": "obligation_id_array",
+      "required": true,
+      "source": "guidance",
+      "validation": "snapshot_bound"
+    },
+    {
+      "name": "operation_id",
+      "type": "nullable_operation_id",
+      "required": false,
+      "source": "request",
+      "validation": "project_bound"
+    },
+    {
+      "name": "server_action",
+      "type": "action_descriptor",
+      "required": false,
+      "source": "canonical_status_or_command_response",
+      "validation": "target_project_actor_session_revisions_confirmation_and_denials_must_match; guidance_is_not_authority"
+    }
+  ],
+  "finish_criteria": [
+    {
+      "id": "audit.snapshot",
+      "type": "one_revision_bound_snapshot",
+      "required": true
+    },
+    {
+      "id": "audit.history",
+      "type": "failed_and_open_evidence_are_retained",
+      "required": true
+    },
+    {
+      "id": "audit.gates",
+      "type": "open_satisfied_and_forced_gates_are_distinct",
+      "required": true
+    },
+    {
+      "id": "audit.next",
+      "type": "one_trusted_recovery_or_finish_action",
+      "required": true
+    },
+    {
+      "id": "audit.authority",
+      "type": "mutation_authorized_again_inside_canonical_transaction",
+      "required": true
+    }
+  ],
+  "next_refs": [
+    "boreal.workflow.health.v1",
+    "boreal.workflow.review.v1",
+    "boreal.workflow.finish.v1",
+    "boreal.workflow.route.v1"
+  ],
+  "state_transition_owner": "boreal.application.v2",
+  "required_server_actions": []
 }

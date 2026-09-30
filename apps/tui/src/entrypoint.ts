@@ -10,6 +10,7 @@ export interface TerminalLaunchOptions {
     readonly socket: string;
     readonly project: string;
     readonly actor: string;
+    readonly credential_ref?: string;
     readonly harness: string;
     readonly session: string;
     readonly work?: string;
@@ -48,11 +49,11 @@ export function parseTerminalArgs(argv: readonly string[]): TerminalLaunchOption
     const theme = argv.includes("--no-color") || process.env.NO_COLOR !== undefined ? "mono" : selectedTheme as "dark" | "light" | "mono";
     const density = flagValue(argv, "--density") ?? process.env.BOREAL_TUI_DENSITY ?? "auto";
     if (!["auto", "compact", "comfortable"].includes(density)) throw new Error("--density must be auto, compact, or comfortable");
-    return { density: density as Density, theme, plain: argv.includes("--plain") || process.env.TERM === "dumb" || process.env.BOREAL_PLAIN !== undefined, ascii: argv.includes("--ascii") || process.env.BOREAL_ASCII === "1", socket, project, actor, harness, session, work: flagValue(argv, "--work"), timeout_ms, interactive: argv.includes("--interactive") };
+    return { density: density as Density, theme, plain: argv.includes("--plain") || process.env.TERM === "dumb" || process.env.BOREAL_PLAIN !== undefined, ascii: argv.includes("--ascii") || process.env.BOREAL_ASCII === "1", socket, project, actor, credential_ref: process.env.BOREAL_CREDENTIAL, harness, session, work: flagValue(argv, "--work"), timeout_ms, interactive: argv.includes("--interactive") };
 }
 export async function mountAndRender(options: TerminalLaunchOptions, write: (value: string) => void): Promise<void> {
     const transport = new UnixSocketFramedTransport(options.socket, { timeout_ms: options.timeout_ms });
-    const client = new VersionedServiceClient(transport, { project_id: options.project, actor_id: options.actor, harness_id: options.harness, session_id: options.session });
+    const client = new VersionedServiceClient(transport, { project_id: options.project, actor_id: options.actor, credential_ref: options.credential_ref, harness_id: options.harness, session_id: options.session });
     const context: TuiWorkflowContext = { project_id: options.project, actor_id: options.actor, harness_id: options.harness, session_id: options.session };
     const controller = new MountedWorkflowController(client, { context });
     try {
@@ -87,7 +88,7 @@ export async function interactiveMountAndRender(options: TerminalLaunchOptions, 
 }
 export async function interactiveMountAndRenderWithTerminal(options: TerminalLaunchOptions, write: (value: string) => void, terminal: FullScreenTerminal): Promise<void> {
     const transport = new UnixSocketFramedTransport(options.socket, { timeout_ms: options.timeout_ms });
-    const client = new VersionedServiceClient(transport, { project_id: options.project, actor_id: options.actor, harness_id: options.harness, session_id: options.session });
+    const client = new VersionedServiceClient(transport, { project_id: options.project, actor_id: options.actor, credential_ref: options.credential_ref, harness_id: options.harness, session_id: options.session });
     const context: TuiWorkflowContext = { project_id: options.project, actor_id: options.actor, harness_id: options.harness, session_id: options.session };
     const controller = new MountedWorkflowController(client, { context });
     try {

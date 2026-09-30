@@ -129,7 +129,7 @@ test('focused inspector survives shrink and returns to the split layout after gr
     });
 });
 test('command views remain accessible without a rail, including the last choice',async()=>{
-    await session(24,6,async(c,t)=>{t.send('v\x1b[F');assert.match(visible(t),/> Tasks/);t.send('\r');assert.match(visible(t),/Tasks/);assert.equal(c.calls.length,0);});
+    await session(24,6,async(c,t)=>{t.send('v\x1b[F');assert.match(visible(t),/> Damaged/);t.send('\r');assert.match(visible(t),/Damaged/);assert.equal(c.calls.length,0);});
 });
 test('density and focus toggles never strand keyboard focus in a hidden rail',async()=>{
     await session(160,40,async(c,t)=>{t.send('\x1b[Zd');t.send('\x1b[B');assert.equal(c.data.route.work_id,'tui-101');t.send('z');assert.doesNotMatch(visible(t),/INSPECTOR/);t.send('z');assert.match(visible(t),/INSPECTOR/);});

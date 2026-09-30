@@ -33,6 +33,58 @@ struct GapSpec {
 // Keep this list close to the dispatch boundary. The registry is a product
 // contract, not a copy of the aspirational command-plan document.
 const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {path:"work checkpoint",syntax:"bwrk work checkpoint --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]",action:"mutate",output:"completion",direct:true,service:true,summary:"retain revision-bound checkpoint progress without fabricating acceptance evidence"},
+    CommandSpec {path:"memory reconcile",syntax:"bwrk memory reconcile OPERATION --yes --expected-revision N [--json]",action:"mutate",output:"memory",direct:true,service:true,summary:"reconcile SQLite with verified Git publication readback"},
+    CommandSpec {path:"memory draft",syntax:"bwrk memory draft [ID] --input PATH [--yes --expected-revision N] [--json]",action:"mutate",output:"memory",direct:true,service:true,summary:"durable cited memory through the application boundary"},
+    CommandSpec {path:"memory review",syntax:"bwrk memory review [ID] --input PATH [--yes --expected-revision N] [--json]",action:"mutate",output:"memory",direct:true,service:true,summary:"durable cited memory through the application boundary"},
+    CommandSpec {path:"memory publish",syntax:"bwrk memory publish [ID] --input PATH [--yes --expected-revision N] [--json]",action:"mutate",output:"memory",direct:true,service:true,summary:"durable cited memory through the application boundary"},
+    CommandSpec {path:"memory show",syntax:"bwrk memory show [ID] --input PATH [--yes --expected-revision N] [--json]",action:"read",output:"memory",direct:true,service:true,summary:"durable cited memory through the application boundary"},
+    CommandSpec {path:"memory search",syntax:"bwrk memory search [ID] --input PATH [--yes --expected-revision N] [--json]",action:"read",output:"memory",direct:true,service:true,summary:"durable cited memory through the application boundary"},
+    CommandSpec {path:"memory readback",syntax:"bwrk memory readback [ID] --input PATH [--yes --expected-revision N] [--json]",action:"read",output:"memory",direct:true,service:true,summary:"durable cited memory through the application boundary"},
+    CommandSpec {path:"intake capture",syntax:"bwrk intake capture [ARGS] [--json]",action:"mutate",output:"intake",direct:true,service:false,summary:"project-scoped intake through the canonical application"},
+    CommandSpec {path:"intake bucket",syntax:"bwrk intake bucket [ARGS] [--json]",action:"mutate",output:"intake",direct:true,service:false,summary:"project-scoped intake through the canonical application"},
+    CommandSpec {path:"intake show",syntax:"bwrk intake show [ARGS] [--json]",action:"read",output:"intake",direct:true,service:false,summary:"project-scoped intake through the canonical application"},
+    CommandSpec {path:"intake list",syntax:"bwrk intake list [ARGS] [--json]",action:"read",output:"intake",direct:true,service:false,summary:"project-scoped intake through the canonical application"},
+    CommandSpec { path: "cycle list", syntax: "bwrk cycle list [ID] [--json]", action: "read", output: "planning", direct: true, service: true, summary: "read revision-consistent cycle planning" },
+    CommandSpec { path: "cycle board", syntax: "bwrk cycle board [ID] [--json]", action: "read", output: "planning", direct: true, service: true, summary: "read revision-consistent cycle planning" },
+    CommandSpec { path: "cycle report", syntax: "bwrk cycle report [ID] [--json]", action: "read", output: "planning", direct: true, service: true, summary: "read revision-consistent cycle planning" },
+    CommandSpec { path: "cycle create", syntax: "bwrk cycle create [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "cycle activate", syntax: "bwrk cycle activate [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "cycle close", syntax: "bwrk cycle close [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "cycle cancel", syntax: "bwrk cycle cancel [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "cycle assign", syntax: "bwrk cycle assign [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "cycle commit", syntax: "bwrk cycle commit [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "cycle remove", syntax: "bwrk cycle remove [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "cycle carry-over", syntax: "bwrk cycle carry-over [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "cycle map-legacy", syntax: "bwrk cycle map-legacy [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "sprint list", syntax: "bwrk sprint list [ID] [--json]", action: "read", output: "planning", direct: true, service: true, summary: "read revision-consistent cycle planning" },
+    CommandSpec { path: "sprint board", syntax: "bwrk sprint board [ID] [--json]", action: "read", output: "planning", direct: true, service: true, summary: "read revision-consistent cycle planning" },
+    CommandSpec { path: "sprint report", syntax: "bwrk sprint report [ID] [--json]", action: "read", output: "planning", direct: true, service: true, summary: "read revision-consistent cycle planning" },
+    CommandSpec { path: "sprint create", syntax: "bwrk sprint create [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "sprint activate", syntax: "bwrk sprint activate [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "sprint close", syntax: "bwrk sprint close [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "sprint cancel", syntax: "bwrk sprint cancel [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "sprint assign", syntax: "bwrk sprint assign [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "sprint commit", syntax: "bwrk sprint commit [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "sprint remove", syntax: "bwrk sprint remove [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "sprint carry-over", syntax: "bwrk sprint carry-over [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "sprint map-legacy", syntax: "bwrk sprint map-legacy [ID] --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "planning", direct: true, service: true, summary: "apply an authenticated, revision-bound cycle operation" },
+    CommandSpec { path: "review approve", syntax: "bwrk review approve --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound review approve through canonical server action policy" },
+    CommandSpec { path: "review reject", syntax: "bwrk review reject --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound review reject through canonical server action policy" },
+    CommandSpec { path: "review return", syntax: "bwrk review return --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound review return through canonical server action policy" },
+    CommandSpec { path: "review revoke", syntax: "bwrk review revoke --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound review revoke through canonical server action policy" },
+    CommandSpec { path: "exception grant", syntax: "bwrk exception grant --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound exception grant through canonical server action policy" },
+    CommandSpec { path: "exception revoke", syntax: "bwrk exception revoke --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound exception revoke through canonical server action policy" },
+    CommandSpec { path: "dep waive", syntax: "bwrk dep waive --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound dep waive through canonical server action policy" },
+    CommandSpec { path: "work reopen", syntax: "bwrk work reopen --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound work reopen through canonical server action policy" },
+    CommandSpec { path: "work cancel", syntax: "bwrk work cancel --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound work cancel through canonical server action policy" },
+    CommandSpec { path: "work retry", syntax: "bwrk work retry --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound work retry through canonical server action policy" },
+    CommandSpec { path: "work publish", syntax: "bwrk work publish --work ID --input PATH --expected-revision N --reason TEXT --yes [--json]", action: "mutate", output: "completion", direct: true, service: true, summary: "revision-bound work publish through canonical server action policy" },
+    CommandSpec { path: "auth show", syntax: "bwrk auth show [--input PATH] [--expected-revision N --reason TEXT --yes] [--json]", action: "read", output: "principal", direct: true, service: false, summary: "show authenticated principal and delegation root" },
+    CommandSpec { path: "auth key", syntax: "bwrk auth key [--input PATH] [--expected-revision N --reason TEXT --yes] [--json]", action: "mutate", output: "principal", direct: true, service: false, summary: "create a local enrollment key without granting authority" },
+    CommandSpec { path: "auth bootstrap", syntax: "bwrk auth bootstrap [--input PATH] [--expected-revision N --reason TEXT --yes] [--json]", action: "mutate", output: "principal", direct: true, service: false, summary: "owner-only bootstrap for an initialized pre-key workspace" },
+    CommandSpec { path: "auth grant", syntax: "bwrk auth grant [--input PATH] [--expected-revision N --reason TEXT --yes] [--json]", action: "mutate", output: "principal", direct: true, service: false, summary: "grant or rotate a revision-bound project principal credential" },
+    CommandSpec { path: "auth revoke", syntax: "bwrk auth revoke [--input PATH] [--expected-revision N --reason TEXT --yes] [--json]", action: "mutate", output: "principal", direct: true, service: false, summary: "revoke a project credential or delegation subtree" },
     CommandSpec {
         path: "commands",
         syntax: "bwrk commands [PATH] [--json]",
@@ -84,7 +136,7 @@ const COMMANDS: &[CommandSpec] = &[
         action: "mutate",
         output: "project",
         direct: true,
-        service: true,
+        service: false,
         summary: "initialize and scaffold a project; prompts for agent skill targets in a terminal",
     },
     CommandSpec {
@@ -526,16 +578,17 @@ const COMMANDS: &[CommandSpec] = &[
 // used yet, rather than guessing at an adapter or falling back to SQLite.
 const GAPS: &[GapSpec] = &[
     GapSpec {
-        path: "summary|review",
+        path: "summary",
         code: "closeout_routes_not_implemented",
-        summary: "typed summary/review records are currently reachable through finish_close only",
+        summary: "typed summary creation is available through the finish/close workflow",
         owner: "closeout",
         scope: "family",
     },
     GapSpec {
-        path: "memory|migration",
+        path: "migration",
         code: "knowledge_routes_not_implemented",
-        summary: "memory and migration still need public application/CLI adapters",
+        summary:
+            "migration materialization is still staged only; do not treat a dry run as applied",
         owner: "integration",
         scope: "family",
     },
@@ -546,62 +599,6 @@ const GAPS: &[GapSpec] = &[
 // surface for discovery and help: a grouped description must not make a real
 // route such as `dep add` or `source show` appear to be unknown.
 const UNAVAILABLE_ROUTES: &[GapSpec] = &[
-    GapSpec {
-        path: "cycle board",
-        code: "work_model_v3_not_enabled",
-        summary: "cycle boards are future capability; v2 scheduling remains the sprint facade",
-        owner: "planning",
-        scope: "route",
-    },
-    GapSpec {
-        path: "cycle report",
-        code: "work_model_v3_not_enabled",
-        summary: "cycle reports are future capability; v2 scheduling remains the sprint facade",
-        owner: "planning",
-        scope: "route",
-    },
-    GapSpec {
-        path: "cycle create",
-        code: "cycle_create_not_implemented",
-        summary: "cycle persistence is awaiting the complete v3 application/store adapter",
-        owner: "planning",
-        scope: "route",
-    },
-    GapSpec {
-        path: "cycle activate",
-        code: "cycle_activate_not_implemented",
-        summary: "cycle activation requires a durable expected-revision mutation",
-        owner: "planning",
-        scope: "route",
-    },
-    GapSpec {
-        path: "sprint create",
-        code: "sprint_create_not_implemented",
-        summary: "sprint is a compatibility planning façade awaiting cycle persistence",
-        owner: "planning",
-        scope: "route",
-    },
-    GapSpec {
-        path: "sprint activate",
-        code: "sprint_activate_not_implemented",
-        summary: "sprint activation is awaiting durable cycle assignment semantics",
-        owner: "planning",
-        scope: "route",
-    },
-    GapSpec {
-        path: "sprint board",
-        code: "sprint_board_not_implemented",
-        summary: "sprint board is awaiting the canonical cycle projection",
-        owner: "planning",
-        scope: "route",
-    },
-    GapSpec {
-        path: "sprint report",
-        code: "sprint_report_not_implemented",
-        summary: "sprint report is awaiting the canonical cycle projection",
-        owner: "planning",
-        scope: "route",
-    },
     GapSpec {
         path: "intake note",
         code: "intake_note_not_implemented",
@@ -627,34 +624,6 @@ const UNAVAILABLE_ROUTES: &[GapSpec] = &[
         path: "intake revisit",
         code: "intake_revisit_not_implemented",
         summary: "use intake capture --kind revisit; this compatibility alias is not exposed",
-        owner: "knowledge",
-        scope: "route",
-    },
-    GapSpec {
-        path: "intake list",
-        code: "work_model_v3_not_enabled",
-        summary: "v2 does not expose additive intake rows; use work create for accepted work",
-        owner: "knowledge",
-        scope: "route",
-    },
-    GapSpec {
-        path: "intake show",
-        code: "work_model_v3_not_enabled",
-        summary: "v2 does not expose additive intake rows; use work show for accepted work",
-        owner: "knowledge",
-        scope: "route",
-    },
-    GapSpec {
-        path: "intake bucket",
-        code: "work_model_v3_not_enabled",
-        summary: "v2 does not expose additive intake buckets or install work-model/3 implicitly",
-        owner: "knowledge",
-        scope: "route",
-    },
-    GapSpec {
-        path: "intake capture",
-        code: "work_model_v3_not_enabled",
-        summary: "v2 does not expose additive intake capture or install work-model/3 implicitly",
         owner: "knowledge",
         scope: "route",
     },
@@ -727,13 +696,6 @@ const UNAVAILABLE_ROUTES: &[GapSpec] = &[
         summary: "independent review decisions are not exposed as a public route",
         owner: "closeout",
         scope: "route",
-    },
-    GapSpec {
-        path: "memory",
-        code: "memory_routes_not_implemented",
-        summary: "memory draft, review, publication, and search routes need application adapters",
-        owner: "integration",
-        scope: "family",
     },
     GapSpec {
         path: "migration",
@@ -1038,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn source_routes_are_direct_only_and_memory_remains_a_gap() {
+    fn source_and_durable_memory_routes_are_advertised_truthfully() {
         let source = registry_result(Some("source show")).unwrap();
         let source_data = source.data.unwrap();
         let route = source_data["available"][0].clone();
@@ -1049,10 +1011,8 @@ mod tests {
 
         let memory = registry_result(Some("memory")).unwrap();
         let memory_data = memory.data.unwrap();
-        let gap = memory_data["unavailable_routes"][0].clone();
-        assert_eq!(gap["path"], "memory");
-        assert_eq!(gap["availability"], "unavailable");
-        assert_eq!(gap["recovery"]["kind"], "implementation_gap");
+        assert_eq!(memory_data["available"].as_array().unwrap().len(), 7);
+        assert!(memory_data["unavailable"].as_array().unwrap().is_empty());
     }
 
     #[test]

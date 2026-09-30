@@ -1,0 +1,531 @@
+{
+  "schema_version": "boreal.archive-manifest.v1",
+  "archive_id": "boreal-v2-implementation-overlay",
+  "archive_directory": "boreal-v2",
+  "source_commit": "abf87bb528b55632499bb246c10aeb902680a582",
+  "source_branch": "codex/apply-responsive-terminal-overlay",
+  "source_dirty": true,
+  "source_label": "Changed/new source overlay against the supplied dirty-worktree archive",
+  "base_archive": "boreal-v2-reference-20260923T192943842Z.zip",
+  "base_sha256": "6be4b35f0b20cbddd3c4eded6b7a5194a7f2c961b3f6eb124312d1341aedef04",
+  "base_source_dirty": true,
+  "implementation_git_history": "No original implementation commits available; no commit IDs claimed",
+  "deletions": [],
+  "protected_paths": [
+    ".git",
+    ".boreal",
+    "memory",
+    "target",
+    "node_modules",
+    "test-project"
+  ],
+  "files": [
+    {
+      "path": "REFERENCE_INDEX.md",
+      "sha256": "c7ee68679cf925a5dd6376770abb890c0ed0e38eb4b3d5497e3d3180d930a6b0",
+      "bytes": 115130,
+      "mode": 420
+    },
+    {
+      "path": "apps/tui/installer/wizard.cjs",
+      "sha256": "1d49682048c666cf85adff44c3a3505a2ae0d88b856a51b264256dfcd7c3604a",
+      "bytes": 49630,
+      "mode": 420
+    },
+    {
+      "path": "apps/tui/src/client.ts",
+      "sha256": "ebcf33d9020a271da5191791766f24ef1273735aa5ad2fd6fbf22aa877e72096",
+      "bytes": 93091,
+      "mode": 420
+    },
+    {
+      "path": "apps/tui/src/entrypoint.ts",
+      "sha256": "317f48dda6793dfb7b6af317835e976a4bef894756fa93e0a1ba871cef80ec8c",
+      "bytes": 8454,
+      "mode": 420
+    },
+    {
+      "path": "apps/tui/src/test.ts",
+      "sha256": "7aa5ac75f519535528f086ac08a122e8a24b9d8e0353b1b14a3771705ec8e49b",
+      "bytes": 77629,
+      "mode": 420
+    },
+    {
+      "path": "apps/tui/src/ui/dashboard.ts",
+      "sha256": "b49e1487de3e0fd0c590f51ddd4d698752e83c8a164b0cab4c09f3e80a9567c7",
+      "bytes": 26948,
+      "mode": 420
+    },
+    {
+      "path": "apps/tui/src/ui/model.ts",
+      "sha256": "80a590125b71333a1ea0cbe7e73cc47c021c37b9ca07a671dff82efec497918f",
+      "bytes": 8751,
+      "mode": 420
+    },
+    {
+      "path": "apps/tui/src/ui/screen.ts",
+      "sha256": "3e182a54903a051ff04b5836cb542291acbc9c62bc715ab4ece814526583f028",
+      "bytes": 5256,
+      "mode": 420
+    },
+    {
+      "path": "apps/tui/tests/fixtures.mjs",
+      "sha256": "756fe9e3e7159d1545374a09593f291f2bc7383771bae902a221a798ac1708d6",
+      "bytes": 7663,
+      "mode": 420
+    },
+    {
+      "path": "apps/tui/tests/responsive.test.mjs",
+      "sha256": "560c829feaadd84b2b5059f81c81f5c40fdee3476a038aeae42baa6cab3d7d31",
+      "bytes": 15398,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/completion.rs",
+      "sha256": "a2e00e73f2b6b42d301b385607fb7c8d7c55318cece875bbdeaa0179dda0cd8b",
+      "bytes": 1685,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/cycle_runtime.rs",
+      "sha256": "89fa003cd3ad94205431da32c0d0991b65278e084351905547c786a03ee62b98",
+      "bytes": 3817,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/decision_wire.rs",
+      "sha256": "bdc0741dfc90fbb37795b95f103a4b566f5f929384442b98ba1761d47773882e",
+      "bytes": 16105,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/evidence_store.rs",
+      "sha256": "1db45ad71f1429c61998e596a0f024c1376b3e4a71ac9b8992df5feca1b8df28",
+      "bytes": 89811,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/guidance.rs",
+      "sha256": "2fb635408d44169e1c4ca4366f3d3eadc2d765796d7d610ea0ea8df8721bcfa9",
+      "bytes": 12935,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/hierarchy.rs",
+      "sha256": "03c8a1fab99742894d94d9799007680ab2832bf09cbad866585f991e651669fc",
+      "bytes": 42789,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/knowledge.rs",
+      "sha256": "94c62243dc039eb5564e572a2dc073d1a99b49f577fc48938a7014f3928ee1a2",
+      "bytes": 62843,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/lib.rs",
+      "sha256": "c0887d5cda913b279158b2bab1866325e49e79209492e4759a8175c9e336ade2",
+      "bytes": 33146,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/status.rs",
+      "sha256": "131cc1a392e8792eb7ff458298098759ea9a835542c9b5fefae0b6517ebb7551",
+      "bytes": 38637,
+      "mode": 420
+    },
+    {
+      "path": "crates/application/src/workflow_assets.rs",
+      "sha256": "4d3d1053e770f1865ba8a8e34b5329cd86b55fab562b347d56b457673b868f17",
+      "bytes": 15180,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/authority.rs",
+      "sha256": "c375ea669b5d96659cf2fee63d6999cc18b2549598e0c716a256700b5fc1b129",
+      "bytes": 5724,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/command_registry.rs",
+      "sha256": "534ff9d6b9538976eb72259c882d1056a3f0601c49e9bd6b87f3f077fb752754",
+      "bytes": 46063,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/completion_commands.rs",
+      "sha256": "5d841e0151ee3f26be3d846dbbe628076f6a2149bea94fd5e8c5a2e171ec6539",
+      "bytes": 3941,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/credentials.rs",
+      "sha256": "9990027a69f193a09b807b3684412fed0e0dbc3f575dbb0527db06e2524ec6ad",
+      "bytes": 5599,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/cycle_commands.rs",
+      "sha256": "a3de885a0594903a720ebe9f6bb1074933121f855a7c52d4c7bd682a7b5626e4",
+      "bytes": 6261,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/dashboard.rs",
+      "sha256": "869685228b5fe928ff967480a2a3dd2a50711f4b399894c37050c1137dde34df",
+      "bytes": 44955,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/main.rs",
+      "sha256": "440f48c24f0822752f2c708ff647c130eea886cf62966f176d997fdb90981f75",
+      "bytes": 324338,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/memory_commands.rs",
+      "sha256": "fa978d78410b61e88e0fe286d409389aeb77f0335e3890568248bce1f9d2d2bd",
+      "bytes": 8673,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/project_context.rs",
+      "sha256": "b5a1c17a1a18ecacf029391ee26386278a803e5ab651ad5be39367d2f2bf54d8",
+      "bytes": 5210,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/service.rs",
+      "sha256": "ecadf09c036865f1f6f03df68d44268af32d88c1b6c6f08c123926a124715923",
+      "bytes": 273461,
+      "mode": 420
+    },
+    {
+      "path": "crates/cli/src/setup.rs",
+      "sha256": "4bdb4aa13f14ef9c7acde618b33c08d390b05f3402539481adad7a7fc77a3153",
+      "bytes": 32108,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/src/actions.rs",
+      "sha256": "01b52cc0245e1e8acb8efee79262fd8726d8d51e9513910230784c6b6c1738d4",
+      "bytes": 40452,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/src/completion.rs",
+      "sha256": "f41f4fa475b514c89221f134f0756a257a2739eb17ace8b3ace2f1921772a378",
+      "bytes": 2751,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/src/decision_inputs.rs",
+      "sha256": "ba29e0191812fe022bdc20375580d2b2cca42be97b8721713e7d69c3ea713be1",
+      "bytes": 44333,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/src/lib.rs",
+      "sha256": "a678d69204bcfc980b78f30f6931f92c715971ff5210efdad3dd2f9009041fc8",
+      "bytes": 50947,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/src/maintenance.rs",
+      "sha256": "b33bdae0f30f6540dba179b2b2b9883a9a09361f932e8c72744feb01bee22739",
+      "bytes": 970,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/src/status_evaluator.rs",
+      "sha256": "004ba63135e85e0918d4d675cd4317ca1a45ddc00359ac2f7ded51ebd2b4a69e",
+      "bytes": 21095,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/src/work_model_v3.rs",
+      "sha256": "e49a9ec8427969a1a08ddf8c94808d832a626a5570229290ea916a6c18d6465b",
+      "bytes": 41589,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/tests/production_action_policy.rs",
+      "sha256": "e15686b550f8876ccf518b594a82f420f3fe90942510a29817b104702c4bbdca",
+      "bytes": 15786,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/tests/production_decision_inputs.rs",
+      "sha256": "c785ee82f16a9b4eef2efefd06aa963a22a3162464a8d9805206dbb2cbe8ea1b",
+      "bytes": 12764,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/tests/production_domain_api.rs",
+      "sha256": "3ac37a0bccd4f62cdcb5e525858767caab56ee26f62b9ade5cc891e9d47fcc62",
+      "bytes": 14781,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/tests/production_properties.rs",
+      "sha256": "264d59c8bbb7bff74c1d46ccd20e570b3bc1612222f09b815f6f32598eb79a1e",
+      "bytes": 138921,
+      "mode": 420
+    },
+    {
+      "path": "crates/domain/tests/production_t10_oracle.rs",
+      "sha256": "dff43117eb49c9f3145b845ab9b089c4aac5cca61ce152e4c6205260f83eb2b7",
+      "bytes": 19708,
+      "mode": 420
+    },
+    {
+      "path": "crates/memory/src/lib.rs",
+      "sha256": "9b1e7ed0db5272474e68851685ab8bc9a7222496d2aae92f41e2a63c9941c288",
+      "bytes": 134391,
+      "mode": 420
+    },
+    {
+      "path": "crates/migration/src/lib.rs",
+      "sha256": "86e0d8321e5c2a272383322c90b0cdeb210aa6bd73a4a5498b2cfd7dde932d88",
+      "bytes": 82281,
+      "mode": 420
+    },
+    {
+      "path": "crates/protocol/src/models.rs",
+      "sha256": "1d3ac17571bb1ea3c428ad7255c5537c730454de938ce50fb2aae94e78123aff",
+      "bytes": 19755,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/acceptance.rs",
+      "sha256": "1dc8983c601db540d28bbc4d9f29073b44b083f57ccea14f013d5f37b2019ba5",
+      "bytes": 28438,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/completion.rs",
+      "sha256": "65f05b79a9fceb3236a716ec7f694ea930fb1190c6a6a04c2e44f1a735354832",
+      "bytes": 26634,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/completion_migrations.rs",
+      "sha256": "3dd2751b15c3dadb1ff01a08b3c421691f46ac90d62dca89d86ecc49150ea5c0",
+      "bytes": 6080,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/cycle_commands.rs",
+      "sha256": "b14d0bf0a4172d40f1d9b222a80a29cd0d1e9fe047455d32869e5529a4f9d59a",
+      "bytes": 19446,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/jobs.rs",
+      "sha256": "294e515538c1d439c5b3fdd990589f86d82bcce31bc487e5136b472701c1dc34",
+      "bytes": 34086,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/lib.rs",
+      "sha256": "95bd6778e19935cd352b6508f18887b36ed9b4f24c27345c1459acc25e3fb526",
+      "bytes": 506912,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/maintenance.rs",
+      "sha256": "aa7350c0c314b7229ca515213520a23cf666046fa4f445dd10459c4a7bec73e5",
+      "bytes": 11225,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/memory.rs",
+      "sha256": "f8add6da7531095872a393219494e747d33c9e375526890a6ec12308554499ec",
+      "bytes": 17237,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/principals.rs",
+      "sha256": "d9e1e192c4420d709387504b5e6f4f95f00a5e17764a59fdfa900b6edd591fdf",
+      "bytes": 19305,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/status_evaluation.rs",
+      "sha256": "a5f72ebac91717d301bf4fea9212c1de7e40d8cbca6a12be0d6d39672c1b1a0d",
+      "bytes": 22024,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/status_facts.rs",
+      "sha256": "4706cfd51944ba2c635a99868276909d211a69ec4acf26300a17b10a46504a85",
+      "bytes": 17666,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/src/work_model_v3.rs",
+      "sha256": "c934d84ae9fbc77b9a069d3aad9afce0c8689e5e9e7c7a7ddda5706288452224",
+      "bytes": 48593,
+      "mode": 420
+    },
+    {
+      "path": "crates/store/tests/schema_v3.rs",
+      "sha256": "f17066a0f997742e4b24fa136ef12b5db514e3453b20c9a7b51f6e29c3643518",
+      "bytes": 40519,
+      "mode": 420
+    },
+    {
+      "path": "handoff/delivery/CHANGED_FILES.tsv",
+      "sha256": "6ae555c31a78c857458a7be8418d8143e89b5c9894ebd43cea2dda756766cfa9",
+      "bytes": 9839,
+      "mode": 420
+    },
+    {
+      "path": "handoff/delivery/IMPLEMENTATION_REPORT.md",
+      "sha256": "c9f0c58650cfa16fe58e263b49be403660cb2d272a559f63cd0d28c948dd92c9",
+      "bytes": 27472,
+      "mode": 420
+    },
+    {
+      "path": "handoff/delivery/MINI_GIT_LOG.md",
+      "sha256": "7b5ac03c420a2ca0ca28cb3784de7f3dc0bb1ad3daa0c322a1d743f309e87b7c",
+      "bytes": 2960,
+      "mode": 420
+    },
+    {
+      "path": "install.sh",
+      "sha256": "2f6c6b7a525a07d024a889f7e7287ba95d95f02870f6f55dd69f7b6a4d83f00f",
+      "bytes": 70170,
+      "mode": 493
+    },
+    {
+      "path": "project/spec/schema-completion-v2.sql",
+      "sha256": "0d2641809c89c02eff4196f4ac7d042147936cb81eb2bc7a6eca66234cec50e2",
+      "bytes": 8230,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/schema-completion-v3.sql",
+      "sha256": "c1b36f8a34596d4b8da286c93adf5946326d2eb8bf2a7cf3e388bed164b1bbf9",
+      "bytes": 622,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/schema-completion-v4.sql",
+      "sha256": "cf7072e65dfd6481e030a8681afdbcf030913e1fd1472000a68bc5224b613ca8",
+      "bytes": 10832,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/schema-completion-v5.sql",
+      "sha256": "5a5c2eaaa3a1a2cb3326631f819a65b1cec1eecaf2bf5a452aa810e323dd7760",
+      "bytes": 2999,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/schema-completion-v6.sql",
+      "sha256": "089542821b024e107b4763fa2c899e56fb7e2267420bad61b525b80c7a5714e6",
+      "bytes": 2438,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/audit.json",
+      "sha256": "358a44fae1a393fc95977ff7cd1971b16bfac82c8f77280f149bdd575c316d6c",
+      "bytes": 2603,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/claim.json",
+      "sha256": "e2f0f2f39b894ea2efc9619041b331ff4f6730eae72d6821d600b7bca5f26332",
+      "bytes": 3751,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/context.json",
+      "sha256": "b7ebe60ca7dff2f4ed4ae4766ade08bf12421ede415ed53ed5b6ba4c8c7a8fd0",
+      "bytes": 3250,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/finish.json",
+      "sha256": "c31d31bc00cc56320acab29395b143b5d0865cba8783917833ec2651222ca3f7",
+      "bytes": 3684,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/handoff.json",
+      "sha256": "b764e969a6dab4974cf057ebabc347856b4c934132ebb0e040775c96cccef051",
+      "bytes": 3303,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/health.json",
+      "sha256": "ff20418c6fa837caa5bd4cf3eb17e34219cf6774b9edf68b122258903eadb895",
+      "bytes": 2443,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/memory.json",
+      "sha256": "74679a157154314a24debb50d13fed7661b5545fe365f9ecf4d350380e0c1f9d",
+      "bytes": 3356,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/package.json",
+      "sha256": "8e4a4ab44c73766e32d6203a7fcba3e271bce837b8094d1e157c1403eb577c7a",
+      "bytes": 1610,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/plan.json",
+      "sha256": "202e3a665a21059b010b5787475d597f8cbe25ced5b85c4c5c1480a7f059142a",
+      "bytes": 3599,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/review.json",
+      "sha256": "e33a3bd21262198b7c66409d636883244e6aa623fcdd7708c9dc95ed690fcbdf",
+      "bytes": 2812,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/route.json",
+      "sha256": "ba41fed9001cdd5c2a56e1e826cad6b57f45800a494720c5fe28337c33373e30",
+      "bytes": 2460,
+      "mode": 420
+    },
+    {
+      "path": "project/spec/workflows/validator.py",
+      "sha256": "bb68ce876b093d51464c860aab2dad98add179a144fed629b99c2ea2bc09fd1b",
+      "bytes": 24826,
+      "mode": 420
+    },
+    {
+      "path": "scripts/release/build_release.py",
+      "sha256": "2228a993dcda9a196d3c5b1a88f7b7bd910b57dacd6b3e13655c4badffa05647",
+      "bytes": 14492,
+      "mode": 493
+    },
+    {
+      "path": "scripts/release/package-smoke.sh",
+      "sha256": "121986b444726d992e1c940d5426052a0a512850b53d4cc71d36276073275600",
+      "bytes": 2169,
+      "mode": 493
+    },
+    {
+      "path": "scripts/release/two-project-smoke.py",
+      "sha256": "c86e0108654ebf801d555d7a84bc20e843c09e86d251f5f2a688ffd21b2cd10b",
+      "bytes": 4127,
+      "mode": 420
+    }
+  ],
+  "file_count": 83,
+  "metadata_files": [
+    "ARCHIVE_MANIFEST.json",
+    "handoff/delivery/OVERLAY_MANIFEST.json"
+  ],
+  "hash_exclusions": {
+    "ARCHIVE_MANIFEST.json": "Root manifest hashes this nested manifest; excluding root avoids a circular hash.",
+    "handoff/delivery/OVERLAY_MANIFEST.json": "A manifest cannot contain a hash of itself. The root manifest verifies its exact bytes."
+  }
+}

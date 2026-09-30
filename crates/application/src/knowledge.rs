@@ -33,7 +33,7 @@ use boreal_source::{
     RetrievalResponse as SourceRetrievalResponse, SourceCaptureReceipt, SourceCaptureRequest,
     SourceCatalog, SourceError, SourceVersion,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 use boreal_store::{
     identity::IdentityContext,
@@ -55,6 +55,8 @@ pub enum KnowledgeDurability {
     SourceCatalog,
     /// A reviewed memory entry was committed to the managed Git repository.
     GitCommit,
+    /// The immutable draft/review or publication admission is persisted in SQLite.
+    CanonicalStore,
     /// The operation only produced an in-memory application result.
     InMemory,
     /// The operation produced a validated staging document, but no live store
@@ -689,8 +691,35 @@ impl<'a> KnowledgeApplication<'a> {
                 "only an accepted memory review may be published".to_owned(),
             ));
         }
-        let expected_identity = publication_identity(&reviewed.draft, &input.operation_id)
-            .map_err(PublishError::from)?;
+        let mut expected_identity =
+            publisher.publication_request_identity(&reviewed.draft, &input.operation_id)?;
+        if let Some((manifest, content)) =
+            store.memory_publication_plan(&identity.project_id, &input.operation_id)?
+        {
+            expected_identity.manifest_identity = manifest;
+            expected_identity.content_digest = content;
+        }
+        if store.is_canonical_production() {
+            let (stored, decision) = store
+                .approved_memory_draft(&identity.project_id, &reviewed.operation.operation_id)?;
+            if stored.entry_id != reviewed.draft.entry_id
+                || stored.title != reviewed.draft.title
+                || stored.body != reviewed.draft.body
+                || decision.actor_id != reviewed.reviewer_id
+                || stored.citations_json != citations_json(&reviewed.draft.citations).to_string()
+            {
+                return Err(KnowledgeError::Invalid(
+                    "supplied memory result differs from durable reviewed content".into(),
+                ));
+            }
+            store.validate_memory_publication_binding(
+                &identity.project_id,
+                &input.operation_id,
+                &reviewed.operation.operation_id,
+                &publisher.root().path().to_string_lossy(),
+                input.expected_manifest_identity.as_deref(),
+            )?;
+        }
         let memory_root_identity = publisher.root().path().to_string_lossy().into_owned();
         let source_identity = input.source_identity.clone().or_else(|| {
             reviewed
@@ -709,12 +738,10 @@ impl<'a> KnowledgeApplication<'a> {
                 "memory_root_identity": memory_root_identity,
                 "expected_manifest_identity": input.expected_manifest_identity,
                 "review_operation_id": reviewed.operation.operation_id,
+                "expected_revision": store.operation(&input.operation_id)?.and_then(|operation|operation.expected_revision),
                 "actor_id": input.actor_id,
                 "session_id": input.session_id,
                 "deadline": input.deadline,
-                "created_at": input.created_at,
-                "started_at": input.started_at,
-                "observed_at": input.observed_at,
                 "source_identity": source_identity,
                 "config_identity": input.config_identity,
             }),
@@ -1373,5 +1400,331 @@ mod tests {
     fn current_migration_format_is_detected_without_heuristic_loss() {
         let input = serde_json::json!({"format": FORMAT, "version": FORMAT_VERSION});
         assert!(!input_contains_format(&input.to_string(), LEGACY_FORMAT));
+    }
+}
+
+fn citations_json(citations: &[boreal_memory::Citation]) -> Value {
+    json!(citations
+        .iter()
+        .map(|c| json!({"source_version_id":c.source_version_id,"location":c.location}))
+        .collect::<Vec<_>>())
+}
+fn stored_draft(record: &boreal_store::memory::MemoryDraftRecord) -> Result<Draft, KnowledgeError> {
+    let values: Value = serde_json::from_str(&record.citations_json)
+        .map_err(|e| KnowledgeError::Invalid(e.to_string()))?;
+    let digest=sha256_content_digest(json!({"draft_id":record.draft_id,"entry_id":record.entry_id,"title":record.title,"body":record.body,"citations":values}).to_string().as_bytes());
+    if digest != record.content_digest {
+        return Err(KnowledgeError::Invalid(
+            "stored memory content digest differs".into(),
+        ));
+    }
+
+    let values = values
+        .as_array()
+        .ok_or_else(|| KnowledgeError::Invalid("stored citations are not an array".into()))?;
+    let citations = values
+        .iter()
+        .map(|value| {
+            Ok(boreal_memory::Citation {
+                source_version_id: value
+                    .get("source_version_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| KnowledgeError::Invalid("citation source missing".into()))?
+                    .into(),
+                location: value
+                    .get("location")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| KnowledgeError::Invalid("citation location missing".into()))?
+                    .into(),
+            })
+        })
+        .collect::<Result<Vec<_>, KnowledgeError>>()?;
+    Ok(Draft::new(
+        &record.project_id,
+        &record.entry_id,
+        &record.title,
+        &record.body,
+        citations,
+    )?)
+}
+impl KnowledgeApplication<'_> {
+    pub fn persist_memory_draft(
+        &self,
+        store: &SqliteStore,
+        context: &boreal_store::V3MutationContext,
+        draft_id: &str,
+        input: MemoryDraftInput,
+    ) -> Result<boreal_store::MutationResult, KnowledgeError> {
+        if input.project_id != context.project_id || input.operation_id != context.operation_id {
+            return Err(KnowledgeError::Invalid(
+                "memory draft context mismatch".into(),
+            ));
+        }
+        let draft = self.draft_memory(input)?.draft;
+        for citation in &draft.citations {
+            let verification =
+                self.verify_source(&draft.project_id, &citation.source_version_id)?;
+            if verification.verified_digest.is_none() {
+                return Err(KnowledgeError::Invalid(
+                    "citation source bytes are unavailable or damaged".into(),
+                ));
+            }
+        }
+        let citations = citations_json(&draft.citations);
+        let content_digest=sha256_content_digest(json!({"draft_id":draft_id,"entry_id":draft.entry_id,"title":draft.title,"body":draft.body,"citations":citations}).to_string().as_bytes());
+        Ok(store.record_memory_draft(
+            context,
+            &boreal_store::memory::MemoryDraftRecord {
+                project_id: context.project_id.clone(),
+                draft_id: draft_id.into(),
+                entry_id: draft.entry_id,
+                title: draft.title,
+                body: draft.body,
+                citations_json: citations.to_string(),
+                content_digest,
+                actor_id: context.actor_id.clone(),
+                project_revision: 0,
+            },
+        )?)
+    }
+    pub fn publish_durable_memory(
+        &self,
+        store: &SqliteStore,
+        identity: &IdentityContext,
+        context: &boreal_store::V3MutationContext,
+        root: impl AsRef<Path>,
+        review_id: &str,
+        expected_manifest: &str,
+    ) -> Result<MemoryPublicationResult, KnowledgeError> {
+        let (record, review) = store.approved_memory_draft(&identity.project_id, review_id)?;
+        let draft = stored_draft(&record)?.review(true);
+        for citation in &draft.citations {
+            if self
+                .verify_source(&draft.project_id, &citation.source_version_id)?
+                .verified_digest
+                .is_none()
+            {
+                return Err(KnowledgeError::Invalid(
+                    "publication source verification failed".into(),
+                ));
+            }
+        }
+        let root = boreal_memory::MemoryRoot::new(root.as_ref())?;
+        let binding = boreal_store::identity::IdentityStore::new(store)
+            .workspace_binding(&identity.project_id)
+            .map_err(|e| KnowledgeError::Invalid(e.to_string()))?;
+        if !root.path().starts_with(binding.canonical_root()) {
+            return Err(KnowledgeError::Invalid(
+                "publication root escaped its workspace".into(),
+            ));
+        }
+        let publisher = Publisher::deferred(root);
+        let mut planned = publisher.publication_request_identity(&draft, &context.operation_id)?;
+        if let Some((manifest, content)) =
+            store.memory_publication_plan(&identity.project_id, &context.operation_id)?
+        {
+            planned.manifest_identity = manifest;
+            planned.content_digest = content;
+        }
+        let memory_root = publisher.root().path().to_string_lossy().into_owned();
+        let source_identity = None::<String>;
+        let config_identity = None::<String>;
+        let digest = canonical_request_digest(
+            "memory.publish/v2",
+            json!({
+            "project_id":identity.project_id,"entry_id":draft.entry_id,"content_digest":planned.content_digest,
+            "manifest_identity":planned.manifest_identity,"memory_root_identity":memory_root,
+            "expected_manifest_identity":expected_manifest,"review_operation_id":review_id,"expected_revision":context.expected_revision,
+            "actor_id":context.actor_id,"session_id":context.session_id,"deadline":null,"source_identity":source_identity,"config_identity":config_identity}),
+        );
+        let mut admission = context.clone();
+        admission.request_digest = digest;
+        let job = ExternalJobInput {
+            job_id: context.operation_id.clone(),
+            operation_id: context.operation_id.clone(),
+            project_id: identity.project_id.clone(),
+            subject_type: "project".into(),
+            subject_id: identity.project_id.clone(),
+            kind: ExternalJobKind::MemoryPublication.as_str().into(),
+            request_digest: admission.request_digest.clone(),
+            source_identity: None,
+            config_identity: None,
+            actor_id: context.actor_id.clone(),
+            session_id: context.session_id.clone(),
+            deadline: None,
+            created_at: context.now.clone(),
+        };
+        store.admit_memory_publication(
+            &admission,
+            identity,
+            review_id,
+            &memory_root,
+            Some(expected_manifest),
+            &planned.manifest_identity,
+            &planned.content_digest,
+            &job,
+        )?;
+        let reviewed = ReviewedMemory {
+            operation: KnowledgeOperation {
+                operation_id: review.review_id,
+                request_digest: record.content_digest.clone(),
+                durability: KnowledgeDurability::CanonicalStore,
+            },
+            provenance: KnowledgeProvenance {
+                project_id: Some(identity.project_id.clone()),
+                memory_entry_id: Some(record.entry_id),
+                content_digest: Some(record.content_digest),
+                ..Default::default()
+            },
+            draft,
+            reviewer_id: review.actor_id,
+            accepted: true,
+        };
+        self.publish_memory(
+            store,
+            identity,
+            &publisher,
+            &reviewed,
+            MemoryPublishInput {
+                operation_id: context.operation_id.clone(),
+                expected_manifest_identity: Some(expected_manifest.into()),
+                actor_id: context.actor_id.clone(),
+                session_id: context.session_id.clone(),
+                deadline: None,
+                created_at: context.now.clone(),
+                started_at: context.now.clone(),
+                observed_at: context.now.clone(),
+                source_identity: None,
+                config_identity: None,
+            },
+        )
+    }
+}
+
+fn validate_publication_root(
+    store: &SqliteStore,
+    identity: &IdentityContext,
+    root: &Path,
+) -> Result<(), KnowledgeError> {
+    let binding = boreal_store::identity::IdentityStore::new(store)
+        .workspace_binding(&identity.project_id)
+        .map_err(|error| KnowledgeError::Invalid(error.to_string()))?;
+    let workspace = std::fs::canonicalize(binding.canonical_root())
+        .map_err(|error| KnowledgeError::Invalid(error.to_string()))?;
+    let expected = workspace.join("memory");
+    if root != expected
+        || root
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(KnowledgeError::Invalid(
+            "publication readback must use this project's memory root".into(),
+        ));
+    }
+    if root.exists()
+        && (std::fs::symlink_metadata(root)
+            .map_err(|error| KnowledgeError::Invalid(error.to_string()))?
+            .file_type()
+            .is_symlink()
+            || std::fs::canonicalize(root)
+                .map_err(|error| KnowledgeError::Invalid(error.to_string()))?
+                != expected)
+    {
+        return Err(KnowledgeError::Invalid(
+            "memory root is not a confined directory".into(),
+        ));
+    }
+    Ok(())
+}
+
+impl KnowledgeApplication<'_> {
+    pub fn read_memory_publication(
+        &self,
+        store: &SqliteStore,
+        identity: &IdentityContext,
+        root: impl AsRef<Path>,
+        operation: &str,
+    ) -> Result<Value, KnowledgeError> {
+        let job = store
+            .external_job_by_operation_with_identity(identity, operation)?
+            .ok_or_else(|| KnowledgeError::Invalid("publication operation missing".into()))?;
+        if job.kind != ExternalJobKind::MemoryPublication.as_str() {
+            return Err(KnowledgeError::Invalid(
+                "operation is not a memory publication".into(),
+            ));
+        }
+        validate_publication_root(store, identity, root.as_ref())?;
+        let publisher = Publisher::deferred(boreal_memory::MemoryRoot::new(root.as_ref())?);
+        let observation = publisher.publication_readback(operation)?;
+        let recovery = observation.recovery();
+        let expected = store.memory_publication_plan(&identity.project_id, operation)?;
+        let matched = observation.is_resolved()
+            && recovery.is_some_and(|r| {
+                expected
+                    .as_ref()
+                    .is_some_and(|(manifest, _)| r.manifest_identity.as_ref() == Some(manifest))
+            });
+        Ok(
+            json!({"project_id":identity.project_id,"operation_id":operation,"stage":job.stage,"request_digest":job.request_digest,
+            "readback_required":!matched || !matches!(job.stage.as_str(),"committed"|"reconciled"),"git_verified":matched,"verified_git_revision":if matched{recovery.and_then(|r|r.git_revision.clone())}else{None},
+            "git_observation":format!("{:?}",observation),"error":job.error_message}),
+        )
+    }
+}
+
+impl KnowledgeApplication<'_> {
+    pub fn review_durable_memory(
+        &self,
+        store: &SqliteStore,
+        context: &boreal_store::V3MutationContext,
+        draft_id: &str,
+        decision: &str,
+        reason: &str,
+    ) -> Result<boreal_store::MutationResult, KnowledgeError> {
+        let record = store
+            .memory_draft(&context.project_id, draft_id)?
+            .ok_or_else(|| KnowledgeError::Invalid("memory draft missing".into()))?;
+        stored_draft(&record)?;
+        Ok(store.record_memory_review(context, draft_id, decision, reason)?)
+    }
+    pub fn reconcile_memory_publication(
+        &self,
+        store: &SqliteStore,
+        identity: &IdentityContext,
+        context: &boreal_store::V3MutationContext,
+        root: impl AsRef<Path>,
+        original_operation: &str,
+    ) -> Result<boreal_store::MutationResult, KnowledgeError> {
+        validate_publication_root(store, identity, root.as_ref())?;
+        let publisher = Publisher::deferred(boreal_memory::MemoryRoot::new(root.as_ref())?);
+        let observation = publisher.publication_readback(original_operation)?;
+        if !observation.is_resolved() {
+            return Err(KnowledgeError::Invalid(
+                "Git publication outcome remains unknown; no result was recorded".into(),
+            ));
+        }
+        let recovery = observation
+            .recovery()
+            .ok_or_else(|| KnowledgeError::Invalid("verified Git readback missing".into()))?;
+        if recovery.operation_id.as_deref() != Some(original_operation) {
+            return Err(KnowledgeError::Invalid(
+                "Git operation identity differs".into(),
+            ));
+        }
+        let manifest = recovery
+            .manifest_identity
+            .as_deref()
+            .ok_or_else(|| KnowledgeError::Invalid("verified manifest missing".into()))?;
+        let git = recovery
+            .git_revision
+            .as_deref()
+            .ok_or_else(|| KnowledgeError::Invalid("verified commit missing".into()))?;
+        Ok(store.reconcile_memory_publication(
+            context,
+            identity,
+            original_operation,
+            manifest,
+            git,
+        )?)
     }
 }

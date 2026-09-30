@@ -79,6 +79,10 @@ fn facts(role: ActorRole, principal: PrincipalBinding) -> DecisionInputs {
         }),
         authority: Fact::present(ActorAuthorityInput {
             project_id: ProjectId::new("project-1"),
+            authority_root: match &principal {
+                PrincipalBinding::Authenticated { actor_id } => actor_id.clone(),
+                PrincipalBinding::Delegated { delegator_id, .. } => delegator_id.clone(),
+            },
             role,
             principal,
             session_id: Some(SessionId::new("session-1")),
@@ -86,6 +90,7 @@ fn facts(role: ActorRole, principal: PrincipalBinding) -> DecisionInputs {
         requirements: Fact::present(PinnedRequirementsInput {
             proof: proof(None),
             requirements: vec![PinnedRequirement {
+                exception: None,
                 id: RequirementId::new("requirement-1"),
                 gate_id: GateId::new("verification"),
                 kind: GateKind::Verification,

@@ -10,6 +10,7 @@ use crate::work_model_v3::WorkSchedule;
 
 pub mod acceptance;
 pub mod actions;
+pub mod completion;
 pub mod decision_inputs;
 pub mod dependencies;
 pub mod rollups;
@@ -21,7 +22,7 @@ pub mod time_policy;
 pub mod work_model_v3;
 
 mod status_evaluator;
-pub use status_evaluator::evaluate_status;
+pub use status_evaluator::{evaluate_canonical_status, evaluate_status};
 
 /// The default immutable attempt budget, measured from `claimed_at`.
 pub const DEFAULT_HARD_TIME_LIMIT_MS: u64 = 2 * 60 * 60 * 1_000;
@@ -1049,7 +1050,8 @@ impl<'a> StatusContext<'a> {
     }
 }
 
-/// Validates the schema-2 milestone → sprint → task containment hierarchy.
+/// Validates project containment while retaining the legacy sprint path.
+/// Direct/container task shape is additionally checked by the work-model projection.
 /// Root milestones and root tasks are allowed; only task rows are executable.
 pub fn validate_parent(child: &WorkItem, parent: Option<&WorkItem>) -> Result<(), DomainError> {
     let Some(parent) = parent else {
@@ -1069,7 +1071,10 @@ pub fn validate_parent(child: &WorkItem, parent: Option<&WorkItem>) -> Result<()
     }
     let valid = matches!(
         (parent.kind, child.kind),
-        (WorkKind::Milestone, WorkKind::Sprint) | (WorkKind::Sprint, WorkKind::Task)
+        (
+            WorkKind::Milestone,
+            WorkKind::Sprint | WorkKind::Milestone | WorkKind::Task
+        ) | (WorkKind::Sprint | WorkKind::Task, WorkKind::Task)
     );
     if valid {
         Ok(())
@@ -1643,3 +1648,5 @@ mod tests {
         ));
     }
 }
+
+pub mod maintenance;

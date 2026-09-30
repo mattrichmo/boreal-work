@@ -203,6 +203,7 @@ fn store_v3_mutations_use_revisions_audit_and_typed_replay() {
     let context = |operation_id: &str, request_digest: &str| V3MutationContext {
         project_id: "p1".to_owned(),
         actor_id: "agent-1".to_owned(),
+        session_id: None,
         operation_id: operation_id.to_owned(),
         request_digest: request_digest.to_owned(),
         expected_revision: None,
@@ -430,6 +431,7 @@ fn v3_replay_requires_actor_session_subject_and_revision_identity() {
     let context = |actor_id: &str, expected_revision: Option<u64>| V3MutationContext {
         project_id: "p1".to_owned(),
         actor_id: actor_id.to_owned(),
+        session_id: None,
         operation_id: "op-identity".to_owned(),
         request_digest: "sha256:identity".to_owned(),
         expected_revision,

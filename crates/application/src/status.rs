@@ -193,6 +193,7 @@ impl StatusActionContext {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusWork {
+    pub canonical_inputs: Option<boreal_domain::decision_inputs::DecisionInputs>,
     pub work: WorkItem,
     pub decision: StatusDecision,
     /// Server-derived action policy for the same snapshot as `decision`.
@@ -238,6 +239,13 @@ impl StatusWork {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusSnapshot {
+    pub project_actions: Vec<boreal_domain::work_model_v3::ProjectPlanningAction>,
+    /// Ordered physical row identities; permits byte-bounded pagination without losing corrupt rows.
+    pub page_work_ids: Vec<String>,
+    /// Physical rows consumed by this page; several diagnostics may refer to one row.
+    pub page_count: u64,
+    pub quarantined_count: u64,
+    pub project_diagnostics: Vec<StatusRecordDiagnostic>,
     pub contract_version: &'static str,
     pub project_id: boreal_domain::ProjectId,
     pub project_revision: Revision,
@@ -253,15 +261,12 @@ pub struct StatusSnapshot {
 
 impl StatusSnapshot {
     pub fn has_more(&self) -> bool {
-        self.offset
-            .saturating_add(self.items.len() as u64)
-            .saturating_add(self.diagnostics.len() as u64)
-            < self.total
+        self.offset.saturating_add(self.page_count) < self.total
     }
 
     pub fn next_offset(&self) -> Option<u64> {
         self.has_more()
-            .then(|| self.offset.saturating_add(self.items.len() as u64))
+            .then(|| self.offset.saturating_add(self.page_count))
     }
 }
 
@@ -370,7 +375,7 @@ pub fn project_status(
             .filter(|(_, policy)| matches!(policy, DependencyPolicy::ClosedOnly))
             .map(|(prerequisite_index, _)| inputs[*prerequisite_index].work.clone())
             .collect::<Vec<_>>();
-        let decision = evaluate_status(StatusContext {
+        let context = StatusContext {
             work: &input.work,
             prerequisites: &prerequisite_rows,
             current_attempt: input.current_attempt.as_ref(),
@@ -382,12 +387,40 @@ pub fn project_status(
             schedule: input.schedule,
             activation_at: input.activation_at,
             affected_dependents: &affected_dependents[index],
-        });
+        };
+        let decision = match input
+            .action_facts
+            .as_ref()
+            .and_then(|facts| facts.canonical_inputs.as_ref())
+        {
+            Some(facts) => boreal_domain::evaluate_canonical_status(context, facts),
+            None => evaluate_status(context),
+        };
         all.push(decision);
     }
 
     let decisions = all.to_vec();
-    let counts = status2_rollup(&decisions);
+    let counts = if inputs.iter().any(|input| {
+        input
+            .action_facts
+            .as_ref()
+            .is_some_and(|facts| facts.canonical_inputs.is_some())
+    }) {
+        let healthy = inputs
+            .iter()
+            .zip(decisions.iter())
+            .filter(|(input, _)| {
+                input
+                    .action_facts
+                    .as_ref()
+                    .is_some_and(|facts| facts.integrity == boreal_store::StatusIntegrity::Valid)
+            })
+            .map(|(_, decision)| decision.clone())
+            .collect::<Vec<_>>();
+        evaluate_rollup(&healthy)
+    } else {
+        status2_rollup(&decisions)
+    };
     let next_status_change_at = decisions
         .iter()
         .filter_map(|decision| decision.next_status_change_at)
@@ -405,15 +438,24 @@ pub fn project_status(
                 .iter()
                 .filter_map(|(prerequisite_index, policy)| {
                     let prerequisite = &inputs[*prerequisite_index];
-                    (!dependency_satisfied(*policy, &prerequisite.work)).then(|| {
+                    let canonical = inputs[index].action_facts.as_ref()
+                        .and_then(|facts| facts.canonical_inputs.as_ref())
+                        .and_then(|facts| facts.dependencies.as_present());
+                    let satisfied = canonical.map_or_else(
+                        || dependency_satisfied(*policy, &prerequisite.work),
+                        |facts| facts.edges.iter().find(|edge| edge.predecessor.work_id == prerequisite.work.id)
+                            .is_some_and(|edge| edge.waiver.is_some() || edge.outcome == boreal_domain::decision_inputs::DependencyOutcome::Closed),
+                    );
+                    (!satisfied).then(|| {
                         DependencyBlocker {
                             work_id: prerequisite.work.id.clone(),
                             display_status: status2_display_status(
                                 all[*prerequisite_index].display_status,
                             ),
-                            satisfies_default: dependency_satisfied(
-                                DependencyPolicy::ClosedOnly,
-                                &prerequisite.work,
+                            satisfies_default: canonical.map_or_else(
+                                || dependency_satisfied(DependencyPolicy::ClosedOnly, &prerequisite.work),
+                                |facts| facts.edges.iter().find(|edge| edge.predecessor.work_id == prerequisite.work.id)
+                                    .is_some_and(|edge| edge.outcome == boreal_domain::decision_inputs::DependencyOutcome::Closed),
                             ),
                             policy: *policy,
                         }
@@ -423,6 +465,7 @@ pub fn project_status(
             let (action_context, actions) =
                 status_actions(&inputs[index], actor, project_revision, as_of, &all[index]);
             StatusWork {
+                canonical_inputs: inputs[index].action_facts.as_ref().and_then(|facts| facts.canonical_inputs.clone()),
                 work: inputs[index].work.clone(),
                 decision: all[index].clone(),
                 actions,
@@ -435,6 +478,11 @@ pub fn project_status(
         .collect::<Vec<_>>();
 
     Ok(StatusSnapshot {
+        project_actions: Vec::new(),
+        page_work_ids: items.iter().map(|item| item.work.id.to_string()).collect(),
+        page_count: items.len() as u64,
+        quarantined_count: 0,
+        project_diagnostics: Vec::new(),
         contract_version: STATUS_CONTRACT_VERSION,
         project_id: project_id.clone(),
         project_revision,
@@ -468,8 +516,33 @@ pub fn project_status_from_store(
     limit: u64,
     offset: u64,
 ) -> Result<StatusSnapshot, String> {
+    project_status_from_store_for_session(store, project_id, actor, None, as_of, limit, offset)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn project_status_from_store_for_session(
+    store: &SqliteStore,
+    project_id: &boreal_domain::ProjectId,
+    actor: &ActorContext,
+    session_id: Option<&str>,
+    as_of: TimestampMs,
+    limit: u64,
+    offset: u64,
+) -> Result<StatusSnapshot, String> {
+    if !(1..=MAX_STATUS_ROWS).contains(&limit) {
+        return Err(StatusProjectionError::InvalidPage {
+            limit,
+            max: MAX_STATUS_ROWS,
+        }
+        .to_string());
+    }
     let (persisted, authorized_actor) = store
-        .read_project_status_for_actor(project_id.as_str(), actor.actor_id.as_str())
+        .read_project_status_for_session(
+            project_id.as_str(),
+            actor.actor_id.as_str(),
+            session_id,
+            as_of,
+        )
         .map_err(|error| error.to_string())?;
     let mut diagnostics = persisted.diagnostics.clone();
     let mut inputs = Vec::with_capacity(persisted.works.len());
@@ -514,6 +587,25 @@ pub fn project_status_from_store(
             }
         })
         .collect::<Vec<_>>();
+    // Page physical work identities, not successful decodes or diagnostic count.
+    // This preserves one revision and exact totals even when an entire page is damaged.
+    let page_ids = persisted
+        .ordered_work_ids
+        .iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let valid_before = persisted
+        .ordered_work_ids
+        .iter()
+        .take(offset as usize)
+        .filter(|id| known_work.contains(&WorkId::new((*id).clone())))
+        .count() as u64;
+    let valid_in_page = page_ids
+        .iter()
+        .filter(|id| known_work.contains(&WorkId::new((*id).clone())))
+        .count() as u64;
     let mut snapshot = project_status(
         project_id,
         &authorized_actor,
@@ -521,12 +613,53 @@ pub fn project_status_from_store(
         Revision(persisted.revision.0),
         &inputs,
         &dependencies,
-        limit,
-        offset,
+        valid_in_page.max(1),
+        valid_before,
     )
     .map_err(|error| error.to_string())?;
+    if valid_in_page == 0 {
+        snapshot.items.clear();
+    }
+    snapshot.project_actions = boreal_domain::work_model_v3::project_planning_actions(
+        project_id,
+        &authorized_actor,
+        persisted
+            .caller_session_id
+            .as_ref()
+            .map(|value| boreal_domain::SessionId::new(value.clone()))
+            .as_ref(),
+        snapshot.project_revision,
+    );
+    snapshot.limit = limit;
+    snapshot.offset = offset;
+    snapshot.page_work_ids = persisted
+        .ordered_work_ids
+        .iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .cloned()
+        .collect();
+    snapshot.page_count = page_ids.len() as u64;
     snapshot.total = persisted.total;
-    snapshot.diagnostics = diagnostics;
+    let all_ids = persisted
+        .ordered_work_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    snapshot.quarantined_count = diagnostics
+        .iter()
+        .filter(|diagnostic| all_ids.contains(&diagnostic.work_id))
+        .map(|diagnostic| &diagnostic.work_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64;
+    snapshot.project_diagnostics = diagnostics
+        .iter()
+        .filter(|diagnostic| !all_ids.contains(&diagnostic.work_id))
+        .cloned()
+        .collect();
+    snapshot.diagnostics = diagnostics
+        .into_iter()
+        .filter(|diagnostic| page_ids.contains(&diagnostic.work_id))
+        .collect();
     Ok(snapshot)
 }
 
@@ -591,7 +724,7 @@ fn status_actions(
     _actor: &ActorContext,
     _project_revision: Revision,
     _as_of: TimestampMs,
-    _decision: &StatusDecision,
+    decision: &StatusDecision,
 ) -> (StatusActionContext, Option<ActionDecision>) {
     if let Some(facts) = &input.action_facts {
         let integrity = match facts.integrity {
@@ -607,7 +740,19 @@ fn status_actions(
                 integrity,
                 missing_facts: facts.missing_facts.clone(),
             },
-            None,
+            {
+                // Missing session/authority and damaged inputs produce denied
+                // descriptors; do not hide the server policy from the client.
+                facts.canonical_inputs.as_ref().map(|inputs| {
+                    boreal_domain::actions::evaluate_actions(
+                        &boreal_domain::actions::ActionEvaluationInput::new(
+                            inputs,
+                            decision.display_status,
+                            &decision.reason_codes,
+                        ),
+                    )
+                })
+            },
         );
     }
     (
