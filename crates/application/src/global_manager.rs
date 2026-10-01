@@ -8,6 +8,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static GLOBAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+const GLOBAL_PATH_MAX_BYTES: usize = 4096;
+const INTERACTIVE_RESPONSE_MAX_BYTES: usize = 900 * 1024;
 
 #[derive(Debug)]
 pub enum GlobalManagerError {
@@ -119,8 +121,28 @@ impl GlobalManagerApplication {
         payload: &Value,
         operation: &str,
     ) -> Result<Value, GlobalManagerError> {
+        if is_mutation(command) {
+            boreal_domain::global_manager::validate_identifier(operation)
+                .map_err(|error| GlobalManagerError::Invalid(error.to_string()))?;
+        }
         let mut prepared = payload.clone();
         if command == "import" {
+            let has_expected_revision = prepared
+                .get("expected_revision")
+                .and_then(Value::as_u64)
+                .is_some();
+            // Empty-manager imports historically default to revision zero. Do
+            // this before readback so retries hash exactly the committed request.
+            if prepared
+                .get("expected_revision")
+                .and_then(Value::as_u64)
+                .is_none()
+            {
+                prepared["expected_revision"] = json!(0);
+            }
+            if let Some(result) = self.store.replay_result(command, &prepared, operation)? {
+                return Ok(result);
+            }
             let state = self.store.state()?;
             let nonempty = ["projects", "items", "notes"]
                 .iter()
@@ -130,23 +152,10 @@ impl GlobalManagerApplication {
                     "import into a non-empty manager requires replace:true".into(),
                 ));
             }
-            if nonempty
-                && prepared
-                    .get("expected_revision")
-                    .and_then(Value::as_u64)
-                    .is_none()
-            {
+            if nonempty && !has_expected_revision {
                 return Err(GlobalManagerError::Invalid(
                     "replacement import requires expected_revision".into(),
                 ));
-            }
-            if !nonempty
-                && prepared
-                    .get("expected_revision")
-                    .and_then(Value::as_u64)
-                    .is_none()
-            {
-                prepared["expected_revision"] = json!(0);
             }
         }
         self.validate(command, &prepared)?;
@@ -175,7 +184,9 @@ impl GlobalManagerApplication {
             let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0);
             let project_id = payload.get("project_id").and_then(Value::as_str);
             let entity_id = payload.get("entity_id").and_then(Value::as_str);
-            let (records, total) = self.store.activity(project_id, entity_id, limit, offset)?;
+            let (records, total, current_revision) = self
+                .store
+                .activity_snapshot(project_id, entity_id, limit, offset)?;
             let events = records
                 .into_iter()
                 .map(|record| {
@@ -222,7 +233,6 @@ impl GlobalManagerApplication {
                     json!({"operation_id":event.operation_id,"revision":event.revision,"command":event.command,"entity_kind":event.entity_kind,"entity_id":event.entity_id,"project_id":event.project_id,"source_id":event.source_id,"target_id":event.target_id,"title":event.title,"summary":event.summary,"created_at":event.created_at})
                 })
                 .collect::<Vec<_>>();
-            let current_revision = self.store.revision()?;
             let next_offset = offset.saturating_add(events.len() as u64);
             return Ok(
                 json!({"events":events,"current_revision":current_revision,"total":total,"limit":limit,"offset":offset,"has_more":next_offset < total,"next_offset":if next_offset < total {json!(next_offset)} else {Value::Null}}),
@@ -340,6 +350,48 @@ impl GlobalManagerApplication {
                 state["snapshot_limit"] = json!(100);
                 state["attention"] = attention;
                 state["activity"] = self.read("history", &json!({"limit":50,"offset":0}))?;
+                let mut payload_truncated = false;
+                while serde_json::to_vec(&state)
+                    .map(|bytes| bytes.len() > INTERACTIVE_RESPONSE_MAX_BYTES)
+                    .unwrap_or(true)
+                {
+                    let mut reduced = false;
+                    for key in [
+                        "projects",
+                        "items",
+                        "notes",
+                        "statuses",
+                        "relationships",
+                        "note_links",
+                        "associations",
+                        "status_history",
+                    ] {
+                        if let Some(rows) = state.get_mut(key).and_then(Value::as_array_mut) {
+                            if !rows.is_empty() {
+                                rows.truncate(rows.len() / 2);
+                                reduced = true;
+                            }
+                        }
+                    }
+                    if let Some(events) = state
+                        .pointer_mut("/activity/events")
+                        .and_then(Value::as_array_mut)
+                    {
+                        if !events.is_empty() {
+                            events.truncate(events.len() / 2);
+                            reduced = true;
+                        }
+                    }
+                    payload_truncated = true;
+                    if !reduced {
+                        return Err(GlobalManagerError::Invalid(
+                            "global summary exceeds the interactive response size limit".into(),
+                        ));
+                    }
+                }
+                if payload_truncated {
+                    state["payload_truncated"] = json!(true);
+                }
                 Ok(state)
             }
             "detail page" => {
@@ -418,46 +470,53 @@ impl GlobalManagerApplication {
                 let rows = source
                     .into_iter()
                     .filter(|row| {
-                        let owner = row
-                            .get("project_id")
-                            .and_then(Value::as_str)
-                            .or_else(|| row.get("management_project_id").and_then(Value::as_str))
-                            .map(str::to_owned)
-                            .or_else(|| {
-                                let item_id = if collection == "status_history" {
-                                    row.get("item_id").and_then(Value::as_str)
-                                } else if collection == "note_links" {
-                                    row.get("item_id").and_then(Value::as_str)
-                                } else if collection == "relationships" {
-                                    row.get("source_id").and_then(Value::as_str)
-                                } else {
-                                    None
-                                };
-                                if collection == "note_links" {
-                                    row.get("note_id")
-                                        .and_then(Value::as_str)
-                                        .and_then(|id| note_projects.get(id).cloned().flatten())
-                                } else {
-                                    item_id.and_then(|id| item_projects.get(id).cloned().flatten())
-                                }
-                            });
-                        (project_id.is_none() || owner.as_deref() == project_id)
+                        let owner = if collection == "projects" {
+                            row.get("id").and_then(Value::as_str)
+                        } else {
+                            row.get("project_id").and_then(Value::as_str).or_else(|| {
+                                row.get("management_project_id").and_then(Value::as_str)
+                            })
+                        }
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            let item_id = if collection == "status_history" {
+                                row.get("item_id").and_then(Value::as_str)
+                            } else if collection == "note_links" {
+                                row.get("item_id").and_then(Value::as_str)
+                            } else if collection == "relationships" {
+                                row.get("source_id").and_then(Value::as_str)
+                            } else {
+                                None
+                            };
+                            if collection == "note_links" {
+                                row.get("note_id")
+                                    .and_then(Value::as_str)
+                                    .and_then(|id| note_projects.get(id).cloned().flatten())
+                            } else {
+                                item_id.and_then(|id| item_projects.get(id).cloned().flatten())
+                            }
+                        });
+                        let scoped_match = if collection == "status_history" {
+                            project_id.is_none_or(|requested| {
+                                ["from_workflow_owner_id", "workflow_owner_id"]
+                                    .iter()
+                                    .filter_map(|field| row.get(*field).and_then(Value::as_str))
+                                    .any(|owner| owner == requested)
+                                    || owner.as_deref() == Some(requested)
+                            })
+                        } else {
+                            project_id.is_none() || owner.as_deref() == project_id
+                        };
+                        scoped_match
                             && (kind.is_none() || row.get("kind").and_then(Value::as_str) == kind)
                             && query.as_ref().is_none_or(|q| {
-                                ["title", "name", "body", "description", "status_id"]
-                                    .iter()
-                                    .any(|field| {
-                                        row.get(*field)
-                                            .and_then(Value::as_str)
-                                            .is_some_and(|text| text.to_lowercase().contains(q))
-                                    })
+                                detail_row_matches_query(&state, collection, row, q)
                             })
                             && (include_archived
                                 || row.get("archived").and_then(Value::as_bool) != Some(true))
                             && (include_archived
-                                || !row
-                                    .get("project_id")
-                                    .and_then(Value::as_str)
+                                || !owner
+                                    .as_deref()
                                     .is_some_and(|owner| archived_projects.contains(owner)))
                     })
                     .collect::<Vec<_>>();
@@ -492,7 +551,22 @@ impl GlobalManagerApplication {
                     .collect::<Vec<_>>();
                 let mut page_value = Value::Array(std::mem::take(&mut page));
                 bound_summary_text(&mut page_value, 512);
-                let page = page_value.as_array().cloned().unwrap_or_default();
+                let mut page = page_value.as_array().cloned().unwrap_or_default();
+                while page.len() > 1
+                    && serde_json::to_vec(&json!({"collection":collection,"rows":&page,"total":total,"limit":limit,"offset":offset,"revision":revision}))
+                        .map(|bytes| bytes.len() > INTERACTIVE_RESPONSE_MAX_BYTES)
+                        .unwrap_or(true)
+                {
+                    page.truncate((page.len() / 2).max(1));
+                }
+                if serde_json::to_vec(&json!({"collection":collection,"rows":&page,"total":total,"limit":limit,"offset":offset,"revision":revision}))
+                    .map(|bytes| bytes.len() > INTERACTIVE_RESPONSE_MAX_BYTES)
+                    .unwrap_or(true)
+                {
+                    return Err(GlobalManagerError::Invalid(
+                        "a detail record exceeds the interactive response size limit".into(),
+                    ));
+                }
                 let next = offset.saturating_add(page.len());
                 Ok(
                     json!({"collection":collection,"rows":page,"total":total,"limit":limit,"offset":offset,"has_more":next < total,"next_offset":if next < total {json!(next)} else {Value::Null},"revision":revision}),
@@ -575,6 +649,70 @@ impl GlobalManagerApplication {
             return Err(GlobalManagerError::Invalid(
                 "global command is required".into(),
             ));
+        }
+        if p.get("expected_revision")
+            .is_some_and(|value| value.as_u64().is_none())
+        {
+            return Err(GlobalManagerError::Invalid(
+                "expected_revision must be a non-negative integer".into(),
+            ));
+        }
+        let string_fields: &[&str] = match command {
+            "project add" => &["project_id", "description", "folder"],
+            "project edit" => &["project_id", "name", "description", "lifecycle", "health"],
+            "todo add" => &["item_id", "title", "description", "kind", "status_id"],
+            "task add" | "subtask add" | "milestone add" => {
+                &["item_id", "title", "description", "status_id"]
+            }
+            "todo edit" | "task edit" | "subtask edit" | "milestone edit" => {
+                &["item_id", "title", "description", "status_id"]
+            }
+            "workflow status edit" => &["label", "category"],
+            "note edit" => &["title", "body"],
+            "relationship add" => &["kind"],
+            _ => &[],
+        };
+        for field in string_fields {
+            if p.get(*field).is_some_and(|value| !value.is_string()) {
+                return Err(GlobalManagerError::Invalid(format!(
+                    "{field} must be a string"
+                )));
+            }
+        }
+        for field in ["folder", "path"] {
+            if p.get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.len() > GLOBAL_PATH_MAX_BYTES)
+            {
+                return Err(GlobalManagerError::Invalid(format!(
+                    "{field} exceeds the {GLOBAL_PATH_MAX_BYTES}-byte limit"
+                )));
+            }
+        }
+        if matches!(
+            command,
+            "todo add"
+                | "task add"
+                | "subtask add"
+                | "milestone add"
+                | "todo edit"
+                | "task edit"
+                | "subtask edit"
+                | "milestone edit"
+        ) {
+            for field in ["project_id", "parent_id"] {
+                if let Some(value) = p.get(field) {
+                    if !value.is_null() && !value.is_string() {
+                        return Err(GlobalManagerError::Invalid(format!(
+                            "{field} must be a string or null"
+                        )));
+                    }
+                    if let Some(id) = value.as_str() {
+                        boreal_domain::global_manager::validate_identifier(id)
+                            .map_err(|error| GlobalManagerError::Invalid(error.to_string()))?;
+                    }
+                }
+            }
         }
         if command == "history" {
             if p.get("limit")
@@ -846,7 +984,7 @@ impl GlobalManagerApplication {
             }
             if p.get("due_at")
                 .and_then(Value::as_str)
-                .is_some_and(|v| utc_date_from_iso(v).is_none())
+                .is_some_and(|v| v.len() > 128 || utc_date_from_iso(v).is_none())
             {
                 return Err(GlobalManagerError::Invalid(
                     "due_at must be YYYY-MM-DD or an ISO timestamp with Z or an explicit offset"
@@ -862,7 +1000,7 @@ impl GlobalManagerApplication {
             }
             if p.get("follow_up_at")
                 .and_then(Value::as_str)
-                .is_some_and(|v| utc_date_from_iso(v).is_none())
+                .is_some_and(|v| v.len() > 128 || utc_date_from_iso(v).is_none())
             {
                 return Err(GlobalManagerError::Invalid("follow_up_at must be YYYY-MM-DD or an ISO timestamp with Z or an explicit offset".into()));
             }
@@ -937,7 +1075,7 @@ impl GlobalManagerApplication {
             }
             if p.get("due_at")
                 .and_then(Value::as_str)
-                .is_some_and(|v| utc_date_from_iso(v).is_none())
+                .is_some_and(|v| v.len() > 128 || utc_date_from_iso(v).is_none())
             {
                 return Err(GlobalManagerError::Invalid(
                     "due_at must be YYYY-MM-DD or an ISO timestamp with Z or an explicit offset"
@@ -953,7 +1091,7 @@ impl GlobalManagerApplication {
             }
             if p.get("follow_up_at")
                 .and_then(Value::as_str)
-                .is_some_and(|v| utc_date_from_iso(v).is_none())
+                .is_some_and(|v| v.len() > 128 || utc_date_from_iso(v).is_none())
             {
                 return Err(GlobalManagerError::Invalid("follow_up_at must be YYYY-MM-DD or an ISO timestamp with Z or an explicit offset".into()));
             }
@@ -1409,7 +1547,9 @@ fn apply_mutation(
             }
             if new_owner != project_id
                 && arr(s, "status_history").iter().any(|entry| {
-                    entry["item_id"] == iid && entry.get("workflow_owner_id").is_none()
+                    entry["item_id"] == iid
+                        && (entry.get("workflow_owner_id").is_none()
+                            || entry.get("from_workflow_owner_id").is_none())
                 })
             {
                 return Err(StoreError::Invalid("item transfer is unsafe because historical workflow identity cannot be preserved".into()));
@@ -1805,20 +1945,22 @@ fn apply_mutation(
                     "unsupported global backup schema version".into(),
                 ));
             }
+            let serialized_size = serde_json::to_vec(incoming)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?
+                .len();
+            if serialized_size > 64 * 1024 * 1024 {
+                return Err(StoreError::Invalid(
+                    "global backup exceeds the 64 MiB import limit".into(),
+                ));
+            }
             validate_import_snapshot(incoming)?;
+            let mut history_entries = 0usize;
+            validate_import_history(incoming, 0, &mut history_entries)?;
             let mut imported_history = incoming
                 .get("imported_history")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            for entry in &imported_history {
-                if !entry.get("snapshot").is_some_and(Value::is_object) {
-                    return Err(StoreError::Invalid(
-                        "invalid imported revision history entry".into(),
-                    ));
-                }
-                validate_import_snapshot(&entry["snapshot"])?;
-            }
             for entry in incoming
                 .get("revision_history")
                 .and_then(Value::as_array)
@@ -1832,7 +1974,6 @@ fn apply_mutation(
                         "invalid global revision history entry".into(),
                     ));
                 }
-                validate_import_snapshot(&entry["snapshot"])?;
                 imported_history.push(json!({"source_revision":entry["revision"],"snapshot":entry["snapshot"],"created_at":entry["created_at"].clone(),"imported":true}));
             }
             *s = json!({"projects":incoming["projects"],"items":incoming["items"],"notes":incoming["notes"],"statuses":incoming["statuses"],"relationships":incoming["relationships"],"note_links":incoming.get("note_links").cloned().unwrap_or(json!([])),"associations":incoming["associations"],"status_history":incoming["status_history"],"imported_history":imported_history});
@@ -1877,7 +2018,9 @@ fn apply_bulk_triage(
         validate_status(state, project_id.as_deref(), status_id)?;
         if project_id != old["project_id"].as_str().map(str::to_owned)
             && arr(state, "status_history").iter().any(|entry| {
-                entry["item_id"] == item_id && entry.get("workflow_owner_id").is_none()
+                entry["item_id"] == item_id
+                    && (entry.get("workflow_owner_id").is_none()
+                        || entry.get("from_workflow_owner_id").is_none())
             })
         {
             return Err(StoreError::Invalid(format!("item {item_id} cannot be transferred because historical workflow identity is missing")));
@@ -2110,7 +2253,10 @@ fn attention_summary(state: &Value) -> Value {
         let mut actions = active_items
             .iter()
             .copied()
-            .filter(|item| matches!(item["kind"].as_str(), Some("task" | "subtask")))
+            .filter(|item| {
+                matches!(item["kind"].as_str(), Some("task" | "subtask"))
+                    && matches!(item_category(state, item), "open" | "active")
+            })
             .collect::<Vec<_>>();
         actions.sort_by(|left, right| {
             let due_key = |item: &Value| {
@@ -2197,18 +2343,145 @@ fn item_category<'a>(state: &'a Value, item: &Value) -> &'a str {
         .unwrap_or("open")
 }
 
+fn detail_row_matches_query(state: &Value, collection: &str, row: &Value, query: &str) -> bool {
+    let mut searchable = Vec::<String>::new();
+    let mut add = |value: &Value| match value {
+        Value::String(text) => searchable.push(text.to_lowercase()),
+        Value::Array(values) => searchable.extend(
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_lowercase),
+        ),
+        _ => {}
+    };
+    for field in [
+        "title",
+        "name",
+        "body",
+        "description",
+        "status_id",
+        "label",
+        "category",
+        "kind",
+        "path",
+        "identity",
+        "lifecycle",
+        "health",
+        "summary",
+        "source_id",
+        "target_id",
+        "due_at",
+        "follow_up_at",
+        "from_status_label",
+        "from_status_id",
+        "from_status_category",
+        "to_status_label",
+        "to_status_id",
+        "to_status_category",
+    ] {
+        if let Some(value) = row.get(field) {
+            add(value);
+        }
+    }
+    if let Some(labels) = row.get("labels") {
+        add(labels);
+    }
+    if collection == "items" {
+        if let (Some(owner), Some(status_id)) = (
+            row.get("project_id").and_then(Value::as_str),
+            row.get("status_id").and_then(Value::as_str),
+        ) {
+            if let Some(status) = arr(state, "statuses").iter().find(|status| {
+                status["project_id"].as_str() == Some(owner)
+                    && status["status_id"].as_str() == Some(status_id)
+            }) {
+                add(&status["label"]);
+                add(&status["category"]);
+            }
+        }
+    }
+    let owners = [
+        row.get("project_id").and_then(Value::as_str),
+        row.get("workflow_owner_id").and_then(Value::as_str),
+        row.get("from_workflow_owner_id").and_then(Value::as_str),
+        row.get("management_project_id").and_then(Value::as_str),
+    ];
+    for owner in owners.into_iter().flatten() {
+        if let Some(project) = arr(state, "projects")
+            .iter()
+            .find(|project| project["id"].as_str() == Some(owner))
+        {
+            for field in ["name", "lifecycle", "health"] {
+                add(&project[field]);
+            }
+            add(&project["labels"]);
+        }
+    }
+    searchable.iter().any(|text| text.contains(query))
+}
+
 fn bound_summary_text(value: &mut Value, maximum_bytes: usize) {
     match value {
         Value::Array(rows) => {
+            rows.truncate(200);
             for row in rows {
-                bound_summary_text(row, maximum_bytes);
+                if let Some(text) = row.as_str() {
+                    *row = json!(bound_text(text, maximum_bytes.min(128)));
+                } else {
+                    bound_summary_text(row, maximum_bytes);
+                }
             }
         }
         Value::Object(fields) => {
-            for (key, field) in fields {
-                if matches!(key.as_str(), "title" | "name" | "label" | "summary") {
-                    if let Some(text) = field.as_str() {
-                        *field = json!(bound_text(text, maximum_bytes));
+            let essential = [
+                "id",
+                "project_id",
+                "parent_id",
+                "item_id",
+                "note_id",
+                "source_id",
+                "target_id",
+                "workflow_owner_id",
+                "from_workflow_owner_id",
+                "status_id",
+                "from_status_id",
+                "to_status_id",
+                "operation_id",
+                "path",
+                "identity",
+            ];
+            let mut keys = fields.keys().cloned().collect::<Vec<_>>();
+            for key in &keys {
+                if key.len() > 128 && !essential.contains(&key.as_str()) {
+                    fields.remove(key);
+                }
+            }
+            keys = fields.keys().cloned().collect();
+            while keys.len() > 64 {
+                let removable = keys
+                    .iter()
+                    .rev()
+                    .find(|key| !essential.contains(&key.as_str()))
+                    .cloned()
+                    .or_else(|| keys.last().cloned());
+                let Some(key) = removable else { break };
+                fields.remove(&key);
+                keys.retain(|candidate| candidate != &key);
+            }
+            for (key, field) in fields.iter_mut() {
+                if key == "labels" {
+                    if let Value::Array(labels) = field {
+                        labels.truncate(32);
+                        for label in labels {
+                            if let Some(text) = label.as_str() {
+                                *label = json!(bound_text(text, maximum_bytes.min(128)));
+                            }
+                        }
+                    }
+                } else if let Some(text) = field.as_str() {
+                    if !essential.contains(&key.as_str()) {
+                        *field = json!(bound_text(text, maximum_bytes.min(256)));
                     }
                 } else if field.is_array() || field.is_object() {
                     bound_summary_text(field, maximum_bytes);
@@ -2326,6 +2599,48 @@ fn civil_from_days(days: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+fn validate_import_history(
+    snapshot: &Value,
+    depth: usize,
+    entry_count: &mut usize,
+) -> Result<(), StoreError> {
+    if depth > 8 {
+        return Err(StoreError::Invalid(
+            "global backup revision history exceeds the maximum nesting depth of 8".into(),
+        ));
+    }
+    let error = |message: &str| StoreError::Invalid(format!("invalid global backup: {message}"));
+    for key in ["revision_history", "imported_history"] {
+        if snapshot.get(key).is_some_and(|value| !value.is_array()) {
+            return Err(error("nested revision history must be arrays"));
+        }
+        for entry in snapshot
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            *entry_count = entry_count.saturating_add(1);
+            if *entry_count > 10_000 {
+                return Err(StoreError::Invalid(
+                    "global backup contains more than 10000 revision history entries".into(),
+                ));
+            }
+            if key == "revision_history" && !entry.get("revision").and_then(Value::as_u64).is_some()
+            {
+                return Err(error("invalid global revision history entry"));
+            }
+            let child = entry
+                .get("snapshot")
+                .filter(|value| value.is_object())
+                .ok_or_else(|| error("revision history snapshot must be an object"))?;
+            validate_import_snapshot(child)?;
+            validate_import_history(child, depth + 1, entry_count)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
     let error = |message: &str| StoreError::Invalid(format!("invalid global backup: {message}"));
     for key in [
@@ -2431,11 +2746,20 @@ fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
         if item["priority"].as_u64().is_some_and(|v| v > 255) {
             return Err(error("item priority exceeds 255"));
         }
-        if item
-            .get("due_at")
-            .is_some_and(|v| !v.is_null() && v.as_str().is_none())
-        {
-            return Err(error("item due_at must be a string or null"));
+        for field in ["due_at", "follow_up_at"] {
+            if item
+                .get(field)
+                .is_some_and(|value| !value.is_null() && value.as_str().is_none())
+            {
+                return Err(error("item dates must be strings or null"));
+            }
+            if item
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.len() > 128 || utc_date_from_iso(value).is_none())
+            {
+                return Err(error("item date is not a bounded ISO date or timestamp"));
+            }
         }
         if kind == ManagementItemKind::Subtask && item["parent_id"].as_str().is_none() {
             return Err(error("subtask parent missing"));
@@ -2544,11 +2868,31 @@ fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
         {
             return Err(error("association identity missing"));
         }
+        let identity = association["identity"].as_str().unwrap_or_default();
+        let kind = association["kind"].as_str().unwrap_or_default();
+        if identity.len() > GLOBAL_PATH_MAX_BYTES {
+            return Err(error(&format!(
+                "association identity exceeds the {GLOBAL_PATH_MAX_BYTES}-byte limit"
+            )));
+        }
+        if kind == "workspace"
+            && boreal_domain::global_manager::validate_identifier(identity).is_err()
+        {
+            return Err(error("workspace association identity is invalid"));
+        }
         if association
             .get("path")
             .is_some_and(|v| !v.is_null() && v.as_str().is_none())
         {
             return Err(error("association path must be a string or null"));
+        }
+        if association["path"]
+            .as_str()
+            .is_some_and(|path| path.len() > GLOBAL_PATH_MAX_BYTES)
+        {
+            return Err(error(&format!(
+                "association path exceeds the {GLOBAL_PATH_MAX_BYTES}-byte limit"
+            )));
         }
     }
     let mut dependency_edges = Vec::new();
@@ -2576,14 +2920,8 @@ fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
             _ => return Err(error("unknown relationship kind")),
         }
     }
-    for (prerequisite, dependent) in &dependency_edges {
-        boreal_domain::global_manager::validate_dependency(
-            prerequisite,
-            dependent,
-            &dependency_edges,
-        )
+    boreal_domain::global_manager::validate_dependency_graph(&dependency_edges)
         .map_err(|_| error("dependency cycle"))?;
-    }
     for transition in arr(snapshot, "status_history") {
         if transition["item_id"]
             .as_str()
@@ -2591,30 +2929,73 @@ fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
         {
             return Err(error("status history item missing"));
         }
-        let historical_owner = transition
-            .get("workflow_owner_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                items_by_id[transition["item_id"].as_str().unwrap()]["project_id"]
-                    .as_str()
-                    .map(str::to_owned)
-            });
-        if transition["to_status_id"].as_str().is_none_or(|sid| {
-            if transition.get("workflow_owner_id").is_some() {
-                return !transition
-                    .get("to_status_label")
-                    .and_then(Value::as_str)
-                    .is_some_and(|v| !v.trim().is_empty())
-                    || !matches!(
-                        transition.get("to_status_category").and_then(Value::as_str),
-                        Some("open" | "active" | "waiting" | "blocked" | "completed" | "cancelled")
-                    );
+        let item = items_by_id[transition["item_id"].as_str().unwrap()];
+        let validate_owner = |field: &str| -> Result<Option<Option<String>>, StoreError> {
+            let Some(value) = transition.get(field) else {
+                return Ok(None);
+            };
+            if value.is_null() {
+                return Ok(Some(None));
             }
-            !status_ids.contains(&(historical_owner.clone(), sid.to_owned()))
-        }) {
-            return Err(error("status history status missing"));
-        }
+            let owner = value
+                .as_str()
+                .ok_or_else(|| error("status history workflow owner must be a string or null"))?;
+            boreal_domain::global_manager::validate_identifier(owner)
+                .map_err(|_| error("invalid status history workflow owner"))?;
+            Ok(Some(Some(owner.to_owned())))
+        };
+        let to_owner_field = validate_owner("workflow_owner_id")?;
+        let from_owner_field = validate_owner("from_workflow_owner_id")?;
+        let current_owner = item["project_id"].as_str().map(str::to_owned);
+        let to_owner = to_owner_field
+            .clone()
+            .unwrap_or_else(|| current_owner.clone());
+        let from_owner = from_owner_field.clone().unwrap_or_else(|| to_owner.clone());
+        let validate_side = |prefix: &str,
+                             nullable: bool,
+                             owner: &Option<String>,
+                             has_owner_metadata: bool|
+         -> Result<(), StoreError> {
+            let id_key = format!("{prefix}_status_id");
+            let label_key = format!("{prefix}_status_label");
+            let category_key = format!("{prefix}_status_category");
+            let id = transition.get(&id_key).and_then(Value::as_str);
+            if nullable && id.is_none() {
+                if transition
+                    .get(&id_key)
+                    .is_some_and(|value| !value.is_null())
+                    || transition
+                        .get(&label_key)
+                        .is_some_and(|value| !value.is_null())
+                    || transition
+                        .get(&category_key)
+                        .is_some_and(|value| !value.is_null())
+                {
+                    return Err(error("incomplete null status history side"));
+                }
+                return Ok(());
+            }
+            let id = id.ok_or_else(|| error("status history status id missing"))?;
+            boreal_domain::global_manager::validate_identifier(id)
+                .map_err(|_| error("invalid status history status id"))?;
+            let registered = status_ids.contains(&(owner.clone(), id.to_owned()));
+            let source_owner_missing = prefix == "from"
+                && !has_owner_metadata
+                && transition.get("workflow_owner_id").is_some();
+            let historical = has_owner_metadata || !registered || source_owner_missing;
+            if historical {
+                let label = transition.get(&label_key).and_then(Value::as_str);
+                let category = transition.get(&category_key).and_then(Value::as_str);
+                if !label.is_some_and(|value| !value.trim().is_empty())
+                    || category.is_none_or(|value| StatusCategory::try_from(value).is_err())
+                {
+                    return Err(error("status history side lacks valid label/category"));
+                }
+            }
+            Ok(())
+        };
+        validate_side("from", true, &from_owner, from_owner_field.is_some())?;
+        validate_side("to", false, &to_owner, to_owner_field.is_some())?;
     }
     Ok(())
 }

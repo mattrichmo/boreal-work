@@ -172,6 +172,36 @@ impl GlobalManagerRequest {
             {
                 return Err("linked page limit must be from 1 to 50".into());
             }
+        } else if self.command == DETAIL_PAGE_COMMAND {
+            let request: GlobalDetailPageRequest = serde_json::from_value(self.payload.clone())
+                .map_err(|error| format!("invalid detail page request: {error}"))?;
+            const COLLECTIONS: &[&str] = &[
+                "projects",
+                "items",
+                "notes",
+                "statuses",
+                "relationships",
+                "note_links",
+                "associations",
+                "status_history",
+                "imported_history",
+            ];
+            if !COLLECTIONS.contains(&request.collection.as_str()) {
+                return Err("unsupported detail collection".into());
+            }
+            if request
+                .project_id
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                return Err("detail page project_id must not be empty".into());
+            }
+            if request
+                .limit
+                .is_some_and(|limit| !(1..=200).contains(&limit))
+            {
+                return Err("detail page limit must be from 1 to 200".into());
+            }
         } else if self.command == LINKED_JOB_SHOW_COMMAND {
             let request: GlobalLinkedJobShowRequest = serde_json::from_value(self.payload.clone())
                 .map_err(|error| format!("invalid linked job request: {error}"))?;

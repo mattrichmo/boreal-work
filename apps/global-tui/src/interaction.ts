@@ -24,7 +24,7 @@ const ROUTE_KEYS: Record<string, Route> = { "1": "overview", "2": "projects", "3
 const routeNames = ROUTE_MENU.map(([, label]) => label);
 function rowId(row: unknown): string | undefined { const r = row as { id?: string; status_id?: string }; return r?.id ?? r?.status_id; }
 function selectedItem(c: GlobalController): Item | undefined { return c.route === "board" ? c.boardSelected : c.selectedItem; }
-function selectedProject(c: GlobalController): Project | undefined { return c.route === "projects" ? c.selectedProject : undefined; }
+function selectedProject(c: GlobalController): Project | undefined { return c.route === "projects" || c.route === "overview" ? c.selectedProject : undefined; }
 function selectedNote(c: GlobalController): Note | undefined { return c.route === "notes" ? c.selectedRow() as Note : undefined; }
 function selectedStatus(c: GlobalController): Status | undefined { return c.route === "workflow" ? c.selectedRow() as Status : undefined; }
 function selectedAssociation(c: GlobalController): Association | undefined { return c.route === "links" ? c.selectedRow() as Association : undefined; }
@@ -275,18 +275,16 @@ export async function runInteractive(controller: GlobalController, terminal: Key
     return entries;
   };
 
-  const inspectItem = (item:Item):void => {
-    const reader={kind:"reader" as const,title:item.title,body:"Loading full record…",offset:0};modal=reader;draw();
-    void controller.loadSelectedDetail().then(()=>{
-      if(modal!==reader)return;
-      const full=controller.snapshot?.items.find(i=>i.id===item.id)??item;
-      const linkedNotes=(full as Item&{linked_notes?:Note[]}).linked_notes??[];
-      reader.body=[full.description??"",`Project: ${controller.projects.find(p=>p.id===full.project_id)?.name??"Personal inbox"}`,`Hierarchy: ${parentBreadcrumb(controller,full)}`,`Status: ${controller.snapshot?.statuses.find(s=>s.project_id===full.project_id&&s.status_id===full.status_id)?.label??full.status_id}`,`Priority: ${full.priority??"—"}`,`Due: ${humanDate(full.due_at)}`,`Follow-up: ${humanDate(full.follow_up_at)}`,`Parent: ${controller.snapshot?.items.find(i=>i.id===full.parent_id)?.title??"None"}`,"",`Linked notes (${linkedNotes.length})`,...(linkedNotes.length?linkedNotes.map(n=>`↳ ${n.title}`):["No linked notes"]),"",...relationshipLines(controller,full),"",...(controller.statusHistoryFor?.(full)??[]).map(h=>`rev ${h.revision}: ${h.from_status_id??"new"} → ${h.to_status_id} · ${humanDate(h.changed_at)}`)].join("\n");
-    }).catch(error=>{if(modal===reader)reader.body=`Full detail unavailable: ${String(error)}`;}).finally(()=>draw());
-  };
-  const inspectNote = (note:Note):void => {
-    const reader={kind:"reader" as const,title:note.title,body:"Loading full note…",offset:0};modal=reader;draw();
-    void controller.loadSelectedDetail().then(()=>{if(modal===reader){const full=controller.snapshot?.notes.find(n=>n.id===note.id) as (Note&{linked_items?:Item[]})|undefined;reader.body=[full?.body??"",`Linked work (${full?.linked_items?.length??0})`,...(full?.linked_items?.length?full.linked_items.map(i=>`↳ ${i.title}`):["No linked work items"])].join("\n");}}).catch(error=>{if(modal===reader)reader.body=`Full note unavailable: ${String(error)}`;}).finally(()=>draw());
+  const showSelectedInInspector = (tab: GlobalController["inspectorTab"] = "details", loadDetail = false): void => {
+    controller.focus = "inspector";
+    controller.inspectorTab = tab;
+    controller.inspectorOffset = 0;
+    if (!loadDetail) { draw(); return; }
+    busy = true;
+    draw();
+    void controller.loadSelectedDetail()
+      .catch(error => { notice = `Full detail unavailable: ${String(error)}`; })
+      .finally(() => { busy = false; draw(); });
   };
 
   const linkNote = (item:Item,note:Note,remove=false):void => launchWrite(remove?"note link remove":"note link add",{note_id:note.id,item_id:item.id});
@@ -352,7 +350,15 @@ export async function runInteractive(controller: GlobalController, terminal: Key
     if (key === "up" || key === "k") { if (controller.focus === "navigation") controller.setRoute(NAV_ROUTES[Math.max(0, NAV_ROUTES.indexOf(controller.route) - 1)]); else if (controller.focus === "inspector") controller.moveInspectorScroll(-1); else controller.moveSelection(-1); draw(); return; }
     if (key === "down" || key === "j") { if (controller.focus === "navigation") controller.setRoute(NAV_ROUTES[Math.min(NAV_ROUTES.length - 1, NAV_ROUTES.indexOf(controller.route) + 1)]); else if (controller.focus === "inspector") controller.moveInspectorScroll(1); else controller.moveSelection(1); draw(); return; }
     if (key === "page-up" || key === "page-down") {
-      if (controller.focus === "inspector") controller.moveInspectorScroll(key === "page-up" ? -8 : 8);
+      if (controller.focus === "inspector") {
+        const row=controller.selectedRow() as (Association&{identity:string})|undefined;
+        if(key==="page-down"&&controller.inspectorTab==="linked"&&row&&"identity" in row){
+          busy=true;
+          const request=controller.loadMoreRows();
+          draw();
+          void request.then(loaded=>{if(!loaded&&!controller.linkedPageError)notice="No additional linked work items.";}).finally(()=>{busy=false;draw();});
+        }else controller.moveInspectorScroll(key === "page-up" ? -8 : 8);
+      }
       else {
         controller.moveSelection(key === "page-up" ? -8 : 8);
         if(key==="page-down"&&controller.selected>=Math.max(0,controller.rows().length-8))void controller.loadMoreRows().then(draw);
@@ -365,10 +371,9 @@ export async function runInteractive(controller: GlobalController, terminal: Key
     if (key === "escape") { if (modal) modal = undefined; else if(relationshipReturn){const back=relationshipReturn;relationshipReturn=undefined;controller.setScope(back.projectId);controller.setRoute(back.route);if(back.selectedId)controller.selectId(back.selectedId);notice="Returned to the original related item.";}else if (controller.route !== "overview") controller.setRoute("overview"); draw(); return; }
     if (key === "enter") {
       if (project) { controller.selectProject(controller.projects.indexOf(project)); return; }
-      if (item) { inspectItem(item); return; }
-      if (controller.route === "history") { void loadHistoryPage(0); return; }
-      if (note) { inspectNote(note); return; }
-      if (association) { openLinkedReader(association); return; }
+      if (item || note) { showSelectedInInspector("details", true); return; }
+      if (association) { showSelectedInInspector("linked"); return; }
+      if (status || controller.route === "history") { showSelectedInInspector(); return; }
     }
     if (key === "H" && association?.kind === "workspace" && association.path && terminal.openLinkedWorkspace) {
       if (escapeTimer) clearTimeout(escapeTimer);
@@ -416,7 +421,7 @@ export async function runInteractive(controller: GlobalController, terminal: Key
     if (key === "p" && item && controller.route === "planning") { launchWrite("todo reorder", { item_id: item.id, direction: "up" }); return; }
     if (key === "v" && item) { modal = { kind: "reader", title: item.title, body: item.description ?? "", offset: 0 }; draw(); return; }
     if (key === "r") { void (controller.unresolvedOperation ? controller.resolveUnknownOperation().then(x => { notice = x; draw(); }) : controller.refresh()).catch(e => { notice = `Refresh/readback failed: ${String(e)}`; }).finally(draw); return; }
-    if (key === "/" && ["overview","board", "list", "todos", "projects", "notes","workflow","archive","links","inbox"].includes(controller.route)) { inputForm("Search this view", [{ key: "query", label: "Search text", value: controller.searchQuery, hint: "Searches the full collection through the service" }], async v => { await controller.search(String(v.query)); modal = undefined; draw(); }); return; }
+    if (key === "/" && ["overview","board", "list", "todos", "projects", "notes","workflow","archive","links","inbox","planning"].includes(controller.route)) { inputForm("Search this view", [{ key: "query", label: "Search text", value: controller.searchQuery, hint: "Searches the full collection through the service" }], async v => { await controller.search(String(v.query)); modal = undefined; draw(); }); return; }
     if (key === "x") { void controller.search("").then(draw).catch(e=>{notice=`Search failed: ${String(e)}`;draw();}); return; }
     const needsWork=["m","c","o","h","b","D","[","]"].includes(key)&&!item;
     const needsArchive=key==="a"&&!(item||project||note);
@@ -517,7 +522,7 @@ export async function runInteractive(controller: GlobalController, terminal: Key
 
 function helpLines(c: GlobalController): string[] {
   const routeActions:Record<Route,string>={
-    overview:"↑↓ choose attention item · Enter inspect · : commands",
+    overview:selectedProject(c)?"↑↓ choose attention item/project · Enter inspect/open project · : commands":"↑↓ choose attention item · Enter inspect · : commands",
     projects:"n create project · e edit · a archive · Enter open project",
     board:"←→ columns · ↑↓ cards · y mark · Y bulk triage · J jump related · K/W note links · Enter inspect",
     list:"↑↓ choose · y mark · Y bulk triage · J jump related · K/W note links · Enter inspect",
@@ -533,7 +538,7 @@ function helpLines(c: GlobalController): string[] {
   const selected=selectedItem(c)?"Selected work: e edit · h add child · m status · c complete · o reopen · b dependency · J jump related · K/W notes · y mark bulk triage · a archive":"";
   return [`${c.route} · ${c.activeProject?.name ?? "All projects"}`, routeActions[c.route], selected, "Tab focus · Space toggle all/last project · s choose scope · : search all views and actions", "? help · r refresh/read receipt · Esc back · q quit. Palette : contains every view and action."].filter(Boolean);
 }
-function contextualHint(c:GlobalController):string{const selected=selectedItem(c)?" · e edit m status c complete b dependency J jump K/W notes y mark":"";return `Tab focus · Space scope · : commands · ? help · ${c.route}:${c.route==="board"?"←→ columns ↑↓ cards y mark Y triage J related Enter inspect":c.route==="projects"?"n create Enter open e edit":c.route==="notes"?"n new Enter backlinks K/W link work":c.route==="workflow"?"s add e edit":c.route==="links"?"Enter inspect l link H handoff":c.route==="archive"?"u restore Enter inspect":c.route==="history"?"Enter activity ↑↓ scroll":c.route==="overview"?"↑↓ attention Enter inspect":c.route==="planning"?"↑↓ navigate z collapse P parent y mark J related":"n capture Enter inspect e edit y mark Y triage J related"}${selected}`;}
+function contextualHint(c:GlobalController):string{const selected=selectedItem(c)?" · e edit m status c complete b dependency J jump K/W notes y mark":"";return `Tab focus · Space scope · : commands · ? help · ${c.route}:${c.route==="board"?"←→ columns ↑↓ cards y mark Y triage J related Enter inspect":c.route==="projects"?"n create Enter open e edit":c.route==="notes"?"n new Enter backlinks K/W link work":c.route==="workflow"?"s add e edit":c.route==="links"?"Enter inspect l link H handoff":c.route==="archive"?"u restore Enter inspect":c.route==="history"?"Enter activity ↑↓ scroll":c.route==="overview"?(selectedProject(c)?"↑↓ attention/project Enter inspect/open":"↑↓ attention Enter inspect"):c.route==="planning"?"↑↓ navigate z collapse P parent y mark J related":"n capture Enter inspect e edit y mark Y triage J related"}${selected}`;}
 function paletteOptions(c: GlobalController): Array<{ label: string; run: () => void | Promise<void> }> {
   return [...ROUTES.map((r, i) => ({ label: `View · ${routeNames[i]}`, run: () => c.setRoute(r) })), { label: "Scope · All projects", run: () => c.setScope(undefined) }, ...c.projects.map(p => ({ label: `Scope · ${p.name}`, run: () => c.setScope(p.id) })), { label: "Refresh snapshot", run: () => c.refresh() }, { label: "Create item", run: () => c.route === "projects" ? c.setRoute("board") : undefined }];
 }
@@ -583,7 +588,7 @@ export async function runLineInterface(controller: GlobalController, input: Asyn
       if (cmd === "help") write("Commands: overview/projects/board/list/todos/notes/workflow/links/planning/archive/history/inbox; scope all|PROJECT_NUMBER; select N; search [TEXT]; refresh; add TITLE; edit TITLE (selected item/project/note); inspect; complete; archive; restore; status N (workflow row); dependency add N|remove N; note add TITLE; quit. Selection is by visible row number, project/status choices by label.\n");
       else if (ROUTES.includes(cmd as Route)) controller.setRoute(cmd as Route);
       else if (cmd === "scope") { if (parts[0] === "all") controller.setScope(undefined); else { const p = controller.projects[Number(parts[0]) - 1]; if (!p) throw new Error("choose a project number shown by projects"); controller.setScope(p.id); } }
-      else if (cmd === "select") { const row = controller.rows()[Number(parts[0]) - 1]; if (!row) throw new Error("row number is outside the current list"); controller.selectId(rowId(row)); }
+      else if (cmd === "select") { const row = controller.rows()[Number(parts[0]) - 1]; if (!row) throw new Error("row number is outside the current list"); controller.selectRow(row); }
       else if (cmd === "search") await controller.search(rest);
       else if (cmd === "refresh") { if (controller.unresolvedOperation) write(`${await controller.resolveUnknownOperation()}\n`); else await controller.refresh(); }
       else if (cmd === "inspect" && item) write(`${item.title}\n${item.description??""}\n${relationshipLines(controller, item).join("\n")}\n`);

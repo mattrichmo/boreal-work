@@ -77,7 +77,10 @@ export function renderForm(state: FormState, width: number, height: number): str
       else content.push(`  ${inputDisplay(value, state.cursors[i], Math.max(1, w - 4))}`);
       if (active) cursorLine = content.length - 1;
     } else content.push(...wrapWords(value || "(empty)", Math.max(1, w - 4)).map(x => `  ${safeText(x)}`));
-    const hint = field.hint ?? (field.kind === "date" ? "Date: YYYY-MM-DD uses the UTC calendar date; timestamps need Z or an explicit offset" : field.kind === "number" ? "Priority: whole number from 0 to 255" : undefined);
+    const dateHint = "Date: YYYY-MM-DD uses the UTC calendar date; timestamps need Z or an explicit offset";
+    const hint = field.kind === "date"
+      ? [dateHint, field.hint].filter((value, index, values): value is string => !!value && values.indexOf(value) === index).join(" · ")
+      : field.hint ?? (field.kind === "number" ? "Priority: whole number from 0 to 255" : undefined);
     if (hint) content.push(...wrapWords(hint, Math.max(1, w - 4)).map(x => `  ${x}`));
     if (field.kind === "picker" && !field.choices?.length) content.push("  No choices available for this destination.");
   });

@@ -194,22 +194,61 @@ pub fn validate_dependency(
     if prerequisite == dependent {
         return Err(GlobalManagerDomainError::DependencyCycle);
     }
-    let mut pending = vec![dependent.to_owned()];
+    let mut adjacency: std::collections::BTreeMap<&str, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for (from, to) in edges {
+        adjacency.entry(from).or_default().push(to);
+    }
+    let mut pending = vec![dependent];
     let mut seen = std::collections::BTreeSet::new();
     while let Some(node) = pending.pop() {
         if node == prerequisite {
             return Err(GlobalManagerDomainError::DependencyCycle);
         }
-        if seen.insert(node.clone()) {
-            pending.extend(
-                edges
-                    .iter()
-                    .filter(|(from, _)| from == &node)
-                    .map(|(_, to)| to.clone()),
-            );
+        if seen.insert(node) {
+            pending.extend(adjacency.get(node).into_iter().flatten().copied());
         }
     }
     Ok(())
+}
+
+/// Validates an existing prerequisite → dependent graph in O(V + E).
+pub fn validate_dependency_graph(
+    edges: &[(String, String)],
+) -> Result<(), GlobalManagerDomainError> {
+    use std::collections::{BTreeMap, VecDeque};
+    let mut adjacency: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut indegree: BTreeMap<&str, usize> = BTreeMap::new();
+    for (from, to) in edges {
+        validate_identifier(from)?;
+        validate_identifier(to)?;
+        if from == to {
+            return Err(GlobalManagerDomainError::DependencyCycle);
+        }
+        adjacency.entry(from).or_default().push(to);
+        indegree.entry(from).or_default();
+        *indegree.entry(to).or_default() += 1;
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(node, degree)| (*degree == 0).then_some(*node))
+        .collect::<VecDeque<_>>();
+    let mut visited = 0usize;
+    while let Some(node) = ready.pop_front() {
+        visited += 1;
+        for next in adjacency.get(node).into_iter().flatten() {
+            let degree = indegree.get_mut(next).expect("edge endpoint was inserted");
+            *degree -= 1;
+            if *degree == 0 {
+                ready.push_back(next);
+            }
+        }
+    }
+    if visited == indegree.len() {
+        Ok(())
+    } else {
+        Err(GlobalManagerDomainError::DependencyCycle)
+    }
 }
 
 pub fn validate_identifier(value: &str) -> Result<(), GlobalManagerDomainError> {

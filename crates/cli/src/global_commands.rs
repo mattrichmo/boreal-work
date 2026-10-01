@@ -846,26 +846,74 @@ pub(crate) fn write_export(
 fn write_export_path(path: &str, data: &Value) -> Result<(), CliError> {
     let path = PathBuf::from(path);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            CliError::invalid(format!("cannot create export directory: {error}"))
-        })?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|error| {
+                CliError::invalid(format!("cannot create export directory: {error}"))
+            })?;
+        }
     }
-    let temp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("json")
-    ));
+    let database = fs::canonicalize(global_db_path()?).map_err(|error| {
+        CliError::invalid(format!("cannot resolve canonical global database: {error}"))
+    })?;
+    let absolute = if path.is_absolute() {
+        path.clone()
+    } else {
+        env::current_dir()
+            .map_err(|error| CliError::invalid(format!("cannot resolve export path: {error}")))?
+            .join(&path)
+    };
+    let parent = absolute.parent().unwrap_or(Path::new("."));
+    let canonical_parent = fs::canonicalize(parent)
+        .map_err(|error| CliError::invalid(format!("cannot resolve export directory: {error}")))?;
+    let destination = canonical_parent.join(
+        absolute
+            .file_name()
+            .ok_or_else(|| CliError::invalid("global export destination must name a file"))?,
+    );
+    let canonical_destination =
+        fs::canonicalize(&destination).unwrap_or_else(|_| destination.clone());
+    if canonical_destination == database {
+        return Err(CliError::invalid(
+            "global export destination cannot replace the canonical SQLite database",
+        ));
+    }
     let encoded = serde_json::to_vec_pretty(data)
         .map_err(|error| CliError::invalid(format!("cannot encode global export: {error}")))?;
-    fs::write(&temp, encoded).map_err(|error| {
-        CliError::with(
+    let file_name = destination.file_name().unwrap().to_string_lossy();
+    let (temp, mut file) = (0..16)
+        .find_map(|_| {
+            let nonce = LINKED_JOB_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let candidate =
+                canonical_parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(&candidate).ok().map(|file| (candidate, file))
+        })
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                "cannot create a unique private global export temp file",
+            )
+        })?;
+    use std::io::Write;
+    let write_result = file.write_all(&encoded).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp);
+        return Err(CliError::with(
             ErrorCode::ServiceUnavailable,
             ApplicationOutcome::Failed,
             format!("cannot write global export: {error}"),
-        )
-    })?;
-    fs::rename(&temp, &path).map_err(|error| {
+        ));
+    }
+    fs::rename(&temp, &destination).map_err(|error| {
+        let _ = fs::remove_file(&temp);
         CliError::with(
             ErrorCode::ServiceUnavailable,
             ApplicationOutcome::Failed,
@@ -1010,6 +1058,21 @@ struct WorkspaceMetadata {
 }
 
 pub(crate) fn validate_workspace(input: &str) -> Result<(String, String), CliError> {
+    let workspace = validate_workspace_details(input)?;
+    Ok((
+        workspace.project_id,
+        workspace.root.to_string_lossy().into_owned(),
+    ))
+}
+
+struct ValidatedWorkspace {
+    project_id: String,
+    root: PathBuf,
+    operator_actor: Option<String>,
+    store: SqliteStore,
+}
+
+fn validate_workspace_details(input: &str) -> Result<ValidatedWorkspace, CliError> {
     let root = fs::canonicalize(input).map_err(|error| {
         CliError::with(
             ErrorCode::NotFound,
@@ -1074,7 +1137,14 @@ pub(crate) fn validate_workspace(input: &str) -> Result<(String, String), CliErr
             "workspace identity does not match its database",
         ));
     }
-    Ok((metadata.project_id, root.to_string_lossy().into_owned()))
+    Ok(ValidatedWorkspace {
+        project_id: metadata.project_id,
+        root,
+        operator_actor: metadata
+            .operator_actor
+            .filter(|actor| !actor.trim().is_empty()),
+        store,
+    })
 }
 
 fn normalize_folder_path(input: &str) -> Result<String, CliError> {
@@ -1207,7 +1277,11 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
             match job.kind {
                 LinkedRefreshKind::Rollup => {
                     let started = Instant::now();
-                    let result = linked_workspace_rollup(&job.key.1, &job.path, Instant::now());
+                    let result = linked_workspace_rollup(
+                        &job.key.1,
+                        &job.path,
+                        Instant::now() + Duration::from_secs(3),
+                    );
                     let now = now_ms_u64();
                     let row = match result {
                         Ok(value) => {
@@ -1543,36 +1617,23 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
 }
 
 fn linked_workspace_rollup(identity: &str, path: &str, deadline: Instant) -> Result<Value, String> {
-    let identity = identity.to_owned();
-    let path = path.to_owned();
     let result = (|| -> Result<Value, String> {
-        let (validated_id, root) = validate_workspace(&path).map_err(|error| error.message)?;
-        if validated_id != identity {
+        if Instant::now() >= deadline {
+            return Err("linked workspace read deadline expired".into());
+        }
+        let workspace = validate_workspace_details(path).map_err(|error| error.message)?;
+        if workspace.project_id != identity {
             return Err("linked project identity does not match workspace metadata".into());
         }
-        let root = PathBuf::from(root);
-        let metadata: WorkspaceMetadata = serde_json::from_slice(
-            &fs::read(root.join(".boreal/project.json")).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        let operator_actor = metadata
-            .operator_actor
-            .as_deref()
-            .filter(|actor| !actor.trim().is_empty())
-            .ok_or_else(|| {
-                "workspace metadata does not record a local operator actor".to_owned()
-            })?;
-        let database = fs::canonicalize(if metadata.database.is_absolute() {
-            metadata.database
-        } else {
-            root.join(metadata.database)
-        })
-        .map_err(|error| error.to_string())?;
-        let store = SqliteStore::open_read_only_for_diagnostics(database)
-            .map_err(|error| error.to_string())?;
+        let operator_actor = workspace.operator_actor.as_deref().ok_or_else(|| {
+            "workspace metadata does not record a local operator actor".to_owned()
+        })?;
+        if Instant::now() >= deadline {
+            return Err("linked workspace read deadline expired".into());
+        }
         let snapshot = boreal_application::project_status_from_store_for_session(
-            &store,
-            &ProjectId::new(&identity),
+            &workspace.store,
+            &ProjectId::new(identity),
             &boreal_domain::ActorContext {
                 actor_id: ActorId::new(operator_actor),
                 role: boreal_domain::ActorRole::Operator,
@@ -1583,12 +1644,14 @@ fn linked_workspace_rollup(identity: &str, path: &str, deadline: Instant) -> Res
             0,
         )
         .map_err(|error| error.to_string())?;
+        if Instant::now() >= deadline {
+            return Err("linked workspace read deadline expired".into());
+        }
         let counts = &snapshot.counts;
         Ok(
             json!({"revision":snapshot.project_revision.0,"as_of":stamp(snapshot.as_of.as_millis()),"as_of_ms":snapshot.as_of.as_millis(),"counts":{"total":snapshot.total,"draft":counts.draft,"queued":counts.queued,"ready":counts.ready,"claimed":counts.claimed,"in_progress":counts.in_progress,"needs_verification":counts.needs_verification,"awaiting_review":counts.awaiting_review,"complete":counts.complete,"closed":counts.closed,"blocked":counts.blocked,"paused":counts.paused,"retry_wait":counts.retry_wait,"expired_review":counts.expired_review,"cancelled":counts.cancelled,"scheduled":counts.scheduled}}),
         )
     })();
-    let _ = deadline;
     result
 }
 
@@ -1602,32 +1665,21 @@ fn linked_workspace_detail(
 ) -> Result<Value, String> {
     let result = {
         let result = (|| -> Result<Value, String> {
-            let (validated_id, root) = validate_workspace(&path).map_err(|error| error.message)?;
-            if validated_id != identity {
+            if Instant::now() >= deadline {
+                return Err("linked workspace read deadline expired".into());
+            }
+            let workspace = validate_workspace_details(path).map_err(|error| error.message)?;
+            if workspace.project_id != identity {
                 return Err("linked project identity does not match workspace metadata".into());
             }
-            let root = PathBuf::from(root);
-            let metadata: WorkspaceMetadata = serde_json::from_slice(
-                &fs::read(root.join(".boreal/project.json")).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-            let operator_actor = metadata
-                .operator_actor
-                .as_deref()
-                .filter(|actor| !actor.trim().is_empty())
-                .ok_or_else(|| {
-                    "workspace metadata does not record a local operator actor".to_owned()
-                })?;
-            let database = fs::canonicalize(if metadata.database.is_absolute() {
-                metadata.database
-            } else {
-                root.join(metadata.database)
-            })
-            .map_err(|error| error.to_string())?;
-            let store = SqliteStore::open_read_only_for_diagnostics(database)
-                .map_err(|error| error.to_string())?;
+            let operator_actor = workspace.operator_actor.as_deref().ok_or_else(|| {
+                "workspace metadata does not record a local operator actor".to_owned()
+            })?;
+            if Instant::now() >= deadline {
+                return Err("linked workspace read deadline expired".into());
+            }
             let snapshot = boreal_application::project_status_from_store_for_session(
-                &store,
+                &workspace.store,
                 &ProjectId::new(identity),
                 &boreal_domain::ActorContext {
                     actor_id: ActorId::new(operator_actor),
@@ -1639,6 +1691,9 @@ fn linked_workspace_detail(
                 offset,
             )
             .map_err(|error| error.to_string())?;
+            if Instant::now() >= deadline {
+                return Err("linked workspace read deadline expired".into());
+            }
             let counts = &snapshot.counts;
             let items = snapshot.items.iter().map(|row| {
                 let work = &row.work;
@@ -1659,7 +1714,7 @@ fn linked_workspace_detail(
             Ok(json!({
                 "management_project_id": management_project_id,
                 "project_id": identity,
-                "path": root,
+                "path": workspace.root,
                 "availability": "available",
                 "revision": snapshot.project_revision.0,
                 "as_of": stamp(snapshot.as_of.as_millis()),
@@ -1673,14 +1728,14 @@ fn linked_workspace_detail(
                 },
                 "items": items,
                 "items_total": snapshot.total,
-                "items_has_more": snapshot.total > items_count,
+                "items_has_more": offset.saturating_add(items_count) < snapshot.total,
                 "items_limit": limit,
                 "items_offset": offset,
             }))
         })();
         result
     };
-    let _ = (management_project_id, identity, path, deadline);
+    let _ = (management_project_id, identity, path);
     result
 }
 

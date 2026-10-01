@@ -98,3 +98,36 @@ edition-matched `rustfmt --check`.
 These focused checks do not claim full-workspace Cargo qualification,
 installed-terminal behavior, or a production database migration run. No live
 management state was changed.
+
+## Follow-up hardening after the later full audit
+
+The follow-up implementation closes additional defects found during the
+independent source review:
+
+- Reject export paths that resolve to the canonical global database. Write
+  private exports through unique exclusive temp files before atomic rename.
+- Validate typed `detail page` requests at the protocol boundary. Reuse one
+  validated workspace identity/store for linked reads, discard results that
+  finish after their deadline, and compute linked-page continuation from the
+  requested offset.
+- Reject item transfers that split child, relationship, or note-link
+  ownership. Require both source and destination workflow identity before
+  transferring items with history; validate each historical status side
+  against its recorded workflow.
+- Bound recursive imported history and interactive response projections.
+  Keep exact totals, mark snapshot samples that were reduced, and preserve
+  page offsets when response-size limits shorten a page. Scope searchable
+  status history to either transition owner.
+- Preserve mixed-row identity and project origin in the TUI. Start archive
+  paging at the raw detail-page origin because routine summaries omit
+  archived-project children; use stable row keys to deduplicate. Enter opens
+  work, note, status, activity, and linked records in the inspector; project
+  rows open their board, and linked details remain pageable.
+
+The follow-up received `cargo check` for the changed Rust packages,
+`npm run typecheck` for the global TUI, edition-matched `rustfmt --check`, and
+`git diff --check`. No tests were added or run in this follow-up. Saved views,
+legacy inbox capture provenance/import, installed-terminal qualification, and
+measured history-retention policy remain separate work. A synchronous linked
+SQLite projection cannot be interrupted once it starts; late results are
+discarded and the worker/queue remain bounded.

@@ -105,8 +105,7 @@ fn launch(_parsed: &ParsedCommand) -> Result<(), CliError> {
             )
         })?;
     if let Err(error) = wait_until_ready(&socket, &mut service) {
-        signal::send_to_process(service.id(), signal::SIGTERM);
-        let _ = service.wait();
+        terminate_child(&mut service);
         let _ = fs::remove_dir_all(&runtime);
         return Err(error);
     }
@@ -130,8 +129,7 @@ fn launch(_parsed: &ParsedCommand) -> Result<(), CliError> {
     let mut tui = match tui {
         Ok(child) => child,
         Err(error) => {
-            signal::send_to_process(service.id(), signal::SIGTERM);
-            let _ = service.wait();
+            terminate_child(&mut service);
             let _ = fs::remove_dir_all(&runtime);
             return Err(CliError::with(
                 ErrorCode::ServiceUnavailable,
@@ -212,26 +210,37 @@ fn wait_until_ready(socket: &Path, service: &mut Child) -> Result<(), CliError> 
 #[cfg(unix)]
 fn supervise(tui: &mut Child, service: &mut Child, socket: &Path) -> Result<ExitStatus, CliError> {
     loop {
-        if let Some(status) = tui.try_wait().map_err(|error| {
-            CliError::with(
-                ErrorCode::ServiceUnavailable,
-                ApplicationOutcome::Failed,
-                error.to_string(),
-            )
-        })? {
+        let tui_status = match tui.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                terminate_child(tui);
+                terminate_child(service);
+                return Err(CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Some(status) = tui_status {
             let _ = request_shutdown(socket);
             wait_service(service);
             return Ok(status);
         }
-        if let Some(status) = service.try_wait().map_err(|error| {
-            CliError::with(
-                ErrorCode::ServiceUnavailable,
-                ApplicationOutcome::Failed,
-                error.to_string(),
-            )
-        })? {
-            let _ = signal::send_to_process(tui.id(), signal::SIGTERM);
-            let _ = tui.wait();
+        let service_status = match service.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                terminate_child(tui);
+                terminate_child(service);
+                return Err(CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Some(status) = service_status {
+            terminate_child(tui);
             return Err(CliError::with(
                 ErrorCode::ServiceUnavailable,
                 ApplicationOutcome::Failed,
@@ -241,9 +250,8 @@ fn supervise(tui: &mut Child, service: &mut Child, socket: &Path) -> Result<Exit
         let pending = signal::take_pending();
         if pending != 0 {
             signal::send_to_process(tui.id(), pending);
-            signal::send_to_process(service.id(), signal::SIGTERM);
-            let _ = tui.wait();
-            let _ = service.wait();
+            terminate_child(service);
+            terminate_child(tui);
             return Err(CliError::with(
                 ErrorCode::ServiceUnavailable,
                 ApplicationOutcome::Failed,
@@ -298,8 +306,24 @@ fn wait_service(service: &mut Child) {
         }
         thread::sleep(Duration::from_millis(25));
     }
-    signal::send_to_process(service.id(), signal::SIGTERM);
-    let _ = service.wait();
+    terminate_child(service);
+}
+
+#[cfg(unix)]
+fn terminate_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    let _ = signal::send_to_process(child.id(), signal::SIGTERM);
+    let deadline = Instant::now() + Duration::from_millis(750);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let _ = signal::send_to_process(child.id(), signal::SIGKILL);
+    let _ = child.wait();
 }
 
 enum TuiEntrypoint {
@@ -316,6 +340,7 @@ mod signal {
     };
     pub(super) const SIGINT: c_int = 2;
     pub(super) const SIGTERM: c_int = 15;
+    pub(super) const SIGKILL: c_int = 9;
     const SIGNAL_ERROR: usize = usize::MAX;
     static PENDING: AtomicI32 = AtomicI32::new(0);
     unsafe extern "C" {

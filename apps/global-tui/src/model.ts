@@ -90,11 +90,12 @@ export class GlobalController {
     if(this.inspectorTab==="linked"&&this.selectedRow()&&"identity" in (this.selectedRow() as object))return this.loadMoreLinked();
     const routes:Record<string,string>={projects:"projects",board:"items",list:"items",planning:"items",todos:"items",inbox:"items",notes:"notes",workflow:"statuses",links:"associations"};const archiveCollections=["projects","items","notes"];const overviewCollections=["items","projects"];let collection=this.route==="archive"?archiveCollections[this.archiveCollectionIndex]:this.route==="overview"?overviewCollections[this.overviewCollectionIndex]:routes[this.route];if(!collection)return false;
     const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;includeArchived?:boolean;kind?:string}):Promise<GlobalPage<T>>};if(!client.detailPage)return false;
-    const key=`${collection}:${this.projectId??"*"}`;let offset=this.pageOffsets.get(key);if(offset===undefined){const data=this.snapshot[collection as "projects"|"items"|"notes"|"statuses"|"associations"] as unknown[];const scopedCount=this.projectId?data.filter(row=>!!row&&typeof row==="object"&&(row as Record<string,unknown>).project_id===this.projectId).length:0;offset=this.searchQuery?0:this.projectId?scopedCount:Math.min(this.snapshot.snapshot_limit??data.length,data.length);}
     const includeArchived=this.route==="archive";
+    const key=`${collection}:${this.projectId??"*"}:${this.route}:${this.searchQuery}:${includeArchived}`;let offset=this.pageOffsets.get(key);if(offset===undefined){const data=this.snapshot[collection as "projects"|"items"|"notes"|"statuses"|"associations"] as unknown[];offset=this.searchQuery?0:summaryVisibleCount(this.snapshot,collection,data,this.projectId,includeArchived);}
     this.pageLoading=true;this.pageError=undefined;
     try{
       const page=await client.detailPage(collection,{...(this.projectId?{projectId:this.projectId}:{}),limit:100,offset,includeArchived,...(this.searchQuery?{query:this.searchQuery}:{})});
+      if(page.revision!==this.snapshot.revision){await this.refresh();this.pageError=`The portfolio changed while loading this page (revision ${page.revision} vs ${this.snapshot?.revision??"unknown"}); refreshed. Load more again to continue.`;return false;}
       if(this.searchQuery)for(const row of page.rows as unknown[]){const id=keyOf(row as Row);if(id)this.searchMatchedIds.add(id);}
       this.pageTotals.set(`${this.route}:${this.projectId??"*"}:${this.searchQuery}:${collection}`,page.total);
       this.appendPage(collection,page.rows as never[]);this.pageOffsets.set(key,page.next_offset??page.offset+page.rows.length);this.reconcileSelection();
@@ -107,7 +108,7 @@ export class GlobalController {
   async search(query:string):Promise<void>{this.searchQuery=query;this.selected=0;this.selectedId=undefined;this.searchMatchedIds.clear();this.pageOffsets.clear();this.pageTotals.clear();this.archiveCollectionIndex=0;this.overviewCollectionIndex=0;this.reconcileSelection();if(!query.trim())return;
     if(this.route==="overview"){
       const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;query?:string}):Promise<GlobalPage<T>>};
-      if(client.detailPage)try{const page=await client.detailPage("projects",{...(this.projectId?{projectId:this.projectId}:{}),query,limit:100,offset:0});for(const row of page.rows as unknown[]){const id=keyOf(row as Row);if(id)this.searchMatchedIds.add(id);}this.appendPage("projects",page.rows as never[]);this.pageOffsets.set(`projects:${this.projectId??"*"}`,page.next_offset??page.rows.length);}catch(error){this.pageError=error instanceof Error?error.message:String(error);}
+      if(client.detailPage)try{const page=await client.detailPage("projects",{...(this.projectId?{projectId:this.projectId}:{}),query,limit:100,offset:0});if(this.snapshot&&page.revision!==this.snapshot.revision){await this.refresh();this.pageError=`The portfolio changed while searching (revision ${page.revision} vs ${this.snapshot?.revision??"unknown"}); refreshed. Search again to continue.`;return;}for(const row of page.rows as unknown[]){const id=keyOf(row as Row);if(id)this.searchMatchedIds.add(id);}this.appendPage("projects",page.rows as never[]);this.pageOffsets.set(`projects:${this.projectId??"*"}:overview:${query}:false`,page.next_offset??page.rows.length);}catch(error){this.pageError=error instanceof Error?error.message:String(error);}
     }
     await this.loadMoreRows();
   }
@@ -146,7 +147,7 @@ export class GlobalController {
     catch(error){const message=error instanceof Error?error.message:String(error);this.linkedPageError=message;this.pageError=message;return false;}finally{this.linkedPageLoading=false;this.pageLoading=false;}
   }
 
-  private appendPage(collection:string,rows:never[]):void{const snap=this.snapshot as unknown as Record<string,unknown>;const current=snap[collection];if(!Array.isArray(current))return;const key=(x:unknown):string=>{if(!x||typeof x!=="object")return JSON.stringify(x);const r=x as Record<string,unknown>;return String(r.id??r.identity??r.status_id??r.operation_id??JSON.stringify(x));};const known=new Set(current.map(key));snap[collection]=[...current,...rows.filter(row=>!known.has(key(row)))];}
+  private appendPage(collection:string,rows:never[]):void{const snap=this.snapshot as unknown as Record<string,unknown>;const current=snap[collection];if(!Array.isArray(current))return;const key=(x:unknown):string=>keyOf(x as Row)??JSON.stringify(x);const known=new Set(current.map(key));snap[collection]=[...current,...rows.filter(row=>!known.has(key(row)))];}
   private replaceSnapshotRow(collection:"items"|"notes",id:string,value:Item|Note):void{const rows=this.snapshot?.[collection] as Array<Item|Note>|undefined;if(!rows)return;const index=rows.findIndex(x=>x.id===id);if(index>=0)rows[index]={...rows[index],...value};}
   private reconcileLinkedSamples(next:GlobalSnapshot):void{
     const active=new Set(next.associations.filter(a=>a.kind==="workspace").map(a=>`${a.project_id}\0${a.identity}`));
@@ -167,7 +168,8 @@ export class GlobalController {
       if("title" in row&&"status_id" in row&&!this.snapshot.items.some(i=>i.id===row.id)){const value=await this.client.execute<Item>(row.kind==="milestone"?"milestone show":row.kind==="task"?"task show":"todo show",{item_id:row.id});this.snapshot.items.push(value);}
       else if("title" in row&&!("status_id" in row)&&!("operation_id" in row)&&!this.snapshot.notes.some(n=>n.id===row.id)){const client=this.client as GlobalServiceClient&{noteShow?(id:string):Promise<Note>};const value=client.noteShow?await client.noteShow(row.id):await this.client.execute<Note>("note show",{note_id:row.id});this.snapshot.notes.push(value);}
       else if("name" in row&&!this.snapshot.projects.some(p=>p.id===row.id)){const value=await this.client.execute<Project>("project show",{project_id:row.id});this.snapshot.projects.push(value);}
-      else if("identity" in row&&!this.snapshot.associations.some(a=>a.identity===row.identity&&a.project_id===row.project_id)){const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;query?:string}):Promise<GlobalPage<T>>};if(client.detailPage){const page=await client.detailPage("associations",{projectId:row.project_id,query:row.identity,limit:100,offset:0});this.snapshot.associations.push(...page.rows as Association[]);}}
+      else if("label" in row&&"status_id" in row&&!this.snapshot.statuses.some(s=>s.status_id===row.status_id&&s.project_id===row.project_id)){const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;query?:string}):Promise<GlobalPage<T>>};if(client.detailPage){const page=await client.detailPage("statuses",{...(row.project_id?{projectId:row.project_id}:{}),query:row.status_id,limit:100,offset:0});if(page.revision===this.snapshot.revision)this.appendPage("statuses",page.rows as never[]);}}
+      else if("identity" in row&&!this.snapshot.associations.some(a=>a.identity===row.identity&&a.project_id===row.project_id&&a.kind===row.kind)){const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;query?:string}):Promise<GlobalPage<T>>};if(client.detailPage){const page=await client.detailPage("associations",{projectId:row.project_id,query:row.identity,limit:100,offset:0});if(page.revision===this.snapshot.revision)this.appendPage("associations",page.rows as never[]);}}
     }catch{/* Keep the last selection if it can still be resolved from the retained snapshot. */}
   }
 
@@ -244,7 +246,9 @@ export class GlobalController {
   setScope(projectId?:string):void{if(projectId)this.lastProjectId=projectId;else if(this.projectId)this.lastProjectId=this.projectId;this.projectId=projectId;this.selected=0;this.selectedId=undefined;this.boardColumn=0;this.boardCard=0;this.reconcileSelection();}
   toggleScope():void{this.setScope(this.projectId?undefined:(this.lastProjectId&&this.projects.some(p=>p.id===this.lastProjectId)?this.lastProjectId:this.projects[0]?.id));}
   setTodoFilter(filter:TodoFilter):void{this.todoFilter=filter;this.selected=0;this.selectedId=undefined;this.reconcileSelection();}
-  selectId(id:string|undefined):void{this.selectedId=id;this.reconcileSelection();}
+  selectId(id:string|undefined):void{if(id){const row=this.rows().find(candidate=>publicRowId(candidate)===id||keyOf(candidate)===id);this.selectedId=row?keyOf(row):id;}else this.selectedId=undefined;this.reconcileSelection();}
+  selectRow(row:Row):void{this.selectedId=keyOf(row);this.reconcileSelection();}
+  rowKey(row:Row|undefined):string|undefined{return keyOf(row);}
   toggleCollapsed(id:string):void{if(this.collapsedItemIds.has(id))this.collapsedItemIds.delete(id);else this.collapsedItemIds.add(id);this.reconcileSelection();}
   isCollapsed(id:string):boolean{return this.collapsedItemIds.has(id);}
   toggleBulkSelected(id:string):void{if(!this.rows().some(row=>keyOf(row)===id))return;if(this.bulkSelectedIds.has(id))this.bulkSelectedIds.delete(id);else this.bulkSelectedIds.add(id);}
@@ -276,7 +280,7 @@ export class GlobalController {
   relationshipsFor(row:Row|undefined):Relationship[]{if(!row||!("title" in row&&"status_id" in row))return [];const item=row as Item;return (this.snapshot?.relationships??[]).filter(r=>r.source_id===item.id||r.target_id===item.id);}
   projectName(id:string|null):string{return this.snapshot?.projects.find(p=>p.id===id)?.name??(id?"Unknown project":"Personal inbox");}
   projectAttention(project:Project):{next_action?:{item_id:string;title:string;due_at:string|null;priority:number|null;status_id:string;status_label:string;kind:string}|null;next_milestone?:{item_id:string;title:string;due_at:string|null;completed_children:number;total_children:number}|null}{return (((this.snapshot?.attention as unknown as {projects?:Record<string,unknown>}|undefined)?.projects?.[project.id])??{}) as ReturnType<GlobalController["projectAttention"]>;}
-  projectNextAction(project:Project):{id:string;title:string;due_at:string|null;priority:number|null;status_id:string;status_label:string;kind:string}|Item|undefined{const a=this.projectAttention(project).next_action;if(a)return{id:a.item_id,title:a.title,due_at:a.due_at,priority:a.priority,status_id:a.status_id,status_label:a.status_label,kind:a.kind};return (this.snapshot?.items??[]).filter(i=>i.project_id===project.id&&!i.archived&&!isDone(this.statusFor(i))).sort((x,y)=>urgency(x,Date.now())-urgency(y,Date.now())||(y.priority??-1)-(x.priority??-1)||x.position-y.position)[0];}
+  projectNextAction(project:Project):{id:string;title:string;due_at:string|null;priority:number|null;status_id:string;status_label:string;kind:string}|Item|undefined{const a=this.projectAttention(project).next_action;if(a)return{id:a.item_id,title:a.title,due_at:a.due_at,priority:a.priority,status_id:a.status_id,status_label:a.status_label,kind:a.kind};return (this.snapshot?.items??[]).filter(i=>{const status=this.statusFor(i);return i.project_id===project.id&&!i.archived&&!isDone(status)&&status?.category!=="waiting"&&status?.category!=="blocked";}).sort((x,y)=>urgency(x,Date.now())-urgency(y,Date.now())||(y.priority??-1)-(x.priority??-1)||x.position-y.position)[0];}
   projectNextMilestone(project:Project):{id:string;title:string;due_at:string|null;completed_children:number;total_children:number}|Item|undefined{const m=this.projectAttention(project).next_milestone;if(m)return{id:m.item_id,title:m.title,due_at:m.due_at,completed_children:m.completed_children,total_children:m.total_children};return (this.snapshot?.items??[]).filter(i=>i.project_id===project.id&&i.kind==="milestone"&&!i.archived&&!isDone(this.statusFor(i))).sort((x,y)=>urgency(x,Date.now())-urgency(y,Date.now())||x.position-y.position)[0];}
   itemBreadcrumb(item:Item):string[]{const byId=new Map((this.snapshot?.items??[]).map(i=>[i.id,i]));const parts:string[]=[];const seen=new Set<string>();let current:Item|undefined=item;while(current?.parent_id&&!seen.has(current.parent_id)){seen.add(current.parent_id);const parent=byId.get(current.parent_id);if(!parent)break;parts.unshift(parent.title);current=parent;}return parts;}
   milestoneProgress(item:Item):{completed:number;total:number;visibleOnly:boolean}{const p=item.project_id?this.snapshot?.projects.find(x=>x.id===item.project_id):undefined;const m=p?this.projectAttention(p).next_milestone:undefined;if(m?.item_id===item.id)return{completed:m.completed_children,total:m.total_children,visibleOnly:false};const children=(this.snapshot?.items??[]).filter(i=>i.parent_id===item.id&&!i.archived);return{completed:children.filter(i=>this.statusFor(i)?.category==="completed").length,total:children.length,visibleOnly:true};}
@@ -311,6 +315,24 @@ function utcDay(time:number):string{return new Date(time).toISOString().slice(0,
 function isInbox(s:Status|undefined):boolean{return s?.category==="inbox"||s?.status_id.toLowerCase()==="inbox";}
 function isWaiting(s:Status|undefined):boolean{return s?.category==="waiting"||s?.status_id.toLowerCase()==="waiting";}
 function matchesTodoFilter(i:Item,s:Status|undefined,f:TodoFilter,now:number):boolean{if(f==="all_open")return true;if(f==="waiting")return isWaiting(s);if(f==="overdue")return isOverdue(i,now)&&!isWaiting(s);if(f==="unscheduled")return !i.due_at&&!isWaiting(s);if(isWaiting(s))return false;if(!i.due_at)return true;const due=Date.parse(i.due_at);return Number.isFinite(due)&&utcDay(due)===utcDay(now);}
-function keyOf(r:Row|undefined):EntityKey|undefined{return r?("id" in r?r.id:"status_id" in r?r.status_id:"identity" in r?r.identity:undefined):undefined;}
+function keyOf(r:Row|undefined):EntityKey|undefined{return r?("operation_id" in r?`operation:${r.operation_id}`:"id" in r?r.id:"status_id" in r?`status:${r.project_id??""}\0${r.status_id}`:"identity" in r?`association:${r.project_id}\0${r.kind}\0${r.identity}`:undefined):undefined;}
+function publicRowId(r:Row):string|undefined{return "operation_id" in r?r.operation_id:"id" in r?r.id:"status_id" in r?r.status_id:"identity" in r?r.identity:undefined;}
+function summaryVisibleCount(snapshot:GlobalSnapshot,collection:string,data:unknown[],projectId:string|undefined,includeArchived:boolean):number{
+  // Archived detail pages include records owned by archived projects, while
+  // routine summaries deliberately omit those records. There is no reliable
+  // raw collection offset for that mixed sample, so start at zero and let the
+  // stable row keys deduplicate records already present in the summary.
+  if(includeArchived)return 0;
+  const archivedProjects=new Set(snapshot.projects.filter(project=>project.archived).map(project=>project.id));
+  return data.filter(value=>{
+    if(!value||typeof value!=="object")return false;
+    const row=value as Record<string,unknown>;const owner=collection==="projects"&&typeof row.id==="string"?row.id:typeof row.project_id==="string"?row.project_id:undefined;
+    if(projectId&&owner!==projectId)return false;
+    if(row.archived===true)return false;
+    if(owner&&archivedProjects.has(owner))return false;
+    if(collection==="statuses"&&owner&&archivedProjects.has(owner))return false;
+    return true;
+  }).length;
+}
 function clamp(n:number,min:number,max:number):number{return Math.max(min,Math.min(max,n));}
 function safe(s:string):string{return s.replace(/[\u0000-\u001f\u007f-\u009f\u001b]/g," ").slice(0,80);}

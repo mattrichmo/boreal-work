@@ -196,9 +196,9 @@ impl GlobalManagerStore {
     /// must first provide an independently verified, restorable archival path.
     /// This helper reports serialized history bytes for operational measurement.
     pub fn revision_history_bytes(&self) -> Result<u64, StoreError> {
-        let mut query = self
-            .inner
-            .prepare("SELECT COALESCE(SUM(length(state_json)),0) FROM global_revision_snapshot")?;
+        let mut query = self.inner.prepare(
+            "SELECT COALESCE(SUM(length(CAST(state_json AS BLOB))),0) FROM global_revision_snapshot",
+        )?;
         if query.step()? != SQLITE_ROW {
             return Err(StoreError::Corrupt(
                 "global revision history size returned no row".into(),
@@ -268,6 +268,27 @@ impl GlobalManagerStore {
         ))
     }
 
+    /// Returns the prior result for an idempotency key, rejecting reuse with
+    /// a different request before application policy checks can mask replay.
+    pub fn replay_result(
+        &self,
+        command: &str,
+        payload: &Value,
+        operation_id: &str,
+    ) -> Result<Option<Value>, StoreError> {
+        if operation_id.trim().is_empty() {
+            return Err(StoreError::Invalid("operation id is required".into()));
+        }
+        let digest = request_digest(command, payload);
+        match self.operation(operation_id)? {
+            Some((old_digest, result)) if old_digest == digest => Ok(Some(result)),
+            Some(_) => Err(StoreError::Conflict(
+                "operation id was already used with different input".into(),
+            )),
+            None => Ok(None),
+        }
+    }
+
     /// Returns a bounded page of committed operations with their result
     /// payloads. Full revision snapshots remain available only through the
     /// explicit backup/export bundle.
@@ -316,6 +337,33 @@ impl GlobalManagerStore {
             });
         }
         Ok((records, total))
+    }
+
+    /// Reads the activity page, total and current revision from one SQLite
+    /// read transaction so concurrent mutations cannot make them disagree.
+    pub fn activity_snapshot(
+        &self,
+        project_id: Option<&str>,
+        entity_id: Option<&str>,
+        limit: u64,
+        offset: u64,
+    ) -> Result<(Vec<GlobalAuditRecord>, u64, u64), StoreError> {
+        self.inner.execute_batch("BEGIN")?;
+        let result = (|| {
+            let (rows, total) = self.activity(project_id, entity_id, limit, offset)?;
+            let revision = self.revision()?;
+            Ok((rows, total, revision))
+        })();
+        match result {
+            Ok(value) => {
+                self.inner.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.inner.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 
     /// Runs one application-supplied state transition inside the global write
