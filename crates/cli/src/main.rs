@@ -698,6 +698,7 @@ fn run_with_operation_at(
     working_directory: Option<&Path>,
 ) -> Result<CliResult, CliError> {
     let mut parsed = parse(args)?;
+    let mut local_project_root = None;
     // An unavailable route is a registry result, not a project operation.
     // Resolve it before local project context so discovery never opens or
     // accidentally selects a database just to report that a command is not
@@ -758,6 +759,7 @@ fn run_with_operation_at(
             Some(root) => project_context::resolve_from(&parsed, root)?,
             None => project_context::resolve(&parsed)?,
         };
+        local_project_root = Some(context.root.clone());
         bind_local_project(&mut parsed, &context.project_id)?;
         if !parsed.options.actor_explicit {
             let metadata = context.root.join(".boreal/project.json");
@@ -951,6 +953,16 @@ fn run_with_operation_at(
         |plan| plan.database.clone(),
     );
     ensure_db_parent(&path)?;
+    #[cfg(unix)]
+    if !setup_requested && service::supports(&parsed) {
+        if let Some(project_root) = local_project_root.as_deref() {
+            if let Some(result) =
+                service::request_from_running_owner(&parsed, operation, &path, project_root)?
+            {
+                return Ok(result);
+            }
+        }
+    }
     let _setup_owner = if let Some(plan) = &setup_plan {
         setup::preflight(plan)?;
         Some(

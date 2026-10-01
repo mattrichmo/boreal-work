@@ -15,8 +15,8 @@ use std::{
 
 #[cfg(unix)]
 use boreal_service::{
-    APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION, JsonRequest, TransportConfig,
-    UnixSocketClient,
+    BusyOutcome, ElectionError, JsonRequest, ProjectElection, TransportConfig, UnixSocketClient,
+    APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
 };
 
 const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -53,6 +53,18 @@ enum TuiEntrypoint {
     },
 }
 
+#[cfg(unix)]
+struct ExistingService {
+    socket: PathBuf,
+    owner: Option<ServiceOwner>,
+}
+
+#[cfg(unix)]
+struct ServiceOwner {
+    owner_id: String,
+    process_id: u32,
+}
+
 pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
     if parsed.options.socket.is_some() {
         return Err(CliError::invalid(
@@ -67,6 +79,7 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
         )
     })?;
     let local = super::project_context::resolve(parsed)?;
+    let project_root = local.root.clone();
     let context = DashboardContext {
         metadata_path: Some(local.root.join(".boreal/project.json")),
         project_root: Some(local.root),
@@ -100,7 +113,7 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
 
     #[cfg(unix)]
     {
-        launch_dashboard(parsed, &database, &project)?;
+        launch_dashboard(parsed, &database, &project, &project_root)?;
         Ok(CliResult {
             outcome: ApplicationOutcome::Unchanged,
             revision: None,
@@ -110,7 +123,7 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
     }
     #[cfg(not(unix))]
     {
-        let _ = (parsed, database, project);
+        let _ = (parsed, database, project, project_root);
         Err(CliError::with(
             ErrorCode::UnsupportedPlatform,
             ApplicationOutcome::Failed,
@@ -423,6 +436,7 @@ fn launch_dashboard(
     parsed: &ParsedCommand,
     database: &Path,
     project: &str,
+    project_root: &Path,
 ) -> Result<(), CliError> {
     use std::os::unix::process::CommandExt;
 
@@ -440,6 +454,24 @@ fn launch_dashboard(
             format!("cannot install dashboard signal handlers: {error}"),
         )
     })?;
+    let runtime_directory =
+        super::project_context::confined_path(project_root, Path::new(".boreal/runtime"), true)?;
+    if let Some(existing) = find_running_service(
+        &runtime_directory,
+        database,
+        project,
+        parsed.options.actor.as_str(),
+    )? {
+        return run_existing_service_dashboard(
+            parsed,
+            &tui,
+            database,
+            project,
+            parsed.options.actor.as_str(),
+            existing,
+        );
+    }
+
     let mut service_socket_guard = SocketGuard::allocate("service")?;
     let service_socket = service_socket_guard.path().to_owned();
 
@@ -469,6 +501,28 @@ fn launch_dashboard(
             parsed.options.actor.as_str(),
         ) {
             let termination = service.terminate(signal::SIGTERM, SERVICE_EXIT_GRACE);
+            if termination.is_ok() {
+                if let Some(existing) = find_running_service(
+                    &runtime_directory,
+                    database,
+                    project,
+                    parsed.options.actor.as_str(),
+                )? {
+                    let dashboard = run_existing_service_dashboard(
+                        parsed,
+                        &tui,
+                        database,
+                        project,
+                        parsed.options.actor.as_str(),
+                        existing,
+                    );
+                    return combine_dashboard_results(
+                        dashboard,
+                        termination,
+                        "private Boreal service shutdown",
+                    );
+                }
+            }
             return combine_dashboard_results(
                 Err(error),
                 termination,
@@ -476,60 +530,10 @@ fn launch_dashboard(
             );
         }
 
-        let harness = if parsed.options.harness == DEFAULT_HARNESS {
-            "tui".to_owned()
-        } else {
-            parsed.options.harness.clone()
+        let outcome = match spawn_dashboard_tui(parsed, &tui, &service_socket, project) {
+            Ok(mut tui_process) => supervise(&mut service, &mut tui_process),
+            Err(error) => Err(error),
         };
-        let session = if parsed.options.session == DEFAULT_SESSION {
-            format!(
-                "session-tui-{}-{}",
-                std::process::id(),
-                DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed)
-            )
-        } else {
-            parsed.options.session.clone()
-        };
-        let mut tui_command = command_for_tui(&tui);
-        tui_command.env(
-            "BOREAL_CREDENTIAL",
-            super::credentials::for_command(parsed)?,
-        );
-        tui_command
-            .arg("--socket")
-            .arg(&service_socket)
-            .arg("--project")
-            .arg(project)
-            .arg("--actor")
-            .arg(&parsed.options.actor)
-            .arg("--harness")
-            .arg(harness)
-            .arg("--session")
-            .arg(session)
-            .arg("--interactive")
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        // Keep the TUI in the launcher's foreground process group so
-        // terminal job control does not stop it when it reads stdin.
-        if let Some(work) = &parsed.options.work {
-            tui_command.arg("--work").arg(work);
-        }
-        let tui_child = match tui_command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                let spawn_error = process_error("start the Boreal TUI")(error);
-                let termination = service.terminate(signal::SIGTERM, SERVICE_EXIT_GRACE);
-                return combine_dashboard_results(
-                    Err(spawn_error),
-                    termination,
-                    "private Boreal service shutdown",
-                );
-            }
-        };
-        let mut tui_process = ManagedChild::new("TUI", tui_child, false, TUI_EXIT_GRACE);
-
-        let outcome = supervise(&mut service, &mut tui_process);
         let termination = service.terminate(signal::SIGTERM, SERVICE_EXIT_GRACE);
         combine_dashboard_results(outcome, termination, "private Boreal service shutdown")
     })();
@@ -539,6 +543,219 @@ fn launch_dashboard(
         cleanup,
         "private dashboard endpoint cleanup",
     )
+}
+
+#[cfg(unix)]
+fn spawn_dashboard_tui(
+    parsed: &ParsedCommand,
+    tui: &TuiEntrypoint,
+    service_socket: &Path,
+    project: &str,
+) -> Result<ManagedChild, CliError> {
+    let harness = if parsed.options.harness == DEFAULT_HARNESS {
+        "tui".to_owned()
+    } else {
+        parsed.options.harness.clone()
+    };
+    let session = if parsed.options.session == DEFAULT_SESSION {
+        format!(
+            "session-tui-{}-{}",
+            std::process::id(),
+            DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    } else {
+        parsed.options.session.clone()
+    };
+    let mut tui_command = command_for_tui(tui);
+    tui_command.env(
+        "BOREAL_CREDENTIAL",
+        super::credentials::for_command(parsed)?,
+    );
+    tui_command
+        .arg("--socket")
+        .arg(service_socket)
+        .arg("--project")
+        .arg(project)
+        .arg("--actor")
+        .arg(&parsed.options.actor)
+        .arg("--harness")
+        .arg(harness)
+        .arg("--session")
+        .arg(session)
+        .arg("--interactive")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some(work) = &parsed.options.work {
+        tui_command.arg("--work").arg(work);
+    }
+    tui_command
+        .spawn()
+        .map(|child| ManagedChild::new("TUI", child, false, TUI_EXIT_GRACE))
+        .map_err(process_error("start the Boreal TUI"))
+}
+
+#[cfg(unix)]
+fn run_existing_service_dashboard(
+    parsed: &ParsedCommand,
+    tui: &TuiEntrypoint,
+    database: &Path,
+    project: &str,
+    actor: &str,
+    existing: ExistingService,
+) -> Result<(), CliError> {
+    let mut tui_process = spawn_dashboard_tui(parsed, tui, &existing.socket, project)?;
+    let dashboard = supervise_external_tui(&mut tui_process);
+    let shutdown = existing
+        .owner
+        .as_ref()
+        .map(|owner| {
+            stop_existing_service_if_owned(database, &existing.socket, project, actor, owner)
+        })
+        .unwrap_or(Ok(()));
+    combine_dashboard_results(dashboard, shutdown, "existing Boreal service shutdown")
+}
+
+#[cfg(unix)]
+fn find_running_service(
+    runtime_directory: &Path,
+    database: &Path,
+    project: &str,
+    actor: &str,
+) -> Result<Option<ExistingService>, CliError> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let entries = match fs::read_dir(runtime_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!(
+                    "cannot inspect project service endpoints under {}: {error}",
+                    runtime_directory.display()
+                ),
+            ));
+        }
+    };
+
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            continue;
+        }
+        let socket = entry.path().join("service.sock");
+        if !fs::symlink_metadata(&socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {
+            continue;
+        }
+        if probe_service(&socket, project, actor).is_err() {
+            continue;
+        }
+        let owner = service_owner_for_socket(database, &socket)?;
+        return Ok(Some(ExistingService { socket, owner }));
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn service_owner_for_socket(
+    database: &Path,
+    socket: &Path,
+) -> Result<Option<ServiceOwner>, CliError> {
+    let Some(owner_id) = observe_database_owner(database)? else {
+        return Ok(None);
+    };
+    let Some(owner) = owner_id.strip_prefix("process:") else {
+        return Ok(None);
+    };
+    let Some((process_id, socket_digest)) = owner.split_once(':') else {
+        return Ok(None);
+    };
+    if socket_digest != sha256_content_digest(socket.to_string_lossy().as_bytes()) {
+        return Ok(None);
+    }
+    let Ok(process_id) = process_id.parse::<u32>() else {
+        return Ok(None);
+    };
+    Ok(Some(ServiceOwner {
+        owner_id,
+        process_id,
+    }))
+}
+
+#[cfg(unix)]
+fn observe_database_owner(database: &Path) -> Result<Option<String>, CliError> {
+    let canonical_database = fs::canonicalize(database).map_err(|error| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            format!("database identity is unavailable: {error}"),
+        )
+    })?;
+    let runtime_directory = canonical_database
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".boreal-service-runtime");
+    let database_identity = format!("database:{}", canonical_database.to_string_lossy());
+    let observer_id = format!(
+        "dashboard-observer:{}:{}",
+        std::process::id(),
+        DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    match ProjectElection::try_acquire(&runtime_directory, database_identity, observer_id) {
+        Ok(lease) => {
+            drop(lease);
+            Ok(None)
+        }
+        Err(ElectionError::Busy(BusyOutcome::ProjectAlreadyOwned { owner_id, .. })) => Ok(owner_id),
+        Err(ElectionError::Busy(_)) => Ok(None),
+        Err(error) => Err(CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            format!("cannot inspect project service ownership: {error}"),
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn stop_existing_service_if_owned(
+    database: &Path,
+    socket: &Path,
+    project: &str,
+    actor: &str,
+    owner: &ServiceOwner,
+) -> Result<(), CliError> {
+    if !signal::process_is_running(owner.process_id)
+        || probe_service(socket, project, actor).is_err()
+        || observe_database_owner(database)?.as_deref() != Some(owner.owner_id.as_str())
+    {
+        return Ok(());
+    }
+    if let Err(error) = signal::send_to_process_checked(owner.process_id, signal::SIGTERM) {
+        if !signal::process_is_running(owner.process_id) {
+            return Ok(());
+        }
+        return Err(CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            format!("cannot request shutdown of the dashboard service: {error}"),
+        ));
+    }
+
+    let deadline = Instant::now() + SERVICE_EXIT_GRACE;
+    while Instant::now() < deadline {
+        if !signal::process_is_running(owner.process_id)
+            || probe_service(socket, project, actor).is_err()
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Err(CliError::with(
+        ErrorCode::ServiceUnavailable,
+        ApplicationOutcome::Failed,
+        "dashboard exited, but the existing Boreal service did not stop after a graceful shutdown request",
+    ))
 }
 
 #[cfg(unix)]
@@ -908,6 +1125,21 @@ fn supervise(service: &mut ManagedChild, tui: &mut ManagedChild) -> Result<(), C
 }
 
 #[cfg(unix)]
+fn supervise_external_tui(tui: &mut ManagedChild) -> Result<(), CliError> {
+    loop {
+        if let Some(status) = tui.try_wait()? {
+            return tui_status(status);
+        }
+        let pending = signal::take_pending();
+        if pending != 0 {
+            let _ = tui.terminate(pending, TUI_EXIT_GRACE);
+            return Err(interrupted_error(pending));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(unix)]
 fn tui_status(status: ExitStatus) -> Result<(), CliError> {
     if status.success() {
         Ok(())
@@ -1201,11 +1433,28 @@ mod signal {
     }
 
     pub(super) fn send_to_process(process_id: u32, signal_number: c_int) {
-        if let Ok(process) = c_int::try_from(process_id) {
-            unsafe {
-                kill(process, signal_number);
-            }
+        let _ = send_to_process_checked(process_id, signal_number);
+    }
+
+    pub(super) fn send_to_process_checked(process_id: u32, signal_number: c_int) -> io::Result<()> {
+        let process = c_int::try_from(process_id).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "process ID is out of range")
+        })?;
+        if unsafe { kill(process, signal_number) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
+    }
+
+    pub(super) fn process_is_running(process_id: u32) -> bool {
+        let Ok(process) = c_int::try_from(process_id) else {
+            return false;
+        };
+        if unsafe { kill(process, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(1)
     }
 }
 
@@ -1347,11 +1596,9 @@ mod tests {
         let path = guard.path().to_owned();
         fs::write(&path, "fixture").unwrap();
         let error = guard.cleanup().unwrap_err();
-        assert!(
-            error
-                .message
-                .contains("refusing to remove a non-socket endpoint")
-        );
+        assert!(error
+            .message
+            .contains("refusing to remove a non-socket endpoint"));
         assert!(path.exists());
         fs::remove_file(path).unwrap();
         guard.cleanup().unwrap();

@@ -6,6 +6,17 @@
 //! commands retain the same versioned protocol envelope as direct commands.
 
 use super::*;
+
+#[cfg(unix)]
+pub(crate) fn request_from_running_owner(
+    parsed: &ParsedCommand,
+    operation: &str,
+    database: &Path,
+    project_root: &Path,
+) -> Result<Option<CliResult>, CliError> {
+    unix::request_from_running_owner(parsed, operation, database, project_root)
+}
+
 fn parity_supported(path: &[String]) -> bool {
     matches!(
         path.iter()
@@ -157,11 +168,11 @@ mod unix {
     use boreal_domain::{ActorContext, ActorRole, ReasonCode};
     use boreal_protocol::{schema, Envelope, ProtocolError as WireError, TransportOutcome};
     use boreal_service::{
-        ApplicationCommandHandler, ApplicationRequest, ApplicationResponse,
-        ConcurrentApplicationCommandHandler, JsonRequest, OperationPhase, RecoveryBackend,
-        RecoveryBackendError, RecoveryEntry, ServiceHost, ServiceHostConfig, ServiceHostHooks,
-        TimerRegistry, TransportConfig, TransportError, UnixSocketClient, APPLICATION_API_VERSION,
-        APPLICATION_SCHEMA_VERSION,
+        ApplicationCommandHandler, ApplicationRequest, ApplicationResponse, BusyOutcome,
+        ConcurrentApplicationCommandHandler, ElectionError, JsonRequest, OperationPhase,
+        ProjectElection, RecoveryBackend, RecoveryBackendError, RecoveryEntry, ServiceHost,
+        ServiceHostConfig, ServiceHostHooks, TimerRegistry, TransportConfig, TransportError,
+        UnixSocketClient, APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
     };
     use boreal_store::{
         identity::{IdentityContext, IdentityStore},
@@ -176,6 +187,110 @@ mod unix {
     // remains the immutable subject id while the operation subject type keeps
     // registration inside the store's current identity vocabulary.
     const UPDATE_SUBJECT_TYPE: &str = "operation";
+
+    pub(super) fn request_from_running_owner(
+        parsed: &ParsedCommand,
+        operation: &str,
+        database: &Path,
+        project_root: &Path,
+    ) -> Result<Option<CliResult>, CliError> {
+        let canonical_database = fs::canonicalize(database).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("database identity is unavailable: {error}"),
+            )
+        })?;
+        let runtime_directory = canonical_database
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(".boreal-service-runtime");
+        let database_identity = format!("database:{}", canonical_database.to_string_lossy());
+        let observer_id = format!("cli-observer:{}", std::process::id());
+        let owner_id = match ProjectElection::try_acquire(
+            &runtime_directory,
+            database_identity,
+            observer_id,
+        ) {
+            Ok(lease) => {
+                drop(lease);
+                return Ok(None);
+            }
+            Err(ElectionError::Busy(BusyOutcome::ProjectAlreadyOwned {
+                owner_id: Some(owner_id),
+                ..
+            })) => owner_id,
+            Err(ElectionError::Busy(_)) => return Ok(None),
+            Err(error) => {
+                return Err(CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    format!("cannot inspect project service ownership: {error}"),
+                ));
+            }
+        };
+        let Some(service_process_id) = owner_id
+            .strip_prefix("process:")
+            .and_then(|value| value.split_once(':').map(|(process_id, _)| process_id))
+        else {
+            return Ok(None);
+        };
+
+        let runtime_root = project_root.join(".boreal/runtime");
+        match fs::symlink_metadata(&runtime_root) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    format!(
+                        "cannot inspect project service sockets under {}: {error}",
+                        runtime_root.display()
+                    ),
+                ));
+            }
+        }
+        let entries = fs::read_dir(&runtime_root).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!(
+                    "cannot inspect project service sockets under {}: {error}",
+                    runtime_root.display()
+                ),
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    format!("cannot inspect project service socket entry: {error}"),
+                )
+            })?;
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let socket = entry.path().join("service.sock");
+            if !fs::symlink_metadata(&socket).is_ok_and(|metadata| metadata.file_type().is_socket())
+            {
+                continue;
+            }
+            let candidate_owner = format!(
+                "process:{service_process_id}:{}",
+                sha256_content_digest(socket.to_string_lossy().as_bytes())
+            );
+            if candidate_owner != owner_id {
+                continue;
+            }
+            let mut routed = parsed.clone();
+            routed.options.socket = Some(socket.to_string_lossy().into_owned());
+            return request(&routed, operation).map(Some);
+        }
+        Ok(None)
+    }
 
     struct StoreUpdateJobPort<'a> {
         store: &'a SqliteStore,
@@ -1963,6 +2078,16 @@ mod unix {
                     .clone()
                     .or_else(|| parsed.options.positionals.first().cloned())
                     .map_or(Value::Null, Value::String);
+                data["source_version_id"] = parsed
+                    .options
+                    .source_version
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+                data["config_identity"] = parsed
+                    .options
+                    .config_identity
+                    .clone()
+                    .map_or(Value::Null, Value::String);
                 data["attempt_id"] = parsed
                     .options
                     .attempt
@@ -2413,7 +2538,8 @@ mod unix {
                     let binding = IdentityStore::new(&self.store)
                         .workspace_binding(&project)
                         .map_err(|e| CliError::invalid(e.to_string()))?;
-                    parsed.options.service_workspace = Some(PathBuf::from(binding.canonical_root()));
+                    parsed.options.service_workspace =
+                        Some(PathBuf::from(binding.canonical_root()));
                     parsed.options.db = self
                         .store
                         .database_path()
