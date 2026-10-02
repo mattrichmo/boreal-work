@@ -1,40 +1,22 @@
-# Adopt plan revision 3 safely
+# Adopt plan revision 4 safely
 
-The active source artifact is `project/build-plan/boreal-final-state/BOREAL_TEMPLATE_V3.json`. It uses Boreal's existing **work-template schema 1**, template ID `boreal-final-state-v3`, version 3. It contains one milestone, 13 sprint items and 81 required task items: **95 work items**. Three preserved optional S10 cards are outside the required import.
+The active file is `BOREAL_TEMPLATE_V4.json`, template ID `boreal-final-state-v4`, version 4, **work-template schema 1**. It contains one milestone, 14 sprints and 85 required tasks, exactly **100 work items**, within the current 1–100 atomic batch limit. Three historical S10 optional tasks remain deferred outside the import. V1–V3 artifacts are immutable history.
 
-The original V1/V2 artifacts remain unchanged. Unlike their original container dependencies, V3 represents sequencing only through direct task edges; milestone/sprint dependency arrays are empty. See TEMPLATE_IMPORT_ADJUSTMENTS.md for the historical `dependency_requires_direct_tasks` rejection.
+## Fresh project
 
-## Fresh project only
+Run `python3 project/build-plan/boreal-final-state/validate_plan.py`, then inspect the installed `bwrk template` help and use supported validate/dry-run/apply operations with the active file, an explicit authorized project/prefix, actor/session and freshly read expected revision. Never use invented syntax or runtime IDs. Do not split a too-large template silently; this one fits the current bound. Verify application-level validation independently from the plan checker.
 
-First run the plan checker:
+A fresh import creates draft planning records. It does not restore another project's history or publish/claim/accept work. A cloud container is an execution host, not automatic authority to another project's database.
 
-```sh
-python3 project/build-plan/boreal-final-state/validate_plan.py
-```
+## Existing V3 project, including the current isolated cloud project
 
-Then use the installed binary's help and existing template validation/dry-run path; the supported command family recorded in the prior plan is:
+Do not replay the full template with the existing prefix, replace a database, delete/recreate tasks or manufacture completion. `PLAN_UPGRADE_V4.json` is a review manifest, not a supported CLI input.
 
-```sh
-bwrk template validate --project PROJECT   --input project/build-plan/boreal-final-state/BOREAL_TEMPLATE_V3.json --json
-bwrk template run --project PROJECT   --input project/build-plan/boreal-final-state/BOREAL_TEMPLATE_V3.json   --dry-run --json
-```
+1. Safely pause new affected dispatch. Read logical/physical project identity, project revision, existing work/edges, attempts, publications, acceptance pins and active file grants. Preserve setup work and an application-supported recovery point.
+2. Compare exact V3 state with the delta. Add only the new `s13`, `s13-t01`, `s13-t02`, `s13-t03`, `s13-t90` records under the actual existing milestone, preserving its prefix and IDs. These are plan keys, not guessed runtime IDs.
+3. Apply title/context and dependency changes using supported revision-bound planning APIs, with one operation identity per intentional action and read-back after uncertainty. S12 requirement amendments and all S11 added prerequisites must be explicit; old proof cannot silently satisfy changed acceptance.
+4. If any affected work is active, published or accepted, use the existing supported amendment/supersession/reopen policy. If the required operation is unavailable, report that exact planning gap to the coordinator; repair it within the existing authorized bootstrap/planning scope before applying. No direct SQL fallback or wholesale reimport.
+5. Preserve deferred S10-T04/T05/T06 and any existing attempts/evidence; scope exclusion is not acceptance. S00-T05's role and write grant remain unchanged.
+6. Read back every affected task, dependency, requirement revision and count. Verify no orphans/cycles/duplicates, preserved history and S11 joins. Verify the active runtime graph is V4 before resuming claims; a Git commit or successful plan validator is not a runtime adoption receipt.
 
-Use a fresh prefix/project. Read the current revision through a canonical revision-bearing read before an explicitly authorized apply:
-
-```sh
-bwrk template run --project PROJECT   --input project/build-plan/boreal-final-state/BOREAL_TEMPLATE_V3.json   --apply --prefix boreal-final --expected-revision REVISION --yes --json
-```
-
-PROJECT and REVISION are placeholders, not executable values. Verify installed help rather than assuming historical syntax. The plan checker is not the application validator. A template import is not proof that work is published, claimed, accepted or ready.
-
-## Existing `boreal-final-*` project
-
-**Do not run the full template with the existing prefix, replace its database, delete/recreate tasks, or mark work done to make the graph match.** `PLAN_UPGRADE_V3.json` is a review manifest, not a new supported `bwrk` command/input format.
-
-1. Read the actual project's logical/physical identity, revision, current work/edges, active attempts, evidence and gate state. Save an application-supported recovery point. Freeze dispatch for affected planning records while their amendment is applied.
-2. Compare that state with the V3 manifest. Preserve all existing IDs. Add only `s12` and `s12-t01` through `s12-t06` plus `s12-t90` under the existing milestone; use actual stored IDs derived from the existing prefix.
-3. Apply reviewed title/context/dependency changes with supported revision-bound planning APIs. Do not weaken dispatch/acceptance/role policies. Handle active or accepted work through explicit amendment/supersession policy; otherwise stop with the unsupported mutation identified. Never bypass it with SQL.
-4. Record S10-T04/T05/T06 as outside this release through the supported audited disposition/scope path, retaining historical IDs, attempts and evidence. They are not accepted outcomes. If the installed container model cannot exclude them safely, keep that as a named planning gap for S12-T02 before claiming the milestone can close.
-5. Read back the entire affected graph. Verify task-only edges, no duplicates/cycles/orphans, preserved history and the new S11 prerequisites. Only then resume dispatch. Store actual revision/operation receipts; Git commit IDs are not application receipts.
-
-S00-T05 remains the existing bounded recovery repair. This revision does not recover/resolve its attempts, reassign its active file grants, publish the milestone or modify the user's local TUI state.
+The orchestrator must report actual operation/revision evidence and any unsupported amendment. Resume only after adoption and ownership reconciliation are confirmed. Repository publication/merge permissions remain those separately granted by the user; this planning file cannot expand them.

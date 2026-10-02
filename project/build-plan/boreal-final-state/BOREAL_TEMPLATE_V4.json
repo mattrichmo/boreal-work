@@ -1,0 +1,2044 @@
+{
+  "schema_version": 1,
+  "id": "boreal-final-state-v4",
+  "version": 4,
+  "title": "Boreal general-work completion and portable agent workflows",
+  "description": "Plan BW-final-state-2026-10-01 revision 4. 14 sprints, 85 required tasks, 100 work items; three historical deferred S10 tasks stay outside the required release. General work, optional deliverables and typed acceptance. Reviewed source 7b56cca95c2bd482ea6880ea098993629cf3be78. Existing native work-template schema 1; task-only dependencies.",
+  "parameters": [],
+  "items": [
+    {
+      "key": "milestone",
+      "kind": "milestone",
+      "parent": null,
+      "title": "Boreal general-work completion and portable agent workflows",
+      "description": "Finish the local Global and Project work manager for software, research, creative and operational tasks: optional versioned deliverables, accepted input context, configurable typed proof, truthful dates and external waits, template reuse, visual/CLI parity, portable recovery and enrolled execution. No hosted SaaS or provider account automation. Required contracts: WORKFLOW_CONTRACT.md and GENERAL_WORK_CONTRACT.md in project/build-plan/boreal-final-state. Revision 4 preserves existing work IDs and history.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "milestone",
+        "multi-agent"
+      ],
+      "acceptance_profile": "reviewed"
+    },
+    {
+      "key": "s00",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S00 — Current-head qualification and parallel execution baseline",
+      "description": "Qualify the exact starting source, repair the validation harness, and establish non-overlapping multi-agent dispatch before product changes begin. Context: project/build-plan/boreal-final-state/sprints/BW-S00/SPRINT.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s00"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s00-t01",
+      "kind": "task",
+      "parent": "s00",
+      "title": "BW-S00-T01 — Freeze exact source baseline and reconcile the current audit inventory",
+      "description": "Produce the authoritative current-state ledger so agents do not rebuild features already present. Context: project/build-plan/boreal-final-state/sprints/BW-S00/tasks/BW-S00-T01.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s00",
+        "lane/coord"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s00-t02",
+      "kind": "task",
+      "parent": "s00",
+      "title": "BW-S00-T02 — Add Global TUI and portable PTY coverage to normal validation",
+      "description": "Make the shipped Global terminal UI a first-class release-tested surface. Context: project/build-plan/boreal-final-state/sprints/BW-S00/tasks/BW-S00-T02.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s00",
+        "lane/validation"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s00-t03",
+      "kind": "task",
+      "parent": "s00",
+      "title": "BW-S00-T03 — Exercise the real release download and checksum verification path",
+      "description": "Make package qualification cover the same archive/checksum path real users use. Context: project/build-plan/boreal-final-state/sprints/BW-S00/tasks/BW-S00-T03.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s00",
+        "lane/release"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s00-t04",
+      "kind": "task",
+      "parent": "s00",
+      "title": "BW-S00-T04 — Establish multi-agent worktrees, write ownership and integration stewardship",
+      "description": "Let multiple agents work concurrently without treating line ranges in shared Rust monoliths as safe parallel locks. Context: project/build-plan/boreal-final-state/sprints/BW-S00/tasks/BW-S00-T04.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s00",
+        "lane/coord"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s00-t05",
+      "kind": "task",
+      "parent": "s00",
+      "title": "BW-S00-T05 — Expose the trusted attempt recovery action through CLI and service",
+      "description": "Make the versioned Recover action emitted by Boreal guidance callable through the supported Rust CLI and service while preserving canonical authorization, attempt fences, operation readback, and the distinct obligation-resolution flow. Context: project/build-plan/boreal-final-state/sprints/BW-S00/tasks/BW-S00-T05.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s00",
+        "lane/cli",
+        "recovery-route"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s00-t90",
+      "kind": "task",
+      "parent": "s00",
+      "title": "BW-S00-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S00/tasks/BW-S00-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s00-t01",
+        "s00-t02",
+        "s00-t03",
+        "s00-t04",
+        "s00-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s00",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s01",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S01 — Physical Global backup, restore and maintenance ownership",
+      "description": "Create a true WAL-safe Global disaster-recovery boundary before any incompatible Global schema expansion. Context: project/build-plan/boreal-final-state/sprints/BW-S01/SPRINT.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s01"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s01-t01",
+      "kind": "task",
+      "parent": "s01",
+      "title": "BW-S01-T01 — Implement reusable Global SQLite online backup and manifest validation",
+      "description": "Create a WAL-safe physical snapshot primitive and self-describing Global backup package. Context: project/build-plan/boreal-final-state/sprints/BW-S01/tasks/BW-S01-T01.md.",
+      "priority": 9,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s01",
+        "lane/global-store"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s01-t02",
+      "kind": "task",
+      "parent": "s01",
+      "title": "BW-S01-T02 — Expose Global physical backup through application, CLI and service",
+      "description": "Give users and the updater a bounded supported physical backup operation. Context: project/build-plan/boreal-final-state/sprints/BW-S01/tasks/BW-S01-T02.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s01-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s01",
+        "lane/global-api"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s01-t03",
+      "kind": "task",
+      "parent": "s01",
+      "title": "BW-S01-T03 — Implement staged Global restore with retained previous database and fresh active identity",
+      "description": "Restore a backup without conflating source backup identity with the newly active physical Global database. Context: project/build-plan/boreal-final-state/sprints/BW-S01/tasks/BW-S01-T03.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s01-t01",
+        "s01-t04"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s01",
+        "lane/global-store"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s01-t04",
+      "kind": "task",
+      "parent": "s01",
+      "title": "BW-S01-T04 — Add Global maintenance admission and non-destructive ownership locking",
+      "description": "Prevent restore/migration from racing live Global mutation without using PID files or force-breaking a live process. Context: project/build-plan/boreal-final-state/sprints/BW-S01/tasks/BW-S01-T04.md.",
+      "priority": 9,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s01",
+        "lane/global-store"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s01-t05",
+      "kind": "task",
+      "parent": "s01",
+      "title": "BW-S01-T05 — Make logical Global transfer symmetric and explicitly separate from backup",
+      "description": "Ensure global export never reports a logical artifact that the paired importer rejects solely because of the known size bound. Context: project/build-plan/boreal-final-state/sprints/BW-S01/tasks/BW-S01-T05.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s01",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s01-t90",
+      "kind": "task",
+      "parent": "s01",
+      "title": "BW-S01-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S01/tasks/BW-S01-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s01-t01",
+        "s01-t02",
+        "s01-t03",
+        "s01-t04",
+        "s01-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s01",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s02",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S02 — Packaging, runtime and release-surface hardening",
+      "description": "Make the existing install/package path trustworthy and ensure the shipped Global TUI/runtime are validated like the project product. Context: project/build-plan/boreal-final-state/sprints/BW-S02/SPRINT.md.",
+      "priority": 6,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s02"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s02-t01",
+      "kind": "task",
+      "parent": "s02",
+      "title": "BW-S02-T01 — Fix release checksum provenance path and test the download-style installer",
+      "description": "Align published SHA256SUMS with installer lookup and test the network-layout contract. Context: project/build-plan/boreal-final-state/sprints/BW-S02/tasks/BW-S02-T01.md.",
+      "priority": 9,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s02",
+        "lane/release"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s02-t02",
+      "kind": "task",
+      "parent": "s02",
+      "title": "BW-S02-T02 — Preflight dashboard Node runtime before service startup",
+      "description": "Make first-launch failures actionable without bundling another runtime. Context: project/build-plan/boreal-final-state/sprints/BW-S02/tasks/BW-S02-T02.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s02",
+        "lane/host-runtime"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s02-t03",
+      "kind": "task",
+      "parent": "s02",
+      "title": "BW-S02-T03 — Make Global TUI source and interaction tests part of release identity/validation",
+      "description": "Ensure a shipped Global UI change invalidates stale validation and runs its own tests. Context: project/build-plan/boreal-final-state/sprints/BW-S02/tasks/BW-S02-T03.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s00-t02"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s02",
+        "lane/validation"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s02-t04",
+      "kind": "task",
+      "parent": "s02",
+      "title": "BW-S02-T04 — Qualify supported target install/launch surfaces without widening platform claims",
+      "description": "Keep release support honest and prove the package surface on the three declared targets. Context: project/build-plan/boreal-final-state/sprints/BW-S02/tasks/BW-S02-T04.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s02-t01",
+        "s02-t02",
+        "s02-t03"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s02",
+        "lane/release"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s02-t05",
+      "kind": "task",
+      "parent": "s02",
+      "title": "BW-S02-T05 — Align install, uninstall/data-retention and supply-chain documentation with real behavior",
+      "description": "Make operator expectations match the actual package/data split. Context: project/build-plan/boreal-final-state/sprints/BW-S02/tasks/BW-S02-T05.md.",
+      "priority": 5,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s02",
+        "lane/docs"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s02-t90",
+      "kind": "task",
+      "parent": "s02",
+      "title": "BW-S02-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S02/tasks/BW-S02-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s02-t01",
+        "s02-t02",
+        "s02-t03",
+        "s02-t04",
+        "s02-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s02",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s03",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S03 — True machine update and paired package/Global recovery",
+      "description": "Remove machine update from arbitrary project authority and make package plus invoking-user Global migration recoverable as one journaled operation. Context: project/build-plan/boreal-final-state/sprints/BW-S03/SPRINT.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s03"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s03-t01",
+      "kind": "task",
+      "parent": "s03",
+      "title": "BW-S03-T01 — Route update and upgrade --machine before project resolution",
+      "description": "Make the public machine command actually machine-scoped and cwd independent. Context: project/build-plan/boreal-final-state/sprints/BW-S03/tasks/BW-S03-T01.md.",
+      "priority": 9,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s02-t90",
+        "s01-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s03",
+        "lane/host-update"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s03-t02",
+      "kind": "task",
+      "parent": "s03",
+      "title": "BW-S03-T02 — Move durable machine update state out of project SQLite",
+      "description": "Persist machine operation state with the resources it changes rather than in an arbitrary project store. Context: project/build-plan/boreal-final-state/sprints/BW-S03/tasks/BW-S03-T02.md.",
+      "priority": 9,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s02-t90",
+        "s01-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s03",
+        "lane/host-update"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s03-t03",
+      "kind": "task",
+      "parent": "s03",
+      "title": "BW-S03-T03 — Pair installer package rollback with invoking-user Global database recovery",
+      "description": "Prevent old package/new unsupported DB or new package/half-migrated DB combinations after interrupted direct install/update. Context: project/build-plan/boreal-final-state/sprints/BW-S03/tasks/BW-S03-T03.md.",
+      "priority": 9,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s02-t90",
+        "s01-t90",
+        "s03-t02",
+        "s01-t03"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s03",
+        "lane/release"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s03-t04",
+      "kind": "task",
+      "parent": "s03",
+      "title": "BW-S03-T04 — Make incompatible Global migration recovery-capable from first open and enforce predecessor policy",
+      "description": "Protect Homebrew/manual first-open migrations, not only Boreal install.sh. Context: project/build-plan/boreal-final-state/sprints/BW-S03/tasks/BW-S03-T04.md.",
+      "priority": 9,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s02-t90",
+        "s01-t90",
+        "s03-t01",
+        "s03-t02",
+        "s01-t02"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s03",
+        "lane/global-store"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s03-t05",
+      "kind": "task",
+      "parent": "s03",
+      "title": "BW-S03-T05 — Document third-party package-manager downgrade and per-user recovery semantics",
+      "description": "Make shared-package limits explicit without pretending one package manager transaction controls every user database. Context: project/build-plan/boreal-final-state/sprints/BW-S03/tasks/BW-S03-T05.md.",
+      "priority": 5,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s02-t90",
+        "s01-t90",
+        "s03-t04"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s03",
+        "lane/docs"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s03-t06",
+      "kind": "task",
+      "parent": "s03",
+      "title": "BW-S03-T06 — Build package+database update fault-injection matrix",
+      "description": "Make every external boundary in the update state machine reproducibly interruptible. Context: project/build-plan/boreal-final-state/sprints/BW-S03/tasks/BW-S03-T06.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s02-t90",
+        "s01-t90",
+        "s03-t02"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s03",
+        "lane/validation"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s03-t90",
+      "kind": "task",
+      "parent": "s03",
+      "title": "BW-S03-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S03/tasks/BW-S03-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s03-t01",
+        "s03-t02",
+        "s03-t03",
+        "s03-t04",
+        "s03-t05",
+        "s03-t06"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s03",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s04",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S04 — Complete bounded Global reads, transfer and linked-workspace isolation",
+      "description": "Close the remaining scale/completeness holes in the current serialized Global read model without prematurely replacing its write authority. Context: project/build-plan/boreal-final-state/sprints/BW-S04/SPRINT.md.",
+      "priority": 6,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s04"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s04-t01",
+      "kind": "task",
+      "parent": "s04",
+      "title": "BW-S04-T01 — Bound project attention and add complete paged attention/detail reads",
+      "description": "Keep Home summaries useful for large portfolios without leaving one unbounded per-project map in the snapshot. Context: project/build-plan/boreal-final-state/sprints/BW-S04/tasks/BW-S04-T01.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s04",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s04-t02",
+      "kind": "task",
+      "parent": "s04",
+      "title": "BW-S04-T02 — Make search and triage pickers complete beyond the snapshot sample",
+      "description": "Ensure an item/project/status/parent on page 101 is still selectable and searchable. Context: project/build-plan/boreal-final-state/sprints/BW-S04/tasks/BW-S04-T02.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s04-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s04",
+        "lane/global-tui"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s04-t03",
+      "kind": "task",
+      "parent": "s04",
+      "title": "BW-S04-T03 — Make linked association enumeration and global next complete beyond summary caps",
+      "description": "Prevent linked projects beyond the first snapshot sample from disappearing from advisory discovery. Context: project/build-plan/boreal-final-state/sprints/BW-S04/tasks/BW-S04-T03.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s04",
+        "lane/global-links"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s04-t04",
+      "kind": "task",
+      "parent": "s04",
+      "title": "BW-S04-T04 — Qualify linked worker saturation, deadlines and last-good isolation",
+      "description": "Prove a slow/busy linked project cannot make Personal Global unusable or overwrite known execution with zero. Context: project/build-plan/boreal-final-state/sprints/BW-S04/tasks/BW-S04-T04.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s04-t03"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s04",
+        "lane/validation"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s04-t05",
+      "kind": "task",
+      "parent": "s04",
+      "title": "BW-S04-T05 — Harden logical export/import size, history and replacement invariants",
+      "description": "Make transfer predictable while preserving lossless history and keeping physical backup as the escape hatch. Context: project/build-plan/boreal-final-state/sprints/BW-S04/tasks/BW-S04-T05.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s01-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s04",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s04-t90",
+      "kind": "task",
+      "parent": "s04",
+      "title": "BW-S04-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S04/tasks/BW-S04-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s04-t01",
+        "s04-t02",
+        "s04-t03",
+        "s04-t04",
+        "s04-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s04",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s05",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S05 — Civil-time daily semantics and dependency-honest management attention",
+      "description": "Make Home and Today mean the same thing across Rust/CLI/TUI and recommend only management work that can actually proceed. Context: project/build-plan/boreal-final-state/sprints/BW-S05/SPRINT.md.",
+      "priority": 6,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s05"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s05-t01",
+      "kind": "task",
+      "parent": "s05",
+      "title": "BW-S05-T01 — Introduce one application-owned system civil-time context",
+      "description": "Give every management client one authoritative definition of today. Context: project/build-plan/boreal-final-state/sprints/BW-S05/tasks/BW-S05-T01.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s04-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s05",
+        "lane/global-domain"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s05-t02",
+      "kind": "task",
+      "parent": "s05",
+      "title": "BW-S05-T02 — Replace Today predicate with explicit grouped daily classification",
+      "description": "Make overdue obligations impossible to disappear after midnight and stop calling undated work Today. Context: project/build-plan/boreal-final-state/sprints/BW-S05/tasks/BW-S05-T02.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s04-t90",
+        "s05-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s05",
+        "lane/global-domain"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s05-t03",
+      "kind": "task",
+      "parent": "s05",
+      "title": "BW-S05-T03 — Make management next action dependency-honest with bounded blocker reasons",
+      "description": "Recommend the next management action only when all direct prerequisites are satisfied. Context: project/build-plan/boreal-final-state/sprints/BW-S05/tasks/BW-S05-T03.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s04-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s05",
+        "lane/global-domain"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s05-t04",
+      "kind": "task",
+      "parent": "s05",
+      "title": "BW-S05-T04 — Rebuild Home attention contract around truthful management summaries",
+      "description": "Expose exact portfolio/project management attention without mixing linked execution completion. Context: project/build-plan/boreal-final-state/sprints/BW-S05/tasks/BW-S05-T04.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s04-t90",
+        "s05-t01",
+        "s05-t03",
+        "s04-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s05",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s05-t05",
+      "kind": "task",
+      "parent": "s05",
+      "title": "BW-S05-T05 — Expose the same daily filters through CLI and service",
+      "description": "Give human CLI and agent clients the same management classifiers as the TUI. Context: project/build-plan/boreal-final-state/sprints/BW-S05/tasks/BW-S05-T05.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s04-t90",
+        "s05-t02",
+        "s05-t04",
+        "s12-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s05",
+        "lane/cli"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s05-t90",
+      "kind": "task",
+      "parent": "s05",
+      "title": "BW-S05-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S05/tasks/BW-S05-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s05-t01",
+        "s05-t02",
+        "s05-t03",
+        "s05-t04",
+        "s05-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s05",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s06",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S06 — Global schema 3, Personal Inbox and capture provenance",
+      "description": "After recovery is proven, add the minimum persistent metadata that turns quick capture into a real triage workflow and preserves future handoff identity without inventing history. Context: project/build-plan/boreal-final-state/sprints/BW-S06/SPRINT.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s06"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s06-t01",
+      "kind": "task",
+      "parent": "s06",
+      "title": "BW-S06-T01 — Introduce Global schema 3 with compatible optional item metadata and strong new IDs",
+      "description": "Make one deliberate schema expansion for capture provenance and future Send state after the recovery bridge exists. Context: project/build-plan/boreal-final-state/sprints/BW-S06/tasks/BW-S06-T01.md.",
+      "priority": 9,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s05-t90",
+        "s03-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s06",
+        "lane/global-store"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s06-t02",
+      "kind": "task",
+      "parent": "s06",
+      "title": "BW-S06-T02 — Provision a distinct Personal Inbox workflow status and make explicit capture enter it",
+      "description": "Create a true classification-free Personal Inbox rather than defining all unfinished Personal work as Inbox. Context: project/build-plan/boreal-final-state/sprints/BW-S06/tasks/BW-S06-T02.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s05-t90",
+        "s03-t90",
+        "s06-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s06",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s06-t03",
+      "kind": "task",
+      "parent": "s06",
+      "title": "BW-S06-T03 — Record immutable capture digest and retain a verifiable original-text witness",
+      "description": "Preserve what was captured without duplicating arbitrary text into every management item state. Context: project/build-plan/boreal-final-state/sprints/BW-S06/tasks/BW-S06-T03.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s05-t90",
+        "s03-t90",
+        "s06-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s06",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s06-t04",
+      "kind": "task",
+      "parent": "s06",
+      "title": "BW-S06-T04 — Import v1 raw capture provenance without fabricating missing history",
+      "description": "Retain useful v1 capture-first provenance while refusing ambiguous synthetic lineage. Context: project/build-plan/boreal-final-state/sprints/BW-S06/tasks/BW-S06-T04.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s05-t90",
+        "s03-t90",
+        "s06-t03"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s06",
+        "lane/migration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s06-t05",
+      "kind": "task",
+      "parent": "s06",
+      "title": "BW-S06-T05 — Make triage atomically map destination, parent, workflow and scheduling metadata",
+      "description": "Turn Inbox into a real decision queue for Personal and project-owned management work. Context: project/build-plan/boreal-final-state/sprints/BW-S06/tasks/BW-S06-T05.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s05-t90",
+        "s03-t90",
+        "s06-t02",
+        "s05-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s06",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s06-t06",
+      "kind": "task",
+      "parent": "s06",
+      "title": "BW-S06-T06 — Version logical schema-3 transfer and preserve capture/future handoff metadata",
+      "description": "Ensure schema-3 state round-trips without losing provenance or future recovery markers. Context: project/build-plan/boreal-final-state/sprints/BW-S06/tasks/BW-S06-T06.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s05-t90",
+        "s03-t90",
+        "s06-t01",
+        "s06-t03",
+        "s06-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s06",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s06-t90",
+      "kind": "task",
+      "parent": "s06",
+      "title": "BW-S06-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S06/tasks/BW-S06-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s06-t01",
+        "s06-t02",
+        "s06-t03",
+        "s06-t04",
+        "s06-t05",
+        "s06-t06"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s06",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s07",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S07 — Complete standalone Global daily product and authority guidance",
+      "description": "Turn the existing routes into a polished keyboard-first daily session and teach humans/agents exactly when to use Global versus project execution. Context: project/build-plan/boreal-final-state/sprints/BW-S07/SPRINT.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s07"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s07-t01",
+      "kind": "task",
+      "parent": "s07",
+      "title": "BW-S07-T01 — Make quick capture and Inbox triage a keyboard decision queue",
+      "description": "Make classification-free capture and rapid later decisions the default interaction. Context: project/build-plan/boreal-final-state/sprints/BW-S07/tasks/BW-S07-T01.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s06-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s07",
+        "lane/global-tui"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s07-t02",
+      "kind": "task",
+      "parent": "s07",
+      "title": "BW-S07-T02 — Render grouped Today/Open and management project heartbeat",
+      "description": "Make Home and daily review visually express the corrected semantics without adding another top-level route. Context: project/build-plan/boreal-final-state/sprints/BW-S07/tasks/BW-S07-T02.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s06-t90",
+        "s05-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s07",
+        "lane/global-tui"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s07-t03",
+      "kind": "task",
+      "parent": "s07",
+      "title": "BW-S07-T03 — Polish archive/restore/history and capture provenance inspection",
+      "description": "Make reversible dismissal and history trustworthy without turning provenance into a new entity. Context: project/build-plan/boreal-final-state/sprints/BW-S07/tasks/BW-S07-T03.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s06-t90",
+        "s06-t03"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s07",
+        "lane/global-tui"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s07-t04",
+      "kind": "task",
+      "parent": "s07",
+      "title": "BW-S07-T04 — Expose daily filters and atomic bulk triage truthfully through public CLI help",
+      "description": "Give agents and terminal users parity with the management TUI without reverse-engineering internal payloads. Context: project/build-plan/boreal-final-state/sprints/BW-S07/tasks/BW-S07-T04.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s06-t90",
+        "s05-t05",
+        "s06-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s07",
+        "lane/cli"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s07-t05",
+      "kind": "task",
+      "parent": "s07",
+      "title": "BW-S07-T05 — Make boreal-route choose Global management or project execution first",
+      "description": "Prevent agents from applying project execution workflows to ordinary personal/business management or vice versa. Context: project/build-plan/boreal-final-state/sprints/BW-S07/tasks/BW-S07-T05.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s06-t90",
+        "s12-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s07",
+        "lane/guidance"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s07-t06",
+      "kind": "task",
+      "parent": "s07",
+      "title": "BW-S07-T06 — Add two-door help and reconcile Global docs with the callable registry",
+      "description": "Make first-minute discoverability match actual authorities and commands. Context: project/build-plan/boreal-final-state/sprints/BW-S07/tasks/BW-S07-T06.md.",
+      "priority": 5,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s06-t90",
+        "s07-t04",
+        "s07-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s07",
+        "lane/docs"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s07-t90",
+      "kind": "task",
+      "parent": "s07",
+      "title": "BW-S07-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S07/tasks/BW-S07-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s07-t01",
+        "s07-t02",
+        "s07-t03",
+        "s07-t04",
+        "s07-t05",
+        "s07-t06"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s07",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s08",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S08 — Project restore identity and immutable Intake delivery receipt",
+      "description": "Prepare the project-owned landing zone for explicit Global handoff without weakening normal Intake, project execution or old work-model/3 authority. Context: project/build-plan/boreal-final-state/sprints/BW-S08/SPRINT.md.",
+      "priority": 6,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s08"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s08-t01",
+      "kind": "task",
+      "parent": "s08",
+      "title": "BW-S08-T01 — Give each project restore activation a genuinely unique physical identity",
+      "description": "Ensure restored project fencing distinguishes independent activations of the same backup. Context: project/build-plan/boreal-final-state/sprints/BW-S08/tasks/BW-S08-T01.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s08",
+        "lane/project-store"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s08-t02",
+      "kind": "task",
+      "parent": "s08",
+      "title": "BW-S08-T02 — Install immutable intake_delivery v1 as an additive feature schema",
+      "description": "Store cross-store handoff provenance separately from mutable Intake content. Context: project/build-plan/boreal-final-state/sprints/BW-S08/tasks/BW-S08-T02.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s12-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s08",
+        "lane/project-store"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s08-t03",
+      "kind": "task",
+      "parent": "s08",
+      "title": "BW-S08-T03 — Implement project-owned Intake receive transaction and idempotent resolution",
+      "description": "Atomically accept an external Global origin into Intake or resolve the already accepted receipt. Context: project/build-plan/boreal-final-state/sprints/BW-S08/tasks/BW-S08-T03.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s08-t02"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s08",
+        "lane/project-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s08-t04",
+      "kind": "task",
+      "parent": "s08",
+      "title": "BW-S08-T04 — Expose service-addressable Intake receive and receipt-bearing readback",
+      "description": "Give contextual Global Send a project-owned API rather than direct SQLite access. Context: project/build-plan/boreal-final-state/sprints/BW-S08/tasks/BW-S08-T04.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s08-t03"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s08",
+        "lane/project-service"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s08-t05",
+      "kind": "task",
+      "parent": "s08",
+      "title": "BW-S08-T05 — Qualify additive feature compatibility and receipt behavior across project restore",
+      "description": "Prove the receipt design does not break ordinary Intake/project workflows or disappear incorrectly during restore. Context: project/build-plan/boreal-final-state/sprints/BW-S08/tasks/BW-S08-T05.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s00-t90",
+        "s08-t01",
+        "s08-t02",
+        "s08-t04"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s08",
+        "lane/validation"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s08-t90",
+      "kind": "task",
+      "parent": "s08",
+      "title": "BW-S08-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S08/tasks/BW-S08-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s08-t01",
+        "s08-t02",
+        "s08-t03",
+        "s08-t04",
+        "s08-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s08",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s09",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S09 — Explicit Global Send with frozen intent and deterministic reconciliation",
+      "description": "Add an explicit transfer from an eligible Global capture-origin item into project Intake while preserving unknown-outcome safety and the authority boundary. Context: project/build-plan/boreal-final-state/sprints/BW-S09/SPRINT.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s09"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s09-t01",
+      "kind": "task",
+      "parent": "s09",
+      "title": "BW-S09-T01 — Implement Global Send eligibility and frozen pending intent state",
+      "description": "Persist the exact handoff intent before external effects and restrict first release to simple capture-origin obligations. Context: project/build-plan/boreal-final-state/sprints/BW-S09/tasks/BW-S09-T01.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s08-t90",
+        "s07-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s09",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s09-t02",
+      "kind": "task",
+      "parent": "s09",
+      "title": "BW-S09-T02 — Add contextual Send to project interaction without a new top-level route",
+      "description": "Expose handoff where users already manage an item while keeping the daily product simple. Context: project/build-plan/boreal-final-state/sprints/BW-S09/tasks/BW-S09-T02.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s08-t90",
+        "s09-t01",
+        "s07-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s09",
+        "lane/global-tui"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s09-t03",
+      "kind": "task",
+      "parent": "s09",
+      "title": "BW-S09-T03 — Implement cross-store receive, readback and attempt reconciliation adapter",
+      "description": "Call only the owning project service and distinguish semantic delivery receipt from per-attempt operation replay. Context: project/build-plan/boreal-final-state/sprints/BW-S09/tasks/BW-S09-T03.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s08-t90",
+        "s09-t01",
+        "s08-t04",
+        "s07-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s09",
+        "lane/global-links"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s09-t04",
+      "kind": "task",
+      "parent": "s09",
+      "title": "BW-S09-T04 — Record accepted Intake reference and archive-not-complete the Global source",
+      "description": "Make Send a clear transfer of responsibility without erasing local provenance or creating duplicate active obligations. Context: project/build-plan/boreal-final-state/sprints/BW-S09/tasks/BW-S09-T04.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s08-t90",
+        "s09-t03",
+        "s07-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s09",
+        "lane/global-app"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s09-t05",
+      "kind": "task",
+      "parent": "s09",
+      "title": "BW-S09-T05 — Exercise clone, restore, import and ambiguous-delivery failure matrix",
+      "description": "Prove Send never uses uncertainty as permission to duplicate. Context: project/build-plan/boreal-final-state/sprints/BW-S09/tasks/BW-S09-T05.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s08-t90",
+        "s09-t03",
+        "s08-t05",
+        "s07-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s09",
+        "lane/validation"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s09-t90",
+      "kind": "task",
+      "parent": "s09",
+      "title": "BW-S09-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S09/tasks/BW-S09-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s09-t01",
+        "s09-t02",
+        "s09-t03",
+        "s09-t04",
+        "s09-t05"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s09",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s10",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S10 — Scale qualification and explicit release-scope decision",
+      "description": "Measure the completed local Global product and only implement storage/view refinements that real scale or usage evidence justifies. Context: project/build-plan/boreal-final-state/sprints/BW-S10/SPRINT.md.",
+      "priority": 6,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s10"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s10-t01",
+      "kind": "task",
+      "parent": "s10",
+      "title": "BW-S10-T01 — Build deterministic representative and stretch Global portfolio fixtures",
+      "description": "Create realistic repeatable scale fixtures without benchmarking seed history rather than state size. Context: project/build-plan/boreal-final-state/sprints/BW-S10/tasks/BW-S10-T01.md.",
+      "priority": 5,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s07-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s10",
+        "lane/performance"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s10-t02",
+      "kind": "task",
+      "parent": "s10",
+      "title": "BW-S10-T02 — Benchmark Global read/write/history/backup behavior on both fixtures",
+      "description": "Produce the evidence needed for storage/refinement decisions. Context: project/build-plan/boreal-final-state/sprints/BW-S10/tasks/BW-S10-T02.md.",
+      "priority": 5,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s07-t90",
+        "s10-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s10",
+        "lane/performance"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s10-t03",
+      "kind": "task",
+      "parent": "s10",
+      "title": "BW-S10-T03 — Decide release fitness and any measured follow-on storage work",
+      "description": "Decide whether the representative workload meets declared budgets; retain the store if it does. Name mandatory remediation for a failed release budget, or explicitly defer optional projections, saved views and experiments. Context: project/build-plan/boreal-final-state/sprints/BW-S10/tasks/BW-S10-T03.md.",
+      "priority": 5,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s07-t90",
+        "s10-t02"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s10",
+        "lane/architecture"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s10-t90",
+      "kind": "task",
+      "parent": "s10",
+      "title": "BW-S10-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S10/tasks/BW-S10-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s10-t01",
+        "s10-t02",
+        "s10-t03"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s10",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s12",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S12 — Complete project workflows and portable agent access",
+      "description": "Close project workflow and adapter gaps in parallel with Global completion. No new orchestration engine, hosted state or automatic provider spawning. Context: project/build-plan/boreal-final-state/sprints/BW-S12/SPRINT.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s12"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s12-t01",
+      "kind": "task",
+      "parent": "s12",
+      "title": "BW-S12-T01 — Freeze callable general-work, artifact and acceptance contracts",
+      "description": "Freeze callable general-work, artifact and acceptance contracts. Required general-work delta and exact scope: project/build-plan/boreal-final-state/sprints/BW-S12/tasks/BW-S12-T01.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s00-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s12",
+        "lane/protocol"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s12-t02",
+      "kind": "task",
+      "parent": "s12",
+      "title": "BW-S12-T02 — Complete planning, optional deliverables and safe plan revision",
+      "description": "Complete planning, optional deliverables and safe plan revision. Required general-work delta and exact scope: project/build-plan/boreal-final-state/sprints/BW-S12/tasks/BW-S12-T02.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s12-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s12",
+        "lane/project-planning"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s12-t03",
+      "kind": "task",
+      "parent": "s12",
+      "title": "BW-S12-T03 — Complete typed acceptance, enrolled execution and recovery",
+      "description": "Complete typed acceptance, enrolled execution and recovery. Required general-work delta and exact scope: project/build-plan/boreal-final-state/sprints/BW-S12/tasks/BW-S12-T03.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s12-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s12",
+        "lane/project-execution"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s12-t04",
+      "kind": "task",
+      "parent": "s12",
+      "title": "BW-S12-T04 — Make context, accepted artifacts and handoffs portable",
+      "description": "Make context, accepted artifacts and handoffs portable. Required general-work delta and exact scope: project/build-plan/boreal-final-state/sprints/BW-S12/tasks/BW-S12-T04.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s12-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s12",
+        "lane/project-knowledge"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s12-t05",
+      "kind": "task",
+      "parent": "s12",
+      "title": "BW-S12-T05 — Expose general-work workflows through one typed contract",
+      "description": "Expose general-work workflows through one typed contract. Required general-work delta and exact scope: project/build-plan/boreal-final-state/sprints/BW-S12/tasks/BW-S12-T05.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s12-t02",
+        "s12-t03",
+        "s12-t04"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s12",
+        "lane/agent-interface"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s12-t06",
+      "kind": "task",
+      "parent": "s12",
+      "title": "BW-S12-T06 — Qualify headless installs and portable mixed-work recovery",
+      "description": "Qualify headless installs and portable mixed-work recovery. Required general-work delta and exact scope: project/build-plan/boreal-final-state/sprints/BW-S12/tasks/BW-S12-T06.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s12-t05",
+        "s02-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s12",
+        "lane/environment-validation"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s12-t90",
+      "kind": "task",
+      "parent": "s12",
+      "title": "BW-S12-T90 — Integrate general-work execution and the portable contract",
+      "description": "Integrate general-work execution and the portable contract. Required general-work delta and exact scope: project/build-plan/boreal-final-state/sprints/BW-S12/tasks/BW-S12-T90.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s12-t01",
+        "s12-t02",
+        "s12-t03",
+        "s12-t04",
+        "s12-t05",
+        "s12-t06"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s12",
+        "lane/integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s13",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S13 — General-work planning, visual delivery and reusable workflows",
+      "description": "Integrate optional business dates, external waits, TUI deliverable visibility and bounded non-software production templates over S12. No provider signup or business launch. Context: project/build-plan/boreal-final-state/sprints/BW-S13/SPRINT.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s13"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s13-t01",
+      "kind": "task",
+      "parent": "s13",
+      "title": "BW-S13-T01 — Complete deadlines, follow-ups and external decision waits",
+      "description": "Complete deadlines, follow-ups and external decision waits. Scope and acceptance: project/build-plan/boreal-final-state/sprints/BW-S13/tasks/BW-S13-T01.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s12-t01",
+        "s05-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s13",
+        "lane/general_scheduling"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s13-t02",
+      "kind": "task",
+      "parent": "s13",
+      "title": "BW-S13-T02 — Build a clear general-work TUI and visual planning surface",
+      "description": "Build a clear general-work TUI and visual planning surface. Scope and acceptance: project/build-plan/boreal-final-state/sprints/BW-S13/tasks/BW-S13-T02.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s12-t05",
+        "s13-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s13",
+        "lane/general_tui"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s13-t03",
+      "kind": "task",
+      "parent": "s13",
+      "title": "BW-S13-T03 — Qualify reusable templates and a non-software production journey",
+      "description": "Qualify reusable templates and a non-software production journey. Scope and acceptance: project/build-plan/boreal-final-state/sprints/BW-S13/tasks/BW-S13-T03.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s12-t90",
+        "s13-t01"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s13",
+        "lane/general_workflow"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s13-t90",
+      "kind": "task",
+      "parent": "s13",
+      "title": "BW-S13-T90 — Integrate and qualify general-purpose work management",
+      "description": "Integrate and qualify general-purpose work management. Scope and acceptance: project/build-plan/boreal-final-state/sprints/BW-S13/tasks/BW-S13-T90.md; GENERAL_WORK_CONTRACT.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s13-t01",
+        "s13-t02",
+        "s13-t03"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s13",
+        "lane/integration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s11",
+      "kind": "sprint",
+      "parent": "milestone",
+      "title": "BW-S11 — Integrated release qualification, v1 parity and operational handover",
+      "description": "Qualify the completed Global + project system on exact supported artifacts, reconcile documentation/parity, and leave a maintainable operator handoff. Context: project/build-plan/boreal-final-state/sprints/BW-S11/SPRINT.md.",
+      "priority": 8,
+      "dispatch": "operator_only",
+      "dependencies": [],
+      "labels": [
+        "boreal-final",
+        "sprint",
+        "bw-s11"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s11-t01",
+      "kind": "task",
+      "parent": "s11",
+      "title": "BW-S11-T01 — Build and smoke exact supported release artifacts on the declared platform matrix",
+      "description": "Qualify the bytes users will install rather than only source-tree behavior. Context: project/build-plan/boreal-final-state/sprints/BW-S11/tasks/BW-S11-T01.md.",
+      "priority": 8,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s10-t90",
+        "s09-t90",
+        "s12-t90",
+        "s13-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s11",
+        "lane/release"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s11-t02",
+      "kind": "task",
+      "parent": "s11",
+      "title": "BW-S11-T02 — Run exact-artifact end-to-end Global and project authority journeys",
+      "description": "Prove the full finished user story through installed binaries and services. Context: project/build-plan/boreal-final-state/sprints/BW-S11/tasks/BW-S11-T02.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s10-t90",
+        "s09-t90",
+        "s11-t01",
+        "s12-t90",
+        "s13-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s11",
+        "lane/validation"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s11-t03",
+      "kind": "task",
+      "parent": "s11",
+      "title": "BW-S11-T03 — Bring install, recovery, Global manager, CLI and agent docs to the shipped final state",
+      "description": "Make first-run, recovery and authority guidance accurate enough for an unfamiliar user/agent. Context: project/build-plan/boreal-final-state/sprints/BW-S11/tasks/BW-S11-T03.md.",
+      "priority": 6,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s10-t90",
+        "s09-t90",
+        "s07-t06",
+        "s09-t04",
+        "s12-t90",
+        "s13-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s11",
+        "lane/docs"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s11-t04",
+      "kind": "task",
+      "parent": "s11",
+      "title": "BW-S11-T04 — Execute explicit v1 parity and deliberate-departure review",
+      "description": "Prove useful legacy workflows remain while documenting intentional v2 authority improvements. Context: project/build-plan/boreal-final-state/sprints/BW-S11/tasks/BW-S11-T04.md.",
+      "priority": 6,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s10-t90",
+        "s09-t90",
+        "s12-t90",
+        "s13-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s11",
+        "lane/migration"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s11-t05",
+      "kind": "task",
+      "parent": "s11",
+      "title": "BW-S11-T05 — Run final recovery, authority, security and representative performance regression",
+      "description": "Catch cross-vertical regressions on the integrated release candidate without turning stretch diagnostics into invented blockers. Context: project/build-plan/boreal-final-state/sprints/BW-S11/tasks/BW-S11-T05.md.",
+      "priority": 7,
+      "dispatch": "automatic",
+      "dependencies": [
+        "s10-t90",
+        "s09-t90",
+        "s11-t01",
+        "s11-t02",
+        "s10-t02",
+        "s12-t90",
+        "s13-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s11",
+        "lane/validation"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s11-t06",
+      "kind": "task",
+      "parent": "s11",
+      "title": "BW-S11-T06 — Finalize operator runbooks, support boundaries and next measured backlog",
+      "description": "Leave Boreal maintainable after the milestone rather than ending with an undocumented one-off pass. Context: project/build-plan/boreal-final-state/sprints/BW-S11/tasks/BW-S11-T06.md.",
+      "priority": 6,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s10-t90",
+        "s09-t90",
+        "s11-t03",
+        "s11-t04",
+        "s11-t05",
+        "s12-t90",
+        "s13-t90"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s11",
+        "lane/coord"
+      ],
+      "acceptance_profile": "focused"
+    },
+    {
+      "key": "s11-t90",
+      "kind": "task",
+      "parent": "s11",
+      "title": "BW-S11-T90 — Integrate the sprint and validate the combined behavior",
+      "description": "Merge the sprint lanes on one combined tree, reconcile shared files, and run the sprint-level validation before successors unlock. Context: project/build-plan/boreal-final-state/sprints/BW-S11/tasks/BW-S11-T90.md.",
+      "priority": 9,
+      "dispatch": "operator_only",
+      "dependencies": [
+        "s11-t01",
+        "s11-t02",
+        "s11-t03",
+        "s11-t04",
+        "s11-t05",
+        "s11-t06"
+      ],
+      "labels": [
+        "boreal-final",
+        "task",
+        "bw-s11",
+        "lane/integration",
+        "sprint-close",
+        "integration"
+      ],
+      "acceptance_profile": "reviewed"
+    }
+  ]
+}

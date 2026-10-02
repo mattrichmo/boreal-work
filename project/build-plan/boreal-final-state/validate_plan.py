@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Validate V3 planning artifacts, never a runtime database or product behavior.
+"""Validate V4 planning artifacts, never a runtime database or product behavior.
 
 No dependencies beyond Python's standard library. Run from any directory.
-Historical V1/V2 templates are immutable; V3 uses the existing schema 1.
+Historical V1/V2/V3 templates are immutable; V4 uses the existing schema 1.
 """
 from __future__ import annotations
 
@@ -48,18 +48,19 @@ def blob_sha(path: Path) -> str:
 
 
 def validate(root: Path) -> dict[str, int]:
-    template = load(root / "BOREAL_TEMPLATE_V3.json")
+    template = load(root / "BOREAL_TEMPLATE_V4.json")
     context = load(root / "PLAN_CONTEXT.json")
-    delta = load(root / "PLAN_UPGRADE_V3.json")
+    delta = load(root / "PLAN_UPGRADE_V4.json")
     require(template.get("schema_version") == 1, "Use supported work-template schema 1")
-    require(template.get("id") == "boreal-final-state-v3" and template.get("version") == 3,
+    require(template.get("id") == "boreal-final-state-v4" and template.get("version") == 4,
             "Wrong active template identity")
-    require(context.get("plan_version") == 3, "Context version drift")
-    require(context.get("active_template") == "BOREAL_TEMPLATE_V3.json", "Active template drift")
+    require(context.get("plan_version") == 4, "Context version drift")
+    require(context.get("active_template") == "BOREAL_TEMPLATE_V4.json", "Active template drift")
     require(blob_sha(root / "BOREAL_TEMPLATE.json") == "b31c07691989b2ba392b25ab71c238db74fc0fc5",
             "Historical V1 template changed")
     require(blob_sha(root / "BOREAL_TEMPLATE_V2.json") == "1ad7bfed8d303008f144218371ae4a29f830cf20",
             "Historical V2 template changed")
+    require(blob_sha(root / "BOREAL_TEMPLATE_V3.json") == "1a63a4b07328ac2bc3a6bd159bd45e2bbd3c97bb", "Historical V3 template changed")
     raw = template.get("items")
     require(isinstance(raw, list), "items must be a list")
     by_key: dict[str, dict[str, Any]] = {}
@@ -74,7 +75,7 @@ def validate(root: Path) -> dict[str, int]:
         require(item["kind"] in {"milestone", "sprint", "task"}, f"Invalid kind: {key}")
         require(item["dispatch"] in {"automatic", "operator_only", "paused"}, f"Invalid dispatch: {key}")
         require(item["acceptance_profile"] in {"focused", "reviewed"}, f"Invalid profile: {key}")
-        require(type(item["priority"]) is int and 0 <= item["priority"] <= 10, f"Invalid priority: {key}")
+        require(type(item["priority"]) is int and 0 <= item["priority"] <= 9, f"Invalid priority: {key}")
         require(isinstance(item["dependencies"], list) and
                 all(isinstance(x, str) for x in item["dependencies"]), f"Invalid dependencies: {key}")
         require(isinstance(item["labels"], list) and all(isinstance(x, str) for x in item["labels"]),
@@ -84,7 +85,7 @@ def validate(root: Path) -> dict[str, int]:
         by_key[key] = item
     tasks = {k: v for k, v in by_key.items() if v["kind"] == "task"}
     sprints = {k: v for k, v in by_key.items() if v["kind"] == "sprint"}
-    require(len(raw) == 95 and len(tasks) == 81 and len(sprints) == 13, "Required scope count drift")
+    require(len(raw) == 100 and len(tasks) == 85 and len(sprints) == 14, "Required scope count drift")
     require(by_key["milestone"]["kind"] == "milestone" and
             by_key["milestone"]["parent"] is None, "Invalid milestone")
     require(context.get("task_count") == len(tasks) and
@@ -94,8 +95,8 @@ def validate(root: Path) -> dict[str, int]:
     deferred = {"s10-t04", "s10-t05", "s10-t06"}
     require(not deferred.intersection(by_key), "Deferred task present in required import")
     require(set(context.get("deferred_task_context", {})) == set(map(tid, deferred)), "Deferred context drift")
-    old = {v["key"] for v in load(root / "BOREAL_TEMPLATE_V2.json")["items"]}
-    require(old - set(by_key) == deferred, "Unexpected removal of historical keys")
+    old = {v["key"] for v in load(root / "BOREAL_TEMPLATE_V3.json")["items"]}
+    require(old - set(by_key) == set(), "Unexpected removal of historical keys")
     require(set(by_key) - old == set(delta.get("new_keys", [])), "Upgrade additions drift")
     require(set(delta.get("deferred_outside_core", [])) == deferred and
             delta.get("removed_ids") == [] and delta.get("not_a_bwrk_input") is True,
@@ -151,12 +152,17 @@ def validate(root: Path) -> dict[str, int]:
     for key, item in tasks.items():
         if key.startswith("s11-") and key != "s11-t90":
             require("s12-t90" in item["dependencies"], f"Missing portable-workflow release gate: {key}")
+    require(len(raw) <= 100, "Native template admission limit exceeded")
+    for key, item in tasks.items():
+        if key.startswith("s11-") and key != "s11-t90":
+            require("s13-t90" in item["dependencies"], f"Missing general-work release gate: {key}")
+    require((root / "GENERAL_WORK_CONTRACT.md").is_file(), "Missing general-work contract")
     require(by_key["milestone"]["acceptance_profile"] == "reviewed" and
             tasks["s11-t90"]["acceptance_profile"] == "reviewed", "Final review weakened")
     require(tasks["s00-t05"]["dispatch"] == "operator_only", "Existing recovery authority changed")
     journeys = (root / "WORKFLOW_CONTRACT.md").read_text(encoding="utf-8")
     rows = re.findall(r"^\| (J\d{2}) \|.*$", journeys, flags=re.M)
-    require(rows == [f"J{i:02}" for i in range(1, 19)], "Required journey membership drift")
+    require(rows == [f"J{i:02}" for i in range(1, 25)], "Required journey membership drift")
     require(set(re.findall(r"BW-S\d{2}-T\d{2}", journeys)) <= set(map(tid, tasks)),
             "Unknown/deferred journey owner")
     return {"sprints": len(sprints), "required_tasks": len(tasks), "work_items": len(raw),

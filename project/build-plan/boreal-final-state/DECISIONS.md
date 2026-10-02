@@ -1,4 +1,4 @@
-# Product and architecture decisions — revision 3
+# Product and architecture decisions — revision 4
 
 The first fourteen decisions are retained from the existing plan. V3 narrows the release boundary and adds workflow completeness; it does not reopen the Rust design.
 
@@ -26,3 +26,7 @@ The first fourteen decisions are retained from the existing plan. V3 narrows the
 22. Keep one T90 per sprint. Focused contract checks are used where downstream integration needs them; final native/artifact acceptance stays reviewed.
 23. S10-T04/T05/T06 remain deferred IDs outside the required release template. Failed mandatory performance budgets demand remediation, not a conveniently weaker definition of done.
 24. A named environment/harness is supported only after its actual capabilities and journey are qualified. A compiled binary, simulated client or GitHub connection does not prove access to ChatGPT's running environment.
+
+## Revision 4 decisions
+
+General work is the product, with software as one domain. Reuse existing work, profile and source engines. Optional requirements and versioned inputs/outputs are additive; command evidence and attributable artifact/human evidence remain distinct. Lightweight rigor is explicit and versioned, never a fallback that weakens an existing task. Dates and structured waits do not authorize external communications. S12 owns core contracts and S13 owns general-work visual/scheduling/reference integration. Business-type templates remain outside the core state machine.

@@ -19,101 +19,1602 @@
     "BW-S09",
     "BW-S10",
     "BW-S12",
+    "BW-S13",
     "BW-S11"
   ],
-  "task_count": 81,
-  "work_template_item_count": 95,
-  "plan_version": 3,
-  "reviewed_source_sha": "1a32762ab53385a9ac485f850617d956484019d8",
-  "active_template": "BOREAL_TEMPLATE_V3.json",
+  "task_count": 85,
+  "work_template_item_count": 100,
+  "plan_version": 4,
+  "reviewed_source_sha": "7b56cca95c2bd482ea6880ea098993629cf3be78",
+  "active_template": "BOREAL_TEMPLATE_V4.json",
   "milestone_work_key": "milestone",
   "existing_prefix_example": "boreal-final",
   "task_context": {
-    "BW-S00-T01": {"sprint": "BW-S00", "lane": "COORD", "owned_paths": ["project/build-plan/boreal-final-state/CURRENT_STATE.md", "project/build-plan/boreal-final-state/SOURCE_BASELINE.md"], "shared_paths": [], "dependencies": [], "dispatch": "operator_only"},
-    "BW-S00-T02": {"sprint": "BW-S00", "lane": "VALIDATION", "owned_paths": [".github/workflows/ci.yml", "scripts/validation/run_full_suite.py", "scripts/validation/global/", "scripts/validation/global-tui/"], "shared_paths": [".github/workflows/ci.yml", "scripts/validation/run_full_suite.py"], "dependencies": ["BW-S00-T01"], "dispatch": "automatic"},
-    "BW-S00-T03": {"sprint": "BW-S00", "lane": "RELEASE", "owned_paths": ["scripts/release/package-smoke.sh", "scripts/release/", "install.sh", ".github/workflows/release.yml"], "shared_paths": ["install.sh", ".github/workflows/release.yml", "scripts/release/package-smoke.sh"], "dependencies": ["BW-S00-T01"], "dispatch": "automatic"},
-    "BW-S00-T04": {"sprint": "BW-S00", "lane": "COORD", "owned_paths": ["project/build-plan/boreal-final-state/execution/PARALLEL_DISPATCH.md", "project/build-plan/boreal-final-state/execution/SHARED_FILES.md", "project/build-plan/boreal-final-state/execution/STREAMS.md"], "shared_paths": [], "dependencies": [], "dispatch": "operator_only"},
-    "BW-S00-T05": {"sprint": "BW-S00", "lane": "CLI", "owned_paths": ["crates/application/src/runtime.rs", "crates/cli/src/recovery_commands.rs", "crates/cli/src/command_registry.rs", "crates/cli/src/main.rs", "crates/cli/src/service.rs", "crates/protocol/src/models.rs", "crates/store/src/recovery.rs", "crates/store/src/lib.rs", "crates/application/src/agent_tools.rs"], "shared_paths": ["crates/cli/src/command_registry.rs", "crates/cli/src/main.rs", "crates/cli/src/service.rs", "crates/protocol/src/models.rs", "crates/store/src/recovery.rs", "crates/store/src/lib.rs", "crates/application/src/agent_tools.rs"], "dependencies": [], "dispatch": "operator_only", "scope_note": "Preserve the narrower per-path restrictions and active stewardship in the existing BW-S00-T05 packet; V3 does not reassign or reopen this task."},
-    "BW-S00-T90": {"sprint": "BW-S00", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S00/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S00-T01", "BW-S00-T02", "BW-S00-T03", "BW-S00-T04", "BW-S00-T05"], "dispatch": "operator_only"},
-    "BW-S01-T01": {"sprint": "BW-S01", "lane": "GLOBAL_STORE", "owned_paths": ["crates/store/src/global_backup.rs", "crates/store/src/global_manager.rs"], "shared_paths": ["crates/store/src/lib.rs", "crates/store/src/global_manager.rs"], "dependencies": ["BW-S00-T90"], "dispatch": "automatic"},
-    "BW-S01-T02": {"sprint": "BW-S01", "lane": "GLOBAL_API", "owned_paths": ["crates/application/src/global_manager_recovery.rs", "crates/cli/src/global_commands.rs", "crates/cli/src/global_service.rs", "crates/cli/src/command_registry.rs"], "shared_paths": ["crates/cli/src/global_commands.rs", "crates/cli/src/global_service.rs", "crates/cli/src/command_registry.rs"], "dependencies": ["BW-S00-T90", "BW-S01-T01"], "dispatch": "automatic"},
-    "BW-S01-T03": {"sprint": "BW-S01", "lane": "GLOBAL_STORE", "owned_paths": ["crates/store/src/global_restore.rs", "crates/application/src/global_manager_recovery.rs", "crates/cli/src/global_commands.rs"], "shared_paths": ["crates/store/src/global_manager.rs", "crates/cli/src/global_commands.rs"], "dependencies": ["BW-S00-T90", "BW-S01-T01", "BW-S01-T04"], "dispatch": "automatic"},
-    "BW-S01-T04": {"sprint": "BW-S01", "lane": "GLOBAL_STORE", "owned_paths": ["crates/store/src/global_maintenance.rs", "crates/application/src/global_manager_recovery.rs"], "shared_paths": ["crates/store/src/global_manager.rs", "crates/cli/src/global_service.rs"], "dependencies": ["BW-S00-T90"], "dispatch": "automatic"},
-    "BW-S01-T05": {"sprint": "BW-S01", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_manager.rs", "crates/cli/src/global_commands.rs", "project/GLOBAL_MANAGER.md"], "shared_paths": ["crates/application/src/global_manager.rs", "crates/cli/src/global_commands.rs"], "dependencies": ["BW-S00-T90"], "dispatch": "automatic"},
-    "BW-S01-T90": {"sprint": "BW-S01", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S01/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S01-T01", "BW-S01-T02", "BW-S01-T03", "BW-S01-T04", "BW-S01-T05"], "dispatch": "operator_only"},
-    "BW-S02-T01": {"sprint": "BW-S02", "lane": "RELEASE", "owned_paths": [".github/workflows/release.yml", "install.sh", "scripts/release/package-smoke.sh", "scripts/release/test_release_identity.py"], "shared_paths": [".github/workflows/release.yml", "install.sh", "scripts/release/package-smoke.sh"], "dependencies": ["BW-S00-T90"], "dispatch": "automatic"},
-    "BW-S02-T02": {"sprint": "BW-S02", "lane": "HOST_RUNTIME", "owned_paths": ["crates/cli/src/dashboard.rs", "crates/cli/src/global_dashboard.rs", "docs/INSTALL.md"], "shared_paths": ["crates/cli/src/dashboard.rs", "crates/cli/src/global_dashboard.rs"], "dependencies": ["BW-S00-T90"], "dispatch": "automatic"},
-    "BW-S02-T03": {"sprint": "BW-S02", "lane": "VALIDATION", "owned_paths": ["scripts/validation/run_full_suite.py", "scripts/release/build_release.py", ".github/workflows/ci.yml"], "shared_paths": ["scripts/validation/run_full_suite.py", ".github/workflows/ci.yml"], "dependencies": ["BW-S00-T90", "BW-S00-T02"], "dispatch": "automatic"},
-    "BW-S02-T04": {"sprint": "BW-S02", "lane": "RELEASE", "owned_paths": [".github/workflows/release.yml", "scripts/release/", "docs/INSTALL.md"], "shared_paths": [".github/workflows/release.yml"], "dependencies": ["BW-S00-T90", "BW-S02-T01", "BW-S02-T02", "BW-S02-T03"], "dispatch": "automatic"},
-    "BW-S02-T05": {"sprint": "BW-S02", "lane": "DOCS", "owned_paths": ["docs/INSTALL.md", "docs/PACKAGING.md", "project/GLOBAL_MANAGER.md"], "shared_paths": [], "dependencies": ["BW-S00-T90"], "dispatch": "operator_only"},
-    "BW-S02-T90": {"sprint": "BW-S02", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S02/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S02-T01", "BW-S02-T02", "BW-S02-T03", "BW-S02-T04", "BW-S02-T05"], "dispatch": "operator_only"},
-    "BW-S03-T01": {"sprint": "BW-S03", "lane": "HOST_UPDATE", "owned_paths": ["crates/cli/src/main.rs", "crates/cli/src/command_registry.rs", "crates/cli/src/update.rs"], "shared_paths": ["crates/cli/src/main.rs", "crates/cli/src/command_registry.rs"], "dependencies": ["BW-S02-T90", "BW-S01-T90"], "dispatch": "automatic"},
-    "BW-S03-T02": {"sprint": "BW-S03", "lane": "HOST_UPDATE", "owned_paths": ["crates/cli/src/machine_update.rs", "crates/cli/src/update.rs"], "shared_paths": ["crates/cli/src/update.rs", "crates/cli/src/command_registry.rs"], "dependencies": ["BW-S02-T90", "BW-S01-T90"], "dispatch": "automatic"},
-    "BW-S03-T03": {"sprint": "BW-S03", "lane": "RELEASE", "owned_paths": ["install.sh", "crates/cli/src/machine_update.rs"], "shared_paths": ["install.sh"], "dependencies": ["BW-S02-T90", "BW-S01-T90", "BW-S03-T02", "BW-S01-T03"], "dispatch": "automatic"},
-    "BW-S03-T04": {"sprint": "BW-S03", "lane": "GLOBAL_STORE", "owned_paths": ["crates/store/src/global_manager.rs", "crates/application/src/global_manager_recovery.rs", "crates/cli/src/global_commands.rs"], "shared_paths": ["crates/store/src/global_manager.rs", "crates/cli/src/global_commands.rs"], "dependencies": ["BW-S02-T90", "BW-S01-T90", "BW-S03-T01", "BW-S03-T02", "BW-S01-T02"], "dispatch": "automatic"},
-    "BW-S03-T05": {"sprint": "BW-S03", "lane": "DOCS", "owned_paths": ["docs/INSTALL.md", "docs/PACKAGING.md", "project/GLOBAL_MANAGER.md"], "shared_paths": [], "dependencies": ["BW-S02-T90", "BW-S01-T90", "BW-S03-T04"], "dispatch": "operator_only"},
-    "BW-S03-T06": {"sprint": "BW-S03", "lane": "VALIDATION", "owned_paths": ["scripts/validation/update/", "scripts/release/update-smoke.sh"], "shared_paths": [], "dependencies": ["BW-S02-T90", "BW-S01-T90", "BW-S03-T02"], "dispatch": "automatic"},
-    "BW-S03-T90": {"sprint": "BW-S03", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S03/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S03-T01", "BW-S03-T02", "BW-S03-T03", "BW-S03-T04", "BW-S03-T05", "BW-S03-T06"], "dispatch": "operator_only"},
-    "BW-S04-T01": {"sprint": "BW-S04", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_manager.rs", "crates/protocol/src/global_manager.rs"], "shared_paths": ["crates/application/src/global_manager.rs"], "dependencies": ["BW-S00-T90"], "dispatch": "automatic", "workflow_journeys": "J06"},
-    "BW-S04-T02": {"sprint": "BW-S04", "lane": "GLOBAL_TUI", "owned_paths": ["apps/global-tui/src/model.ts", "apps/global-tui/src/interaction.ts", "apps/global-tui/src/client.ts"], "shared_paths": ["apps/global-tui/src/model.ts", "apps/global-tui/src/interaction.ts"], "dependencies": ["BW-S00-T90", "BW-S04-T01"], "dispatch": "automatic"},
-    "BW-S04-T03": {"sprint": "BW-S04", "lane": "GLOBAL_LINKS", "owned_paths": ["crates/cli/src/global_discovery.rs", "crates/cli/src/global_commands.rs"], "shared_paths": ["crates/cli/src/global_discovery.rs", "crates/cli/src/global_commands.rs"], "dependencies": ["BW-S00-T90"], "dispatch": "automatic", "workflow_journeys": "J06"},
-    "BW-S04-T04": {"sprint": "BW-S04", "lane": "VALIDATION", "owned_paths": ["scripts/validation/global/linked_saturation.py", "crates/cli/src/global_commands.rs"], "shared_paths": [], "dependencies": ["BW-S00-T90", "BW-S04-T03"], "dispatch": "automatic"},
-    "BW-S04-T05": {"sprint": "BW-S04", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_manager.rs", "crates/cli/src/global_commands.rs"], "shared_paths": ["crates/application/src/global_manager.rs", "crates/cli/src/global_commands.rs"], "dependencies": ["BW-S00-T90", "BW-S01-T05"], "dispatch": "automatic"},
-    "BW-S04-T90": {"sprint": "BW-S04", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S04/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S04-T01", "BW-S04-T02", "BW-S04-T03", "BW-S04-T04", "BW-S04-T05"], "dispatch": "operator_only"},
-    "BW-S05-T01": {"sprint": "BW-S05", "lane": "GLOBAL_DOMAIN", "owned_paths": ["crates/application/src/global_time.rs", "crates/protocol/src/global_manager.rs"], "shared_paths": ["crates/application/src/global_manager.rs", "crates/protocol/src/global_manager.rs"], "dependencies": ["BW-S04-T90"], "dispatch": "automatic", "workflow_journeys": "J04"},
-    "BW-S05-T02": {"sprint": "BW-S05", "lane": "GLOBAL_DOMAIN", "owned_paths": ["crates/application/src/global_daily_review.rs", "apps/global-tui/src/model.ts"], "shared_paths": ["apps/global-tui/src/model.ts"], "dependencies": ["BW-S04-T90", "BW-S05-T01"], "dispatch": "automatic"},
-    "BW-S05-T03": {"sprint": "BW-S05", "lane": "GLOBAL_DOMAIN", "owned_paths": ["crates/domain/src/global_manager.rs", "crates/application/src/global_manager_attention.rs"], "shared_paths": ["crates/application/src/global_manager.rs"], "dependencies": ["BW-S04-T90"], "dispatch": "automatic", "workflow_journeys": "J04,J05"},
-    "BW-S05-T04": {"sprint": "BW-S05", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_manager_attention.rs", "apps/global-tui/src/view.ts"], "shared_paths": ["apps/global-tui/src/view.ts"], "dependencies": ["BW-S04-T90", "BW-S05-T01", "BW-S05-T03", "BW-S04-T01"], "dispatch": "automatic"},
-    "BW-S05-T05": {"sprint": "BW-S05", "lane": "CLI", "owned_paths": ["crates/cli/src/global_commands.rs", "crates/cli/src/command_registry.rs"], "shared_paths": ["crates/cli/src/global_commands.rs", "crates/cli/src/command_registry.rs"], "dependencies": ["BW-S04-T90", "BW-S05-T02", "BW-S05-T04", "BW-S12-T01"], "dispatch": "automatic"},
-    "BW-S05-T90": {"sprint": "BW-S05", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S05/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S05-T01", "BW-S05-T02", "BW-S05-T03", "BW-S05-T04", "BW-S05-T05"], "dispatch": "operator_only"},
-    "BW-S06-T01": {"sprint": "BW-S06", "lane": "GLOBAL_STORE", "owned_paths": ["crates/store/src/global_manager.rs", "crates/application/src/global_manager.rs"], "shared_paths": ["crates/store/src/global_manager.rs", "crates/application/src/global_manager.rs"], "dependencies": ["BW-S05-T90", "BW-S03-T90"], "dispatch": "automatic"},
-    "BW-S06-T02": {"sprint": "BW-S06", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_manager.rs", "crates/domain/src/global_manager.rs"], "shared_paths": ["crates/application/src/global_manager.rs"], "dependencies": ["BW-S05-T90", "BW-S03-T90", "BW-S06-T01"], "dispatch": "automatic"},
-    "BW-S06-T03": {"sprint": "BW-S06", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_capture.rs", "crates/domain/src/global_manager.rs"], "shared_paths": ["crates/application/src/global_manager.rs"], "dependencies": ["BW-S05-T90", "BW-S03-T90", "BW-S06-T01"], "dispatch": "automatic", "workflow_journeys": "J02,J12"},
-    "BW-S06-T04": {"sprint": "BW-S06", "lane": "MIGRATION", "owned_paths": ["crates/application/src/global_import.rs", "project/legacy-map/", "project/GLOBAL_MANAGER.md"], "shared_paths": ["crates/application/src/global_manager.rs"], "dependencies": ["BW-S05-T90", "BW-S03-T90", "BW-S06-T03"], "dispatch": "automatic"},
-    "BW-S06-T05": {"sprint": "BW-S06", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_manager.rs", "crates/cli/src/global_commands.rs"], "shared_paths": ["crates/application/src/global_manager.rs", "crates/cli/src/global_commands.rs"], "dependencies": ["BW-S05-T90", "BW-S03-T90", "BW-S06-T02", "BW-S05-T05"], "dispatch": "automatic", "workflow_journeys": "J03,J05"},
-    "BW-S06-T06": {"sprint": "BW-S06", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_manager.rs", "crates/cli/src/global_commands.rs"], "shared_paths": ["crates/application/src/global_manager.rs", "crates/cli/src/global_commands.rs"], "dependencies": ["BW-S05-T90", "BW-S03-T90", "BW-S06-T01", "BW-S06-T03", "BW-S06-T05"], "dispatch": "automatic"},
-    "BW-S06-T90": {"sprint": "BW-S06", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S06/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S06-T01", "BW-S06-T02", "BW-S06-T03", "BW-S06-T04", "BW-S06-T05", "BW-S06-T06"], "dispatch": "operator_only"},
-    "BW-S07-T01": {"sprint": "BW-S07", "lane": "GLOBAL_TUI", "owned_paths": ["apps/global-tui/src/interaction.ts", "apps/global-tui/src/model.ts"], "shared_paths": ["apps/global-tui/src/interaction.ts", "apps/global-tui/src/model.ts"], "dependencies": ["BW-S06-T90"], "dispatch": "automatic", "workflow_journeys": "J02,J03"},
-    "BW-S07-T02": {"sprint": "BW-S07", "lane": "GLOBAL_TUI", "owned_paths": ["apps/global-tui/src/view.ts", "apps/global-tui/src/model.ts"], "shared_paths": ["apps/global-tui/src/view.ts", "apps/global-tui/src/model.ts"], "dependencies": ["BW-S06-T90", "BW-S05-T90"], "dispatch": "automatic"},
-    "BW-S07-T03": {"sprint": "BW-S07", "lane": "GLOBAL_TUI", "owned_paths": ["apps/global-tui/src/view.ts", "apps/global-tui/src/model.ts", "apps/global-tui/src/client.ts"], "shared_paths": ["apps/global-tui/src/view.ts", "apps/global-tui/src/model.ts"], "dependencies": ["BW-S06-T90", "BW-S06-T03"], "dispatch": "automatic", "workflow_journeys": "J05"},
-    "BW-S07-T04": {"sprint": "BW-S07", "lane": "CLI", "owned_paths": ["crates/cli/src/command_registry.rs", "crates/cli/src/global_commands.rs"], "shared_paths": ["crates/cli/src/command_registry.rs", "crates/cli/src/global_commands.rs"], "dependencies": ["BW-S06-T90", "BW-S05-T05", "BW-S06-T05"], "dispatch": "automatic"},
-    "BW-S07-T05": {"sprint": "BW-S07", "lane": "GUIDANCE", "owned_paths": ["skills/boreal-route/SKILL.md", "skills/boreal-route/boreal.yaml", "skills/boreal-route/agents/openai.yaml"], "shared_paths": ["skills/manifest.json"], "dependencies": ["BW-S06-T90", "BW-S12-T05"], "dispatch": "automatic", "workflow_journeys": "J08,J16"},
-    "BW-S07-T06": {"sprint": "BW-S07", "lane": "DOCS", "owned_paths": ["project/GLOBAL_MANAGER.md", "docs/INSTALL.md", "project/CLI_COMMANDS.md", "crates/cli/src/global_discovery.rs"], "shared_paths": ["crates/cli/src/global_discovery.rs"], "dependencies": ["BW-S06-T90", "BW-S07-T04", "BW-S07-T05"], "dispatch": "operator_only"},
-    "BW-S07-T90": {"sprint": "BW-S07", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S07/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S07-T01", "BW-S07-T02", "BW-S07-T03", "BW-S07-T04", "BW-S07-T05", "BW-S07-T06"], "dispatch": "operator_only"},
-    "BW-S08-T01": {"sprint": "BW-S08", "lane": "PROJECT_STORE", "owned_paths": ["crates/store/src/identity.rs", "crates/store/src/lib.rs"], "shared_paths": ["crates/store/src/lib.rs"], "dependencies": ["BW-S00-T90"], "dispatch": "automatic"},
-    "BW-S08-T02": {"sprint": "BW-S08", "lane": "PROJECT_STORE", "owned_paths": ["crates/store/src/intake_delivery.rs", "project/spec/intake-delivery-v1.sql"], "shared_paths": ["crates/store/src/lib.rs"], "dependencies": ["BW-S00-T90", "BW-S12-T01"], "dispatch": "automatic"},
-    "BW-S08-T03": {"sprint": "BW-S08", "lane": "PROJECT_APP", "owned_paths": ["crates/application/src/intake_delivery.rs", "crates/store/src/intake_delivery.rs"], "shared_paths": ["crates/store/src/work_model_v3.rs"], "dependencies": ["BW-S00-T90", "BW-S08-T02"], "dispatch": "automatic", "workflow_journeys": "J14"},
-    "BW-S08-T04": {"sprint": "BW-S08", "lane": "PROJECT_SERVICE", "owned_paths": ["crates/cli/src/knowledge_parity.rs", "crates/cli/src/service.rs", "crates/cli/src/command_registry.rs", "crates/protocol/src/models.rs"], "shared_paths": ["crates/cli/src/service.rs", "crates/cli/src/command_registry.rs", "crates/protocol/src/models.rs"], "dependencies": ["BW-S00-T90", "BW-S08-T03"], "dispatch": "automatic", "workflow_journeys": "J14,J16"},
-    "BW-S08-T05": {"sprint": "BW-S08", "lane": "VALIDATION", "owned_paths": ["scripts/validation/intake-delivery/"], "shared_paths": [], "dependencies": ["BW-S00-T90", "BW-S08-T01", "BW-S08-T02", "BW-S08-T04"], "dispatch": "automatic"},
-    "BW-S08-T90": {"sprint": "BW-S08", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S08/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S08-T01", "BW-S08-T02", "BW-S08-T03", "BW-S08-T04", "BW-S08-T05"], "dispatch": "operator_only"},
-    "BW-S09-T01": {"sprint": "BW-S09", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_send.rs", "crates/domain/src/global_manager.rs"], "shared_paths": ["crates/application/src/global_manager.rs"], "dependencies": ["BW-S08-T90", "BW-S07-T90"], "dispatch": "automatic", "workflow_journeys": "J14"},
-    "BW-S09-T02": {"sprint": "BW-S09", "lane": "GLOBAL_TUI", "owned_paths": ["apps/global-tui/src/interaction.ts", "apps/global-tui/src/view.ts"], "shared_paths": ["apps/global-tui/src/interaction.ts", "apps/global-tui/src/view.ts"], "dependencies": ["BW-S08-T90", "BW-S09-T01", "BW-S07-T90"], "dispatch": "automatic", "workflow_journeys": "J14"},
-    "BW-S09-T03": {"sprint": "BW-S09", "lane": "GLOBAL_LINKS", "owned_paths": ["crates/cli/src/global_send.rs", "crates/application/src/global_send.rs"], "shared_paths": ["crates/cli/src/global_commands.rs", "crates/cli/src/global_service.rs"], "dependencies": ["BW-S08-T90", "BW-S09-T01", "BW-S08-T04", "BW-S07-T90"], "dispatch": "automatic"},
-    "BW-S09-T04": {"sprint": "BW-S09", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_send.rs", "apps/global-tui/src/view.ts"], "shared_paths": ["crates/application/src/global_manager.rs", "apps/global-tui/src/view.ts"], "dependencies": ["BW-S08-T90", "BW-S09-T03", "BW-S07-T90"], "dispatch": "automatic"},
-    "BW-S09-T05": {"sprint": "BW-S09", "lane": "VALIDATION", "owned_paths": ["scripts/validation/global-send/"], "shared_paths": [], "dependencies": ["BW-S08-T90", "BW-S09-T03", "BW-S08-T05", "BW-S07-T90"], "dispatch": "automatic", "workflow_journeys": "J14,J15"},
-    "BW-S09-T90": {"sprint": "BW-S09", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S09/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S09-T01", "BW-S09-T02", "BW-S09-T03", "BW-S09-T04", "BW-S09-T05"], "dispatch": "operator_only"},
-    "BW-S10-T01": {"sprint": "BW-S10", "lane": "PERFORMANCE", "owned_paths": ["scripts/validation/global-scale/fixtures.py"], "shared_paths": [], "dependencies": ["BW-S07-T90"], "dispatch": "automatic"},
-    "BW-S10-T02": {"sprint": "BW-S10", "lane": "PERFORMANCE", "owned_paths": ["scripts/validation/global-scale/benchmark.py", "project/validation/global-scale/"], "shared_paths": [], "dependencies": ["BW-S07-T90", "BW-S10-T01"], "dispatch": "operator_only", "workflow_journeys": "J18"},
-    "BW-S10-T03": {"sprint": "BW-S10", "lane": "ARCHITECTURE", "owned_paths": ["project/build-plan/boreal-final-state/SCALE_DECISION.md"], "shared_paths": [], "dependencies": ["BW-S07-T90", "BW-S10-T02"], "dispatch": "operator_only", "workflow_journeys": "J18"},
-    "BW-S10-T90": {"sprint": "BW-S10", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S10/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S10-T01", "BW-S10-T02", "BW-S10-T03"], "dispatch": "operator_only"},
-    "BW-S12-T01": {"sprint": "BW-S12", "lane": "PROTOCOL", "owned_paths": ["project/spec/cli-contract.json", "project/INTERFACES.md", "project/spec/workflows/", "crates/protocol/src/models.rs"], "shared_paths": ["project/spec/cli-contract.json", "crates/protocol/src/models.rs"], "dependencies": ["BW-S00-T90"], "dispatch": "operator_only"},
-    "BW-S12-T02": {"sprint": "BW-S12", "lane": "PROJECT_PLANNING", "owned_paths": ["crates/application/src/intake.rs", "crates/application/src/hierarchy.rs", "crates/cli/src/template_commands.rs", "crates/cli/src/work_split.rs", "project/spec/WORK_MODEL_V2.md"], "shared_paths": ["crates/cli/src/main.rs", "crates/cli/src/service.rs", "crates/cli/src/command_registry.rs", "crates/protocol/src/models.rs", "crates/store/src/lib.rs"], "dependencies": ["BW-S12-T01"], "dispatch": "automatic"},
-    "BW-S12-T03": {"sprint": "BW-S12", "lane": "PROJECT_EXECUTION", "owned_paths": ["crates/application/src/runtime.rs", "crates/application/src/guidance.rs", "crates/application/src/agent_tools.rs", "crates/cli/src/recovery_commands.rs", "crates/store/src/completion.rs", "crates/store/src/acceptance.rs", "crates/store/src/recovery.rs"], "shared_paths": ["crates/cli/src/main.rs", "crates/cli/src/service.rs", "crates/cli/src/command_registry.rs", "crates/protocol/src/models.rs", "crates/store/src/lib.rs"], "dependencies": ["BW-S12-T01"], "dispatch": "automatic"},
-    "BW-S12-T04": {"sprint": "BW-S12", "lane": "PROJECT_KNOWLEDGE", "owned_paths": ["crates/source/src/", "crates/memory/src/", "crates/cli/src/project_context.rs", "crates/cli/src/memory_commands.rs", "crates/cli/src/summary_commands.rs", "project/SOURCE_ENGINE.md", "project/MEMORY_BANK.md"], "shared_paths": ["crates/cli/src/main.rs", "crates/cli/src/service.rs", "crates/protocol/src/models.rs"], "dependencies": ["BW-S12-T01"], "dispatch": "automatic"},
-    "BW-S12-T05": {"sprint": "BW-S12", "lane": "AGENT_INTERFACE", "owned_paths": ["crates/protocol/src/models.rs", "crates/service/src/application_route.rs", "crates/cli/src/command_registry.rs", "skills/", "project/spec/workflows/", "project/INTERFACES.md"], "shared_paths": ["crates/protocol/src/models.rs", "crates/cli/src/main.rs", "crates/cli/src/service.rs", "crates/cli/src/command_registry.rs", "skills/manifest.json"], "dependencies": ["BW-S12-T02", "BW-S12-T03", "BW-S12-T04"], "dispatch": "automatic"},
-    "BW-S12-T06": {"sprint": "BW-S12", "lane": "ENVIRONMENT_VALIDATION", "owned_paths": ["scripts/validation/boreal-portability/", "docs/INSTALL.md", "docs/WORKFLOWS.md"], "shared_paths": ["scripts/validation/run_full_suite.py", ".github/workflows/ci.yml", "docs/INSTALL.md", "docs/WORKFLOWS.md"], "dependencies": ["BW-S12-T05", "BW-S02-T90"], "dispatch": "automatic"},
-    "BW-S12-T90": {"sprint": "BW-S12", "lane": "INTEGRATION", "owned_paths": ["project/validation/boreal-final-state/BW-S12/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S12-T01", "BW-S12-T02", "BW-S12-T03", "BW-S12-T04", "BW-S12-T05", "BW-S12-T06"], "dispatch": "operator_only"},
-    "BW-S11-T01": {"sprint": "BW-S11", "lane": "RELEASE", "owned_paths": [".github/workflows/release.yml", "scripts/release/", "packaging/"], "shared_paths": [".github/workflows/release.yml"], "dependencies": ["BW-S10-T90", "BW-S09-T90", "BW-S12-T90"], "dispatch": "automatic"},
-    "BW-S11-T02": {"sprint": "BW-S11", "lane": "VALIDATION", "owned_paths": ["scripts/validation/final-product/"], "shared_paths": [], "dependencies": ["BW-S10-T90", "BW-S09-T90", "BW-S11-T01", "BW-S12-T90"], "dispatch": "automatic", "workflow_journeys": "J01-J18"},
-    "BW-S11-T03": {"sprint": "BW-S11", "lane": "DOCS", "owned_paths": ["docs/INSTALL.md", "docs/PACKAGING.md", "project/GLOBAL_MANAGER.md", "project/CLI_COMMANDS.md", "project/AGENT_GUIDANCE.md", "skills/boreal-route/"], "shared_paths": [], "dependencies": ["BW-S10-T90", "BW-S09-T90", "BW-S07-T06", "BW-S09-T04", "BW-S12-T90"], "dispatch": "operator_only", "workflow_journeys": "J16-J18"},
-    "BW-S11-T04": {"sprint": "BW-S11", "lane": "MIGRATION", "owned_paths": ["project/build-plan/boreal-final-state/V1_PARITY.md", "project/legacy-map/"], "shared_paths": [], "dependencies": ["BW-S10-T90", "BW-S09-T90", "BW-S12-T90"], "dispatch": "operator_only", "workflow_journeys": "J07-J13"},
-    "BW-S11-T05": {"sprint": "BW-S11", "lane": "VALIDATION", "owned_paths": ["scripts/validation/run_full_suite.py", "scripts/validation/final-product/"], "shared_paths": [], "dependencies": ["BW-S10-T90", "BW-S09-T90", "BW-S11-T01", "BW-S11-T02", "BW-S10-T02", "BW-S12-T90"], "dispatch": "automatic", "workflow_journeys": "J09-J18"},
-    "BW-S11-T06": {"sprint": "BW-S11", "lane": "COORD", "owned_paths": ["project/build-plan/boreal-final-state/OPERATIONS.md", "project/build-plan/boreal-final-state/DEFERRED_AND_MEASURED.md", "project/build-plan/boreal-final-state/FINAL_HANDOFF.md"], "shared_paths": [], "dependencies": ["BW-S10-T90", "BW-S09-T90", "BW-S11-T03", "BW-S11-T04", "BW-S11-T05", "BW-S12-T90"], "dispatch": "operator_only"},
-    "BW-S11-T90": {"sprint": "BW-S11", "lane": "INTEGRATION", "owned_paths": ["shared integration files touched by this sprint", "project/validation/boreal-final-state/BW-S11/"], "shared_paths": ["all protected shared files touched by sprint tasks"], "dependencies": ["BW-S11-T01", "BW-S11-T02", "BW-S11-T03", "BW-S11-T04", "BW-S11-T05", "BW-S11-T06"], "dispatch": "operator_only", "workflow_journeys": "J01-J18"}
+    "BW-S00-T01": {
+      "sprint": "BW-S00",
+      "lane": "COORD",
+      "owned_paths": [
+        "project/build-plan/boreal-final-state/CURRENT_STATE.md",
+        "project/build-plan/boreal-final-state/SOURCE_BASELINE.md"
+      ],
+      "shared_paths": [],
+      "dependencies": [],
+      "dispatch": "operator_only"
+    },
+    "BW-S00-T02": {
+      "sprint": "BW-S00",
+      "lane": "VALIDATION",
+      "owned_paths": [
+        ".github/workflows/ci.yml",
+        "scripts/validation/run_full_suite.py",
+        "scripts/validation/global/",
+        "scripts/validation/global-tui/"
+      ],
+      "shared_paths": [
+        ".github/workflows/ci.yml",
+        "scripts/validation/run_full_suite.py"
+      ],
+      "dependencies": [
+        "BW-S00-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S00-T03": {
+      "sprint": "BW-S00",
+      "lane": "RELEASE",
+      "owned_paths": [
+        "scripts/release/package-smoke.sh",
+        "scripts/release/",
+        "install.sh",
+        ".github/workflows/release.yml"
+      ],
+      "shared_paths": [
+        "install.sh",
+        ".github/workflows/release.yml",
+        "scripts/release/package-smoke.sh"
+      ],
+      "dependencies": [
+        "BW-S00-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S00-T04": {
+      "sprint": "BW-S00",
+      "lane": "COORD",
+      "owned_paths": [
+        "project/build-plan/boreal-final-state/execution/PARALLEL_DISPATCH.md",
+        "project/build-plan/boreal-final-state/execution/SHARED_FILES.md",
+        "project/build-plan/boreal-final-state/execution/STREAMS.md"
+      ],
+      "shared_paths": [],
+      "dependencies": [],
+      "dispatch": "operator_only"
+    },
+    "BW-S00-T05": {
+      "sprint": "BW-S00",
+      "lane": "CLI",
+      "owned_paths": [
+        "crates/application/src/runtime.rs",
+        "crates/cli/src/recovery_commands.rs",
+        "crates/cli/src/command_registry.rs",
+        "crates/cli/src/main.rs",
+        "crates/cli/src/service.rs",
+        "crates/protocol/src/models.rs",
+        "crates/store/src/recovery.rs",
+        "crates/store/src/lib.rs",
+        "crates/application/src/agent_tools.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/command_registry.rs",
+        "crates/cli/src/main.rs",
+        "crates/cli/src/service.rs",
+        "crates/protocol/src/models.rs",
+        "crates/store/src/recovery.rs",
+        "crates/store/src/lib.rs",
+        "crates/application/src/agent_tools.rs"
+      ],
+      "dependencies": [],
+      "dispatch": "operator_only",
+      "scope_note": "Preserve the narrower per-path restrictions and active stewardship in the existing BW-S00-T05 packet; V3 does not reassign or reopen this task."
+    },
+    "BW-S00-T90": {
+      "sprint": "BW-S00",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S00/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S00-T01",
+        "BW-S00-T02",
+        "BW-S00-T03",
+        "BW-S00-T04",
+        "BW-S00-T05"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S01-T01": {
+      "sprint": "BW-S01",
+      "lane": "GLOBAL_STORE",
+      "owned_paths": [
+        "crates/store/src/global_backup.rs",
+        "crates/store/src/global_manager.rs"
+      ],
+      "shared_paths": [
+        "crates/store/src/lib.rs",
+        "crates/store/src/global_manager.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S01-T02": {
+      "sprint": "BW-S01",
+      "lane": "GLOBAL_API",
+      "owned_paths": [
+        "crates/application/src/global_manager_recovery.rs",
+        "crates/cli/src/global_commands.rs",
+        "crates/cli/src/global_service.rs",
+        "crates/cli/src/command_registry.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/global_commands.rs",
+        "crates/cli/src/global_service.rs",
+        "crates/cli/src/command_registry.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S01-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S01-T03": {
+      "sprint": "BW-S01",
+      "lane": "GLOBAL_STORE",
+      "owned_paths": [
+        "crates/store/src/global_restore.rs",
+        "crates/application/src/global_manager_recovery.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "shared_paths": [
+        "crates/store/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S01-T01",
+        "BW-S01-T04"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S01-T04": {
+      "sprint": "BW-S01",
+      "lane": "GLOBAL_STORE",
+      "owned_paths": [
+        "crates/store/src/global_maintenance.rs",
+        "crates/application/src/global_manager_recovery.rs"
+      ],
+      "shared_paths": [
+        "crates/store/src/global_manager.rs",
+        "crates/cli/src/global_service.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S01-T05": {
+      "sprint": "BW-S01",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs",
+        "project/GLOBAL_MANAGER.md"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S01-T90": {
+      "sprint": "BW-S01",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S01/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S01-T01",
+        "BW-S01-T02",
+        "BW-S01-T03",
+        "BW-S01-T04",
+        "BW-S01-T05"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S02-T01": {
+      "sprint": "BW-S02",
+      "lane": "RELEASE",
+      "owned_paths": [
+        ".github/workflows/release.yml",
+        "install.sh",
+        "scripts/release/package-smoke.sh",
+        "scripts/release/test_release_identity.py"
+      ],
+      "shared_paths": [
+        ".github/workflows/release.yml",
+        "install.sh",
+        "scripts/release/package-smoke.sh"
+      ],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S02-T02": {
+      "sprint": "BW-S02",
+      "lane": "HOST_RUNTIME",
+      "owned_paths": [
+        "crates/cli/src/dashboard.rs",
+        "crates/cli/src/global_dashboard.rs",
+        "docs/INSTALL.md"
+      ],
+      "shared_paths": [
+        "crates/cli/src/dashboard.rs",
+        "crates/cli/src/global_dashboard.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S02-T03": {
+      "sprint": "BW-S02",
+      "lane": "VALIDATION",
+      "owned_paths": [
+        "scripts/validation/run_full_suite.py",
+        "scripts/release/build_release.py",
+        ".github/workflows/ci.yml"
+      ],
+      "shared_paths": [
+        "scripts/validation/run_full_suite.py",
+        ".github/workflows/ci.yml"
+      ],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S00-T02"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S02-T04": {
+      "sprint": "BW-S02",
+      "lane": "RELEASE",
+      "owned_paths": [
+        ".github/workflows/release.yml",
+        "scripts/release/",
+        "docs/INSTALL.md"
+      ],
+      "shared_paths": [
+        ".github/workflows/release.yml"
+      ],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S02-T01",
+        "BW-S02-T02",
+        "BW-S02-T03"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S02-T05": {
+      "sprint": "BW-S02",
+      "lane": "DOCS",
+      "owned_paths": [
+        "docs/INSTALL.md",
+        "docs/PACKAGING.md",
+        "project/GLOBAL_MANAGER.md"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S02-T90": {
+      "sprint": "BW-S02",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S02/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S02-T01",
+        "BW-S02-T02",
+        "BW-S02-T03",
+        "BW-S02-T04",
+        "BW-S02-T05"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S03-T01": {
+      "sprint": "BW-S03",
+      "lane": "HOST_UPDATE",
+      "owned_paths": [
+        "crates/cli/src/main.rs",
+        "crates/cli/src/command_registry.rs",
+        "crates/cli/src/update.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/main.rs",
+        "crates/cli/src/command_registry.rs"
+      ],
+      "dependencies": [
+        "BW-S02-T90",
+        "BW-S01-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S03-T02": {
+      "sprint": "BW-S03",
+      "lane": "HOST_UPDATE",
+      "owned_paths": [
+        "crates/cli/src/machine_update.rs",
+        "crates/cli/src/update.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/update.rs",
+        "crates/cli/src/command_registry.rs"
+      ],
+      "dependencies": [
+        "BW-S02-T90",
+        "BW-S01-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S03-T03": {
+      "sprint": "BW-S03",
+      "lane": "RELEASE",
+      "owned_paths": [
+        "install.sh",
+        "crates/cli/src/machine_update.rs"
+      ],
+      "shared_paths": [
+        "install.sh"
+      ],
+      "dependencies": [
+        "BW-S02-T90",
+        "BW-S01-T90",
+        "BW-S03-T02",
+        "BW-S01-T03"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S03-T04": {
+      "sprint": "BW-S03",
+      "lane": "GLOBAL_STORE",
+      "owned_paths": [
+        "crates/store/src/global_manager.rs",
+        "crates/application/src/global_manager_recovery.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "shared_paths": [
+        "crates/store/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "dependencies": [
+        "BW-S02-T90",
+        "BW-S01-T90",
+        "BW-S03-T01",
+        "BW-S03-T02",
+        "BW-S01-T02"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S03-T05": {
+      "sprint": "BW-S03",
+      "lane": "DOCS",
+      "owned_paths": [
+        "docs/INSTALL.md",
+        "docs/PACKAGING.md",
+        "project/GLOBAL_MANAGER.md"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S02-T90",
+        "BW-S01-T90",
+        "BW-S03-T04"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S03-T06": {
+      "sprint": "BW-S03",
+      "lane": "VALIDATION",
+      "owned_paths": [
+        "scripts/validation/update/",
+        "scripts/release/update-smoke.sh"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S02-T90",
+        "BW-S01-T90",
+        "BW-S03-T02"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S03-T90": {
+      "sprint": "BW-S03",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S03/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S03-T01",
+        "BW-S03-T02",
+        "BW-S03-T03",
+        "BW-S03-T04",
+        "BW-S03-T05",
+        "BW-S03-T06"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S04-T01": {
+      "sprint": "BW-S04",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/protocol/src/global_manager.rs"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J06"
+    },
+    "BW-S04-T02": {
+      "sprint": "BW-S04",
+      "lane": "GLOBAL_TUI",
+      "owned_paths": [
+        "apps/global-tui/src/model.ts",
+        "apps/global-tui/src/interaction.ts",
+        "apps/global-tui/src/client.ts"
+      ],
+      "shared_paths": [
+        "apps/global-tui/src/model.ts",
+        "apps/global-tui/src/interaction.ts"
+      ],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S04-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S04-T03": {
+      "sprint": "BW-S04",
+      "lane": "GLOBAL_LINKS",
+      "owned_paths": [
+        "crates/cli/src/global_discovery.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/global_discovery.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J06"
+    },
+    "BW-S04-T04": {
+      "sprint": "BW-S04",
+      "lane": "VALIDATION",
+      "owned_paths": [
+        "scripts/validation/global/linked_saturation.py",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S04-T03"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S04-T05": {
+      "sprint": "BW-S04",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S01-T05"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S04-T90": {
+      "sprint": "BW-S04",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S04/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S04-T01",
+        "BW-S04-T02",
+        "BW-S04-T03",
+        "BW-S04-T04",
+        "BW-S04-T05"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S05-T01": {
+      "sprint": "BW-S05",
+      "lane": "GLOBAL_DOMAIN",
+      "owned_paths": [
+        "crates/application/src/global_time.rs",
+        "crates/protocol/src/global_manager.rs"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/protocol/src/global_manager.rs"
+      ],
+      "dependencies": [
+        "BW-S04-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J04"
+    },
+    "BW-S05-T02": {
+      "sprint": "BW-S05",
+      "lane": "GLOBAL_DOMAIN",
+      "owned_paths": [
+        "crates/application/src/global_daily_review.rs",
+        "apps/global-tui/src/model.ts"
+      ],
+      "shared_paths": [
+        "apps/global-tui/src/model.ts"
+      ],
+      "dependencies": [
+        "BW-S04-T90",
+        "BW-S05-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S05-T03": {
+      "sprint": "BW-S05",
+      "lane": "GLOBAL_DOMAIN",
+      "owned_paths": [
+        "crates/domain/src/global_manager.rs",
+        "crates/application/src/global_manager_attention.rs"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs"
+      ],
+      "dependencies": [
+        "BW-S04-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J04,J05"
+    },
+    "BW-S05-T04": {
+      "sprint": "BW-S05",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_manager_attention.rs",
+        "apps/global-tui/src/view.ts"
+      ],
+      "shared_paths": [
+        "apps/global-tui/src/view.ts"
+      ],
+      "dependencies": [
+        "BW-S04-T90",
+        "BW-S05-T01",
+        "BW-S05-T03",
+        "BW-S04-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S05-T05": {
+      "sprint": "BW-S05",
+      "lane": "CLI",
+      "owned_paths": [
+        "crates/cli/src/global_commands.rs",
+        "crates/cli/src/command_registry.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/global_commands.rs",
+        "crates/cli/src/command_registry.rs"
+      ],
+      "dependencies": [
+        "BW-S04-T90",
+        "BW-S05-T02",
+        "BW-S05-T04",
+        "BW-S12-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S05-T90": {
+      "sprint": "BW-S05",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S05/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S05-T01",
+        "BW-S05-T02",
+        "BW-S05-T03",
+        "BW-S05-T04",
+        "BW-S05-T05"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S06-T01": {
+      "sprint": "BW-S06",
+      "lane": "GLOBAL_STORE",
+      "owned_paths": [
+        "crates/store/src/global_manager.rs",
+        "crates/application/src/global_manager.rs"
+      ],
+      "shared_paths": [
+        "crates/store/src/global_manager.rs",
+        "crates/application/src/global_manager.rs"
+      ],
+      "dependencies": [
+        "BW-S05-T90",
+        "BW-S03-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S06-T02": {
+      "sprint": "BW-S06",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/domain/src/global_manager.rs"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs"
+      ],
+      "dependencies": [
+        "BW-S05-T90",
+        "BW-S03-T90",
+        "BW-S06-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S06-T03": {
+      "sprint": "BW-S06",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_capture.rs",
+        "crates/domain/src/global_manager.rs"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs"
+      ],
+      "dependencies": [
+        "BW-S05-T90",
+        "BW-S03-T90",
+        "BW-S06-T01"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J02,J12"
+    },
+    "BW-S06-T04": {
+      "sprint": "BW-S06",
+      "lane": "MIGRATION",
+      "owned_paths": [
+        "crates/application/src/global_import.rs",
+        "project/legacy-map/",
+        "project/GLOBAL_MANAGER.md"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs"
+      ],
+      "dependencies": [
+        "BW-S05-T90",
+        "BW-S03-T90",
+        "BW-S06-T03"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S06-T05": {
+      "sprint": "BW-S06",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "dependencies": [
+        "BW-S05-T90",
+        "BW-S03-T90",
+        "BW-S06-T02",
+        "BW-S05-T05"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J03,J05"
+    },
+    "BW-S06-T06": {
+      "sprint": "BW-S06",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "dependencies": [
+        "BW-S05-T90",
+        "BW-S03-T90",
+        "BW-S06-T01",
+        "BW-S06-T03",
+        "BW-S06-T05"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S06-T90": {
+      "sprint": "BW-S06",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S06/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S06-T01",
+        "BW-S06-T02",
+        "BW-S06-T03",
+        "BW-S06-T04",
+        "BW-S06-T05",
+        "BW-S06-T06"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S07-T01": {
+      "sprint": "BW-S07",
+      "lane": "GLOBAL_TUI",
+      "owned_paths": [
+        "apps/global-tui/src/interaction.ts",
+        "apps/global-tui/src/model.ts"
+      ],
+      "shared_paths": [
+        "apps/global-tui/src/interaction.ts",
+        "apps/global-tui/src/model.ts"
+      ],
+      "dependencies": [
+        "BW-S06-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J02,J03"
+    },
+    "BW-S07-T02": {
+      "sprint": "BW-S07",
+      "lane": "GLOBAL_TUI",
+      "owned_paths": [
+        "apps/global-tui/src/view.ts",
+        "apps/global-tui/src/model.ts"
+      ],
+      "shared_paths": [
+        "apps/global-tui/src/view.ts",
+        "apps/global-tui/src/model.ts"
+      ],
+      "dependencies": [
+        "BW-S06-T90",
+        "BW-S05-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S07-T03": {
+      "sprint": "BW-S07",
+      "lane": "GLOBAL_TUI",
+      "owned_paths": [
+        "apps/global-tui/src/view.ts",
+        "apps/global-tui/src/model.ts",
+        "apps/global-tui/src/client.ts"
+      ],
+      "shared_paths": [
+        "apps/global-tui/src/view.ts",
+        "apps/global-tui/src/model.ts"
+      ],
+      "dependencies": [
+        "BW-S06-T90",
+        "BW-S06-T03"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J05"
+    },
+    "BW-S07-T04": {
+      "sprint": "BW-S07",
+      "lane": "CLI",
+      "owned_paths": [
+        "crates/cli/src/command_registry.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/command_registry.rs",
+        "crates/cli/src/global_commands.rs"
+      ],
+      "dependencies": [
+        "BW-S06-T90",
+        "BW-S05-T05",
+        "BW-S06-T05"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S07-T05": {
+      "sprint": "BW-S07",
+      "lane": "GUIDANCE",
+      "owned_paths": [
+        "skills/boreal-route/SKILL.md",
+        "skills/boreal-route/boreal.yaml",
+        "skills/boreal-route/agents/openai.yaml"
+      ],
+      "shared_paths": [
+        "skills/manifest.json"
+      ],
+      "dependencies": [
+        "BW-S06-T90",
+        "BW-S12-T05"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J08,J16"
+    },
+    "BW-S07-T06": {
+      "sprint": "BW-S07",
+      "lane": "DOCS",
+      "owned_paths": [
+        "project/GLOBAL_MANAGER.md",
+        "docs/INSTALL.md",
+        "project/CLI_COMMANDS.md",
+        "crates/cli/src/global_discovery.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/global_discovery.rs"
+      ],
+      "dependencies": [
+        "BW-S06-T90",
+        "BW-S07-T04",
+        "BW-S07-T05"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S07-T90": {
+      "sprint": "BW-S07",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S07/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S07-T01",
+        "BW-S07-T02",
+        "BW-S07-T03",
+        "BW-S07-T04",
+        "BW-S07-T05",
+        "BW-S07-T06"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S08-T01": {
+      "sprint": "BW-S08",
+      "lane": "PROJECT_STORE",
+      "owned_paths": [
+        "crates/store/src/identity.rs",
+        "crates/store/src/lib.rs"
+      ],
+      "shared_paths": [
+        "crates/store/src/lib.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S08-T02": {
+      "sprint": "BW-S08",
+      "lane": "PROJECT_STORE",
+      "owned_paths": [
+        "crates/store/src/intake_delivery.rs",
+        "project/spec/intake-delivery-v1.sql"
+      ],
+      "shared_paths": [
+        "crates/store/src/lib.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S12-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S08-T03": {
+      "sprint": "BW-S08",
+      "lane": "PROJECT_APP",
+      "owned_paths": [
+        "crates/application/src/intake_delivery.rs",
+        "crates/store/src/intake_delivery.rs"
+      ],
+      "shared_paths": [
+        "crates/store/src/work_model_v3.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S08-T02"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J14"
+    },
+    "BW-S08-T04": {
+      "sprint": "BW-S08",
+      "lane": "PROJECT_SERVICE",
+      "owned_paths": [
+        "crates/cli/src/knowledge_parity.rs",
+        "crates/cli/src/service.rs",
+        "crates/cli/src/command_registry.rs",
+        "crates/protocol/src/models.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/service.rs",
+        "crates/cli/src/command_registry.rs",
+        "crates/protocol/src/models.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S08-T03"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J14,J16"
+    },
+    "BW-S08-T05": {
+      "sprint": "BW-S08",
+      "lane": "VALIDATION",
+      "owned_paths": [
+        "scripts/validation/intake-delivery/"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S00-T90",
+        "BW-S08-T01",
+        "BW-S08-T02",
+        "BW-S08-T04"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S08-T90": {
+      "sprint": "BW-S08",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S08/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S08-T01",
+        "BW-S08-T02",
+        "BW-S08-T03",
+        "BW-S08-T04",
+        "BW-S08-T05"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S09-T01": {
+      "sprint": "BW-S09",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_send.rs",
+        "crates/domain/src/global_manager.rs"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs"
+      ],
+      "dependencies": [
+        "BW-S08-T90",
+        "BW-S07-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J14"
+    },
+    "BW-S09-T02": {
+      "sprint": "BW-S09",
+      "lane": "GLOBAL_TUI",
+      "owned_paths": [
+        "apps/global-tui/src/interaction.ts",
+        "apps/global-tui/src/view.ts"
+      ],
+      "shared_paths": [
+        "apps/global-tui/src/interaction.ts",
+        "apps/global-tui/src/view.ts"
+      ],
+      "dependencies": [
+        "BW-S08-T90",
+        "BW-S09-T01",
+        "BW-S07-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J14"
+    },
+    "BW-S09-T03": {
+      "sprint": "BW-S09",
+      "lane": "GLOBAL_LINKS",
+      "owned_paths": [
+        "crates/cli/src/global_send.rs",
+        "crates/application/src/global_send.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/global_commands.rs",
+        "crates/cli/src/global_service.rs"
+      ],
+      "dependencies": [
+        "BW-S08-T90",
+        "BW-S09-T01",
+        "BW-S08-T04",
+        "BW-S07-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S09-T04": {
+      "sprint": "BW-S09",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_send.rs",
+        "apps/global-tui/src/view.ts"
+      ],
+      "shared_paths": [
+        "crates/application/src/global_manager.rs",
+        "apps/global-tui/src/view.ts"
+      ],
+      "dependencies": [
+        "BW-S08-T90",
+        "BW-S09-T03",
+        "BW-S07-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S09-T05": {
+      "sprint": "BW-S09",
+      "lane": "VALIDATION",
+      "owned_paths": [
+        "scripts/validation/global-send/"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S08-T90",
+        "BW-S09-T03",
+        "BW-S08-T05",
+        "BW-S07-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J14,J15"
+    },
+    "BW-S09-T90": {
+      "sprint": "BW-S09",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S09/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S09-T01",
+        "BW-S09-T02",
+        "BW-S09-T03",
+        "BW-S09-T04",
+        "BW-S09-T05"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S10-T01": {
+      "sprint": "BW-S10",
+      "lane": "PERFORMANCE",
+      "owned_paths": [
+        "scripts/validation/global-scale/fixtures.py"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S07-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S10-T02": {
+      "sprint": "BW-S10",
+      "lane": "PERFORMANCE",
+      "owned_paths": [
+        "scripts/validation/global-scale/benchmark.py",
+        "project/validation/global-scale/"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S07-T90",
+        "BW-S10-T01"
+      ],
+      "dispatch": "operator_only",
+      "workflow_journeys": "J18"
+    },
+    "BW-S10-T03": {
+      "sprint": "BW-S10",
+      "lane": "ARCHITECTURE",
+      "owned_paths": [
+        "project/build-plan/boreal-final-state/SCALE_DECISION.md"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S07-T90",
+        "BW-S10-T02"
+      ],
+      "dispatch": "operator_only",
+      "workflow_journeys": "J18"
+    },
+    "BW-S10-T90": {
+      "sprint": "BW-S10",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S10/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S10-T01",
+        "BW-S10-T02",
+        "BW-S10-T03"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S12-T01": {
+      "sprint": "BW-S12",
+      "lane": "PROTOCOL",
+      "owned_paths": [
+        "project/spec/cli-contract.json",
+        "project/INTERFACES.md",
+        "project/spec/workflows/",
+        "crates/protocol/src/models.rs"
+      ],
+      "shared_paths": [
+        "project/spec/cli-contract.json",
+        "crates/protocol/src/models.rs"
+      ],
+      "dependencies": [
+        "BW-S00-T90"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S12-T02": {
+      "sprint": "BW-S12",
+      "lane": "PROJECT_PLANNING",
+      "owned_paths": [
+        "crates/application/src/intake.rs",
+        "crates/application/src/hierarchy.rs",
+        "crates/cli/src/template_commands.rs",
+        "crates/cli/src/work_split.rs",
+        "project/spec/WORK_MODEL_V2.md",
+        "crates/application/src/template_planning.rs",
+        "crates/store/src/template_planning.rs",
+        "crates/domain/src/deliverables.rs",
+        "crates/store/src/deliverables.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/main.rs",
+        "crates/cli/src/service.rs",
+        "crates/cli/src/command_registry.rs",
+        "crates/protocol/src/models.rs",
+        "crates/store/src/lib.rs"
+      ],
+      "dependencies": [
+        "BW-S12-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S12-T03": {
+      "sprint": "BW-S12",
+      "lane": "PROJECT_EXECUTION",
+      "owned_paths": [
+        "crates/application/src/runtime.rs",
+        "crates/application/src/guidance.rs",
+        "crates/application/src/agent_tools.rs",
+        "crates/cli/src/recovery_commands.rs",
+        "crates/store/src/completion.rs",
+        "crates/store/src/acceptance.rs",
+        "crates/store/src/recovery.rs",
+        "crates/store/src/profiles.rs",
+        "crates/application/src/artifact_acceptance.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/main.rs",
+        "crates/cli/src/service.rs",
+        "crates/cli/src/command_registry.rs",
+        "crates/protocol/src/models.rs",
+        "crates/store/src/lib.rs"
+      ],
+      "dependencies": [
+        "BW-S12-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S12-T04": {
+      "sprint": "BW-S12",
+      "lane": "PROJECT_KNOWLEDGE",
+      "owned_paths": [
+        "crates/source/src/",
+        "crates/memory/src/",
+        "crates/cli/src/project_context.rs",
+        "crates/cli/src/memory_commands.rs",
+        "crates/cli/src/summary_commands.rs",
+        "project/SOURCE_ENGINE.md",
+        "project/MEMORY_BANK.md",
+        "crates/source/src/lib.rs",
+        "crates/application/src/artifact_context.rs"
+      ],
+      "shared_paths": [
+        "crates/cli/src/main.rs",
+        "crates/cli/src/service.rs",
+        "crates/protocol/src/models.rs"
+      ],
+      "dependencies": [
+        "BW-S12-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S12-T05": {
+      "sprint": "BW-S12",
+      "lane": "AGENT_INTERFACE",
+      "owned_paths": [
+        "crates/protocol/src/models.rs",
+        "crates/service/src/application_route.rs",
+        "crates/cli/src/command_registry.rs",
+        "skills/",
+        "project/spec/workflows/",
+        "project/INTERFACES.md"
+      ],
+      "shared_paths": [
+        "crates/protocol/src/models.rs",
+        "crates/cli/src/main.rs",
+        "crates/cli/src/service.rs",
+        "crates/cli/src/command_registry.rs",
+        "skills/manifest.json"
+      ],
+      "dependencies": [
+        "BW-S12-T02",
+        "BW-S12-T03",
+        "BW-S12-T04"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S12-T06": {
+      "sprint": "BW-S12",
+      "lane": "ENVIRONMENT_VALIDATION",
+      "owned_paths": [
+        "scripts/validation/boreal-portability/",
+        "docs/INSTALL.md",
+        "docs/WORKFLOWS.md"
+      ],
+      "shared_paths": [
+        "scripts/validation/run_full_suite.py",
+        ".github/workflows/ci.yml",
+        "docs/INSTALL.md",
+        "docs/WORKFLOWS.md"
+      ],
+      "dependencies": [
+        "BW-S12-T05",
+        "BW-S02-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S12-T90": {
+      "sprint": "BW-S12",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "project/validation/boreal-final-state/BW-S12/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S12-T01",
+        "BW-S12-T02",
+        "BW-S12-T03",
+        "BW-S12-T04",
+        "BW-S12-T05",
+        "BW-S12-T06"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S11-T01": {
+      "sprint": "BW-S11",
+      "lane": "RELEASE",
+      "owned_paths": [
+        ".github/workflows/release.yml",
+        "scripts/release/",
+        "packaging/"
+      ],
+      "shared_paths": [
+        ".github/workflows/release.yml"
+      ],
+      "dependencies": [
+        "BW-S10-T90",
+        "BW-S09-T90",
+        "BW-S12-T90",
+        "BW-S13-T90"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S11-T02": {
+      "sprint": "BW-S11",
+      "lane": "VALIDATION",
+      "owned_paths": [
+        "scripts/validation/final-product/"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S10-T90",
+        "BW-S09-T90",
+        "BW-S11-T01",
+        "BW-S12-T90",
+        "BW-S13-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J01-J18"
+    },
+    "BW-S11-T03": {
+      "sprint": "BW-S11",
+      "lane": "DOCS",
+      "owned_paths": [
+        "docs/INSTALL.md",
+        "docs/PACKAGING.md",
+        "project/GLOBAL_MANAGER.md",
+        "project/CLI_COMMANDS.md",
+        "project/AGENT_GUIDANCE.md",
+        "skills/boreal-route/"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S10-T90",
+        "BW-S09-T90",
+        "BW-S07-T06",
+        "BW-S09-T04",
+        "BW-S12-T90",
+        "BW-S13-T90"
+      ],
+      "dispatch": "operator_only",
+      "workflow_journeys": "J16-J18"
+    },
+    "BW-S11-T04": {
+      "sprint": "BW-S11",
+      "lane": "MIGRATION",
+      "owned_paths": [
+        "project/build-plan/boreal-final-state/V1_PARITY.md",
+        "project/legacy-map/"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S10-T90",
+        "BW-S09-T90",
+        "BW-S12-T90",
+        "BW-S13-T90"
+      ],
+      "dispatch": "operator_only",
+      "workflow_journeys": "J07-J13"
+    },
+    "BW-S11-T05": {
+      "sprint": "BW-S11",
+      "lane": "VALIDATION",
+      "owned_paths": [
+        "scripts/validation/run_full_suite.py",
+        "scripts/validation/final-product/"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S10-T90",
+        "BW-S09-T90",
+        "BW-S11-T01",
+        "BW-S11-T02",
+        "BW-S10-T02",
+        "BW-S12-T90",
+        "BW-S13-T90"
+      ],
+      "dispatch": "automatic",
+      "workflow_journeys": "J09-J18"
+    },
+    "BW-S11-T06": {
+      "sprint": "BW-S11",
+      "lane": "COORD",
+      "owned_paths": [
+        "project/build-plan/boreal-final-state/OPERATIONS.md",
+        "project/build-plan/boreal-final-state/DEFERRED_AND_MEASURED.md",
+        "project/build-plan/boreal-final-state/FINAL_HANDOFF.md"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S10-T90",
+        "BW-S09-T90",
+        "BW-S11-T03",
+        "BW-S11-T04",
+        "BW-S11-T05",
+        "BW-S12-T90",
+        "BW-S13-T90"
+      ],
+      "dispatch": "operator_only"
+    },
+    "BW-S11-T90": {
+      "sprint": "BW-S11",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "shared integration files touched by this sprint",
+        "project/validation/boreal-final-state/BW-S11/"
+      ],
+      "shared_paths": [
+        "all protected shared files touched by sprint tasks"
+      ],
+      "dependencies": [
+        "BW-S11-T01",
+        "BW-S11-T02",
+        "BW-S11-T03",
+        "BW-S11-T04",
+        "BW-S11-T05",
+        "BW-S11-T06"
+      ],
+      "dispatch": "operator_only",
+      "workflow_journeys": "J01-J18"
+    },
+    "BW-S13-T01": {
+      "sprint": "BW-S13",
+      "lane": "GENERAL_SCHEDULING",
+      "owned_paths": [
+        "crates/domain/src/work_model_v3.rs",
+        "crates/domain/src/decision_inputs.rs",
+        "crates/application/src/intake.rs",
+        "crates/store/src/work_model_v3.rs"
+      ],
+      "shared_paths": [
+        "crates/protocol/src/models.rs",
+        "crates/cli/src/command_registry.rs",
+        "crates/cli/src/main.rs",
+        "crates/cli/src/service.rs",
+        "crates/store/src/lib.rs"
+      ],
+      "dependencies": [
+        "BW-S12-T01",
+        "BW-S05-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S13-T02": {
+      "sprint": "BW-S13",
+      "lane": "GENERAL_TUI",
+      "owned_paths": [
+        "apps/tui/src/",
+        "apps/tui/tests/"
+      ],
+      "shared_paths": [
+        "shared modules explicitly assigned by the integration steward"
+      ],
+      "dependencies": [
+        "BW-S12-T05",
+        "BW-S13-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S13-T03": {
+      "sprint": "BW-S13",
+      "lane": "GENERAL_WORKFLOW",
+      "owned_paths": [
+        "project/templates/",
+        "project/validation/boreal-final-state/BW-S13/",
+        "scripts/validation/"
+      ],
+      "shared_paths": [
+        "shared modules explicitly assigned by the integration steward"
+      ],
+      "dependencies": [
+        "BW-S12-T90",
+        "BW-S13-T01"
+      ],
+      "dispatch": "automatic"
+    },
+    "BW-S13-T90": {
+      "sprint": "BW-S13",
+      "lane": "INTEGRATION",
+      "owned_paths": [
+        "project/validation/boreal-final-state/BW-S13/"
+      ],
+      "shared_paths": [
+        "shared modules explicitly assigned by the integration steward"
+      ],
+      "dependencies": [
+        "BW-S13-T01",
+        "BW-S13-T02",
+        "BW-S13-T03"
+      ],
+      "dispatch": "operator_only"
+    }
   },
   "deferred_task_context": {
-    "BW-S10-T04": {"sprint": "BW-S10", "lane": "GLOBAL_STORE", "owned_paths": ["crates/store/src/global_projection.rs", "crates/application/src/global_projection.rs"], "shared_paths": [], "dependencies": ["BW-S07-T90", "BW-S10-T03"], "dispatch": "paused"},
-    "BW-S10-T05": {"sprint": "BW-S10", "lane": "GLOBAL_APP", "owned_paths": ["crates/application/src/global_views.rs", "apps/global-tui/src/view.ts"], "shared_paths": [], "dependencies": ["BW-S07-T90", "BW-S10-T03"], "dispatch": "paused"},
-    "BW-S10-T06": {"sprint": "BW-S10", "lane": "PRODUCT", "owned_paths": ["project/build-plan/boreal-final-state/experiments/"], "shared_paths": [], "dependencies": ["BW-S07-T90", "BW-S10-T03"], "dispatch": "paused"}
+    "BW-S10-T04": {
+      "sprint": "BW-S10",
+      "lane": "GLOBAL_STORE",
+      "owned_paths": [
+        "crates/store/src/global_projection.rs",
+        "crates/application/src/global_projection.rs"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S07-T90",
+        "BW-S10-T03"
+      ],
+      "dispatch": "paused"
+    },
+    "BW-S10-T05": {
+      "sprint": "BW-S10",
+      "lane": "GLOBAL_APP",
+      "owned_paths": [
+        "crates/application/src/global_views.rs",
+        "apps/global-tui/src/view.ts"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S07-T90",
+        "BW-S10-T03"
+      ],
+      "dispatch": "paused"
+    },
+    "BW-S10-T06": {
+      "sprint": "BW-S10",
+      "lane": "PRODUCT",
+      "owned_paths": [
+        "project/build-plan/boreal-final-state/experiments/"
+      ],
+      "shared_paths": [],
+      "dependencies": [
+        "BW-S07-T90",
+        "BW-S10-T03"
+      ],
+      "dispatch": "paused"
+    }
   }
 }

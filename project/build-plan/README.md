@@ -1,3 +1,9 @@
+# Active 2026-10-02 dispatch: plan revision 4
+
+Use [boreal-final-state/README.md](boreal-final-state/README.md) and its task-level graph for the current milestone. Preserve all active grants and runtime history. The material below is historical requirements/context; it must not start a competing execution queue. Current scope includes general-purpose work and optional deliverables, not hosted SaaS.
+
+---
+
 # Current production completion
 
 Use [FINAL_PRODUCTION_PLAN.md](production-completion/FINAL_PRODUCTION_PLAN.md)

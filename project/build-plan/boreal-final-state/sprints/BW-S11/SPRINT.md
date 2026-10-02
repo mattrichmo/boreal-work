@@ -13,12 +13,12 @@ Read `../../MASTER_PLAN.md`, `../../DECISIONS.md`, `../../execution/PARALLEL_DIS
 
 | Task | Outcome | Lane | Dispatch | Direct prerequisites |
 | --- | --- | --- | --- | --- |
-| [BW-S11-T01](tasks/BW-S11-T01.md) | Build and smoke exact supported release artifacts on the declared platform matrix | RELEASE | automatic | BW-S10-T90, BW-S09-T90, BW-S12-T90 |
-| [BW-S11-T02](tasks/BW-S11-T02.md) | Run exact-artifact end-to-end Global and project authority journeys | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S12-T90 |
-| [BW-S11-T03](tasks/BW-S11-T03.md) | Bring install, recovery, Global manager, CLI and agent docs to the shipped final state | DOCS | operator_only | BW-S10-T90, BW-S09-T90, BW-S07-T06, BW-S09-T04, BW-S12-T90 |
-| [BW-S11-T04](tasks/BW-S11-T04.md) | Execute explicit v1 parity and deliberate-departure review | MIGRATION | operator_only | BW-S10-T90, BW-S09-T90, BW-S12-T90 |
-| [BW-S11-T05](tasks/BW-S11-T05.md) | Run final recovery, authority, security and representative performance regression | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S11-T02, BW-S10-T02, BW-S12-T90 |
-| [BW-S11-T06](tasks/BW-S11-T06.md) | Finalize operator runbooks, support boundaries and next measured backlog | COORD | operator_only | BW-S10-T90, BW-S09-T90, BW-S11-T03, BW-S11-T04, BW-S11-T05, BW-S12-T90 |
+| [BW-S11-T01](tasks/BW-S11-T01.md) | Build and smoke exact supported release artifacts on the declared platform matrix | RELEASE | automatic | BW-S10-T90, BW-S09-T90, BW-S12-T90, BW-S13-T90 |
+| [BW-S11-T02](tasks/BW-S11-T02.md) | Run exact-artifact end-to-end Global and project authority journeys | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S12-T90, BW-S13-T90 |
+| [BW-S11-T03](tasks/BW-S11-T03.md) | Bring install, recovery, Global manager, CLI and agent docs to the shipped final state | DOCS | operator_only | BW-S10-T90, BW-S09-T90, BW-S07-T06, BW-S09-T04, BW-S12-T90, BW-S13-T90 |
+| [BW-S11-T04](tasks/BW-S11-T04.md) | Execute explicit v1 parity and deliberate-departure review | MIGRATION | operator_only | BW-S10-T90, BW-S09-T90, BW-S12-T90, BW-S13-T90 |
+| [BW-S11-T05](tasks/BW-S11-T05.md) | Run final recovery, authority, security and representative performance regression | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S11-T02, BW-S10-T02, BW-S12-T90, BW-S13-T90 |
+| [BW-S11-T06](tasks/BW-S11-T06.md) | Finalize operator runbooks, support boundaries and next measured backlog | COORD | operator_only | BW-S10-T90, BW-S09-T90, BW-S11-T03, BW-S11-T04, BW-S11-T05, BW-S12-T90, BW-S13-T90 |
 | [BW-S11-T90](tasks/BW-S11-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S11-T01, BW-S11-T02, BW-S11-T03, BW-S11-T04, BW-S11-T05, BW-S11-T06 |
 
 ## Parallelism
@@ -47,3 +47,7 @@ The integrator records the exact combined source identity, changed shared contra
 ## Revision 3 completion contract
 
 Read `../../WORKFLOW_CONTRACT.md`; its required journeys augment, not replace, the validation above. Follow the current task table/JSON graph if historical wave prose differs. No core workflow may be silently deferred to reach a green release.
+
+## General-work join
+
+Every leaf also depends on BW-S13-T90. J19–J24 are required release journeys, not optional demos.

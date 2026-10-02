@@ -18,3 +18,7 @@ During work:
 - Run a focused task-local check only when your output is consumed by another task before sprint close or when needed to avoid handing downstream code an unvalidated API.
 
 Handoff using `templates/TASK_HANDOFF.md`.
+
+## Active revision 4
+
+Read GENERAL_WORK_CONTRACT.md and execution/REVISION_V4.md. Use the current stored V4 graph after supported adoption; a repository update alone is not adoption. General work has optional outputs/dates and selected rigor. Nested workers are allowed with disjoint grants, but every claim/review/closeout uses the canonical protocol. Keep legacy IDs, receipts and active S00-T05 authority intact.

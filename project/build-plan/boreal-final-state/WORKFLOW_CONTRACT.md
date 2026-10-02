@@ -1,4 +1,4 @@
-# Required feature and workflow contract — revision 3
+# Required feature and workflow contract — revision 4
 
 This is the release contract for the existing local product, not evidence that these workflows already pass. Each owner must start from the dispatched implementation, retain working behavior, repair the named seams and provide integrated evidence. Historical production-completion F1-F5 and `project/INTERFACES.md` supply inherited requirements; they are not new greenfield projects.
 
@@ -25,6 +25,13 @@ This is the release contract for the existing local product, not evidence that t
 | J17 | Run headlessly in an isolated environment | An installed compatible binary works without TUI/Node/Cargo at runtime. Explicit persistent roots survive restart; ephemeral destruction is not presented as recovery. Two workers share one authority; OS restrictions remain explicit failures/unsupported cases. | BW-S12-T06 |
 | J18 | Ship the product, not a report | Supported artifacts, native installation and an authorized isolated real-work journey pass on exact identities. Representative budgets are declared before measurement. Final evidence covers all required journeys; optional experiments and unverified hosts are not advertised as shipped. | BW-S10-T01, BW-S10-T02, BW-S10-T03, BW-S11-T01, BW-S11-T02, BW-S11-T03, BW-S11-T04, BW-S11-T05, BW-S11-T06, BW-S11-T90 |
 
+| J19 | Define general work and optional outputs | Description, prerequisite/context links and optional typed output requirements survive creation, templates, amendments and recovery; no-deliverable legacy work remains valid. | BW-S12-T01, BW-S12-T02 |
+| J20 | Produce, inspect, review and accept artifacts | Required output coverage and exact artifact/input revisions govern close; command proof, automatic inspection and attributable human/independent decisions remain distinct. | BW-S12-T03, BW-S12-T04, BW-S12-T90 |
+| J21 | Reuse accepted results across workers | Logo variants consume an exact accepted master; stale/missing/denied bytes and changed inputs are explicit, and relocation/restart preserves identity. | BW-S12-T04, BW-S12-T06, BW-S13-T03 |
+| J22 | Manage dates and external waits | Optional due/planned/not-before/follow-up dates have civil-time semantics; a named wait blocks only dependents and resolves through an authorized attributable decision. | BW-S13-T01, BW-S05-T01 |
+| J23 | See and operate the same general work everywhere | CLI, typed service, guide and TUI expose context, deliverables, dates, waits, profile and precise close blockers without a second lifecycle. | BW-S12-T05, BW-S13-T02 |
+| J24 | Execute reusable mixed-work production | An enrolled worker and reviewer complete lightweight research and a versioned creative chain, with failed/revised outputs, parallel branches and a new repeated-case identity. | BW-S13-T03, BW-S13-T90, BW-S11-T02 |
+
 ## Cross-cutting rules
 
 **One semantic authority.** Adapters never reimplement eligibility, completion, authorization, evidence applicability, Send resolution or database mutation. Global does not own Project attempts; a Project Intake receipt is not a completion receipt. Machine recovery is a separate local authority, not a broadly exposed agent tool.
@@ -38,6 +45,8 @@ This is the release contract for the existing local product, not evidence that t
 **Stop safely.** Distinguish workflow cancellation, process stop, lease expiry, release, recovery and accepted completion. Preserve worktree/result evidence before reassignment. Do not force-break live locks. An active requirement/result change invokes the existing explicit policy and cannot silently reuse old proof.
 
 ## Evidence record
+
+Read [GENERAL_WORK_CONTRACT.md](GENERAL_WORK_CONTRACT.md) for the required additive behavior and scope.
 
 For each required journey, S11 records the current handler/command, test/fixture, exact source/binary/protocol identity, environment, actor roles, operation/result/receipt references, observed outcome and limitations. Use `pass`, `fail`, `unsupported` or `not_run` accurately. Core gaps stay blocking; unsupported future deployment modes stay outside the shipped support matrix. No invented measured latency or runtime completion status belongs in this plan.
 

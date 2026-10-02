@@ -1,4 +1,4 @@
-# Behavioral parity and deliberate departures — revision 3
+# Behavioral parity and deliberate departures — revision 4
 
 BW-S11-T04 owns the final review. Preserve useful behavior, not incompatible v1 spellings or the old Global write-through authority. Historical production-completion F1-F5 remain inherited requirements; S12 repairs only verified current gaps.
 
@@ -18,3 +18,7 @@ BW-S11-T04 owns the final review. Preserve useful behavior, not incompatible v1 
 For each row record the old requirement/spelling, current supported replacement, actual test/fixture and outcome, with any deliberate departure and rationale. Missing core behavior stays blocking. Do not reopen old completed work to manufacture another implementation cycle.
 
 Deliberate departures retained: Global does not mutate Project execution or own claims/evidence/finish; reminder/calendar/automation/SaaS products are not restored by a parity claim; exact unsupported command spellings have documented replacements rather than fake handlers.
+
+## General-work parity
+
+J19–J24 also require useful no-deliverable work, optional structured outputs, accepted input identity, lightweight and reviewed profiles, task dates/follow-ups, explicit human waits and consistent visual/CLI behavior. Existing software profiles and historical receipts must continue to work. Do not advertise a whole new recurring business engine from these fixtures.

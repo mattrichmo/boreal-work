@@ -9,13 +9,13 @@
 
 | Task | Outcome | Lane | Dispatch | Direct prerequisites |
 | --- | --- | --- | --- | --- |
-| [BW-S12-T01](tasks/BW-S12-T01.md) | Freeze the callable capability and workflow contract | PROTOCOL | operator_only | BW-S00-T90 |
-| [BW-S12-T02](tasks/BW-S12-T02.md) | Complete planning, Intake disposition and safe plan revision | PROJECT_PLANNING | automatic | BW-S12-T01 |
-| [BW-S12-T03](tasks/BW-S12-T03.md) | Complete enrolled-agent execution, review and interruption recovery | PROJECT_EXECUTION | automatic | BW-S12-T01 |
-| [BW-S12-T04](tasks/BW-S12-T04.md) | Make cited context, results and handoffs recoverable across sessions | PROJECT_KNOWLEDGE | automatic | BW-S12-T01 |
-| [BW-S12-T05](tasks/BW-S12-T05.md) | Expose complete typed workflows without a CLI-only state machine | AGENT_INTERFACE | automatic | BW-S12-T02, BW-S12-T03, BW-S12-T04 |
-| [BW-S12-T06](tasks/BW-S12-T06.md) | Qualify headless installs and restartable isolated agent environments | ENVIRONMENT_VALIDATION | automatic | BW-S12-T05, BW-S02-T90 |
-| [BW-S12-T90](tasks/BW-S12-T90.md) | Integrate project workflows and qualify the portable agent contract | INTEGRATION | operator_only | BW-S12-T01, BW-S12-T02, BW-S12-T03, BW-S12-T04, BW-S12-T05, BW-S12-T06 |
+| [BW-S12-T01](tasks/BW-S12-T01.md) | Freeze callable general-work, artifact and acceptance contracts | PROTOCOL | operator_only | BW-S00-T90 |
+| [BW-S12-T02](tasks/BW-S12-T02.md) | Complete planning, optional deliverables and safe plan revision | PROJECT_PLANNING | automatic | BW-S12-T01 |
+| [BW-S12-T03](tasks/BW-S12-T03.md) | Complete typed acceptance, enrolled execution and recovery | PROJECT_EXECUTION | automatic | BW-S12-T01 |
+| [BW-S12-T04](tasks/BW-S12-T04.md) | Make context, accepted artifacts and handoffs portable | PROJECT_KNOWLEDGE | automatic | BW-S12-T01 |
+| [BW-S12-T05](tasks/BW-S12-T05.md) | Expose general-work workflows through one typed contract | AGENT_INTERFACE | automatic | BW-S12-T02, BW-S12-T03, BW-S12-T04 |
+| [BW-S12-T06](tasks/BW-S12-T06.md) | Qualify headless installs and portable mixed-work recovery | ENVIRONMENT_VALIDATION | automatic | BW-S12-T05, BW-S02-T90 |
+| [BW-S12-T90](tasks/BW-S12-T90.md) | Integrate general-work execution and the portable contract | INTEGRATION | operator_only | BW-S12-T01, BW-S12-T02, BW-S12-T03, BW-S12-T04, BW-S12-T05, BW-S12-T06 |
 
 ## Parallelism and scope
 
@@ -35,3 +35,7 @@ Read `../../WORKFLOW_CONTRACT.md`, `../../DECISIONS.md`, `../../execution/PARALL
 - Full MCP packaging, remote HTTP, SaaS and provider spawning are not smuggled into this sprint. See `../../INTERFACE_ROADMAP.md` for the separate bounded successor.
 
 The integration record names exact source/binary/protocol identities, fixtures, checks, skipped/unsupported cases and residual required defects. Only S11's final artifact/native journeys qualify the release.
+
+## Revision 4 extension
+
+T01 freezes GENERAL_WORK_CONTRACT.md; T02 owns requirement planning, T03 typed acceptance, T04 artifact/input identity, T05 callable parity and T06 recovery. Preserve original scope and use separate module grants. S13 consumes these capabilities for waits, visual surfaces and non-software fixtures. S11 requires both sprint gates.
