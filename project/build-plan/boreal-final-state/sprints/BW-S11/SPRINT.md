@@ -2,7 +2,7 @@
 
 **Goal:** Qualify the completed Global + project system on exact supported artifacts, reconcile documentation/parity, and leave a maintainable operator handoff.
 
-**Entry dependency:** BW-S09-T90, BW-S10-T90  
+**Entry dependency:** BW-S09-T90, BW-S10-T90 and BW-S12-T90  
 **Sprint close:** `BW-S11-T90` — integration + sprint-level validation.
 
 ## Required context
@@ -13,12 +13,12 @@ Read `../../MASTER_PLAN.md`, `../../DECISIONS.md`, `../../execution/PARALLEL_DIS
 
 | Task | Outcome | Lane | Dispatch | Direct prerequisites |
 | --- | --- | --- | --- | --- |
-| [BW-S11-T01](tasks/BW-S11-T01.md) | Build and smoke exact supported release artifacts on the declared platform matrix | RELEASE | automatic | BW-S10-T90, BW-S09-T90 |
-| [BW-S11-T02](tasks/BW-S11-T02.md) | Run exact-artifact end-to-end Global and project authority journeys | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01 |
-| [BW-S11-T03](tasks/BW-S11-T03.md) | Bring install, recovery, Global manager, CLI and agent docs to the shipped final state | DOCS | operator_only | BW-S10-T90, BW-S09-T90, BW-S07-T06, BW-S09-T04 |
-| [BW-S11-T04](tasks/BW-S11-T04.md) | Execute explicit v1 parity and deliberate-departure review | MIGRATION | operator_only | BW-S10-T90, BW-S09-T90 |
-| [BW-S11-T05](tasks/BW-S11-T05.md) | Run final recovery, authority, security and representative performance regression | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S11-T02, BW-S10-T02 |
-| [BW-S11-T06](tasks/BW-S11-T06.md) | Finalize operator runbooks, support boundaries and next measured backlog | COORD | operator_only | BW-S10-T90, BW-S09-T90, BW-S11-T03, BW-S11-T04, BW-S11-T05 |
+| [BW-S11-T01](tasks/BW-S11-T01.md) | Build and smoke exact supported release artifacts on the declared platform matrix | RELEASE | automatic | BW-S10-T90, BW-S09-T90, BW-S12-T90 |
+| [BW-S11-T02](tasks/BW-S11-T02.md) | Run exact-artifact end-to-end Global and project authority journeys | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S12-T90 |
+| [BW-S11-T03](tasks/BW-S11-T03.md) | Bring install, recovery, Global manager, CLI and agent docs to the shipped final state | DOCS | operator_only | BW-S10-T90, BW-S09-T90, BW-S07-T06, BW-S09-T04, BW-S12-T90 |
+| [BW-S11-T04](tasks/BW-S11-T04.md) | Execute explicit v1 parity and deliberate-departure review | MIGRATION | operator_only | BW-S10-T90, BW-S09-T90, BW-S12-T90 |
+| [BW-S11-T05](tasks/BW-S11-T05.md) | Run final recovery, authority, security and representative performance regression | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S11-T02, BW-S10-T02, BW-S12-T90 |
+| [BW-S11-T06](tasks/BW-S11-T06.md) | Finalize operator runbooks, support boundaries and next measured backlog | COORD | operator_only | BW-S10-T90, BW-S09-T90, BW-S11-T03, BW-S11-T04, BW-S11-T05, BW-S12-T90 |
 | [BW-S11-T90](tasks/BW-S11-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S11-T01, BW-S11-T02, BW-S11-T03, BW-S11-T04, BW-S11-T05, BW-S11-T06 |
 
 ## Parallelism
@@ -43,3 +43,7 @@ Validation is intentionally concentrated here, in `BW-S11-T90`, unless a leaf pa
 ## Sprint handoff
 
 The integrator records the exact combined source identity, changed shared contracts, checks actually run, failures/unsupported cases, and successor tasks unlocked. A task worker's branch or focused check does not by itself close the sprint.
+
+## Revision 3 completion contract
+
+Read `../../WORKFLOW_CONTRACT.md`; its required journeys augment, not replace, the validation above. Follow the current task table/JSON graph if historical wave prose differs. No core workflow may be silently deferred to reach a green release.

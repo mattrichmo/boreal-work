@@ -1,8 +1,8 @@
-# Task index
+# Task index — plan revision 3
 
-Plan `BW-final-state-2026-10-01` version 2 contains **12 sprints** and **77 task cards** plus one milestone. The original v1 import remains recorded in [PLAN_CHANGE_001.md](PLAN_CHANGE_001.md).
+Plan `BW-final-state-2026-10-01`: **13 sprints, 81 required task cards and one milestone (95 imported work items)**. Three original conditional S10 cards are preserved as deferred work outside the required V3 template. Historical V1/V2 templates remain unchanged.
 
-Most tasks, including sprint-close `T90`, use `focused` acceptance so validation stays sprint-level rather than ceremony-heavy. The final release close uses `reviewed` acceptance.
+`BOREAL_TEMPLATE_V3.json` and `PLAN_CONTEXT.json` agree on task-level dependencies. Container dependency arrays are empty to match the existing import contract. Runtime claims/status are not stored here. Execution order is dependency-driven; S12 runs alongside the Global lanes, not after S11.
 
 ## BW-S00 — Current-head qualification and parallel execution baseline
 
@@ -68,7 +68,7 @@ Most tasks, including sprint-close `T90`, use `focused` acceptance so validation
 | [BW-S05-T02](sprints/BW-S05/tasks/BW-S05-T02.md) | Replace Today predicate with explicit grouped daily classification | GLOBAL_DOMAIN | automatic | BW-S04-T90, BW-S05-T01 |
 | [BW-S05-T03](sprints/BW-S05/tasks/BW-S05-T03.md) | Make management next action dependency-honest with bounded blocker reasons | GLOBAL_DOMAIN | automatic | BW-S04-T90 |
 | [BW-S05-T04](sprints/BW-S05/tasks/BW-S05-T04.md) | Rebuild Home attention contract around truthful management summaries | GLOBAL_APP | automatic | BW-S04-T90, BW-S05-T01, BW-S05-T03, BW-S04-T01 |
-| [BW-S05-T05](sprints/BW-S05/tasks/BW-S05-T05.md) | Expose the same daily filters through CLI and service | CLI | automatic | BW-S04-T90, BW-S05-T02, BW-S05-T04 |
+| [BW-S05-T05](sprints/BW-S05/tasks/BW-S05-T05.md) | Expose the same daily filters through CLI and service | CLI | automatic | BW-S04-T90, BW-S05-T02, BW-S05-T04, BW-S12-T01 |
 | [BW-S05-T90](sprints/BW-S05/tasks/BW-S05-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S05-T01, BW-S05-T02, BW-S05-T03, BW-S05-T04, BW-S05-T05 |
 
 ## BW-S06 — Global schema 3, Personal Inbox and capture provenance
@@ -91,7 +91,7 @@ Most tasks, including sprint-close `T90`, use `focused` acceptance so validation
 | [BW-S07-T02](sprints/BW-S07/tasks/BW-S07-T02.md) | Render grouped Today/Open and management project heartbeat | GLOBAL_TUI | automatic | BW-S06-T90, BW-S05-T90 |
 | [BW-S07-T03](sprints/BW-S07/tasks/BW-S07-T03.md) | Polish archive/restore/history and capture provenance inspection | GLOBAL_TUI | automatic | BW-S06-T90, BW-S06-T03 |
 | [BW-S07-T04](sprints/BW-S07/tasks/BW-S07-T04.md) | Expose daily filters and atomic bulk triage truthfully through public CLI help | CLI | automatic | BW-S06-T90, BW-S05-T05, BW-S06-T05 |
-| [BW-S07-T05](sprints/BW-S07/tasks/BW-S07-T05.md) | Make boreal-route choose Global management or project execution first | GUIDANCE | automatic | BW-S06-T90 |
+| [BW-S07-T05](sprints/BW-S07/tasks/BW-S07-T05.md) | Make boreal-route choose Global management or project execution first | GUIDANCE | automatic | BW-S06-T90, BW-S12-T05 |
 | [BW-S07-T06](sprints/BW-S07/tasks/BW-S07-T06.md) | Add two-door help and reconcile Global docs with the callable registry | DOCS | operator_only | BW-S06-T90, BW-S07-T04, BW-S07-T05 |
 | [BW-S07-T90](sprints/BW-S07/tasks/BW-S07-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S07-T01, BW-S07-T02, BW-S07-T03, BW-S07-T04, BW-S07-T05, BW-S07-T06 |
 
@@ -99,44 +99,59 @@ Most tasks, including sprint-close `T90`, use `focused` acceptance so validation
 
 | Task | Title | Lane | Dispatch | Direct prerequisites |
 | --- | --- | --- | --- | --- |
-| [BW-S08-T01](sprints/BW-S08/tasks/BW-S08-T01.md) | Give each project restore activation a genuinely unique physical identity | PROJECT_STORE | automatic | BW-S07-T90 |
-| [BW-S08-T02](sprints/BW-S08/tasks/BW-S08-T02.md) | Install immutable intake_delivery v1 as an additive feature schema | PROJECT_STORE | automatic | BW-S07-T90 |
-| [BW-S08-T03](sprints/BW-S08/tasks/BW-S08-T03.md) | Implement project-owned Intake receive transaction and idempotent resolution | PROJECT_APP | automatic | BW-S07-T90, BW-S08-T02 |
-| [BW-S08-T04](sprints/BW-S08/tasks/BW-S08-T04.md) | Expose service-addressable Intake receive and receipt-bearing readback | PROJECT_SERVICE | automatic | BW-S07-T90, BW-S08-T03 |
-| [BW-S08-T05](sprints/BW-S08/tasks/BW-S08-T05.md) | Qualify additive feature compatibility and receipt behavior across project restore | VALIDATION | automatic | BW-S07-T90, BW-S08-T01, BW-S08-T02, BW-S08-T04 |
+| [BW-S08-T01](sprints/BW-S08/tasks/BW-S08-T01.md) | Give each project restore activation a genuinely unique physical identity | PROJECT_STORE | automatic | BW-S00-T90 |
+| [BW-S08-T02](sprints/BW-S08/tasks/BW-S08-T02.md) | Install immutable intake_delivery v1 as an additive feature schema | PROJECT_STORE | automatic | BW-S00-T90, BW-S12-T01 |
+| [BW-S08-T03](sprints/BW-S08/tasks/BW-S08-T03.md) | Implement project-owned Intake receive transaction and idempotent resolution | PROJECT_APP | automatic | BW-S00-T90, BW-S08-T02 |
+| [BW-S08-T04](sprints/BW-S08/tasks/BW-S08-T04.md) | Expose service-addressable Intake receive and receipt-bearing readback | PROJECT_SERVICE | automatic | BW-S00-T90, BW-S08-T03 |
+| [BW-S08-T05](sprints/BW-S08/tasks/BW-S08-T05.md) | Qualify additive feature compatibility and receipt behavior across project restore | VALIDATION | automatic | BW-S00-T90, BW-S08-T01, BW-S08-T02, BW-S08-T04 |
 | [BW-S08-T90](sprints/BW-S08/tasks/BW-S08-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S08-T01, BW-S08-T02, BW-S08-T03, BW-S08-T04, BW-S08-T05 |
 
 ## BW-S09 — Explicit Global Send with frozen intent and deterministic reconciliation
 
 | Task | Title | Lane | Dispatch | Direct prerequisites |
 | --- | --- | --- | --- | --- |
-| [BW-S09-T01](sprints/BW-S09/tasks/BW-S09-T01.md) | Implement Global Send eligibility and frozen pending intent state | GLOBAL_APP | automatic | BW-S08-T90 |
-| [BW-S09-T02](sprints/BW-S09/tasks/BW-S09-T02.md) | Add contextual Send to project interaction without a new top-level route | GLOBAL_TUI | automatic | BW-S08-T90, BW-S09-T01 |
-| [BW-S09-T03](sprints/BW-S09/tasks/BW-S09-T03.md) | Implement cross-store receive, readback and attempt reconciliation adapter | GLOBAL_LINKS | automatic | BW-S08-T90, BW-S09-T01, BW-S08-T04 |
-| [BW-S09-T04](sprints/BW-S09/tasks/BW-S09-T04.md) | Record accepted Intake reference and archive-not-complete the Global source | GLOBAL_APP | automatic | BW-S08-T90, BW-S09-T03 |
-| [BW-S09-T05](sprints/BW-S09/tasks/BW-S09-T05.md) | Exercise clone, restore, import and ambiguous-delivery failure matrix | VALIDATION | automatic | BW-S08-T90, BW-S09-T03, BW-S08-T05 |
+| [BW-S09-T01](sprints/BW-S09/tasks/BW-S09-T01.md) | Implement Global Send eligibility and frozen pending intent state | GLOBAL_APP | automatic | BW-S08-T90, BW-S07-T90 |
+| [BW-S09-T02](sprints/BW-S09/tasks/BW-S09-T02.md) | Add contextual Send to project interaction without a new top-level route | GLOBAL_TUI | automatic | BW-S08-T90, BW-S09-T01, BW-S07-T90 |
+| [BW-S09-T03](sprints/BW-S09/tasks/BW-S09-T03.md) | Implement cross-store receive, readback and attempt reconciliation adapter | GLOBAL_LINKS | automatic | BW-S08-T90, BW-S09-T01, BW-S08-T04, BW-S07-T90 |
+| [BW-S09-T04](sprints/BW-S09/tasks/BW-S09-T04.md) | Record accepted Intake reference and archive-not-complete the Global source | GLOBAL_APP | automatic | BW-S08-T90, BW-S09-T03, BW-S07-T90 |
+| [BW-S09-T05](sprints/BW-S09/tasks/BW-S09-T05.md) | Exercise clone, restore, import and ambiguous-delivery failure matrix | VALIDATION | automatic | BW-S08-T90, BW-S09-T03, BW-S08-T05, BW-S07-T90 |
 | [BW-S09-T90](sprints/BW-S09/tasks/BW-S09-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S09-T01, BW-S09-T02, BW-S09-T03, BW-S09-T04, BW-S09-T05 |
 
-## BW-S10 — Scale qualification and evidence-driven product refinement
+## BW-S10 — Scale qualification and explicit release-scope decision
 
 | Task | Title | Lane | Dispatch | Direct prerequisites |
 | --- | --- | --- | --- | --- |
 | [BW-S10-T01](sprints/BW-S10/tasks/BW-S10-T01.md) | Build deterministic representative and stretch Global portfolio fixtures | PERFORMANCE | automatic | BW-S07-T90 |
 | [BW-S10-T02](sprints/BW-S10/tasks/BW-S10-T02.md) | Benchmark Global read/write/history/backup behavior on both fixtures | PERFORMANCE | operator_only | BW-S07-T90, BW-S10-T01 |
-| [BW-S10-T03](sprints/BW-S10/tasks/BW-S10-T03.md) | Choose the post-measurement storage and retention strategy | ARCHITECTURE | operator_only | BW-S07-T90, BW-S10-T02 |
-| [BW-S10-T04](sprints/BW-S10/tasks/BW-S10-T04.md) | Conditional: add rebuildable read/search projection if measured reads require it | GLOBAL_STORE | paused | BW-S07-T90, BW-S10-T03 |
-| [BW-S10-T05](sprints/BW-S10/tasks/BW-S10-T05.md) | Conditional: add named saved views after query semantics and scale are stable | GLOBAL_APP | paused | BW-S07-T90, BW-S10-T03 |
-| [BW-S10-T06](sprints/BW-S10/tasks/BW-S10-T06.md) | Conditional: run cheap Heartbeat, Captured-as, List and Track experiments | PRODUCT | paused | BW-S07-T90, BW-S10-T03 |
+| [BW-S10-T03](sprints/BW-S10/tasks/BW-S10-T03.md) | Decide release fitness and any measured follow-on storage work | ARCHITECTURE | operator_only | BW-S07-T90, BW-S10-T02 |
 | [BW-S10-T90](sprints/BW-S10/tasks/BW-S10-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S10-T01, BW-S10-T02, BW-S10-T03 |
+
+## BW-S12 — Complete project workflows and portable agent access
+
+| Task | Title | Lane | Dispatch | Direct prerequisites |
+| --- | --- | --- | --- | --- |
+| [BW-S12-T01](sprints/BW-S12/tasks/BW-S12-T01.md) | Freeze the callable capability and workflow contract | PROTOCOL | operator_only | BW-S00-T90 |
+| [BW-S12-T02](sprints/BW-S12/tasks/BW-S12-T02.md) | Complete planning, Intake disposition and safe plan revision | PROJECT_PLANNING | automatic | BW-S12-T01 |
+| [BW-S12-T03](sprints/BW-S12/tasks/BW-S12-T03.md) | Complete enrolled-agent execution, review and interruption recovery | PROJECT_EXECUTION | automatic | BW-S12-T01 |
+| [BW-S12-T04](sprints/BW-S12/tasks/BW-S12-T04.md) | Make cited context, results and handoffs recoverable across sessions | PROJECT_KNOWLEDGE | automatic | BW-S12-T01 |
+| [BW-S12-T05](sprints/BW-S12/tasks/BW-S12-T05.md) | Expose complete typed workflows without a CLI-only state machine | AGENT_INTERFACE | automatic | BW-S12-T02, BW-S12-T03, BW-S12-T04 |
+| [BW-S12-T06](sprints/BW-S12/tasks/BW-S12-T06.md) | Qualify headless installs and restartable isolated agent environments | ENVIRONMENT_VALIDATION | automatic | BW-S12-T05, BW-S02-T90 |
+| [BW-S12-T90](sprints/BW-S12/tasks/BW-S12-T90.md) | Integrate project workflows and qualify the portable agent contract | INTEGRATION | operator_only | BW-S12-T01, BW-S12-T02, BW-S12-T03, BW-S12-T04, BW-S12-T05, BW-S12-T06 |
 
 ## BW-S11 — Integrated release qualification, v1 parity and operational handover
 
 | Task | Title | Lane | Dispatch | Direct prerequisites |
 | --- | --- | --- | --- | --- |
-| [BW-S11-T01](sprints/BW-S11/tasks/BW-S11-T01.md) | Build and smoke exact supported release artifacts on the declared platform matrix | RELEASE | automatic | BW-S10-T90, BW-S09-T90 |
-| [BW-S11-T02](sprints/BW-S11/tasks/BW-S11-T02.md) | Run exact-artifact end-to-end Global and project authority journeys | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01 |
-| [BW-S11-T03](sprints/BW-S11/tasks/BW-S11-T03.md) | Bring install, recovery, Global manager, CLI and agent docs to the shipped final state | DOCS | operator_only | BW-S10-T90, BW-S09-T90, BW-S07-T06, BW-S09-T04 |
-| [BW-S11-T04](sprints/BW-S11/tasks/BW-S11-T04.md) | Execute explicit v1 parity and deliberate-departure review | MIGRATION | operator_only | BW-S10-T90, BW-S09-T90 |
-| [BW-S11-T05](sprints/BW-S11/tasks/BW-S11-T05.md) | Run final recovery, authority, security and representative performance regression | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S11-T02, BW-S10-T02 |
-| [BW-S11-T06](sprints/BW-S11/tasks/BW-S11-T06.md) | Finalize operator runbooks, support boundaries and next measured backlog | COORD | operator_only | BW-S10-T90, BW-S09-T90, BW-S11-T03, BW-S11-T04, BW-S11-T05 |
+| [BW-S11-T01](sprints/BW-S11/tasks/BW-S11-T01.md) | Build and smoke exact supported release artifacts on the declared platform matrix | RELEASE | automatic | BW-S10-T90, BW-S09-T90, BW-S12-T90 |
+| [BW-S11-T02](sprints/BW-S11/tasks/BW-S11-T02.md) | Run exact-artifact end-to-end Global and project authority journeys | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S12-T90 |
+| [BW-S11-T03](sprints/BW-S11/tasks/BW-S11-T03.md) | Bring install, recovery, Global manager, CLI and agent docs to the shipped final state | DOCS | operator_only | BW-S10-T90, BW-S09-T90, BW-S07-T06, BW-S09-T04, BW-S12-T90 |
+| [BW-S11-T04](sprints/BW-S11/tasks/BW-S11-T04.md) | Execute explicit v1 parity and deliberate-departure review | MIGRATION | operator_only | BW-S10-T90, BW-S09-T90, BW-S12-T90 |
+| [BW-S11-T05](sprints/BW-S11/tasks/BW-S11-T05.md) | Run final recovery, authority, security and representative performance regression | VALIDATION | automatic | BW-S10-T90, BW-S09-T90, BW-S11-T01, BW-S11-T02, BW-S10-T02, BW-S12-T90 |
+| [BW-S11-T06](sprints/BW-S11/tasks/BW-S11-T06.md) | Finalize operator runbooks, support boundaries and next measured backlog | COORD | operator_only | BW-S10-T90, BW-S09-T90, BW-S11-T03, BW-S11-T04, BW-S11-T05, BW-S12-T90 |
 | [BW-S11-T90](sprints/BW-S11/tasks/BW-S11-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S11-T01, BW-S11-T02, BW-S11-T03, BW-S11-T04, BW-S11-T05, BW-S11-T06 |
+
+## Preserved outside the required release
+
+- [BW-S10-T04](sprints/BW-S10/tasks/BW-S10-T04.md): see [DEFERRED.md](DEFERRED.md); no automatic activation.
+- [BW-S10-T05](sprints/BW-S10/tasks/BW-S10-T05.md): see [DEFERRED.md](DEFERRED.md); no automatic activation.
+- [BW-S10-T06](sprints/BW-S10/tasks/BW-S10-T06.md): see [DEFERRED.md](DEFERRED.md); no automatic activation.

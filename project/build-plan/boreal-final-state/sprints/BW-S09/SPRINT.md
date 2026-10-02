@@ -2,7 +2,7 @@
 
 **Goal:** Add an explicit transfer from an eligible Global capture-origin item into project Intake while preserving unknown-outcome safety and the authority boundary.
 
-**Entry dependency:** BW-S08-T90  
+**Entry dependency:** BW-S07-T90 and BW-S08-T90  
 **Sprint close:** `BW-S09-T90` — integration + sprint-level validation.
 
 ## Required context
@@ -13,19 +13,19 @@ Read `../../MASTER_PLAN.md`, `../../DECISIONS.md`, `../../execution/PARALLEL_DIS
 
 | Task | Outcome | Lane | Dispatch | Direct prerequisites |
 | --- | --- | --- | --- | --- |
-| [BW-S09-T01](tasks/BW-S09-T01.md) | Implement Global Send eligibility and frozen pending intent state | GLOBAL_APP | automatic | BW-S08-T90 |
-| [BW-S09-T02](tasks/BW-S09-T02.md) | Add contextual Send to project interaction without a new top-level route | GLOBAL_TUI | automatic | BW-S08-T90, BW-S09-T01 |
-| [BW-S09-T03](tasks/BW-S09-T03.md) | Implement cross-store receive, readback and attempt reconciliation adapter | GLOBAL_LINKS | automatic | BW-S08-T90, BW-S09-T01, BW-S08-T04 |
-| [BW-S09-T04](tasks/BW-S09-T04.md) | Record accepted Intake reference and archive-not-complete the Global source | GLOBAL_APP | automatic | BW-S08-T90, BW-S09-T03 |
-| [BW-S09-T05](tasks/BW-S09-T05.md) | Exercise clone, restore, import and ambiguous-delivery failure matrix | VALIDATION | automatic | BW-S08-T90, BW-S09-T03, BW-S08-T05 |
+| [BW-S09-T01](tasks/BW-S09-T01.md) | Implement Global Send eligibility and frozen pending intent state | GLOBAL_APP | automatic | BW-S08-T90, BW-S07-T90 |
+| [BW-S09-T02](tasks/BW-S09-T02.md) | Add contextual Send to project interaction without a new top-level route | GLOBAL_TUI | automatic | BW-S08-T90, BW-S09-T01, BW-S07-T90 |
+| [BW-S09-T03](tasks/BW-S09-T03.md) | Implement cross-store receive, readback and attempt reconciliation adapter | GLOBAL_LINKS | automatic | BW-S08-T90, BW-S09-T01, BW-S08-T04, BW-S07-T90 |
+| [BW-S09-T04](tasks/BW-S09-T04.md) | Record accepted Intake reference and archive-not-complete the Global source | GLOBAL_APP | automatic | BW-S08-T90, BW-S09-T03, BW-S07-T90 |
+| [BW-S09-T05](tasks/BW-S09-T05.md) | Exercise clone, restore, import and ambiguous-delivery failure matrix | VALIDATION | automatic | BW-S08-T90, BW-S09-T03, BW-S08-T05, BW-S07-T90 |
 | [BW-S09-T90](tasks/BW-S09-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S09-T01, BW-S09-T02, BW-S09-T03, BW-S09-T04, BW-S09-T05 |
 
 ## Parallelism
 
-- T01 Global state/eligibility and T02 UI may start in parallel once command shape is fixed; UI uses a stub until T03 integration.
+- T01 Global state/eligibility precedes T02 UI. After T01 is accepted, T02 may use its fixed contract while T03 integrates the cross-store adapter.
 - T03 cross-store adapter consumes S08 service and T01 persistence.
 - T04 acceptance/archive consumes T03.
-- T05 is the fault matrix and can grow alongside implementation.
+- T05 consumes accepted T03 and S08-T05. Test-case design may be prepared earlier read-only; authoritative dispatch follows the task edges.
 
 ## Sprint validation
 
@@ -43,3 +43,7 @@ Validation is intentionally concentrated here, in `BW-S09-T90`, unless a leaf pa
 ## Sprint handoff
 
 The integrator records the exact combined source identity, changed shared contracts, checks actually run, failures/unsupported cases, and successor tasks unlocked. A task worker's branch or focused check does not by itself close the sprint.
+
+## Revision 3 completion contract
+
+Read `../../WORKFLOW_CONTRACT.md`; its required journeys augment, not replace, the validation above. Follow the current task table/JSON graph if historical wave prose differs. No core workflow may be silently deferred to reach a green release.

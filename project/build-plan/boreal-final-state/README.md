@@ -1,28 +1,17 @@
-# Boreal final-state plan pack
+# Boreal local-core completion — active plan revision 3
 
-This pack turns the multi-round Global Manager audit/design discussion into a **current-state → finished-product execution plan** aligned with Boreal's own planning model.
+**Plan:** `BW-final-state-2026-10-01` · **existing milestone key:** `milestone` / example runtime ID `boreal-final-milestone`.
 
-## Contents
+The V3 scope is **13 sprints, 81 required tasks and one milestone**. Three original conditional S10 task IDs remain preserved outside the required release. This updates the existing plan; it does not reset work or create a competing execution graph.
 
-- `MASTER_PLAN.md` — destination architecture and dependency waves.
-- `TASK_INDEX.md` — every task and prerequisite.
-- `sprints/BW-Sxx/SPRINT.md` — sprint goal, parallel lanes and sprint-level validation.
-- `sprints/BW-Sxx/tasks/*.md` — bounded agent assignments with context and write boundaries.
-- `execution/` — multi-agent dispatch/write ownership.
-- `.boreal/templates/boreal-final-state-v1.json` — **supported Boreal work-template v1 import**.
-- `IMPORT.md` — exact dry-run/apply instructions.
-- `DECISIONS.md` / `DEFERRED.md` — settled architecture and intentionally excluded scope.
+Start with [MASTER_PLAN.md](MASTER_PLAN.md) and [WORKFLOW_CONTRACT.md](WORKFLOW_CONTRACT.md). Use [TASK_INDEX.md](TASK_INDEX.md), [PLAN_CONTEXT.json](PLAN_CONTEXT.json) and the individual task cards for dispatch. [DEPENDENCY_GRAPH.md](DEPENDENCY_GRAPH.md) explains the changed sequence.
 
-## Shape
+The active fresh-import artifact is [BOREAL_TEMPLATE_V3.json](BOREAL_TEMPLATE_V3.json), still using the supported **work-template schema 1**. [IMPORT.md](IMPORT.md) distinguishes fresh import from safe amendment of an already-imported project. Do not replay a template over live attempts.
 
-- 1 milestone
-- 12 sprints
-- 76 tasks including one integration/test close task per sprint
+[PLAN_CHANGE_002.md](PLAN_CHANGE_002.md) records the scope and evidence; [PLAN_UPGRADE_V3.json](PLAN_UPGRADE_V3.json) is a review delta, not executable `bwrk` input. `BOREAL_TEMPLATE.json`, `BOREAL_TEMPLATE_V2.json` and `PLAN_CHANGE_001.md` remain historical sources. The older `CURRENT_STATE.md` / `SOURCE_BASELINE.md` inventories remain dated evidence; S00 must qualify the actual dispatched head and local changes.
 
-The plan is deliberately lighter on per-task gates than Boreal's historical production-completion packet. Most automated/manual validation is concentrated in each sprint's `T90`; tasks carry a local check only when a downstream task consumes that interface before sprint close.
+[DEFERRED.md](DEFERRED.md) owns exclusions. [INTERFACE_ROADMAP.md](INTERFACE_ROADMAP.md) defines the bounded MCP/remote successor without making it a local release blocker. [V1_PARITY.md](V1_PARITY.md) keeps useful v1 and historical production requirements visible.
 
-## Baseline
+Run `python3 project/build-plan/boreal-final-state/validate_plan.py` to check plan consistency. This validates planning artifacts, **not** product behavior or a live Boreal database.
 
-Generated from source analysis at `main@6ab1c078150993936d5d381822e7774d9e5cfade`. Re-read current source when dispatching; this plan is a delta from that baseline, not a replacement application design.
-
-Start with [IMPORT.md](IMPORT.md) if loading the work graph into Boreal, or [MASTER_PLAN.md](MASTER_PLAN.md) for the product/build sequence.
+Current cross-sprint sequencing and ownership amendment: [execution/REVISION_V3.md](execution/REVISION_V3.md). Existing ownership records remain binding; the current task graph supersedes historical wave prose.

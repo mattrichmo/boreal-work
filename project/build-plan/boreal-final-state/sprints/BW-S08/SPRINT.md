@@ -2,7 +2,7 @@
 
 **Goal:** Prepare the project-owned landing zone for explicit Global handoff without weakening normal Intake, project execution or old work-model/3 authority.
 
-**Entry dependency:** BW-S07-T90  
+**Entry dependency:** BW-S00-T90; T02 additionally consumes BW-S12-T01  
 **Sprint close:** `BW-S08-T90` — integration + sprint-level validation.
 
 ## Required context
@@ -13,11 +13,11 @@ Read `../../MASTER_PLAN.md`, `../../DECISIONS.md`, `../../execution/PARALLEL_DIS
 
 | Task | Outcome | Lane | Dispatch | Direct prerequisites |
 | --- | --- | --- | --- | --- |
-| [BW-S08-T01](tasks/BW-S08-T01.md) | Give each project restore activation a genuinely unique physical identity | PROJECT_STORE | automatic | BW-S07-T90 |
-| [BW-S08-T02](tasks/BW-S08-T02.md) | Install immutable intake_delivery v1 as an additive feature schema | PROJECT_STORE | automatic | BW-S07-T90 |
-| [BW-S08-T03](tasks/BW-S08-T03.md) | Implement project-owned Intake receive transaction and idempotent resolution | PROJECT_APP | automatic | BW-S07-T90, BW-S08-T02 |
-| [BW-S08-T04](tasks/BW-S08-T04.md) | Expose service-addressable Intake receive and receipt-bearing readback | PROJECT_SERVICE | automatic | BW-S07-T90, BW-S08-T03 |
-| [BW-S08-T05](tasks/BW-S08-T05.md) | Qualify additive feature compatibility and receipt behavior across project restore | VALIDATION | automatic | BW-S07-T90, BW-S08-T01, BW-S08-T02, BW-S08-T04 |
+| [BW-S08-T01](tasks/BW-S08-T01.md) | Give each project restore activation a genuinely unique physical identity | PROJECT_STORE | automatic | BW-S00-T90 |
+| [BW-S08-T02](tasks/BW-S08-T02.md) | Install immutable intake_delivery v1 as an additive feature schema | PROJECT_STORE | automatic | BW-S00-T90, BW-S12-T01 |
+| [BW-S08-T03](tasks/BW-S08-T03.md) | Implement project-owned Intake receive transaction and idempotent resolution | PROJECT_APP | automatic | BW-S00-T90, BW-S08-T02 |
+| [BW-S08-T04](tasks/BW-S08-T04.md) | Expose service-addressable Intake receive and receipt-bearing readback | PROJECT_SERVICE | automatic | BW-S00-T90, BW-S08-T03 |
+| [BW-S08-T05](tasks/BW-S08-T05.md) | Qualify additive feature compatibility and receipt behavior across project restore | VALIDATION | automatic | BW-S00-T90, BW-S08-T01, BW-S08-T02, BW-S08-T04 |
 | [BW-S08-T90](tasks/BW-S08-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S08-T01, BW-S08-T02, BW-S08-T03, BW-S08-T04, BW-S08-T05 |
 
 ## Parallelism
@@ -42,3 +42,9 @@ Validation is intentionally concentrated here, in `BW-S08-T90`, unless a leaf pa
 ## Sprint handoff
 
 The integrator records the exact combined source identity, changed shared contracts, checks actually run, failures/unsupported cases, and successor tasks unlocked. A task worker's branch or focused check does not by itself close the sprint.
+
+## Revision 3 completion contract
+
+Read `../../WORKFLOW_CONTRACT.md`; its required journeys augment, not replace, the validation above. Follow the current task table/JSON graph if historical wave prose differs. No core workflow may be silently deferred to reach a green release.
+
+Project receipt/restore groundwork no longer waits for Global TUI polish. This does not authorize Send: S09 still waits for the standalone Global gate S07-T90.

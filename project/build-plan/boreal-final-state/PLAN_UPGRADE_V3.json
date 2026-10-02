@@ -1,0 +1,547 @@
+{
+  "schema": "boreal.plan_review_delta.v1",
+  "not_a_bwrk_input": true,
+  "from_template": "BOREAL_TEMPLATE_V2.json",
+  "to_template": "BOREAL_TEMPLATE_V3.json",
+  "reviewed_source_sha": "1a32762ab53385a9ac485f850617d956484019d8",
+  "preserve_existing_prefix": "boreal-final",
+  "new_keys": [
+    "s12",
+    "s12-t01",
+    "s12-t02",
+    "s12-t03",
+    "s12-t04",
+    "s12-t05",
+    "s12-t06",
+    "s12-t90"
+  ],
+  "deferred_outside_core": [
+    "s10-t04",
+    "s10-t05",
+    "s10-t06"
+  ],
+  "removed_ids": [],
+  "changes": [
+    {
+      "key": "milestone",
+      "changes": {
+        "title": {
+          "before": "Boreal final-state completion",
+          "after": "Boreal local-core completion and agent-ready workflows"
+        }
+      }
+    },
+    {
+      "key": "s01",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s00-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s02",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s00-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s03",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s01-t90",
+            "s02-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s04",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s00-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s04-t01",
+      "changes": {
+        "required_workflow_journeys": "J06"
+      }
+    },
+    {
+      "key": "s04-t03",
+      "changes": {
+        "required_workflow_journeys": "J06"
+      }
+    },
+    {
+      "key": "s05",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s04-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s05-t01",
+      "changes": {
+        "required_workflow_journeys": "J04"
+      }
+    },
+    {
+      "key": "s05-t03",
+      "changes": {
+        "required_workflow_journeys": "J04,J05"
+      }
+    },
+    {
+      "key": "s05-t05",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s04-t90",
+            "s05-t02",
+            "s05-t04"
+          ],
+          "after": [
+            "s04-t90",
+            "s05-t02",
+            "s05-t04",
+            "s12-t01"
+          ]
+        }
+      }
+    },
+    {
+      "key": "s06",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s03-t90",
+            "s05-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s06-t03",
+      "changes": {
+        "required_workflow_journeys": "J02,J12"
+      }
+    },
+    {
+      "key": "s06-t05",
+      "changes": {
+        "required_workflow_journeys": "J03,J05"
+      }
+    },
+    {
+      "key": "s07",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s06-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s07-t01",
+      "changes": {
+        "required_workflow_journeys": "J02,J03"
+      }
+    },
+    {
+      "key": "s07-t03",
+      "changes": {
+        "required_workflow_journeys": "J05"
+      }
+    },
+    {
+      "key": "s07-t05",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s06-t90"
+          ],
+          "after": [
+            "s06-t90",
+            "s12-t05"
+          ]
+        },
+        "required_workflow_journeys": "J08,J16"
+      }
+    },
+    {
+      "key": "s08",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s07-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s08-t01",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s07-t90"
+          ],
+          "after": [
+            "s00-t90"
+          ]
+        }
+      }
+    },
+    {
+      "key": "s08-t02",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s07-t90"
+          ],
+          "after": [
+            "s00-t90",
+            "s12-t01"
+          ]
+        }
+      }
+    },
+    {
+      "key": "s08-t03",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s07-t90",
+            "s08-t02"
+          ],
+          "after": [
+            "s00-t90",
+            "s08-t02"
+          ]
+        },
+        "required_workflow_journeys": "J14"
+      }
+    },
+    {
+      "key": "s08-t04",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s07-t90",
+            "s08-t03"
+          ],
+          "after": [
+            "s00-t90",
+            "s08-t03"
+          ]
+        },
+        "required_workflow_journeys": "J14,J16"
+      }
+    },
+    {
+      "key": "s08-t05",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s07-t90",
+            "s08-t01",
+            "s08-t02",
+            "s08-t04"
+          ],
+          "after": [
+            "s00-t90",
+            "s08-t01",
+            "s08-t02",
+            "s08-t04"
+          ]
+        }
+      }
+    },
+    {
+      "key": "s09",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s08-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s09-t01",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s08-t90"
+          ],
+          "after": [
+            "s08-t90",
+            "s07-t90"
+          ]
+        },
+        "required_workflow_journeys": "J14"
+      }
+    },
+    {
+      "key": "s09-t02",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s08-t90",
+            "s09-t01"
+          ],
+          "after": [
+            "s08-t90",
+            "s09-t01",
+            "s07-t90"
+          ]
+        },
+        "required_workflow_journeys": "J14"
+      }
+    },
+    {
+      "key": "s09-t03",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s08-t90",
+            "s09-t01",
+            "s08-t04"
+          ],
+          "after": [
+            "s08-t90",
+            "s09-t01",
+            "s08-t04",
+            "s07-t90"
+          ]
+        }
+      }
+    },
+    {
+      "key": "s09-t04",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s08-t90",
+            "s09-t03"
+          ],
+          "after": [
+            "s08-t90",
+            "s09-t03",
+            "s07-t90"
+          ]
+        }
+      }
+    },
+    {
+      "key": "s09-t05",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s08-t90",
+            "s09-t03",
+            "s08-t05"
+          ],
+          "after": [
+            "s08-t90",
+            "s09-t03",
+            "s08-t05",
+            "s07-t90"
+          ]
+        },
+        "required_workflow_journeys": "J14,J15"
+      }
+    },
+    {
+      "key": "s10",
+      "changes": {
+        "title": {
+          "before": "BW-S10 — Scale qualification and evidence-driven product refinement",
+          "after": "BW-S10 — Scale qualification and explicit release-scope decision"
+        },
+        "dependencies": {
+          "before": [
+            "s07-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s10-t02",
+      "changes": {
+        "required_workflow_journeys": "J18"
+      }
+    },
+    {
+      "key": "s10-t03",
+      "changes": {
+        "title": {
+          "before": "BW-S10-T03 — Choose the post-measurement storage and retention strategy",
+          "after": "BW-S10-T03 — Decide release fitness and any measured follow-on storage work"
+        },
+        "required_workflow_journeys": "J18"
+      }
+    },
+    {
+      "key": "s11",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s09-t90",
+            "s10-t90"
+          ],
+          "after": []
+        }
+      }
+    },
+    {
+      "key": "s11-t01",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s10-t90",
+            "s09-t90"
+          ],
+          "after": [
+            "s10-t90",
+            "s09-t90",
+            "s12-t90"
+          ]
+        }
+      }
+    },
+    {
+      "key": "s11-t02",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s10-t90",
+            "s09-t90",
+            "s11-t01"
+          ],
+          "after": [
+            "s10-t90",
+            "s09-t90",
+            "s11-t01",
+            "s12-t90"
+          ]
+        },
+        "required_workflow_journeys": "J01-J18"
+      }
+    },
+    {
+      "key": "s11-t03",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s10-t90",
+            "s09-t90",
+            "s07-t06",
+            "s09-t04"
+          ],
+          "after": [
+            "s10-t90",
+            "s09-t90",
+            "s07-t06",
+            "s09-t04",
+            "s12-t90"
+          ]
+        },
+        "required_workflow_journeys": "J16-J18"
+      }
+    },
+    {
+      "key": "s11-t04",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s10-t90",
+            "s09-t90"
+          ],
+          "after": [
+            "s10-t90",
+            "s09-t90",
+            "s12-t90"
+          ]
+        },
+        "required_workflow_journeys": "J07-J13"
+      }
+    },
+    {
+      "key": "s11-t05",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s10-t90",
+            "s09-t90",
+            "s11-t01",
+            "s11-t02",
+            "s10-t02"
+          ],
+          "after": [
+            "s10-t90",
+            "s09-t90",
+            "s11-t01",
+            "s11-t02",
+            "s10-t02",
+            "s12-t90"
+          ]
+        },
+        "required_workflow_journeys": "J09-J18"
+      }
+    },
+    {
+      "key": "s11-t06",
+      "changes": {
+        "dependencies": {
+          "before": [
+            "s10-t90",
+            "s09-t90",
+            "s11-t03",
+            "s11-t04",
+            "s11-t05"
+          ],
+          "after": [
+            "s10-t90",
+            "s09-t90",
+            "s11-t03",
+            "s11-t04",
+            "s11-t05",
+            "s12-t90"
+          ]
+        }
+      }
+    },
+    {
+      "key": "s11-t90",
+      "changes": {
+        "required_workflow_journeys": "J01-J18"
+      }
+    }
+  ]
+}

@@ -17,13 +17,13 @@ Read `../../MASTER_PLAN.md`, `../../DECISIONS.md`, `../../execution/PARALLEL_DIS
 | [BW-S07-T02](tasks/BW-S07-T02.md) | Render grouped Today/Open and management project heartbeat | GLOBAL_TUI | automatic | BW-S06-T90, BW-S05-T90 |
 | [BW-S07-T03](tasks/BW-S07-T03.md) | Polish archive/restore/history and capture provenance inspection | GLOBAL_TUI | automatic | BW-S06-T90, BW-S06-T03 |
 | [BW-S07-T04](tasks/BW-S07-T04.md) | Expose daily filters and atomic bulk triage truthfully through public CLI help | CLI | automatic | BW-S06-T90, BW-S05-T05, BW-S06-T05 |
-| [BW-S07-T05](tasks/BW-S07-T05.md) | Make boreal-route choose Global management or project execution first | GUIDANCE | automatic | BW-S06-T90 |
+| [BW-S07-T05](tasks/BW-S07-T05.md) | Make boreal-route choose Global management or project execution first | GUIDANCE | automatic | BW-S06-T90, BW-S12-T05 |
 | [BW-S07-T06](tasks/BW-S07-T06.md) | Add two-door help and reconcile Global docs with the callable registry | DOCS | operator_only | BW-S06-T90, BW-S07-T04, BW-S07-T05 |
 | [BW-S07-T90](tasks/BW-S07-T90.md) | Integrate the sprint and validate the combined behavior | INTEGRATION | operator_only | BW-S07-T01, BW-S07-T02, BW-S07-T03, BW-S07-T04, BW-S07-T05, BW-S07-T06 |
 
 ## Parallelism
 
-- T01 Inbox interaction, T04 CLI parity, and T05 guidance can begin in parallel.
+- T01 Inbox interaction and T04 CLI parity can begin in parallel. T05 guidance also requires S12-T05; it may run beside them once that contract is integrated.
 - T02 grouped daily UI consumes S05 contracts and can run beside T01.
 - T03 history/provenance inspector consumes S06.
 - T06 docs reconcile after command/guidance wording freezes.
@@ -43,3 +43,7 @@ Validation is intentionally concentrated here, in `BW-S07-T90`, unless a leaf pa
 ## Sprint handoff
 
 The integrator records the exact combined source identity, changed shared contracts, checks actually run, failures/unsupported cases, and successor tasks unlocked. A task worker's branch or focused check does not by itself close the sprint.
+
+## Revision 3 completion contract
+
+Read `../../WORKFLOW_CONTRACT.md`; its required journeys augment, not replace, the validation above. Follow the current task table/JSON graph if historical wave prose differs. No core workflow may be silently deferred to reach a green release.
