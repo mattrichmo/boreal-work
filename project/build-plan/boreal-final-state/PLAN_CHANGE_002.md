@@ -19,7 +19,7 @@ The current plan is strong on Global semantics and recovery but gives inherited 
 - Keep V1/V2 templates immutable. Create V3 in the existing supported schema with task-only dependency edges, synchronized context/index/cards, and a plan consistency checker. `PLAN_UPGRADE_V3.json` describes a reviewed change set, not an executable application migration.
 - Preserve local-first, Rust authority, Global/Project separation, atomic provenance/Send, recovery, supported-platform limits and one T90 per sprint. Full MCP/remote delivery remains a concrete separate successor, not another hidden release requirement.
 
-**Counts:** V2 had 77 task cards / 12 sprints / 1 milestone. V3 requires 81 tasks / 13 sprints / 1 milestone = 95 imported items, with 3 original deferred cards retained outside the active import. Net required-task change: +7 -3 = +4. No historical task ID is deleted.
+**Counts:** V2 listed 77 task cards across 12 sprints, including 3 paused conditional tasks: 74 nonconditional tasks. V3 requires 81 tasks across 13 sprints, plus one milestone = 95 imported items. The 3 original conditional cards remain outside the active import, making 84 retained task cards overall. Seven tasks are new. The template's task-item count increases by four (77 + 7 - 3 = 81); required scope increases by seven relative to V2's 74 nonconditional tasks. No historical task ID is deleted.
 
 ## Evidence and limits
 
