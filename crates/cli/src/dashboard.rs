@@ -1592,14 +1592,35 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn socket_guard_refuses_to_remove_a_non_socket_endpoint() {
-        let mut guard = SocketGuard::allocate("test").unwrap();
+        let suffix = DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory = (0_u32..)
+            .find_map(|attempt| {
+                let candidate = env::temp_dir().join(format!(
+                    "boreal-dashboard-socket-guard-{}-{suffix}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => Some(candidate),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(error) => panic!("cannot create socket guard fixture: {error}"),
+                }
+            })
+            .expect("socket guard fixture directory name space exhausted");
+        let mut guard = SocketGuard {
+            path: directory.join("service.sock"),
+            directory,
+            cleaned: false,
+        };
         let path = guard.path().to_owned();
         fs::write(&path, "fixture").unwrap();
         let error = guard.cleanup().unwrap_err();
-        assert!(error
-            .message
-            .contains("refusing to remove a non-socket endpoint"));
+        assert!(
+            error
+                .message
+                .contains("refusing to remove a non-socket endpoint")
+        );
         assert!(path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"fixture");
         fs::remove_file(path).unwrap();
         guard.cleanup().unwrap();
     }
