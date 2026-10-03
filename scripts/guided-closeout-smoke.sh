@@ -53,6 +53,18 @@ service() {
   fi
 }
 
+# Preserve the structured error envelope for expected server-side denials.
+service_capture() {
+  local result status
+  if result=$("$BIN" "$@" --db "$DB" --socket "$SOCKET" --json); then
+    status=0
+  else
+    status=$?
+  fi
+  printf '%s\n' "$result"
+  return "$status"
+}
+
 require_direct() {
   local action=$1
   shift
@@ -111,13 +123,9 @@ for i in "${!agents[@]}"; do
   jq -e --arg agent "$agent" '.data.actor_id == $agent and .data.role == "agent"' \
     <<<"$authority" >/dev/null
 
-  started=$(require_direct "Agent session registration ($agent)" session start \
-    --project "$PROJECT" --actor "$agent" --harness "$HARNESS" --session "$session" \
-    --expected-revision "$revision" --operation-id "guided-closeout-session-$agent")
-  revision=$(jq -er '.revision' <<<"$started")
-  jq -e --arg agent "$agent" --arg session "$session" \
-    '.data.actor_id == $agent and .data.session_id == $session and .data.state == "active"' \
-    <<<"$started" >/dev/null
+  # The first service claim registers this enrolled Agent session atomically
+  # with the attempt. A direct pre-registration would force the service claim
+  # to guess which independent session-registration operation to replay.
 done
 
 for gate in "${gates[@]}"; do
@@ -212,7 +220,7 @@ start_service() {
   return 1
 }
 
-start_service 18 || {
+start_service 39 || {
   printf 'guided closeout smoke: service startup failed before socket readiness; setup and gate-policy publication assertions passed\n' >&2
   exit 1
 }
@@ -227,20 +235,23 @@ for i in "${!works[@]}"; do
   agent=${agents[$i]}
   session=${sessions[$i]}
   claim=$(service work claim "$PROJECT" "$work" --actor "$agent" --harness "$HARNESS" --session "$session" \
-    --source-version "$source_version" --config-identity "$CONFIG_ID")
+    --source-version "$source_version" --config-identity "$CONFIG_ID" \
+    --operation-id "op_guided-closeout-claim-$work")
   attempts[$i]=$(jq -er '.data.attempt_id' <<<"$claim")
   fences[$i]=$(jq -er '.data.fence' <<<"$claim")
-  jq -e '.outcome == "changed" and (.data.attempt_id | type == "string" and length > 0) and .data.fence > 0 and .data.phase == "claimed" and .data.current == true' \
+  jq -e '.outcome == "changed" and (.data.attempt_id | type == "string" and length > 0) and .data.fence > 0 and .data.phase == "claimed"' \
     <<<"$claim" >/dev/null
 
   started=$(service agent start "$work" --project "$PROJECT" --actor "$agent" --harness "$HARNESS" --session "$session" \
-    --source-version "$source_version" --config-identity "$CONFIG_ID")
+    --source-version "$source_version" --config-identity "$CONFIG_ID" \
+    --operation-id "op_guided-closeout-start-$work")
   jq -e '.outcome == "changed" and .data.phase == "running" and .data.current == true' <<<"$started" >/dev/null
 
   verification=
   for gate in "${gates[@]}"; do
     result=$(service evidence run --project "$PROJECT" --actor "$agent" --harness "$HARNESS" --session "$session" \
-      --work "$work" --gate "$gate" --attempt "${attempts[$i]}" --fence "${fences[$i]}")
+      --work "$work" --gate "$gate" --attempt "${attempts[$i]}" --fence "${fences[$i]}" \
+      --operation-id "op_guided-closeout-evidence-$work-$gate")
     jq -e --arg gate "$gate" '.outcome == "changed" and (.data.gate_id | endswith(":" + $gate)) and .data.result == "passed" and .data.execution_outcome == "passed"' \
       <<<"$result" >/dev/null
     receipt_path=$(jq -er '.data.receipt_path' <<<"$result")
@@ -260,23 +271,91 @@ for i in "${!works[@]}"; do
   work=${works[$i]}
   agent=${agents[$i]}
   session=${sessions[$i]}
+  finish_operation="op_guided-closeout-finish-$work"
+  if finish=$(service_capture agent finish "$work" --close --project "$PROJECT" --actor "$agent" --harness "$HARNESS" \
+    --session "$session" --attempt "${attempts[$i]}" --fence "${fences[$i]}" \
+    --receipt "${receipts[$i]}" --summary "${summaries[$i]}" \
+    --operation-id "$finish_operation"); then
+    printf 'guided closeout smoke: expected initial recovery hold for %s, but close committed immediately\n' "$work" >&2
+    exit 1
+  fi
+  jq -e '.outcome == "conflict" and .error.code == "claim_conflict" and .error.message == "action_denied:status_denied"' <<<"$finish" >/dev/null
+
+  obligations=$(service recovery list --project "$PROJECT" --actor "$OPERATOR" --harness "$HARNESS" \
+    --session "$OPERATOR_SESSION" --operation-id "op_guided-closeout-recovery-list-$work")
+  obligation_id=$(jq -er --arg attempt "${attempts[$i]}" \
+    '.data.items[] | select(.attempt_id == $attempt and .reason == "resource_unknown" and .state == "unresolved" and .resource_state == "release_pending") | .obligation_id' \
+    <<<"$obligations")
+  [[ "$obligation_id" == request:close:*:recovery:submission ]]
+  recovery_revision=$(jq -er '.revision' <<<"$obligations")
+
+  recovery_input=".boreal/runtime/$work-recovery-resolution.json"
+  jq -n --arg obligation "$obligation_id" --arg resolution "guided-closeout-release-$work" \
+    --arg reason "The local verifier subprocesses exited and the Operator confirms no writer retains this worktree." \
+    '{obligation_id:$obligation,resolution_id:$resolution,outcome:"resource_released",reason:$reason,resource_state:"released"}' \
+    >"$PROJECT_ROOT/$recovery_input"
+  resolution_operation="op_guided-closeout-resolve-$work"
+  resolved=$(service recovery resolve --project "$PROJECT" "$obligation_id" --actor "$OPERATOR" \
+    --harness "$HARNESS" --session "$OPERATOR_SESSION" --input "$recovery_input" \
+    --expected-revision "$recovery_revision" --yes --operation-id "$resolution_operation")
+  jq -e --arg obligation "$obligation_id" \
+    '.outcome == "changed" and .data.obligation.obligation_id == $obligation and .data.obligation.state == "resolved" and .data.obligation.resource_state == "released"' \
+    <<<"$resolved" >/dev/null
+
+  resolution_readback=$(service operation show "$PROJECT" "$resolution_operation" --actor "$OPERATOR" \
+    --harness "$HARNESS" --session "$OPERATOR_SESSION" --operation-id "op_guided-closeout-readback-resolve-$work")
+  jq -e --arg operation "$resolution_operation" --arg obligation "$obligation_id" \
+    '.data.operation.operation_id == $operation and .data.operation.command == "recovery.resolve" and .data.operation.result.obligation_id == $obligation and .data.operation.result.resource_state == "released"' \
+    <<<"$resolution_readback" >/dev/null
+  remaining=$(service recovery list --project "$PROJECT" --actor "$OPERATOR" --harness "$HARNESS" \
+    --session "$OPERATOR_SESSION" --operation-id "op_guided-closeout-recovery-readback-$work")
+  jq -e --arg obligation "$obligation_id" \
+    'all(.data.items[]; .obligation_id != $obligation)' <<<"$remaining" >/dev/null
+
+  # Retry the same operation identity. Its committed receipt, summary and open
+  # close intent are read back; only the previously denied finalization runs.
   finish=$(service agent finish "$work" --close --project "$PROJECT" --actor "$agent" --harness "$HARNESS" \
     --session "$session" --attempt "${attempts[$i]}" --fence "${fences[$i]}" \
-    --receipt "${receipts[$i]}" --summary "${summaries[$i]}")
+    --receipt "${receipts[$i]}" --summary "${summaries[$i]}" \
+    --operation-id "$finish_operation")
   jq -e '.outcome == "changed" and .data.close_state == "finalized" and (.data.receipt_id | type == "string" and length > 0)' \
     <<<"$finish" >/dev/null
+  jq -e '.data.receipt_replayed == true and .data.summary_replayed == true and .data.close_state == "finalized"' \
+    <<<"$finish" >/dev/null
+
+  finish_readback=$(service operation show "$PROJECT" "$finish_operation:result" --actor "$OPERATOR" \
+    --harness "$HARNESS" --session "$OPERATOR_SESSION" --operation-id "op_guided-closeout-readback-finish-$work")
+  jq -e --arg operation "$finish_operation:result" \
+    '.data.operation.operation_id == $operation and .data.operation.command == "finish_close.result" and .data.operation.result.close.close_state == "finalized"' \
+    <<<"$finish_readback" >/dev/null
+
+  replay=$(service agent finish "$work" --close --project "$PROJECT" --actor "$agent" --harness "$HARNESS" \
+    --session "$session" --attempt "${attempts[$i]}" --fence "${fences[$i]}" \
+    --receipt "${receipts[$i]}" --summary "${summaries[$i]}" \
+    --operation-id "$finish_operation")
+  jq -e '.outcome == "changed" and .data.close_state == "finalized" and .data.receipt_replayed == true and .data.summary_replayed == true' \
+    <<<"$replay" >/dev/null
 done
 
 wait "$SERVICE_PID"
 SERVICE_PID=
 
-start_service 1 || {
+start_service 3 || {
   printf 'guided closeout smoke: service restart failed before status readback\n' >&2
   exit 1
 }
-status=$(service status "$PROJECT" --actor "$OPERATOR" --harness "$HARNESS" --session "$OPERATOR_SESSION")
-jq -e '.data.items | length == 3 and all(.[]; .display_status == "closed")' <<<"$status" >/dev/null
+status=$(service status "$PROJECT" --limit 1 --offset 0 --actor "$OPERATOR" --harness "$HARNESS" --session "$OPERATOR_SESSION")
+jq -e '.data.total == 3 and (.data.items | length == 1)' <<<"$status" >/dev/null
+status_items=$(jq -c '.data.items' <<<"$status")
+while [[ -n "$(jq -r '.data.next_offset // empty' <<<"$status")" ]]; do
+  offset=$(jq -er '.data.next_offset' <<<"$status")
+  status=$(service status "$PROJECT" --limit 1 --offset "$offset" --actor "$OPERATOR" --harness "$HARNESS" --session "$OPERATOR_SESSION")
+  jq -e '.data.total == 3 and (.data.items | length == 1)' <<<"$status" >/dev/null
+  status_items=$(jq -cn --argjson accumulated "$status_items" --argjson page "$(jq -c '.data.items' <<<"$status")" '$accumulated + $page')
+done
+jq -e 'length == 3 and all(.[]; .display_status == "closed") and ([.[].work_id] | sort) == ["guided-work-a", "guided-work-b", "guided-work-c"]' \
+  <<<"$status_items" >/dev/null
 wait "$SERVICE_PID"
 SERVICE_PID=
 
-echo "guided closeout smoke: PASS (three independently enrolled Agents, source-bound gate policies, service claim/start/evidence/finish/close, restart, and status readback)"
+echo "guided closeout smoke: PASS (three independently enrolled Agents, service-owned session/claim/start/evidence, Operator recovery reconciliation, finish replay/readback, restart, and closed status)"
