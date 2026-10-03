@@ -4032,6 +4032,52 @@ fn required_string(object: &[(String, JsonValue)], key: &str) -> Result<String, 
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn process_state_is_running(state: &str) -> bool {
+        let state = state.trim_start();
+        !state.is_empty() && !state.starts_with('Z')
+    }
+
+    #[cfg(unix)]
+    fn descendant_is_running(pid: u32) -> bool {
+        if process_is_definitely_dead(pid) {
+            return false;
+        }
+
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps must be available to inspect a spawned descendant");
+        assert!(
+            output.status.success(),
+            "ps failed while inspecting descendant {pid}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        process_state_is_running(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    #[cfg(unix)]
+    fn assert_descendant_not_running(pid: u32) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while descendant_is_running(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !descendant_is_running(pid),
+            "descendant {pid} is still running after its process group was terminated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zombie_process_state_is_not_running() {
+        assert!(!process_state_is_running("Z"));
+        assert!(!process_state_is_running("Z+"));
+        assert!(process_state_is_running("S"));
+        assert!(process_state_is_running("R+"));
+        assert!(!process_state_is_running(""));
+    }
+
     fn draft() -> Draft {
         Draft::new(
             "p1",
@@ -4398,7 +4444,7 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        assert!(process_is_definitely_dead(child_pid));
+        assert_descendant_not_running(child_pid);
         let _ = fs::remove_file(pid_file);
     }
 
@@ -4424,7 +4470,7 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        assert!(process_is_definitely_dead(child_pid));
+        assert_descendant_not_running(child_pid);
         let _ = fs::remove_file(pid_file);
     }
 
