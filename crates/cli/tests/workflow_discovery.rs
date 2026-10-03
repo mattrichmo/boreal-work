@@ -14,7 +14,7 @@ fn invoke(args: &[&str]) -> (bool, Value) {
 fn direct_workflow_queries_do_not_require_project_state() {
     let (success, list) = invoke(&["workflows", "list", "--json"]);
     assert!(success);
-    assert_eq!(list["outcome"], "changed");
+    assert_eq!(list["outcome"], "unchanged");
     assert_eq!(list["data"]["assets"].as_array().unwrap().len(), 10);
 
     let (success, show) = invoke(&["workflows", "show", "boreal.workflow.audit.v1", "--json"]);
