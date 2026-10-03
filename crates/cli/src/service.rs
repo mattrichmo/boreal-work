@@ -854,10 +854,7 @@ mod unix {
         };
         for project in projects {
             let mut offset = 0_u64;
-            loop {
-                let Ok(page) = store.list_work(&project, 1_000, offset) else {
-                    break;
-                };
+            while let Ok(page) = store.list_work(&project, 1_000, offset) {
                 for work in &page.items {
                     let Ok(Some(attempt)) = store.current_attempt_for_work(&project, &work.work_id)
                     else {
@@ -1505,7 +1502,7 @@ mod unix {
                 PENDING.store(0, Ordering::SeqCst);
                 let mut previous = [(0, 0); 2];
                 for (slot, signal_number) in previous.iter_mut().zip([SIGINT, SIGTERM]) {
-                    let handler = unsafe { signal(signal_number, record as usize) };
+                    let handler = unsafe { signal(signal_number, record as *const () as usize) };
                     if handler == SIGNAL_ERROR {
                         for (installed, old_handler) in previous.iter().copied() {
                             if installed != 0 {
@@ -2303,9 +2300,14 @@ mod unix {
                     make_envelope(&request.operation_id, outcome, revision, value, None)
                 }
                 Err(error) => {
-                    let wire_error = error.protocol_error.clone().unwrap_or_else(|| {
-                        WireError::new(error.code, error.message.clone(), is_retryable(error.code))
-                    });
+                    let wire_error =
+                        error.protocol_error.as_deref().cloned().unwrap_or_else(|| {
+                            WireError::new(
+                                error.code,
+                                error.message.clone(),
+                                is_retryable(error.code),
+                            )
+                        });
                     make_envelope(
                         &request.operation_id,
                         error.outcome,
@@ -2753,8 +2755,8 @@ mod unix {
                     "source_add operation identity does not match the service envelope",
                 ));
             }
-            if request.input.as_bytes().len() > 4096
-                || request.origin.as_bytes().len() > 4096
+            if request.input.len() > 4096
+                || request.origin.len() > 4096
                 || request
                     .media_type
                     .as_deref()
@@ -4632,30 +4634,33 @@ mod unix {
             let summary = summary_payload(&receipt, &summary_body, operation);
             let app = WorkApplication::new(&self.store);
             let journal = app.authenticated_operation_journal(&identity);
-            let parent_request_digest = super::super::finish_close_request_digest(
-                &project,
-                &work_id,
-                attempt.as_str(),
-                fence.get(),
-                &actor,
-                &session,
-                optional_u64(data, "expected_revision")?,
-                &receipt,
-                &summary_body,
-            );
+            let expected_revision = optional_u64(data, "expected_revision")?;
+            let parent_request_digest =
+                super::super::finish_close_request_digest(super::super::FinishCloseDigestInput {
+                    project: &project,
+                    work_id: &work_id,
+                    attempt: attempt.as_str(),
+                    fence: fence.get(),
+                    actor: &actor,
+                    session: &session,
+                    expected_revision,
+                    receipt: &receipt,
+                    summary_body: &summary_body,
+                });
             let result_operation = super::super::finish_result_operation_id(operation);
-            super::super::ensure_finish_parent_intent(
-                &journal,
+            let finish_context = super::super::FinishCloseJournalContext {
+                journal: &journal,
                 operation,
-                &project,
-                &actor,
-                &session,
-                attempt.as_str(),
-                fence.get(),
-                optional_u64(data, "expected_revision")?,
-                &parent_request_digest,
-                &result_operation,
-            )?;
+                project: &project,
+                actor: &actor,
+                session: &session,
+                attempt: attempt.as_str(),
+                fence: fence.get(),
+                expected_revision,
+                request_digest: &parent_request_digest,
+                result_operation: &result_operation,
+            };
+            super::super::ensure_finish_parent_intent(&finish_context)?;
             if let Some(readback) =
                 super::super::finish_result_readback(&journal, operation, &result_operation)?
             {
@@ -4754,20 +4759,7 @@ mod unix {
                     })).collect::<Vec<_>>(),
                 })),
             });
-            super::super::append_finish_result_operation(
-                &journal,
-                operation,
-                &result_operation,
-                &project,
-                &actor,
-                &session,
-                attempt.as_str(),
-                fence.get(),
-                optional_u64(data, "expected_revision")?,
-                outcome,
-                &parent_request_digest,
-                &close_data,
-            )?;
+            super::super::append_finish_result_operation(&finish_context, outcome, &close_data)?;
             Ok((outcome, Some(finalized.revision), Some(close_data)))
         }
 
@@ -5137,7 +5129,7 @@ mod unix {
         // The identity is intentionally bound here; its availability is the
         // persisted fact used to gate a start.
         let source = store
-            .source_version(project.as_str(), &source_version_id)
+            .source_version(project.as_str(), source_version_id)
             .map_err(map_store_error)?;
         if !source.is_some_and(|source| source.availability == "available") {
             return Err(CliError::invalid(format!(
@@ -5718,17 +5710,21 @@ mod tests {
         (catalog, captured.source.source_version_id)
     }
 
+    struct ServiceTestGatePolicy<'a> {
+        source_version_id: &'a str,
+        gate_id: &'a str,
+        kind: &'a str,
+        executable: &'a str,
+        argv: &'a [&'a str],
+        config_identity: &'a str,
+        max_runtime_ms: u64,
+    }
+
     fn publish_service_test_gate_policy(
         store: &SqliteStore,
         project: &str,
         operation_id: &str,
-        source_version_id: &str,
-        gate_id: &str,
-        kind: &str,
-        executable: &str,
-        argv: &[&str],
-        config_identity: &str,
-        max_runtime_ms: u64,
+        policy: ServiceTestGatePolicy<'_>,
     ) {
         let database = store
             .database_location()
@@ -5737,25 +5733,25 @@ mod tests {
         let catalog = boreal_source::SourceCatalog::with_persistent_filesystem(&catalog_root)
             .expect("persistent service test source catalog opens");
         let path = std::env::split_paths(&env::var_os("PATH").expect("test PATH is set"))
-            .map(|directory| directory.join(executable))
+            .map(|directory| directory.join(policy.executable))
             .find(|candidate| fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file()))
-            .unwrap_or_else(|| panic!("test verifier {executable} is on PATH"));
+            .unwrap_or_else(|| panic!("test verifier {} is on PATH", policy.executable));
         let verifier_digest = super::super::sha256_content_digest(
             &fs::read(path).expect("test verifier executable reads"),
         );
         let declaration = json!({
-            "gate_id": gate_id,
+            "gate_id": policy.gate_id,
             "policy_revision": 1,
-            "kind": kind,
-            "executable": executable,
+            "kind": policy.kind,
+            "executable": policy.executable,
             "verifier_digest": verifier_digest,
-            "argv": argv,
+            "argv": policy.argv,
             "cwd": ".",
-            "source_snapshot_hash": source_version_id,
-            "config_identity": config_identity,
+            "source_snapshot_hash": policy.source_version_id,
+            "config_identity": policy.config_identity,
             "environment_fingerprint": "computed-at-run-time",
             "observables": [],
-            "max_runtime_ms": max_runtime_ms,
+            "max_runtime_ms": policy.max_runtime_ms,
         });
         boreal_application::KnowledgeApplication::new(&catalog)
             .capture_source_with_store(
@@ -5763,7 +5759,7 @@ mod tests {
                 boreal_application::SourceCaptureInput {
                     operation_id: operation_id.to_owned(),
                     project_id: project.to_owned(),
-                    origin: format!("gate-policy:{gate_id}:1"),
+                    origin: format!("gate-policy:{}:1", policy.gate_id),
                     media_type: "application/vnd.boreal.gate-policy+json".to_owned(),
                     bytes: serde_json::to_vec(&declaration).expect("test gate policy serializes"),
                 },
@@ -5804,13 +5800,15 @@ mod tests {
             &store,
             "service-project",
             "op_witnessed_finish_policy",
-            &source_version_id,
-            "verification",
-            "verification",
-            "true",
-            &["true"],
-            "config-witnessed-finish",
-            1_000,
+            ServiceTestGatePolicy {
+                source_version_id: &source_version_id,
+                gate_id: "verification",
+                kind: "verification",
+                executable: "true",
+                argv: &["true"],
+                config_identity: "config-witnessed-finish",
+                max_runtime_ms: 1_000,
+            },
         );
         let revision = store.project_revision("service-project").unwrap().0;
         let mut handler = make_handler_at(store, gate_root);
@@ -6848,13 +6846,15 @@ mod tests {
             &store,
             "service-project",
             "op_production_concurrent_policy",
-            &source_version_id,
-            "verification",
-            "verification",
-            "sleep",
-            &["sleep", "1"],
-            "config-production-concurrent",
-            2_000,
+            ServiceTestGatePolicy {
+                source_version_id: &source_version_id,
+                gate_id: "verification",
+                kind: "verification",
+                executable: "sleep",
+                argv: &["sleep", "1"],
+                config_identity: "config-production-concurrent",
+                max_runtime_ms: 2_000,
+            },
         );
         let revision = store.project_revision("service-project").unwrap().0;
 
@@ -8086,13 +8086,15 @@ mod tests {
             &store,
             "service-project",
             "op_evidence_failure_policy",
-            &source_version_id,
-            "verification",
-            "verification",
-            "false",
-            &["false"],
-            "config-evidence-failure",
-            30,
+            ServiceTestGatePolicy {
+                source_version_id: &source_version_id,
+                gate_id: "verification",
+                kind: "verification",
+                executable: "false",
+                argv: &["false"],
+                config_identity: "config-evidence-failure",
+                max_runtime_ms: 30,
+            },
         );
         let revision = store.project_revision("service-project").unwrap().0;
 

@@ -25,10 +25,10 @@ use boreal_protocol::{
 use boreal_source::SourceCatalog;
 use boreal_store::identity::{IdentityError, IdentityStore, WorkspaceBinding};
 use boreal_store::{
-    AttemptRecord, AuditEventRecord, EvidenceExecutionState, MaintenanceJobInput,
-    MaintenanceJobTransition, OperationOutcome as StoreOperationOutcome, OperationRecord,
-    ReceiptAttestation, ReceiptOutcome, ReceiptRecord, SqliteBackupPackageReport,
-    SqliteRestorePackageReport, SqliteStore, StoreError, WorkRecord,
+    AuditEventRecord, EvidenceExecutionState, MaintenanceJobInput, MaintenanceJobTransition,
+    OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation, ReceiptOutcome,
+    ReceiptRecord, SqliteBackupPackageReport, SqliteRestorePackageReport, SqliteStore, StoreError,
+    WorkRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -287,9 +287,11 @@ struct CliError {
     transport: TransportOutcome,
     as_of: Option<String>,
     next_status_change_at: Option<String>,
-    detail_ref: Option<DetailReference>,
-    protocol_error: Option<ProtocolError>,
+    detail_ref: Option<Box<DetailReference>>,
+    protocol_error: Option<Box<ProtocolError>>,
 }
+
+const _: () = assert!(std::mem::size_of::<CliError>() <= 128);
 
 impl CliError {
     fn invalid(message: impl Into<String>) -> Self {
@@ -325,10 +327,10 @@ impl CliError {
         let mut value = Self::with(error.code, outcome, error.message.clone());
         value.as_of = as_of;
         value.next_status_change_at = next_status_change_at;
-        value.detail_ref = detail_ref;
-        value.protocol_error = Some(error);
+        value.detail_ref = detail_ref.map(Box::new);
+        value.protocol_error = Some(Box::new(error));
         if outcome == ApplicationOutcome::Unknown {
-            if let Some(protocol_error) = value.protocol_error.as_mut() {
+            if let Some(protocol_error) = value.protocol_error.as_deref_mut() {
                 protocol_error.readback_required = Some(true);
                 if protocol_error.operation_id.is_none() {
                     protocol_error.operation_id = operation_id.map(str::to_owned);
@@ -352,7 +354,7 @@ impl CliError {
             error.message.clone(),
         );
         value.transport = TransportOutcome::Error;
-        value.protocol_error = Some(error);
+        value.protocol_error = Some(Box::new(error));
         value
     }
 }
@@ -424,17 +426,17 @@ fn main() -> ExitCode {
             } else {
                 json!({ "command": "help", "text": HELP })
             };
-            print_envelope(
-                operation_id(&args),
-                None,
-                ApplicationOutcome::Changed,
-                Some(data),
-                None,
-                None,
-                None,
-                TransportOutcome::Ok,
-                None,
-            );
+            print_envelope(CliEnvelopeFields {
+                operation_id: operation_id(&args),
+                revision: None,
+                outcome: ApplicationOutcome::Changed,
+                data: Some(data),
+                as_of: None,
+                next_status_change_at: None,
+                detail_ref: None,
+                transport: TransportOutcome::Ok,
+                error: None,
+            });
             return ExitCode::SUCCESS;
         }
         if has_data_operand {
@@ -442,19 +444,19 @@ fn main() -> ExitCode {
                 "help/version flags must be a command discovery request, not a data operand";
             if json_output {
                 let error = CliError::invalid(message);
-                print_envelope(
-                    operation_id(&args),
-                    None,
-                    error.outcome,
-                    None,
-                    error.as_of,
-                    error.next_status_change_at,
-                    error.detail_ref,
-                    error.transport,
-                    error.protocol_error.or_else(|| {
+                print_envelope(CliEnvelopeFields {
+                    operation_id: operation_id(&args),
+                    revision: None,
+                    outcome: error.outcome,
+                    data: None,
+                    as_of: error.as_of,
+                    next_status_change_at: error.next_status_change_at,
+                    detail_ref: error.detail_ref.map(|detail_ref| *detail_ref),
+                    transport: error.transport,
+                    error: error.protocol_error.map(|error| *error).or_else(|| {
                         Some(ProtocolError::new(error.code, error.message.clone(), false))
                     }),
-                );
+                });
                 return ExitCode::from(error.exit);
             }
             eprintln!("error [{}]: {message}", ErrorCode::InvalidArgument);
@@ -469,17 +471,17 @@ fn main() -> ExitCode {
             let has_data = result.data.is_some();
             let application_error = result_protocol_error(&result, &operation);
             if json_output {
-                print_envelope(
-                    operation,
-                    result.revision,
-                    result.outcome,
-                    result.data,
-                    result.as_of,
-                    result.next_status_change_at,
-                    result.detail_ref,
-                    TransportOutcome::Ok,
-                    application_error.clone(),
-                );
+                print_envelope(CliEnvelopeFields {
+                    operation_id: operation,
+                    revision: result.revision,
+                    outcome: result.outcome,
+                    data: result.data,
+                    as_of: result.as_of,
+                    next_status_change_at: result.next_status_change_at,
+                    detail_ref: result.detail_ref,
+                    transport: TransportOutcome::Ok,
+                    error: application_error.clone(),
+                });
             } else if !interactive_dashboard {
                 if let Some(human) = result.human.as_deref() {
                     print!("{human}");
@@ -513,17 +515,20 @@ fn main() -> ExitCode {
                     protocol_error.operation_id = Some(operation.clone());
                     protocol_error.readback_required = Some(true);
                 }
-                print_envelope(
-                    operation,
-                    None,
-                    error.outcome,
-                    None,
-                    error.as_of,
-                    error.next_status_change_at,
-                    error.detail_ref,
-                    error.transport,
-                    error.protocol_error.or(Some(protocol_error)),
-                );
+                print_envelope(CliEnvelopeFields {
+                    operation_id: operation,
+                    revision: None,
+                    outcome: error.outcome,
+                    data: None,
+                    as_of: error.as_of,
+                    next_status_change_at: error.next_status_change_at,
+                    detail_ref: error.detail_ref.map(|detail_ref| *detail_ref),
+                    transport: error.transport,
+                    error: error
+                        .protocol_error
+                        .map(|error| *error)
+                        .or(Some(protocol_error)),
+                });
             } else {
                 eprintln!("error [{}]: {}", error.code, error.message);
             }
@@ -532,7 +537,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn print_envelope(
+struct CliEnvelopeFields {
     operation_id: String,
     revision: Option<u64>,
     outcome: ApplicationOutcome,
@@ -542,19 +547,21 @@ fn print_envelope(
     detail_ref: Option<DetailReference>,
     transport: TransportOutcome,
     error: Option<ProtocolError>,
-) {
+}
+
+fn print_envelope(fields: CliEnvelopeFields) {
     let envelope = Envelope {
         api_version: API_VERSION.to_owned(),
         schema_version: schema::ENVELOPE.to_owned(),
-        operation_id,
-        revision,
-        as_of: as_of.unwrap_or_else(now),
-        next_status_change_at,
-        transport,
-        outcome,
-        data,
-        detail_ref,
-        error,
+        operation_id: fields.operation_id,
+        revision: fields.revision,
+        as_of: fields.as_of.unwrap_or_else(now),
+        next_status_change_at: fields.next_status_change_at,
+        transport: fields.transport,
+        outcome: fields.outcome,
+        data: fields.data,
+        detail_ref: fields.detail_ref,
+        error: fields.error,
     };
     let encoded = serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
     let encoded = if encoded.len() <= MAX_JSON_BYTES {
@@ -967,7 +974,7 @@ fn run_with_operation_at(
         setup::preflight(plan)?;
         Some(
             boreal_service::ProjectElection::try_acquire(
-                &plan.project_root.join(".boreal/runtime/setup"),
+                plan.project_root.join(".boreal/runtime/setup"),
                 format!("setup:{}", plan.project_root.display()),
                 format!("setup-process:{}", std::process::id()),
             )
@@ -2225,26 +2232,23 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
             // command namespace.
             path.push(arg.clone());
             index += 1;
-        } else if !path.is_empty()
+        } else if (!path.is_empty()
             && options.positionals.is_empty()
-            && command_registry::is_path_prefix(&path, arg)
-        {
-            path.push(arg.clone());
-            index += 1;
-        } else if (path.len() < 2
-            && !matches!(
-                path.first().map(String::as_str),
-                Some(
-                    "init"
-                        | "backup"
-                        | "restore"
-                        | "completion"
-                        | "start"
-                        | "done"
-                        | "run"
-                        | "events"
-                )
-            ))
+            && command_registry::is_path_prefix(&path, arg))
+            || (path.len() < 2
+                && !matches!(
+                    path.first().map(String::as_str),
+                    Some(
+                        "init"
+                            | "backup"
+                            | "restore"
+                            | "completion"
+                            | "start"
+                            | "done"
+                            | "run"
+                            | "events"
+                    )
+                ))
             || (path.len() == 2 && {
                 let mut candidate = path.clone();
                 candidate.push(arg.clone());
@@ -3185,8 +3189,8 @@ fn review_list_result(
     let reviews = app
         .review_list(
             &project,
-            parsed.options.limit.unwrap_or(50).clamp(1, 500) as u64,
-            parsed.options.offset.unwrap_or(0) as u64,
+            parsed.options.limit.unwrap_or(50).clamp(1, 500),
+            parsed.options.offset.unwrap_or(0),
         )
         .map_err(map_application_error)?;
     let revision = store_revision(store, &project)?;
@@ -3251,7 +3255,7 @@ fn migration_result(
     store: &SqliteStore,
     verify: bool,
 ) -> Result<CliResult, CliError> {
-    let project = project_argument(parsed, 0)?;
+    let _project = project_argument(parsed, 0)?;
     let input = parsed
         .options
         .input
@@ -3336,7 +3340,7 @@ fn migration_apply_result(
         ));
     }
     let project = project_argument(parsed, 0)?;
-    let expected_revision = parsed
+    let _expected_revision = parsed
         .options
         .expected_revision
         .ok_or_else(|| CliError::invalid("migration apply requires --expected-revision"))?;
@@ -4492,17 +4496,7 @@ fn action_decision_json(
 ) -> Value {
     boreal_application::action_decision_json(decision, context_available)
 }
-/// Select a candidate for discovery without turning a compatibility status
-/// hint into authorization. Once the store supplies v3 identity/proof facts,
-/// this is exactly the server-derived Claim decision. Until then, the real
-/// claim/start mutation remains the authority and can reject the candidate.
-fn status_item_selection_eligible(item: &boreal_application::StatusWork) -> bool {
-    item.claimable_for_actor()
-}
-
-use boreal_application::{
-    action_denial_code, action_input_name, action_kind_name, actor_role_name,
-};
+use boreal_application::{action_input_name, action_kind_name};
 
 fn lifecycle_name(value: PersistedLifecycle) -> &'static str {
     match value {
@@ -5859,7 +5853,10 @@ fn guide_for_work(
                     )
             })
         {
-            let attempt = item.attempt.as_ref().expect("bound attempt");
+            let attempt = match item.attempt.as_ref() {
+                Some(attempt) => attempt,
+                None => unreachable!("attempt presence was checked before building guidance"),
+            };
             let gate = &item
                 .gates
                 .gates
@@ -6099,7 +6096,7 @@ fn guide_idle(
         provenance: GuidanceProvenanceDto {
             registry_version: "directives.v1".to_owned(),
             registry_path: "boreal.agent.directive.registry.v1".to_owned(),
-            source_snapshot_hash: format!("{}", env!("BOREAL_BUILD_SOURCE_ID")),
+            source_snapshot_hash: env!("BOREAL_BUILD_SOURCE_ID").to_owned(),
             config_identity: sha256_content_digest(project.as_str().as_bytes()),
             gap_codes: reasons,
             workflow_refs: vec![
@@ -6338,30 +6335,32 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
     // is part of the closeout identity, not a post-receipt presentation step.
     let summary_body = read_summary_body(parsed)?;
     let summary = summary_payload(&receipt, &summary_body, operation);
-    let parent_request_digest = finish_close_request_digest(
-        &ProjectId::new(project.clone()),
-        &work_id,
-        expected_attempt,
-        expected_fence,
-        &parsed.options.actor,
-        &parsed.options.session,
-        parsed.options.expected_revision,
-        &receipt,
-        &summary_body,
-    );
+    let project_id = ProjectId::new(project.clone());
+    let parent_request_digest = finish_close_request_digest(FinishCloseDigestInput {
+        project: &project_id,
+        work_id: &work_id,
+        attempt: expected_attempt,
+        fence: expected_fence,
+        actor: &parsed.options.actor,
+        session: &parsed.options.session,
+        expected_revision: parsed.options.expected_revision,
+        receipt: &receipt,
+        summary_body: &summary_body,
+    });
     let result_operation = finish_result_operation_id(operation);
-    ensure_finish_parent_intent(
-        &journal,
+    let finish_context = FinishCloseJournalContext {
+        journal: &journal,
         operation,
-        &ProjectId::new(project.clone()),
-        &parsed.options.actor,
-        &parsed.options.session,
-        expected_attempt,
-        expected_fence,
-        parsed.options.expected_revision,
-        &parent_request_digest,
-        &result_operation,
-    )?;
+        project: &project_id,
+        actor: &parsed.options.actor,
+        session: &parsed.options.session,
+        attempt: expected_attempt,
+        fence: expected_fence,
+        expected_revision: parsed.options.expected_revision,
+        request_digest: &parent_request_digest,
+        result_operation: &result_operation,
+    };
+    ensure_finish_parent_intent(&finish_context)?;
     if let Some(readback) = finish_result_readback(&journal, operation, &result_operation)? {
         return Ok(readback);
     }
@@ -6430,7 +6429,7 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         .prepare_finish(
             adapter,
             attempt_request(
-                &ProjectId::new(project.clone()),
+                &project_id,
                 &work_id,
                 &AttemptId::new(expected_attempt),
                 &parsed.options,
@@ -6509,20 +6508,7 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             })).collect::<Vec<_>>(),
         })),
     });
-    append_finish_result_operation(
-        &journal,
-        operation,
-        &result_operation,
-        &ProjectId::new(project),
-        &parsed.options.actor,
-        &parsed.options.session,
-        expected_attempt,
-        expected_fence,
-        parsed.options.expected_revision,
-        close_outcome,
-        &parent_request_digest,
-        &close_data,
-    )?;
+    append_finish_result_operation(&finish_context, close_outcome, &close_data)?;
     bounded_result(Some(close_data), Some(finalized.revision)).map(|mut result| {
         result.outcome = close_outcome;
         result
@@ -8618,46 +8604,6 @@ fn attempt_json_with_current(
     json!({"attempt_id": mutation.attempt_id.as_str(), "fence": mutation.fence.get(), "phase": format!("{:?}", mutation.phase).to_ascii_lowercase(), "lease_deadline": stamp(mutation.lease_deadline.as_millis()), "hard_deadline": stamp(mutation.hard_deadline.as_millis()), "deadline_source": "claim_hard_budget", "replayed": mutation.replayed, "current": current})
 }
 
-fn resume_action(
-    options: &CliOptions,
-    project: &ProjectId,
-    _work_id: &str,
-    attempt: &AttemptRecord,
-) -> NextActionDto {
-    NextActionDto {
-        directive_id: "attempt.resume@v1".to_owned(),
-        severity: "required".to_owned(),
-        title: "Resume the current fenced attempt".to_owned(),
-        instruction: "Reload the durable attempt and continue; do not claim replacement work."
-            .to_owned(),
-        subject: SubjectDto {
-            subject_type: "attempt".to_owned(),
-            id: attempt.attempt_id.clone(),
-        },
-        safe_argv: vec![
-            "bwrk".to_owned(),
-            "agent".to_owned(),
-            "resume".to_owned(),
-            "--project".to_owned(),
-            project.as_str().to_owned(),
-            "--actor".to_owned(),
-            options.actor.clone(),
-            "--harness".to_owned(),
-            options.harness.clone(),
-            "--session".to_owned(),
-            options.session.clone(),
-            "--attempt".to_owned(),
-            attempt.attempt_id.clone(),
-            "--fence".to_owned(),
-            attempt.fence.to_string(),
-            "--json".to_owned(),
-        ],
-        cwd: ".".to_owned(),
-        runner: "boreal_cli".to_owned(),
-        shell: false,
-    }
-}
-
 fn start_action(
     options: &CliOptions,
     project: &ProjectId,
@@ -8800,17 +8746,30 @@ fn bounded_result(data: Option<Value>, revision: Option<u64>) -> Result<CliResul
     })
 }
 
-fn finish_close_request_digest(
-    project: &ProjectId,
-    work_id: &str,
-    attempt: &str,
+struct FinishCloseDigestInput<'a> {
+    project: &'a ProjectId,
+    work_id: &'a str,
+    attempt: &'a str,
     fence: u64,
-    actor: &str,
-    session: &str,
+    actor: &'a str,
+    session: &'a str,
     expected_revision: Option<u64>,
-    receipt: &ReceiptPayload,
-    summary_body: &str,
-) -> String {
+    receipt: &'a ReceiptPayload,
+    summary_body: &'a str,
+}
+
+fn finish_close_request_digest(input: FinishCloseDigestInput<'_>) -> String {
+    let FinishCloseDigestInput {
+        project,
+        work_id,
+        attempt,
+        fence,
+        actor,
+        session,
+        expected_revision,
+        receipt,
+        summary_body,
+    } = input;
     canonical_request_digest(
         "finish.close/v2",
         json!({
@@ -8912,18 +8871,35 @@ fn finish_application_outcome(outcome: StoreOperationOutcome) -> ApplicationOutc
     }
 }
 
-fn ensure_finish_parent_intent(
-    journal: &AuthenticatedOperationJournal<'_>,
-    operation: &str,
-    project: &ProjectId,
-    actor: &str,
-    session: &str,
-    attempt: &str,
+#[derive(Clone, Copy)]
+struct FinishCloseJournalContext<'a, 'store> {
+    journal: &'a AuthenticatedOperationJournal<'store>,
+    operation: &'a str,
+    project: &'a ProjectId,
+    actor: &'a str,
+    session: &'a str,
+    attempt: &'a str,
     fence: u64,
     expected_revision: Option<u64>,
-    request_digest: &str,
-    result_operation: &str,
+    request_digest: &'a str,
+    result_operation: &'a str,
+}
+
+fn ensure_finish_parent_intent(
+    context: &FinishCloseJournalContext<'_, '_>,
 ) -> Result<(), CliError> {
+    let FinishCloseJournalContext {
+        journal,
+        operation,
+        project,
+        actor,
+        session,
+        attempt,
+        fence,
+        expected_revision,
+        request_digest,
+        result_operation,
+    } = *context;
     if let Some(readback) = journal.readback(operation).map_err(map_application_error)? {
         let existing = readback.operation.ok_or_else(|| {
             CliError::with(
@@ -9114,19 +9090,22 @@ fn finish_result_readback(
 }
 
 fn append_finish_result_operation(
-    journal: &AuthenticatedOperationJournal<'_>,
-    parent_operation: &str,
-    result_operation: &str,
-    project: &ProjectId,
-    actor: &str,
-    session: &str,
-    attempt: &str,
-    fence: u64,
-    expected_revision: Option<u64>,
+    context: &FinishCloseJournalContext<'_, '_>,
     outcome: ApplicationOutcome,
-    parent_request_digest: &str,
     result: &Value,
 ) -> Result<(), CliError> {
+    let FinishCloseJournalContext {
+        journal,
+        operation: parent_operation,
+        result_operation,
+        project,
+        actor,
+        session,
+        attempt,
+        fence,
+        expected_revision,
+        request_digest: parent_request_digest,
+    } = *context;
     let created_at = now();
     let result_json = json!({
         "parent_operation_id": parent_operation,
@@ -9336,38 +9315,6 @@ fn find_session_work(
         .map(|attempt| attempt.work_id))
 }
 
-fn select_claimable_work(
-    store: &SqliteStore,
-    project: &ProjectId,
-    actor: &str,
-    session: &str,
-) -> Result<Option<String>, CliError> {
-    let snapshot = boreal_application::project_status_from_store_for_session(
-        store,
-        project,
-        &boreal_domain::ActorContext {
-            actor_id: ActorId::new(actor.to_owned()),
-            role: boreal_domain::ActorRole::Agent,
-        },
-        Some(session),
-        TimestampMs::from_millis(now_ms_u64()),
-        1_000,
-        0,
-    )
-    .map_err(|message| {
-        CliError::with(
-            ErrorCode::GuidanceUnavailable,
-            ApplicationOutcome::Failed,
-            message,
-        )
-    })?;
-    Ok(snapshot
-        .items
-        .into_iter()
-        .find(|item| item.work.kind == WorkKind::Task && status_item_selection_eligible(item))
-        .map(|item| item.work.id.as_str().to_owned()))
-}
-
 /// Find a likely candidate for goal-less `start` without registering a
 /// session just to discover that the project is idle. This is a readiness
 /// hint only: `claim_result` registers the requested session and the store
@@ -9416,32 +9363,6 @@ fn status_item_start_candidate_eligible(item: &boreal_application::StatusWork) -
                 ..
             }
         )
-}
-
-fn phase_status(phase: AttemptPhase) -> &'static str {
-    match phase {
-        AttemptPhase::Claimed => "claimed",
-        AttemptPhase::Accepted => "accepted",
-        AttemptPhase::Running => "in_progress",
-        AttemptPhase::Verifying => "needs_verification",
-        AttemptPhase::ExpiryPending | AttemptPhase::Expired => "expired_review",
-        AttemptPhase::Completed => "complete",
-        AttemptPhase::Failed => "failed",
-        AttemptPhase::Released => "ready",
-        AttemptPhase::Cancelled => "cancelled",
-    }
-}
-
-fn request_digest(operation: &str, project: &ProjectId, work: &str, attempt: &str) -> String {
-    canonical_request_digest(
-        "attempt.transition/v1",
-        json!({
-            "operation_id": operation,
-            "project_id": project.as_str(),
-            "work_id": work,
-            "attempt_id": attempt,
-        }),
-    )
 }
 
 fn cli_claim_request_digest(
@@ -11265,17 +11186,17 @@ mod tests {
     fn finish_close_digest_changes_for_each_proof_relevant_receipt_field() {
         let base = finish_receipt_fixture();
         let digest = |receipt: &ReceiptPayload| {
-            finish_close_request_digest(
-                &ProjectId::new("finish-project"),
-                "finish-work",
-                "finish-attempt",
-                3,
-                "actor-finish",
-                "session-finish",
-                Some(19),
+            finish_close_request_digest(FinishCloseDigestInput {
+                project: &ProjectId::new("finish-project"),
+                work_id: "finish-work",
+                attempt: "finish-attempt",
+                fence: 3,
+                actor: "actor-finish",
+                session: "session-finish",
+                expected_revision: Some(19),
                 receipt,
-                "finish summary",
-            )
+                summary_body: "finish summary",
+            })
         };
         let expected = digest(&base);
         let mut variants = Vec::new();

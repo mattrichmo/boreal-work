@@ -366,7 +366,7 @@ mod signal {
             PENDING.store(0, Ordering::SeqCst);
             let mut previous = [(0, 0); 2];
             for (slot, number) in previous.iter_mut().zip([SIGINT, SIGTERM]) {
-                let handler = unsafe { signal(number, record as usize) };
+                let handler = unsafe { signal(number, record as *const () as usize) };
                 if handler == SIGNAL_ERROR {
                     return Err(io::Error::last_os_error());
                 }
@@ -423,10 +423,11 @@ fn envelope_from_cli_error(operation: &str, error: CliError) -> Envelope<Value> 
         transport: error.transport,
         outcome: error.outcome,
         data: None,
-        detail_ref: error.detail_ref,
+        detail_ref: error.detail_ref.map(|detail_ref| *detail_ref),
         error: Some(
             error
                 .protocol_error
+                .map(|error| *error)
                 .unwrap_or_else(|| ProtocolError::new(error.code, error.message, false)),
         ),
     }
