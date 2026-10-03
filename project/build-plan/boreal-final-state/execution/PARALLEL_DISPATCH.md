@@ -55,24 +55,27 @@ recorded.
 - When tasks have disjoint files, they can run concurrently only when their
   dependencies and sprint wave also permit it.
 
-## Sprint waves
+## Sprint sequencing
 
-The maximum cross-sprint overlap is set by `MASTER_PLAN.md`:
+The active cross-sprint schedule is revision 4 in
+`REVISION_V4.md`; the imported task graph is the executable dependency source.
+The older numbered-wave summary is intentionally removed because it omitted
+BW-S12 and BW-S13. Sprint containers have no executable dependency edges, so
+the following groups summarize safe entry points without replacing task-level
+readiness:
 
-| Wave | Sprints that may overlap |
+| Entry point | Work that may proceed when its task prerequisites and file grants allow |
 | --- | --- |
-| 0 | BW-S00 |
-| 1 | BW-S01, BW-S02, BW-S04 |
-| 2 | BW-S03, BW-S05 |
-| 3 | BW-S06 |
-| 4 | BW-S07 |
-| 5 | BW-S08, BW-S10 |
-| 6 | BW-S09, while remaining BW-S10 diagnostic work finishes |
-| 7 | BW-S11 |
+| Initial qualification | BW-S00; BW-S00-T90 is the gate before dependent implementation work. |
+| After BW-S00-T90 | BW-S01, BW-S02, BW-S04, BW-S12-T01, and nonconflicting BW-S08 work; each leaf still follows its own dependency edges. |
+| Parallel core work | BW-S03, BW-S05, BW-S06, BW-S07, BW-S08, BW-S10, and the remaining BW-S12 tasks as their exact prerequisites pass. |
+| General scheduling and delivery | BW-S13-T01 follows BW-S12-T01 and BW-S05-T01; T02 follows T01 and BW-S12-T05; T03 follows T01 and BW-S12-T90. |
+| Final integration | BW-S11 starts only after BW-S09-T90, BW-S10-T90, BW-S12-T90, and BW-S13-T90 are accepted. |
 
-Within a sprint, the sprint's `Parallelism` section sets dependency order, and
-the exact task packets set file ownership. The coordinator checks both before
-each dispatch; a wave does not make overlapping files safe.
+BW-S12-T02 and BW-S12-T03 may overlap when their exact write sets remain
+disjoint. The coordinator checks the current graph and whole-file grants before
+each dispatch; a sprint label or sequence group does not make overlapping
+files safe.
 
 ## Shared-patch request
 
