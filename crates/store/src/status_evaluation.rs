@@ -384,10 +384,12 @@ impl SqliteStore {
                     snapshot.project_id.as_str(),
                     Revision(snapshot.revision.0),
                     row,
-                    &actor,
-                    &authority_root,
-                    session_id.as_deref(),
-                    as_of,
+                    super::status_facts::CanonicalDecisionContext {
+                        actor: &actor,
+                        authority_root: &authority_root,
+                        session_id: session_id.as_deref(),
+                        as_of,
+                    },
                 )
             });
             match inputs {

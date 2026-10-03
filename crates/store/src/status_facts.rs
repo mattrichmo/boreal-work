@@ -4,6 +4,13 @@ use super::*;
 use boreal_domain::decision_inputs as facts;
 use boreal_domain::{ActorContext, Revision, TimestampMs};
 
+pub(crate) struct CanonicalDecisionContext<'a> {
+    pub(crate) actor: &'a ActorContext,
+    pub(crate) authority_root: &'a str,
+    pub(crate) session_id: Option<&'a str>,
+    pub(crate) as_of: TimestampMs,
+}
+
 pub(crate) fn validate_pinned_status_cursor(
     project_id: &str,
     work_id: &str,
@@ -31,64 +38,20 @@ pub(crate) fn validate_pinned_status_cursor(
     }
 }
 
-#[cfg(test)]
-mod status_seed_tests {
-    use super::*;
-
-    #[test]
-    fn status_seed_rejects_a_pinned_proof_revision_mismatch() {
-        let pin = PinnedRequirements {
-            project_id: "project".to_owned(),
-            work_id: "work-1".to_owned(),
-            proof_revision: 2,
-            subject_kind: RequirementSubjectKind::Task,
-            profile: profiles::ProfileIdentity {
-                profile_id: "focused".to_owned(),
-                version: 1,
-                policy_digest: "sha256:test".to_owned(),
-            },
-            provenance: profiles::RequirementProvenance {
-                profile_id: "focused".to_owned(),
-                profile_version: 1,
-                profile_digest: "sha256:test".to_owned(),
-                resolved_at: "unix-ms:1".to_owned(),
-                source: "profile:focused/1".to_owned(),
-            },
-            declarations: Vec::new(),
-            resolved_digest: "sha256:resolved".to_owned(),
-        };
-
-        let result = validate_pinned_status_cursor(
-            "project",
-            "work-1",
-            CanonicalStatusSeed {
-                entity_revision: Some(3),
-                proof_revision: Some(1),
-                unresolved_recovery: false,
-                has_gate_exception: false,
-            },
-            &pin,
-        );
-
-        assert!(matches!(
-            result,
-            Err(StoreError::Corrupt(detail))
-                if detail == "pinned requirement and proof cursor disagree"
-        ));
-    }
-}
-
 impl SqliteStore {
     pub(crate) fn canonical_decision_inputs(
         &self,
         project_id: &str,
         revision: Revision,
         row: &StatusWorkRecord,
-        actor: &ActorContext,
-        authority_root: &str,
-        session_id: Option<&str>,
-        as_of: TimestampMs,
+        context: CanonicalDecisionContext<'_>,
     ) -> Result<facts::DecisionInputs, StoreError> {
+        let CanonicalDecisionContext {
+            actor,
+            authority_root,
+            session_id,
+            as_of,
+        } = context;
         let work_id = row.work.id.as_str();
         let mut cursor = self.prepare(
             "SELECT entity_revision, proof_revision FROM boreal_entity_revision
@@ -660,5 +623,52 @@ impl SqliteStore {
                 Repair,
             ]),
         })
+    }
+}
+
+#[cfg(test)]
+mod status_seed_tests {
+    use super::*;
+
+    #[test]
+    fn status_seed_rejects_a_pinned_proof_revision_mismatch() {
+        let pin = PinnedRequirements {
+            project_id: "project".to_owned(),
+            work_id: "work-1".to_owned(),
+            proof_revision: 2,
+            subject_kind: RequirementSubjectKind::Task,
+            profile: profiles::ProfileIdentity {
+                profile_id: "focused".to_owned(),
+                version: 1,
+                policy_digest: "sha256:test".to_owned(),
+            },
+            provenance: profiles::RequirementProvenance {
+                profile_id: "focused".to_owned(),
+                profile_version: 1,
+                profile_digest: "sha256:test".to_owned(),
+                resolved_at: "unix-ms:1".to_owned(),
+                source: "profile:focused/1".to_owned(),
+            },
+            declarations: Vec::new(),
+            resolved_digest: "sha256:resolved".to_owned(),
+        };
+
+        let result = validate_pinned_status_cursor(
+            "project",
+            "work-1",
+            CanonicalStatusSeed {
+                entity_revision: Some(3),
+                proof_revision: Some(1),
+                unresolved_recovery: false,
+                has_gate_exception: false,
+            },
+            &pin,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StoreError::Corrupt(detail))
+                if detail == "pinned requirement and proof cursor disagree"
+        ));
     }
 }
