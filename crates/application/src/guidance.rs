@@ -89,7 +89,7 @@ impl Directive {
         if self.safe_argv[0] != "bwrk" {
             return Err(DirectiveValidationError::UnsafeSafeArg);
         }
-        if !self.safe_argv.iter().any(|arg| *arg == "--json") {
+        if !self.safe_argv.contains(&"--json") {
             return Err(DirectiveValidationError::MissingJsonFlag);
         }
         if self.safe_argv.iter().any(|arg| !is_safe_arg(arg)) {

@@ -479,9 +479,7 @@ impl GlobalManagerApplication {
                         }
                         .map(str::to_owned)
                         .or_else(|| {
-                            let item_id = if collection == "status_history" {
-                                row.get("item_id").and_then(Value::as_str)
-                            } else if collection == "note_links" {
+                            let item_id = if matches!(collection, "status_history" | "note_links") {
                                 row.get("item_id").and_then(Value::as_str)
                             } else if collection == "relationships" {
                                 row.get("source_id").and_then(Value::as_str)
@@ -594,7 +592,7 @@ impl GlobalManagerApplication {
                         arr(&state, "notes")
                             .iter()
                             .find(|note| note["id"] == note_id)
-                            .map(|note| compact_note_link(note))
+                            .map(compact_note_link)
                     })
                     .collect::<Vec<_>>();
                 item["linked_notes"] = json!(links);
@@ -1011,12 +1009,10 @@ impl GlobalManagerApplication {
                     .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
             }
         }
-        if command == "project attach-folder" {
-            if string(p, "path")?.trim().is_empty() {
-                return Err(GlobalManagerError::Invalid(
-                    "folder path is required".into(),
-                ));
-            }
+        if command == "project attach-folder" && string(p, "path")?.trim().is_empty() {
+            return Err(GlobalManagerError::Invalid(
+                "folder path is required".into(),
+            ));
         }
         if matches!(
             command,

@@ -753,7 +753,7 @@ impl<'a> KnowledgeApplication<'a> {
                 || stored.title != reviewed.draft.title
                 || stored.body != reviewed.draft.body
                 || decision.actor_id != reviewed.reviewer_id
-                || stored.citations_json != citations_json(&reviewed.draft.citations).to_string()
+                || !citations_json_matches(&stored.citations_json, &reviewed.draft.citations)
             {
                 return Err(KnowledgeError::Invalid(
                     "supplied memory result differs from durable reviewed content".into(),
@@ -1088,6 +1088,10 @@ impl<'a> KnowledgeApplication<'a> {
     /// work graph into the selected project. Historical attempts, evidence,
     /// and terminal outcomes remain in the immutable source document and are
     /// never promoted into accepted v2 proof.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserves the established public migration-apply API and its explicit project, actor, operation, revision, input, and timestamp fields"
+    )]
     pub fn apply_migration_to_store(
         &self,
         store: &SqliteStore,
@@ -1116,7 +1120,7 @@ impl<'a> KnowledgeApplication<'a> {
 
         let dry_run = self.migration_dry_run(format!("{operation_id}:plan"), input)?;
         if !dry_run.ready {
-            return Ok(self.apply_migration(&dry_run)?);
+            return self.apply_migration(&dry_run);
         }
         let mut document = match &dry_run.kind {
             MigrationPlanKind::Legacy { plan } => plan.apply().map_err(|error| {
@@ -1752,6 +1756,14 @@ fn citations_json(citations: &[boreal_memory::Citation]) -> Value {
         .map(|c| json!({"source_version_id":c.source_version_id,"location":c.location}))
         .collect::<Vec<_>>())
 }
+#[expect(
+    clippy::cmp_owned,
+    reason = "persisted citations are canonical JSON text; comparing to the Value directly would compare against a JSON string scalar instead of its serialized array"
+)]
+fn citations_json_matches(stored: &str, citations: &[boreal_memory::Citation]) -> bool {
+    stored == citations_json(citations).to_string()
+}
+
 fn stored_draft(record: &boreal_store::memory::MemoryDraftRecord) -> Result<Draft, KnowledgeError> {
     let values: Value = serde_json::from_str(&record.citations_json)
         .map_err(|e| KnowledgeError::Invalid(e.to_string()))?;
