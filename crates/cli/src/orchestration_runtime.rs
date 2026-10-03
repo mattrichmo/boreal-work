@@ -19,6 +19,21 @@ use std::thread;
 use std::time::{Duration, Instant};
 static RUNTIME_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub(crate) static RUNTIME_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) struct DispatchClaimInput<'a> {
+    pub(crate) operation: &'a str,
+    pub(crate) work_id: &'a str,
+    pub(crate) run_id: &'a str,
+    pub(crate) claim: &'a Value,
+    pub(crate) policy: HarnessPolicy,
+    pub(crate) policy_digest: &'a str,
+}
+
+type WorkerSlot = (
+    boreal_application::orchestration_runtime::WorkerIdentity,
+    Option<(String, thread::JoinHandle<Result<CliResult, CliError>>)>,
+);
+
 pub(crate) fn runtime_mutation_guard() -> MutexGuard<'static, ()> {
     RUNTIME_MUTATION_LOCK
         .lock()
@@ -34,7 +49,7 @@ fn install_runtime_signal_handlers() {
         fn signal(sig: i32, handler: usize) -> usize;
     }
     unsafe {
-        let handler = runtime_signal_handler as usize;
+        let handler = runtime_signal_handler as *const () as usize;
         let _ = signal(2, handler);
         let _ = signal(15, handler);
     }
@@ -42,14 +57,17 @@ fn install_runtime_signal_handlers() {
 
 pub(crate) fn dispatch_claim(
     parsed: &ParsedCommand,
-    operation: &str,
     store: &SqliteStore,
-    work_id: &str,
-    run_id: &str,
-    claim: &Value,
-    policy: HarnessPolicy,
-    policy_digest: &str,
+    dispatch: DispatchClaimInput<'_>,
 ) -> Result<Value, CliError> {
+    let DispatchClaimInput {
+        operation,
+        work_id,
+        run_id,
+        claim,
+        policy,
+        policy_digest,
+    } = dispatch;
     let context = project_context::resolve(parsed)?;
     let workspace = context
         .root
@@ -429,7 +447,7 @@ pub(crate) fn dispatch_claim(
         None,
     ) {
         terminate_process_group(pid, &mut process);
-        if let (Ok(job), Ok(c)) = (
+        if let (Ok(Some(job)), Ok(c)) = (
             store.orchestration_process_job(&context.project_id, &job_id),
             runtime_context(
                 parsed,
@@ -439,18 +457,16 @@ pub(crate) fn dispatch_claim(
                 json!({"job_id":job_id,"pid":pid,"error":e.to_string()}),
             ),
         ) {
-            if let Some(job) = job {
-                let _ = runtime.transition_process(
-                    &c,
-                    &job_id,
-                    job.revision,
-                    "readback_required",
-                    Some(pid as u64),
-                    None,
-                    None,
-                    Some("child was stopped after process-start journal transition failed"),
-                );
-            }
+            let _ = runtime.transition_process(
+                &c,
+                &job_id,
+                job.revision,
+                "readback_required",
+                Some(pid as u64),
+                None,
+                None,
+                Some("child was stopped after process-start journal transition failed"),
+            );
         }
         return Err(map_runtime_error(e));
     }
@@ -900,10 +916,7 @@ pub(crate) fn daemon_run(
             CliError::invalid("parallel local workers require a file-backed project database")
         })?
         .to_path_buf();
-    let mut slots: Vec<(
-        boreal_application::orchestration_runtime::WorkerIdentity,
-        Option<(String, thread::JoinHandle<Result<CliResult, CliError>>)>,
-    )> = pool
+    let mut slots: Vec<WorkerSlot> = pool
         .workers
         .into_iter()
         .take(workers as usize)

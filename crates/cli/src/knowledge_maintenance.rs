@@ -3,6 +3,30 @@ use super::*;
 use boreal_application::{canonical_request_digest, KnowledgeMaintenanceApplication};
 use boreal_store::V3MutationContext;
 
+struct PublishedMemoryPlanDigest<'a> {
+    action: &'a str,
+    project: &'a str,
+    revision: u64,
+    report: &'a boreal_memory::ImportReport,
+    source_id: &'a str,
+    source_digest: &'a str,
+    canonical_id: &'a str,
+    canonical_digest: Option<&'a str>,
+}
+
+struct PublishedMemoryApply<'a> {
+    parsed: &'a ParsedCommand,
+    store: &'a SqliteStore,
+    operation: &'a str,
+    project: &'a str,
+    input: &'a Value,
+    plan_digest: &'a str,
+    expected: u64,
+    source_id: &'a str,
+    canonical_id: &'a str,
+    merging: bool,
+}
+
 pub(crate) fn supported(path: &[String]) -> bool {
     matches!(path,[a,b] if (a=="duplicate"&&b=="scan") || (a=="merge"&&matches!(b.as_str(),"plan"|"apply"|"show")) || (a=="compact"&&matches!(b.as_str(),"analyze"|"apply"|"show")) || (a=="vault"&&b=="init") || (a=="memory"&&b=="init"))
 }
@@ -114,16 +138,16 @@ pub(crate) fn run(
                     ));
                 }
                 let revision = store.project_revision(&project).map_err(map_store_error)?.0;
-                let digest = published_plan_digest(
-                    "merge",
-                    &project,
+                let digest = published_plan_digest(PublishedMemoryPlanDigest {
+                    action: "merge",
+                    project: &project,
                     revision,
-                    &report,
+                    report: &report,
                     source_id,
-                    &source.content_digest,
+                    source_digest: &source.content_digest,
                     canonical_id,
-                    Some(&canonical.content_digest),
-                );
+                    canonical_digest: Some(&canonical.content_digest),
+                });
                 let mut citations = source.source_citations.clone();
                 citations.extend(canonical.source_citations.clone());
                 citations.sort();
@@ -182,18 +206,18 @@ pub(crate) fn run(
                 if canonical_kind != "published_memory" {
                     return Err(CliError::invalid("published memory can only be consolidated with another published memory entry"));
                 }
-                return apply_published_memory(
+                return apply_published_memory(PublishedMemoryApply {
                     parsed,
                     store,
                     operation,
-                    &project,
-                    &input,
-                    &plan_digest,
+                    project: &project,
+                    input: &input,
+                    plan_digest: &plan_digest,
                     expected,
                     source_id,
                     canonical_id,
-                    true,
-                );
+                    merging: true,
+                });
             }
             let payload = json!({"project":project,"source_kind":source_kind,"source_id":source_id,"canonical_kind":canonical_kind,"canonical_id":canonical_id,"plan_digest":plan_digest,"expected_revision":expected});
             let context = context(
@@ -246,7 +270,16 @@ pub(crate) fn run(
                 let note_path = memory_root.as_ref()?.join(&entry.manifest_path);
                 let bytes = fs::read(note_path).ok()?.len();
                 if bytes < minimum { return None; }
-                let source = published_plan_digest("compact", &project, revision, report, &entry.memory_entry_id, &entry.content_digest, "", None);
+                let source = published_plan_digest(PublishedMemoryPlanDigest {
+                    action: "compact",
+                    project: &project,
+                    revision,
+                    report,
+                    source_id: &entry.memory_entry_id,
+                    source_digest: &entry.content_digest,
+                    canonical_id: "",
+                    canonical_digest: None,
+                });
                 Some(json!({"kind":"published_memory","id":entry.memory_entry_id,"source_revision":revision,"source_digest":entry.content_digest,"bytes":bytes,"plan_digest":source,"source_citations":entry.source_citations,"git_revision":report.git_revision,"manifest_identity":report.manifest_identity,"summary_required_from_operator":true,"original_preserved":true}))
             }).collect::<Vec<_>>()).unwrap_or_default();
             let mut existing = value["candidates"].as_array().cloned().unwrap_or_default();
@@ -273,18 +306,18 @@ pub(crate) fn run(
             let source_kind = field(&input, "source_kind")?;
             let source_id = field(&input, "source_id")?;
             if source_kind == "published_memory" {
-                return apply_published_memory(
+                return apply_published_memory(PublishedMemoryApply {
                     parsed,
                     store,
                     operation,
-                    &project,
-                    &input,
-                    &plan_digest,
+                    project: &project,
+                    input: &input,
+                    plan_digest: &plan_digest,
                     expected,
                     source_id,
-                    "",
-                    false,
-                );
+                    canonical_id: "",
+                    merging: false,
+                });
             }
             let source_revision = input
                 .get("source_revision")
@@ -411,39 +444,31 @@ fn published_entry<'a>(
         })
 }
 
-fn published_plan_digest(
-    action: &str,
-    project: &str,
-    revision: u64,
-    report: &boreal_memory::ImportReport,
-    source_id: &str,
-    source_digest: &str,
-    canonical_id: &str,
-    canonical_digest: Option<&str>,
-) -> String {
+fn published_plan_digest(plan: PublishedMemoryPlanDigest<'_>) -> String {
     canonical_request_digest(
         "maintenance.published_memory.plan.v1",
         json!({
-            "action":action,"project_id":project,"revision":revision,
-            "git_revision":report.git_revision,"manifest_identity":report.manifest_identity,
-            "source_id":source_id,"source_digest":source_digest,
-            "canonical_id":canonical_id,"canonical_digest":canonical_digest
+            "action":plan.action,"project_id":plan.project,"revision":plan.revision,
+            "git_revision":plan.report.git_revision,"manifest_identity":plan.report.manifest_identity,
+            "source_id":plan.source_id,"source_digest":plan.source_digest,
+            "canonical_id":plan.canonical_id,"canonical_digest":plan.canonical_digest
         }),
     )
 }
 
-fn apply_published_memory(
-    parsed: &ParsedCommand,
-    store: &SqliteStore,
-    operation: &str,
-    project: &str,
-    input: &Value,
-    plan_digest: &str,
-    expected: u64,
-    source_id: &str,
-    canonical_id: &str,
-    merging: bool,
-) -> Result<CliResult, CliError> {
+fn apply_published_memory(request: PublishedMemoryApply<'_>) -> Result<CliResult, CliError> {
+    let PublishedMemoryApply {
+        parsed,
+        store,
+        operation,
+        project,
+        input,
+        plan_digest,
+        expected,
+        source_id,
+        canonical_id,
+        merging,
+    } = request;
     require_operator(store, project, &parsed.options.actor)?;
     store
         .validate_project_session(project, &parsed.options.actor, &parsed.options.session)
@@ -565,11 +590,7 @@ fn apply_published_memory(
     } else {
         None
     };
-    let canonical_digest = if let Some(entry) = canonical {
-        Some(entry.content_digest.as_str())
-    } else {
-        None
-    };
+    let canonical_digest = canonical.map(|entry| entry.content_digest.as_str());
     if let Some(entry) = canonical {
         if input.get("canonical_digest").and_then(Value::as_str)
             != Some(entry.content_digest.as_str())
@@ -587,16 +608,16 @@ fn apply_published_memory(
             "published memory manifest or source changed; build a fresh plan",
         ));
     }
-    let fresh_plan = published_plan_digest(
-        if merging { "merge" } else { "compact" },
+    let fresh_plan = published_plan_digest(PublishedMemoryPlanDigest {
+        action: if merging { "merge" } else { "compact" },
         project,
         revision,
-        &report,
+        report: &report,
         source_id,
-        &source.content_digest,
-        if merging { canonical_id } else { "" },
+        source_digest: &source.content_digest,
+        canonical_id: if merging { canonical_id } else { "" },
         canonical_digest,
-    );
+    });
     if fresh_plan != plan_digest
         || input
             .get("plan_digest")
