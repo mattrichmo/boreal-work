@@ -29,6 +29,16 @@ const SETUP_SESSION: &str = "executor-regression-setup-session";
 const SESSION: &str = "executor-regression-session";
 const CONFIG: &str = "executor-regression-config";
 
+struct GateDeclarationInput<'a> {
+    executable: &'a str,
+    argv: Vec<&'a str>,
+    observables: Vec<&'a str>,
+    max_runtime_ms: u64,
+    environment_allowlist: Option<Vec<String>>,
+    policy_revision: u64,
+    config_identity: &'a str,
+}
+
 #[test]
 fn standard_boreal_layout_runs_declared_command_from_workspace_root() {
     let mut fixture = Fixture::new("workspace-root");
@@ -178,15 +188,15 @@ fn executor_uses_allowlisted_environment_and_records_measured_fingerprint() {
 
     // A sensitive variable is rejected while the Operator publishes policy,
     // before it can become an immutable policy selected by an attempt.
-    fixture.write_gate_declaration(
-        "./inspect-environment",
-        vec!["./inspect-environment"],
-        vec!["path-present"],
-        30_000,
-        Some(vec!["SECRET_TOKEN".to_owned()]),
-        2,
-        "executor-regression-sensitive-config",
-    );
+    fixture.write_gate_declaration(GateDeclarationInput {
+        executable: "./inspect-environment",
+        argv: vec!["./inspect-environment"],
+        observables: vec!["path-present"],
+        max_runtime_ms: 30_000,
+        environment_allowlist: Some(vec!["SECRET_TOKEN".to_owned()]),
+        policy_revision: 2,
+        config_identity: "executor-regression-sensitive-config",
+    });
     let rejected = fixture.publish_gate("op_sensitive_gate_policy");
     assert_eq!(rejected.status.code(), Some(2), "{}", text(&rejected));
     let rejected_envelope = envelope(&rejected);
@@ -570,29 +580,29 @@ impl Fixture {
         max_runtime_ms: u64,
         environment_allowlist: Option<Vec<String>>,
     ) {
-        self.write_gate_declaration(
+        self.write_gate_declaration(GateDeclarationInput {
             executable,
             argv,
             observables,
             max_runtime_ms,
             environment_allowlist,
-            1,
-            CONFIG,
-        );
+            policy_revision: 1,
+            config_identity: CONFIG,
+        });
         let output = self.publish_gate("op_executor_gate_policy");
         assert_success(&output, "gate policy publish");
     }
 
-    fn write_gate_declaration(
-        &self,
-        executable: &str,
-        argv: Vec<&str>,
-        observables: Vec<&str>,
-        max_runtime_ms: u64,
-        environment_allowlist: Option<Vec<String>>,
-        policy_revision: u64,
-        config_identity: &str,
-    ) {
+    fn write_gate_declaration(&self, input: GateDeclarationInput<'_>) {
+        let GateDeclarationInput {
+            executable,
+            argv,
+            observables,
+            max_runtime_ms,
+            environment_allowlist,
+            policy_revision,
+            config_identity,
+        } = input;
         let state_root = self.database.parent().unwrap();
         let executable_path = self.root.join(executable.trim_start_matches("./"));
         let verifier_digest = boreal_application::sha256_content_digest(
