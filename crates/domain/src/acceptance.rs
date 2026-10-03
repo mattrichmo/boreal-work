@@ -191,7 +191,7 @@ pub struct RequirementDeclarationBody {
 /// result written under the previous identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RequirementDeclaration {
-    Present(RequirementDeclarationBody),
+    Present(Box<RequirementDeclarationBody>),
     Deleted {
         expected: RequirementReference,
     },
@@ -203,7 +203,7 @@ pub enum RequirementDeclaration {
 
 impl RequirementDeclaration {
     pub fn present(body: RequirementDeclarationBody) -> Self {
-        Self::Present(body)
+        Self::Present(Box::new(body))
     }
 
     pub fn deleted(expected: RequirementReference) -> Self {

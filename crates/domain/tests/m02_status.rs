@@ -427,7 +427,7 @@ fn complete_and_cancelled_never_satisfy_close_only_edges() {
     );
     assert_eq!(complete.display_status, DerivedStatus::Complete);
     assert_eq!(
-        idle(&work, &[upstream.clone()], None).display_status,
+        idle(&work, std::slice::from_ref(&upstream), None).display_status,
         DerivedStatus::Queued
     );
     let mut cancelled = upstream.clone();

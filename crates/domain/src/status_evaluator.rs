@@ -374,11 +374,11 @@ fn evaluate_status_inner(
                     ReasonCode::ExpiryReviewRequired,
                 ),
             }
-        } else if submitted {
-            proof_decision(context.gates, &gaps)
-        } else if context.gates.iter().any(|gate| {
-            gate.required && gate.state == GateState::Failed && gate.kind != GateKind::Review
-        }) {
+        } else if submitted
+            || context.gates.iter().any(|gate| {
+                gate.required && gate.state == GateState::Failed && gate.kind != GateKind::Review
+            })
+        {
             proof_decision(context.gates, &gaps)
         } else if work.dispatch_policy == DispatchPolicy::Paused {
             pending(

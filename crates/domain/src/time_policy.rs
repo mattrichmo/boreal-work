@@ -559,10 +559,7 @@ impl RetryPolicy {
         let multiplier = 1_u64
             .checked_shl(shift)
             .ok_or(TimePolicyError::BackoffOverflow)?;
-        let uncapped = self
-            .base_delay_ms
-            .checked_mul(multiplier)
-            .unwrap_or(u64::MAX);
+        let uncapped = self.base_delay_ms.saturating_mul(multiplier);
         Ok(uncapped.min(self.max_delay_ms))
     }
 

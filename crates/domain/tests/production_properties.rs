@@ -81,9 +81,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
     message.extend_from_slice(&(bytes.len() as u64 * 8).to_be_bytes());
 
     let mut state = INITIAL;
-    for chunk in message.chunks_exact(64) {
+    for chunk in message.chunks(64) {
         let mut schedule = [0u32; 64];
-        for (word, encoded) in schedule[..16].iter_mut().zip(chunk.chunks_exact(4)) {
+        for (word, encoded) in schedule[..16].iter_mut().zip(chunk.chunks(4)) {
             *word = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
         }
         for index in 16..64 {
