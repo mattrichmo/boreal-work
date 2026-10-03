@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -563,11 +563,16 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
         .spawn()
         .expect("service launches");
 
-    for _ in 0..300 {
+    let startup_deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < startup_deadline {
         // Binding the socket happens before the host acquires database
         // ownership. A versioned status response proves the service is ready.
-        if socket.exists() && service_status_is_ready(root, database, socket, project, actor) {
-            return Some(child);
+        if socket.exists() {
+            let remaining = startup_deadline.saturating_duration_since(Instant::now());
+            let probe_timeout = remaining.min(Duration::from_millis(250));
+            if service_status_is_ready(root, database, socket, project, actor, probe_timeout) {
+                return Some(child);
+            }
         }
         if child.try_wait().expect("service status reads").is_some() {
             let output = child
@@ -581,10 +586,15 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
             }
             panic!("service exited before becoming ready: {combined}");
         }
-        thread::sleep(Duration::from_millis(10));
+        let remaining = startup_deadline.saturating_duration_since(Instant::now());
+        thread::sleep(remaining.min(Duration::from_millis(10)));
     }
 
-    terminate_if_running(&mut child, SIGKILL);
+    if child.try_wait().expect("service status reads").is_none() {
+        terminate_if_running(&mut child, SIGKILL);
+    } else {
+        let _ = child.wait_with_output();
+    }
     panic!("service did not create its socket within the startup timeout");
 }
 
@@ -594,17 +604,40 @@ fn service_status_is_ready(
     socket: &Path,
     project: &str,
     actor: &str,
+    timeout: Duration,
 ) -> bool {
-    let Ok(output) = Command::new(binary())
+    let Ok(mut probe) = Command::new(binary())
         .current_dir(root)
         .args(["status", project, "--actor", actor, "--db"])
         .arg(database)
         .args(["--socket"])
         .arg(socket)
         .args(["--json"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
     else {
         return false;
+    };
+    let deadline = Instant::now() + timeout;
+    let output = loop {
+        match probe.try_wait() {
+            Ok(Some(_)) => {
+                let Ok(output) = probe.wait_with_output() else {
+                    return false;
+                };
+                break output;
+            }
+            Ok(None) if Instant::now() < deadline => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(10)));
+            }
+            _ => {
+                let _ = probe.kill();
+                let _ = probe.wait();
+                return false;
+            }
+        }
     };
     if !output.status.success() {
         return false;
