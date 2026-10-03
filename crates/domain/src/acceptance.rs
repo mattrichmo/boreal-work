@@ -189,9 +189,13 @@ pub struct RequirementDeclarationBody {
 /// A deleted declaration is retained as a typed historical fact.  It does not
 /// silently become an empty profile, and an altered definition never matches a
 /// result written under the previous identity.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the public Present payload unboxed for downstream source compatibility."
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RequirementDeclaration {
-    Present(Box<RequirementDeclarationBody>),
+    Present(RequirementDeclarationBody),
     Deleted {
         expected: RequirementReference,
     },
@@ -203,7 +207,7 @@ pub enum RequirementDeclaration {
 
 impl RequirementDeclaration {
     pub fn present(body: RequirementDeclarationBody) -> Self {
-        Self::Present(Box::new(body))
+        Self::Present(body)
     }
 
     pub fn deleted(expected: RequirementReference) -> Self {
