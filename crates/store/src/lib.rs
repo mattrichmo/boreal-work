@@ -10,6 +10,9 @@ use boreal_domain::{
     GateKind, GateRequirement, GateState, PersistedLifecycle, ProfileId, ProjectId, ReasonCode,
     Reservation, TimestampMs, WorkId, WorkItem, WorkKind,
 };
+use libsqlite3_sys::{
+    sqlite3_compileoption_get, sqlite3_libversion, sqlite3_libversion_number, sqlite3_sourceid,
+};
 use serde_json::{json, Value};
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -304,6 +307,8 @@ const SQLITE_NOTADB: c_int = 26;
 const SQLITE_ROW: c_int = 100;
 const SQLITE_DONE: c_int = 101;
 const SQLITE_NULL: c_int = 5;
+const SQLITE_RUNTIME_RELEASE_FLOOR: c_int = 3_051_003;
+const SQLITE_RUNTIME_RELEASE_FLOOR_TEXT: &str = "3.51.3";
 const SQLITE_OPEN_READWRITE: c_int = 0x0000_0002;
 const SQLITE_OPEN_CREATE: c_int = 0x0000_0004;
 const SQLITE_OPEN_READONLY: c_int = 0x0000_0001;
@@ -317,9 +322,9 @@ type sqlite3_stmt = c_void;
 type sqlite3_backup = c_void;
 type SqliteDestructor = unsafe extern "C" fn(*mut c_void);
 
-// SQLite is a system library on the supported desktop platforms. Keeping this
-// tiny FFI local avoids adding a network-fetched crate to the v2 bootstrap.
-#[link(name = "sqlite3")]
+// SQLite's database calls are kept behind this small FFI. `libsqlite3-sys`
+// supplies the pinned, bundled native library so the process cannot silently
+// link against a host SQLite build with a known WAL-reset corruption bug.
 unsafe extern "C" {
     fn sqlite3_open_v2(
         filename: *const c_char,
@@ -329,9 +334,6 @@ unsafe extern "C" {
     ) -> c_int;
     fn sqlite3_close(database: *mut sqlite3) -> c_int;
     fn sqlite3_errmsg(database: *mut sqlite3) -> *const c_char;
-    fn sqlite3_libversion() -> *const c_char;
-    fn sqlite3_sourceid() -> *const c_char;
-    fn sqlite3_compileoption_get(index: c_int) -> *const c_char;
     fn sqlite3_busy_timeout(database: *mut sqlite3, milliseconds: c_int) -> c_int;
     fn sqlite3_exec(
         database: *mut sqlite3,
@@ -1583,6 +1585,18 @@ impl SqliteStore {
     }
 
     fn open_connection(path: impl AsRef<Path>, flags: c_int) -> Result<Self, StoreError> {
+        Self::open_connection_with_runtime_version(path, flags, unsafe {
+            sqlite3_libversion_number()
+        })
+    }
+
+    fn open_connection_with_runtime_version(
+        path: impl AsRef<Path>,
+        flags: c_int,
+        runtime_version_number: c_int,
+    ) -> Result<Self, StoreError> {
+        ensure_sqlite_runtime_release_floor(runtime_version_number)?;
+
         let path = path.as_ref();
         let filename = CString::new(
             path.to_str()
@@ -12065,6 +12079,30 @@ pub fn sqlite_runtime_identity() -> SqliteRuntimeIdentity {
     }
 }
 
+fn ensure_sqlite_runtime_release_floor(version_number: c_int) -> Result<(), StoreError> {
+    if version_number >= SQLITE_RUNTIME_RELEASE_FLOOR {
+        return Ok(());
+    }
+
+    Err(StoreError::Unavailable(format!(
+        "SQLite runtime {} (version code {version_number}) is below the required release floor {}; refusing database access because the floor contains the WAL-reset corruption fix",
+        sqlite_version_number_text(version_number),
+        SQLITE_RUNTIME_RELEASE_FLOOR_TEXT,
+    )))
+}
+
+fn sqlite_version_number_text(version_number: c_int) -> String {
+    if version_number < 0 {
+        return format!("unknown ({version_number})");
+    }
+    format!(
+        "{}.{}.{}",
+        version_number / 1_000_000,
+        (version_number / 1_000) % 1_000,
+        version_number % 1_000,
+    )
+}
+
 unsafe fn sqlite_text_pointer(pointer: *const c_char) -> String {
     if pointer.is_null() {
         String::new()
@@ -13673,5 +13711,68 @@ impl SqliteStore {
     /// different database or derive authority from this pathname.
     pub fn database_location(&self) -> Option<&Path> {
         self.database_path.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod sqlite_release_floor_tests {
+    use super::{
+        ensure_sqlite_runtime_release_floor, sqlite_version_number_text, SqliteStore,
+        SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE,
+    };
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn release_floor_accepts_exact_minimum_and_rejects_older_versions() {
+        assert!(ensure_sqlite_runtime_release_floor(3_051_003).is_ok());
+        assert!(ensure_sqlite_runtime_release_floor(3_052_000).is_ok());
+
+        for (version, expected) in [(3_051_002, "3.51.2"), (3_046_001, "3.46.1")] {
+            let error = ensure_sqlite_runtime_release_floor(version)
+                .expect_err("a runtime below the release floor must fail closed");
+            let message = error.to_string();
+            assert!(message.contains(expected), "{message}");
+            assert!(
+                message.contains("required release floor 3.51.3"),
+                "{message}"
+            );
+            assert!(message.contains("WAL-reset corruption fix"), "{message}");
+        }
+
+        assert_eq!(sqlite_version_number_text(3_051_003), "3.51.3");
+        assert_eq!(sqlite_version_number_text(-1), "unknown (-1)");
+    }
+
+    #[test]
+    fn below_floor_rejection_precedes_database_creation() {
+        let path = unique_path();
+        assert!(!path.exists());
+
+        let error = match SqliteStore::open_connection_with_runtime_version(
+            &path,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+            3_046_001,
+        ) {
+            Ok(_) => panic!("an old SQLite runtime must not open a database"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("3.46.1"));
+        assert!(
+            !path.exists(),
+            "floor rejection must happen before sqlite3_open_v2"
+        );
+    }
+
+    fn unique_path() -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "boreal-sqlite-release-floor-{}-{timestamp}.sqlite",
+            std::process::id()
+        ))
     }
 }

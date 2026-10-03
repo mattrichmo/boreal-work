@@ -53,6 +53,11 @@ fn runtime_floor_is_reported_without_falsifying_support() {
     assert!(!identity.libversion.is_empty());
     assert!(!identity.source_id.is_empty());
     assert!(identity.version_tuple().is_some());
+    assert!(
+        meets_floor,
+        "release acceptance must use SQLite 3.51.3 or later; found {} ({})",
+        identity.libversion, identity.source_id
+    );
     assert_eq!(identity.as_json()["libversion"], identity.libversion);
     assert_eq!(identity.as_json()["source_id"], identity.source_id);
 
@@ -63,7 +68,7 @@ fn runtime_floor_is_reported_without_falsifying_support() {
             "runtime": identity.as_json(),
             "required_floor": "3.51.3",
             "meets_floor": meets_floor,
-            "policy": "report-and-gate-release; do not claim support when false"
+            "policy": "SQLite access fails closed below the release floor"
         })
     );
 }
