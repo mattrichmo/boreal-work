@@ -103,7 +103,10 @@ def seed_fixture(binary: Path, database: Path, root: Path, count: int) -> dict:
         binary,
         [
             "init",
+            "--project",
             "v11-project",
+            "--project-root",
+            str(root),
             "--actor",
             "v11-validator",
             "--db",
@@ -301,7 +304,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="boreal-v11-production-client-") as directory:
         root = Path(directory)
-        database = root / "boreal.sqlite"
+        database = root / ".boreal" / "boreal.sqlite"
         socket_path = root / "service.sock"
         fixture = seed_fixture(binary, database, root, args.work_items)
         service_env = os.environ.copy()
