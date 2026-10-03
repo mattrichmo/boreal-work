@@ -1572,6 +1572,23 @@ fn stamp(value: TimestampMs) -> String {
     format!("unix-ms:{}", value.as_millis())
 }
 
+/// New summary/proof candidates have new close intent identities. A rejected
+/// candidate and its operation result remain immutable and readable.
+fn close_candidate_id(intent: &CloseIntent) -> String {
+    format!(
+        "close:{}",
+        canonical_request_digest(
+            "close.candidate/v1",
+            json!({
+                "work_id":intent.work_id.as_str(),"attempt_id":intent.attempt_id.as_str(),
+                "fence":intent.fence.get(),"source":intent.source_snapshot_hash.as_str(),
+                "configuration":intent.config_identity.as_str(),"profile":intent.profile_id.as_str(),
+                "profile_version":intent.profile_version,"summary_id":intent.summary_id,
+            })
+        )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2351,21 +2368,4 @@ mod tests {
             .expect("read failed receipt operation")
             .is_none());
     }
-}
-
-/// New summary/proof candidates have new close intent identities. A rejected
-/// candidate and its operation result remain immutable and readable.
-fn close_candidate_id(intent: &CloseIntent) -> String {
-    format!(
-        "close:{}",
-        canonical_request_digest(
-            "close.candidate/v1",
-            json!({
-                "work_id":intent.work_id.as_str(),"attempt_id":intent.attempt_id.as_str(),
-                "fence":intent.fence.get(),"source":intent.source_snapshot_hash.as_str(),
-                "configuration":intent.config_identity.as_str(),"profile":intent.profile_id.as_str(),
-                "profile_version":intent.profile_version,"summary_id":intent.summary_id,
-            })
-        )
-    )
 }
