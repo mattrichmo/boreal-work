@@ -4825,6 +4825,16 @@ mod unix {
                 || subject.get("attempt_id").and_then(Value::as_str)
                     != Some(receipt.attempt_id.as_str())
                 || subject.get("fence").and_then(Value::as_u64) != Some(receipt.fence.get())
+                || !witnessed_gate_reference_matches(
+                    receipt.gate_id.as_str(),
+                    &canonical_gate,
+                    work_id,
+                )
+                || !witnessed_gate_reference_matches(
+                    subject_gate_id,
+                    &canonical_subject_gate,
+                    work_id,
+                )
                 || canonical_subject_gate != canonical_gate
                 || coverage.get("kind").and_then(Value::as_str) != Some(coverage_kind.as_str())
                 || coverage.get("profile_id").and_then(Value::as_str)
@@ -4921,6 +4931,18 @@ mod unix {
                 ReceiptResult::Failed => durable.result == ReceiptOutcome::Failed,
                 ReceiptResult::Stale => durable.result == ReceiptOutcome::Stale,
             }
+    }
+
+    pub(super) fn witnessed_gate_reference_matches(
+        requested_gate_id: &str,
+        canonical_gate_id: &str,
+        work_id: &str,
+    ) -> bool {
+        requested_gate_id == canonical_gate_id
+            || canonical_gate_id
+                .strip_prefix(work_id)
+                .and_then(|suffix| suffix.strip_prefix(':'))
+                .is_some_and(|profile_gate_id| requested_gate_id == profile_gate_id)
     }
 
     pub(super) fn make_envelope(
@@ -8043,6 +8065,26 @@ mod tests {
         let (mut handler, finish, root, _) = witnessed_finish_fixture("witnessed-finish-forgery");
         let mut cases = Vec::new();
 
+        let canonical_gate = "service-work:verification";
+        for wildcard_alias in ["verif%", "verificat_on"] {
+            assert_eq!(
+                handler
+                    .store
+                    .gate_id_for_work("service-project", "service-work", wildcard_alias)
+                    .expect("LIKE resolver demonstrates wildcard alias"),
+                canonical_gate,
+                "fixture must exercise SQL LIKE alias {wildcard_alias}",
+            );
+            assert!(
+                !super::unix::witnessed_gate_reference_matches(
+                    wildcard_alias,
+                    canonical_gate,
+                    "service-work",
+                ),
+                "wildcard alias {wildcard_alias} must not be accepted as an exact durable or submitted gate reference",
+            );
+        }
+
         let mut forged = finish.clone();
         forged["receipt"]["receipt_id"] = json!("receipt-missing-witnessed");
         cases.push(("missing receipt", forged));
@@ -8056,6 +8098,16 @@ mod tests {
             ),
             ("fence", "/receipt/subject/fence", json!(2)),
             ("gate", "/receipt/subject/gate_id", json!("summary")),
+            (
+                "gate percent wildcard alias",
+                "/receipt/subject/gate_id",
+                json!("verif%"),
+            ),
+            (
+                "gate underscore wildcard alias",
+                "/receipt/subject/gate_id",
+                json!("verificat_on"),
+            ),
             (
                 "operation",
                 "/receipt/operation_id",
