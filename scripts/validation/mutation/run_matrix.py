@@ -115,8 +115,17 @@ def run_validator(root: Path, validator: str) -> subprocess.CompletedProcess[str
 
 def run_mutation(mutation: Mutation) -> dict:
     with tempfile.TemporaryDirectory(prefix="boreal-contract-mutation-") as directory:
-        copied_root = Path(directory) / "spec"
+        fixture_root = Path(directory)
+        copied_root = fixture_root / "project" / "spec"
         shutil.copytree(SPEC, copied_root)
+        # Workflow command validation prefers the executable registry when it
+        # is available. Mirror the package validator's isolated fixture so
+        # the matrix checks against the current CLI instead of falling back to
+        # a frozen contract that may not yet list newer accepted spellings.
+        registry_root = fixture_root / "crates" / "cli" / "src"
+        registry_root.mkdir(parents=True)
+        for name in ("command_registry.rs", "main.rs"):
+            shutil.copy2(ROOT / "crates" / "cli" / "src" / name, registry_root / name)
         baseline_contracts = run_validator(copied_root, "contracts")
         baseline_workflows = run_validator(copied_root, "workflows")
         if baseline_contracts.returncode != 0 or baseline_workflows.returncode != 0:

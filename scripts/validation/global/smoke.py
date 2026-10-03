@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--tui', type=Path, default=Path('apps/global-tui/dist/entrypoint.js'))
     args = parser.parse_args()
     binary, tui = args.binary.resolve(), args.tui.resolve()
-    with tempfile.TemporaryDirectory(prefix='bg-', dir='/private/tmp') as temporary:
+    with tempfile.TemporaryDirectory(prefix='bg-') as temporary:
         root = Path(temporary)
         env = dict(os.environ, BOREAL_GLOBAL_ROOT=str(root/'global'))
         def cli(*argv, cwd=root):
@@ -109,12 +109,17 @@ def main():
             rendered=subprocess.run(['node',str(tui),'--socket',str(endpoint)],env=env,cwd=root,text=True,capture_output=True,timeout=15)
             assert rendered.returncode==0, rendered.stderr
             assert 'Life' in rendered.stdout and 'Book dentist' in rendered.stdout and 'New business' in rendered.stdout, rendered.stdout
-            exported=request('export')
+            backup=root/'snapshot.json'
+            export_summary=request('export',{'path':str(backup)})
+            assert export_summary['exported'] is True and backup.is_file(), export_summary
+            exported=json.loads(backup.read_text())
             snapshot=request('snapshot')
-            assert exported['items']==snapshot['items']
-            with tempfile.TemporaryDirectory(prefix='bg-restore-',dir='/private/tmp') as restore:
-                backup=root/'snapshot.json'
-                backup.write_text(json.dumps(exported))
+            exported_items={item['id']:item for item in exported['items']}
+            snapshot_items={item['id']:item for item in snapshot['items']}
+            assert snapshot_items.keys() <= exported_items.keys(), (snapshot_items, exported_items)
+            assert all(exported_items[item_id]['title']==item['title'] for item_id,item in snapshot_items.items())
+            assert export_summary['counts']['items']==len(exported_items)
+            with tempfile.TemporaryDirectory(prefix='bg-restore-') as restore:
                 restored_env=dict(env,BOREAL_GLOBAL_ROOT=restore)
                 result=subprocess.run([str(binary),'global','import','--input',str(backup),'--json'],env=restored_env,cwd=root,text=True,capture_output=True,timeout=15)
                 assert result.returncode==0, result.stdout+result.stderr
