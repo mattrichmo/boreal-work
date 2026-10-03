@@ -144,6 +144,7 @@ class ForensicAuditTests(unittest.TestCase):
             "deadline_crossed_while_service_stopped": True,
             "service_restarted_after_deadline": True,
             "deadline_unix_ms": 10,
+            "service_exited_at_unix_ms": 9,
             "service_restart_unix_ms": 11,
             "attempt_after_restart": {
                 "attempt_id": "attempt-1",
@@ -183,6 +184,10 @@ class ForensicAuditTests(unittest.TestCase):
         self.assertTrue(
             RUNNER.v10_component_evidence_complete("durable_deadline", component, **common)
         )
+        component["service_exited_at_unix_ms"] = 11
+        self.assertFalse(
+            RUNNER.v10_component_evidence_complete("durable_deadline", component, **common)
+        )
 
     def test_full_load_requires_integer_and_reconciled_worker_counts(self) -> None:
         profile_document = {
@@ -194,6 +199,7 @@ class ForensicAuditTests(unittest.TestCase):
             "requests_per_worker_target": 2,
             "minimum_duration_ms": 1,
             "completion_target": 2,
+            "maximum_failed_or_unavailable_responses_target": 1,
             "starvation_target": 10,
         }
         component = {
@@ -230,11 +236,17 @@ class ForensicAuditTests(unittest.TestCase):
             "budget_document": None,
             "profile_document": profile_document,
         }
+        # A successful completion count alone must not hide an excessive
+        # number of failed or unavailable requests.
+        self.assertFalse(RUNNER.v10_component_evidence_complete("full_load", component, **common))
+        component["observed_profile"]["failed_or_unavailable_responses"] = 1
+        component["observed_profile"]["successful_responses"] = 3
+        component["observed_profile"]["worker_progress"]["0"]["successful_responses"] = 2
         self.assertTrue(RUNNER.v10_component_evidence_complete("full_load", component, **common))
         component["observed_profile"]["dispatch_capacity"] = 1.5
         self.assertFalse(RUNNER.v10_component_evidence_complete("full_load", component, **common))
         component["observed_profile"]["dispatch_capacity"] = 2
-        component["observed_profile"]["successful_responses"] = 3
+        component["observed_profile"]["successful_responses"] = 4
         self.assertFalse(RUNNER.v10_component_evidence_complete("full_load", component, **common))
 
         component["observed_profile"]["successful_responses"] = 4

@@ -534,6 +534,20 @@ def main() -> int:
         ]
         checks.append(
             run_check(
+                "validation-harness-unit-tests",
+                [
+                    "python3",
+                    "-m",
+                    "unittest",
+                    "scripts/validation/test_forensic_audit.py",
+                    "scripts/validation/test_production_host_agent_input.py",
+                ],
+                log_dir,
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
+        checks.append(
+            run_check(
                 "forensic-audit",
                 [
                     "python3",

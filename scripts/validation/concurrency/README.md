@@ -121,6 +121,26 @@ service-stop results. The report treats an unavailable Agent fixture as
 `unavailable`; an exercised Agent path that contradicts an assertion is a
 `fail`.
 
+An existing Agent may be supplied for a read-only identity preflight with
+`--agent-input PATH --full-v10`. The private JSON descriptor uses schema
+`boreal.v10-agent-input.v1` and contains `project_id`, `actor_id`, absolute
+`project_root`, `work_id`, `source_version_id`, `config_identity`, `session_id`,
+`harness_id`, and the already-existing `attempt_id` and positive `fence`. The
+descriptor file must be owned by the running user and inaccessible to group or
+other users. The harness reads the standard project-local credential file
+without creating or changing credentials, then uses it only in short-lived
+child-process environments. Before exposing the credential, it requires a
+private executable owned by the running user, verifies its `--version --json`
+build revision and source fingerprint against the current clean CLI source
+inputs, and removes dynamic loader injection variables from the child
+environment. It accepts only the repository's `target/debug/bwrk` binary. It
+verifies canonical `auth show`, `session show`,
+`work show`, and `agent resume` readbacks. Missing, revoked, insecure, or
+mismatched inputs fail before the synthetic probes. This preflight does not
+claim work and does not establish stop/recovery evidence by itself. Credentials
+are never written to reports or command arguments. The verified executable path,
+digest, and build identity are included in the preflight evidence.
+
 Typed `service_busy` behavior is reported independently under
 `v10_acceptance.components.typed_control`; a `protocol_mismatch` response
 with a queue-full message remains distinct. The harness never retries an
@@ -161,3 +181,20 @@ and contradicts an assertion. The absent approved full-load profile is
 `not_approved`. Only the full-mode object can establish V10, and it exits
 nonzero while any required component is incomplete. The compatibility smoke
 retains its narrow pass/fail exit behavior and never declares V10 complete.
+
+There is no approved 10-second sustained profile in the current harness. If an
+owner later chooses a duration such as 10 seconds, the runner must keep the
+approved normal workload active throughout that interval; waiting idle after a
+short batch is not sustained-load evidence. The approved profile must state
+worker and service capacity, request mix and rate, minimum active duration,
+successful completion target, explicit maximum failed/unavailable responses,
+and maximum per-worker gap between successful responses. The current bounded
+batch records the error-code/message breakdown, including `invalid_argument`
+responses from valid-shaped status and work-show calls, as unexpected errors;
+it does not treat 256 successes as approved or infer an error allowance.
+
+A single control-latency observation is diagnostic only. An approved control
+budget must define the request cadence and sample count across the same active
+load window, confirm normal clients remain active and a typed queue-full result
+was observed, and identify which aggregate latency statistic is compared with
+the owner-approved limit. No sample count or latency target is assumed here.

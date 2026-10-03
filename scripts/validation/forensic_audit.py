@@ -136,7 +136,9 @@ def v10_component_evidence_complete(
             and component.get("deadline_crossed_while_service_stopped") is True
             and component.get("service_restarted_after_deadline") is True
             and type(component.get("deadline_unix_ms")) is int
+            and type(component.get("service_exited_at_unix_ms")) is int
             and type(component.get("service_restart_unix_ms")) is int
+            and component["service_exited_at_unix_ms"] <= component["deadline_unix_ms"]
             and component["service_restart_unix_ms"] >= component["deadline_unix_ms"]
             and isinstance(attempt, dict)
             and attempt.get("attempt_id") == attempt_id
@@ -174,6 +176,7 @@ def v10_component_evidence_complete(
             "requests_per_worker_target": "requests_per_worker",
             "minimum_duration_ms": "observed_duration_ms",
             "completion_target": "successful_responses",
+            "maximum_failed_or_unavailable_responses_target": "failed_or_unavailable_responses",
             "starvation_target": "observed_max_success_progress_gap_ms",
         }
         if (
@@ -184,7 +187,10 @@ def v10_component_evidence_complete(
             or not profile_document.get("source")
             or profile.get("source") != profile_document.get("source")
             or any(type(profile_document.get(key)) is not int for key in thresholds)
-            or any(profile_document[key] < 1 for key in thresholds)
+            or any(
+                profile_document[key] < (0 if key == "maximum_failed_or_unavailable_responses_target" else 1)
+                for key in thresholds
+            )
             or any(
                 type(profile.get(key)) is not int
                 or profile.get(key) != profile_document.get(key)
@@ -246,10 +252,15 @@ def v10_component_evidence_complete(
         return all(
             measured[field] >= profile_document[threshold]
             for threshold, field in thresholds.items()
-            if threshold != "starvation_target"
+            if threshold not in {
+                "starvation_target",
+                "maximum_failed_or_unavailable_responses_target",
+            }
         ) and (
             measured["observed_max_success_progress_gap_ms"]
             <= profile_document["starvation_target"]
+            and measured["failed_or_unavailable_responses"]
+            <= profile_document["maximum_failed_or_unavailable_responses_target"]
             and type(measured.get("requests_started")) is int
             and measured["requests_started"]
             == measured["workers"] * measured["requests_per_worker"]
@@ -307,6 +318,7 @@ def v10_component_evidence_complete(
         actor_id = attempt.get("actor_id")
         authority = attempt.get("agent_authority_readback")
         deadline_ms = attempt.get("deadline_unix_ms")
+        stopped_ms = attempt.get("service_exited_at_unix_ms")
         restart_ms = attempt.get("service_restart_unix_ms")
         obligation = attempt.get("recovery_obligation")
         reservation = attempt.get("resource_reservation")
@@ -332,7 +344,9 @@ def v10_component_evidence_complete(
             and type(attempt.get("fence")) is int
             and attempt["fence"] > 0
             and type(deadline_ms) is int
+            and type(stopped_ms) is int
             and type(restart_ms) is int
+            and stopped_ms <= deadline_ms
             and restart_ms >= deadline_ms
             and attempt.get("deadline_crossed_while_service_stopped") is True
             and isinstance(disposition, dict)

@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
 import platform
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +34,585 @@ ROOT = Path(__file__).resolve().parents[3]
 SHIM_SOURCE = Path(__file__).with_name("fake_clock.c")
 SMOKE_DISPATCH_WORKERS = 1
 SMOKE_DISPATCH_CAPACITY = 2
+AGENT_INPUT_SCHEMA = "boreal.v10-agent-input.v1"
+AGENT_INPUT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "project_id",
+        "actor_id",
+        "project_root",
+        "work_id",
+        "source_version_id",
+        "config_identity",
+        "session_id",
+        "harness_id",
+        "attempt_id",
+        "fence",
+    }
+)
+MAX_AGENT_INPUT_BYTES = 16 * 1024
+MAX_CREDENTIAL_BYTES = 8 * 1024
+
+
+@dataclass(frozen=True)
+class AgentInput:
+    project_id: str
+    actor_id: str
+    project_root: Path
+    work_id: str
+    source_version_id: str
+    config_identity: str
+    session_id: str
+    harness_id: str
+    attempt_id: str
+    fence: int
+    credential: str = field(repr=False, compare=False)
+
+
+def sanitized_environment(source: dict[str, str] | None = None) -> dict[str, str]:
+    environment = (source if source is not None else os.environ).copy()
+    environment.pop("BOREAL_CREDENTIAL", None)
+    for key in (
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_FORCE_FLAT_NAMESPACE",
+    ):
+        environment.pop(key, None)
+    return environment
+
+
+def current_cli_source_id() -> str:
+    """Mirror crates/cli/build.rs source fingerprint for the current checkout."""
+    paths: set[Path] = set()
+    for directory in (ROOT / "crates", ROOT / "skills", ROOT / "project/spec/workflows"):
+        if not directory.is_dir():
+            continue
+        for current, child_directories, filenames in os.walk(directory, followlinks=False):
+            current_path = Path(current)
+            child_directories[:] = [
+                name
+                for name in child_directories
+                if not (current_path / name).is_symlink()
+            ]
+            for filename in filenames:
+                path = current_path / filename
+                if path.is_symlink():
+                    continue
+                relative = path.relative_to(ROOT)
+                if any(part in {"tests", "benches", "examples"} for part in relative.parts):
+                    continue
+                extension = relative.suffix[1:] if relative.suffix else ""
+                if path.name == "Cargo.toml" or extension in {"rs", "md", "yaml", "yml", "json", "toml"}:
+                    paths.add(path)
+    paths.update(
+        path
+        for path in (
+            ROOT / "Cargo.toml",
+            ROOT / "Cargo.lock",
+            ROOT / "apps/tui/installer/wizard.cjs",
+            ROOT / "apps/tui/installer/wizard-body.cjs",
+        )
+        if path.is_file() and not path.is_symlink()
+    )
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        try:
+            relative = path.relative_to(ROOT).as_posix()
+            digest.update(relative.encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\n")
+        except OSError as error:
+            raise RuntimeError("Agent preflight cannot fingerprint current CLI source inputs") from error
+    return f"sha256:{digest.hexdigest()}"
+
+
+def verify_agent_cli(binary: Path) -> dict:
+    """Fail closed unless the credential recipient is a clean, current bwrk build."""
+    try:
+        metadata = binary.lstat()
+    except OSError as error:
+        raise RuntimeError("Agent preflight CLI is unavailable") from error
+    if (
+        binary.resolve() != (ROOT / "target/debug/bwrk").resolve()
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or not metadata.st_mode & 0o111
+        or not hasattr(os, "geteuid")
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_mode & 0o022
+    ):
+        raise RuntimeError("Agent preflight CLI is not a private executable owned by the running user")
+
+    revision = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=ROOT,
+        env=sanitized_environment(),
+        text=True,
+        capture_output=True,
+        timeout=10.0,
+        check=False,
+    )
+    if revision.returncode != 0 or not revision.stdout.strip():
+        raise RuntimeError("Agent preflight cannot establish the current source revision")
+    source_changes = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--quiet",
+            "HEAD",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates",
+            "skills",
+            "project/spec/workflows",
+            "apps/tui/installer/wizard.cjs",
+            "apps/tui/installer/wizard-body.cjs",
+        ],
+        cwd=ROOT,
+        env=sanitized_environment(),
+        timeout=10.0,
+        check=False,
+    )
+    if source_changes.returncode != 0:
+        raise RuntimeError("Agent preflight refuses a CLI built from dirty source inputs")
+    version = subprocess.run(
+        [str(binary), "--version", "--json"],
+        cwd=ROOT,
+        env=sanitized_environment(),
+        text=True,
+        capture_output=True,
+        timeout=10.0,
+        check=False,
+    )
+    try:
+        lines = [line for line in version.stdout.splitlines() if line.strip()]
+        envelope = json.loads(lines[-1]) if lines else None
+        data = envelope.get("data") if isinstance(envelope, dict) else None
+    except (json.JSONDecodeError, AttributeError):
+        data = None
+    if (
+        version.returncode != 0
+        or not isinstance(data, dict)
+        or data.get("build_revision") != revision.stdout.strip()
+        or data.get("build_source_id") != current_cli_source_id()
+    ):
+        raise RuntimeError("Agent preflight CLI build does not match the current source revision")
+    return {
+        "path": str(binary),
+        "sha256": file_sha256(binary),
+        "build_revision": data["build_revision"],
+        "build_source_id": data["build_source_id"],
+    }
+
+
+def _strict_json_object(encoded: bytes, *, description: str) -> dict:
+    def no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(encoded, object_pairs_hook=no_duplicate_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError(f"{description} is malformed") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{description} must be a JSON object")
+    return value
+
+
+def _private_file_bytes(path: Path, *, max_bytes: int, description: str) -> bytes:
+    if not hasattr(os, "geteuid") or not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError(f"secure {description} checks require a supported Unix platform")
+    try:
+        before = path.lstat()
+        if (
+            not path.is_absolute()
+            or path.is_symlink()
+            or not path.is_file()
+            or before.st_uid != os.geteuid()
+            or before.st_mode & 0o077
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            raise RuntimeError(f"{description} is insecure or has an invalid size")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"{description} is unavailable or insecure") from error
+    try:
+        current = os.fstat(fd)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.geteuid()
+            or current.st_mode & 0o077
+            or current.st_size <= 0
+            or current.st_size > max_bytes
+            or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise RuntimeError(f"{description} is insecure or has an invalid size")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            encoded = stream.read(max_bytes + 1)
+        if len(encoded) > max_bytes:
+            raise RuntimeError(f"{description} exceeds the size limit")
+        return encoded
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _private_directory_fd(parent_fd: int, name: str, *, description: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as error:
+        raise RuntimeError(f"{description} is unavailable or insecure") from error
+    metadata = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_mode & 0o077
+    ):
+        os.close(fd)
+        raise RuntimeError(f"{description} is insecure")
+    return fd
+
+
+def _read_standard_credential(project_root: Path, project_id: str, actor_id: str) -> str:
+    if not hasattr(os, "geteuid") or not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError("secure credential checks require a supported Unix platform")
+    actor_hash = hashlib.sha256(actor_id.encode("utf-8")).hexdigest()
+    credential_name = f"sha256-{actor_hash}.json"
+    root_fd = boreal_fd = credentials_fd = credential_fd = -1
+    try:
+        root_fd = os.open(
+            project_root,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        root_meta = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_meta.st_mode) or root_meta.st_uid != os.geteuid():
+            raise RuntimeError("project root is not an owned directory")
+        boreal_fd = _private_directory_fd(root_fd, ".boreal", description="credential directory")
+        credentials_fd = _private_directory_fd(
+            boreal_fd, "credentials", description="credential directory"
+        )
+        try:
+            credential_fd = os.open(
+                credential_name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=credentials_fd,
+            )
+        except OSError as error:
+            raise RuntimeError("standard local credential is unavailable or insecure") from error
+        metadata = os.fstat(credential_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o077
+            or metadata.st_size <= 0
+            or metadata.st_size > MAX_CREDENTIAL_BYTES
+        ):
+            raise RuntimeError("standard local credential is insecure or has an invalid size")
+        with os.fdopen(credential_fd, "rb") as stream:
+            credential_fd = -1
+            encoded = stream.read(MAX_CREDENTIAL_BYTES + 1)
+        if len(encoded) > MAX_CREDENTIAL_BYTES:
+            raise RuntimeError("standard local credential exceeds the size limit")
+    except OSError as error:
+        raise RuntimeError("standard local credential is unavailable or insecure") from error
+    finally:
+        for fd in (credential_fd, credentials_fd, boreal_fd, root_fd):
+            if fd >= 0:
+                os.close(fd)
+
+    value = _strict_json_object(encoded, description="standard local credential")
+    if (
+        set(value) != {"schema_version", "project_id", "actor_id", "credential"}
+        or value.get("schema_version") != "boreal.local-credential.v1"
+        or value.get("project_id") != project_id
+        or value.get("actor_id") != actor_id
+        or not isinstance(value.get("credential"), str)
+        or not value["credential"].strip()
+    ):
+        raise RuntimeError("standard local credential does not match the descriptor")
+    return value["credential"]
+
+
+def load_agent_input(path: Path) -> AgentInput:
+    """Load a private, nonsecret descriptor and its existing standard credential."""
+    descriptor_path = path.expanduser().absolute()
+    descriptor = _strict_json_object(
+        _private_file_bytes(
+            descriptor_path,
+            max_bytes=MAX_AGENT_INPUT_BYTES,
+            description="Agent input descriptor",
+        ),
+        description="Agent input descriptor",
+    )
+    if set(descriptor) != AGENT_INPUT_FIELDS or descriptor.get("schema_version") != AGENT_INPUT_SCHEMA:
+        raise RuntimeError("Agent input descriptor has an unsupported schema or fields")
+    string_fields = (
+        "project_id",
+        "actor_id",
+        "work_id",
+        "source_version_id",
+        "config_identity",
+        "session_id",
+        "harness_id",
+        "attempt_id",
+    )
+    for name in string_fields:
+        value = descriptor.get(name)
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or len(value) > 512
+            or any(ord(character) < 0x20 for character in value)
+        ):
+            raise RuntimeError(f"Agent input descriptor has an invalid {name}")
+    fence = descriptor.get("fence")
+    if type(fence) is not int or fence <= 0:
+        raise RuntimeError("Agent input descriptor has an invalid fence")
+    root_value = descriptor.get("project_root")
+    if not isinstance(root_value, str) or not Path(root_value).is_absolute():
+        raise RuntimeError("Agent input project_root must be absolute")
+    try:
+        project_root = Path(root_value).resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("Agent input project_root is unavailable") from error
+    if not project_root.is_dir():
+        raise RuntimeError("Agent input project_root is not a directory")
+    credential = _read_standard_credential(project_root, descriptor["project_id"], descriptor["actor_id"])
+    return AgentInput(
+        project_id=descriptor["project_id"],
+        actor_id=descriptor["actor_id"],
+        project_root=project_root,
+        work_id=descriptor["work_id"],
+        source_version_id=descriptor["source_version_id"],
+        config_identity=descriptor["config_identity"],
+        session_id=descriptor["session_id"],
+        harness_id=descriptor["harness_id"],
+        attempt_id=descriptor["attempt_id"],
+        fence=fence,
+        credential=credential,
+    )
+
+
+def invoke_with_credential(
+    binary: Path,
+    args: list[str],
+    *,
+    cwd: Path,
+    credential: str,
+    timeout: float = 30.0,
+) -> dict:
+    """Run one CLI process with a credential only in that child's environment."""
+    child_env = sanitized_environment()
+    child_env["BOREAL_CREDENTIAL"] = credential
+    argv = [str(binary), *args]
+    completed = subprocess.run(
+        argv,
+        cwd=cwd,
+        env=child_env,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    # Credential-bearing child output is intentionally never returned or
+    # included in an exception. Only the bounded JSON envelope is interpreted.
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    try:
+        envelope = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError as error:
+        raise RuntimeError("credentialed CLI returned an invalid JSON envelope") from error
+    if not isinstance(envelope, dict):
+        raise RuntimeError("credentialed CLI returned no JSON envelope")
+    return {"exit_code": completed.returncode, "envelope": envelope}
+
+
+def _require_cli_success(result: dict, *, command: str) -> dict:
+    envelope = result.get("envelope")
+    error = envelope.get("error") if isinstance(envelope, dict) else None
+    if result.get("exit_code") != 0 or error:
+        code = error.get("code") if isinstance(error, dict) else None
+        raise RuntimeError(f"Agent preflight {command} failed closed (error_code={code or 'unknown'})")
+    data = envelope.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Agent preflight {command} returned no structured data")
+    return data
+
+
+def run_agent_input_preflight(
+    binary: Path,
+    descriptor_path: Path,
+    *,
+    invoke_fn=invoke_with_credential,
+) -> dict:
+    """Authenticate and prove exact session/claim/resume bindings before probes."""
+    cli_identity = verify_agent_cli(binary)
+    agent = load_agent_input(descriptor_path)
+
+    def run(arguments: list[str], command: str) -> dict:
+        return invoke_fn(
+            binary,
+            [*arguments, "--json"],
+            cwd=agent.project_root,
+            credential=agent.credential,
+        )
+
+    authority = _require_cli_success(
+        run(
+            ["auth", "show", "--project", agent.project_id, "--actor", agent.actor_id],
+            "auth show",
+        ),
+        command="auth show",
+    )
+    if (
+        authority.get("project_id") != agent.project_id
+        or authority.get("actor_id") != agent.actor_id
+        or authority.get("role") != "agent"
+    ):
+        raise RuntimeError("Agent preflight authority readback did not prove an authorized Agent")
+
+    session = _require_cli_success(
+        run(
+            [
+                "session",
+                "show",
+                "--project",
+                agent.project_id,
+                "--session",
+                agent.session_id,
+                "--actor",
+                agent.actor_id,
+            ],
+            "session show",
+        ),
+        command="session show",
+    )
+    if (
+        session.get("project_id") != agent.project_id
+        or session.get("session_id") != agent.session_id
+        or session.get("actor_id") != agent.actor_id
+        or session.get("harness_id") != agent.harness_id
+        or session.get("state") != "active"
+    ):
+        raise RuntimeError("Agent preflight session readback does not match the descriptor")
+
+    work = _require_cli_success(
+        run(
+            [
+                "work",
+                "show",
+                agent.project_id,
+                agent.work_id,
+                "--actor",
+                agent.actor_id,
+            ],
+            "work show",
+        ),
+        command="work show",
+    )
+    if work.get("project_id") != agent.project_id or work.get("work_id") != agent.work_id:
+        raise RuntimeError("Agent preflight work readback does not match the descriptor")
+    resume = _require_cli_success(
+        run(
+            [
+                "agent",
+                "resume",
+                "--project",
+                agent.project_id,
+                "--actor",
+                agent.actor_id,
+                "--harness",
+                agent.harness_id,
+                "--session",
+                agent.session_id,
+                "--attempt",
+                agent.attempt_id,
+            ],
+            "agent resume",
+        ),
+        command="agent resume",
+    )
+    context = resume.get("context")
+    status = resume.get("status")
+    provenance = resume.get("provenance")
+    if (
+        not isinstance(context, dict)
+        or not isinstance(status, dict)
+        or not isinstance(provenance, dict)
+        or context.get("mode") != "resume"
+        or context.get("project_id") != agent.project_id
+        or context.get("actor_id") != agent.actor_id
+        or context.get("harness_id") != agent.harness_id
+        or context.get("session_id") != agent.session_id
+        or status.get("work_id") != agent.work_id
+        or status.get("attempt_id") != agent.attempt_id
+        or type(status.get("fence")) is not int
+        or status.get("fence") != agent.fence
+        or provenance.get("source_snapshot_hash") != agent.source_version_id
+        or provenance.get("config_identity") != agent.config_identity
+    ):
+        raise RuntimeError("Agent preflight resume readback does not match the existing attempt binding")
+
+    return {
+        "status": "read_only_preflight_pass",
+        "cli_identity": cli_identity,
+        "attempted": False,
+        "authorized_agent": True,
+        "actor_role": "agent",
+        "project_id": agent.project_id,
+        "actor_id": agent.actor_id,
+        "session_id": agent.session_id,
+        "harness_id": agent.harness_id,
+        "work_id": agent.work_id,
+        "source_version_id": agent.source_version_id,
+        "config_identity": agent.config_identity,
+        "attempt_id": agent.attempt_id,
+        "fence": agent.fence,
+        "authority_readback": {
+            "project_id": authority["project_id"],
+            "actor_id": authority["actor_id"],
+            "role": authority["role"],
+        },
+        "session_readback": {
+            "project_id": session["project_id"],
+            "session_id": session["session_id"],
+            "actor_id": session["actor_id"],
+            "harness_id": session["harness_id"],
+            "state": session["state"],
+        },
+        "work_readback": {
+            "project_id": work["project_id"],
+            "work_id": work["work_id"],
+            "kind": work.get("kind"),
+            "lifecycle": work.get("lifecycle"),
+        },
+        "claim_readback": {
+            "project_id": context["project_id"],
+            "actor_id": context["actor_id"],
+            "harness_id": context["harness_id"],
+            "session_id": context["session_id"],
+            "work_id": status["work_id"],
+            "attempt_id": status["attempt_id"],
+            "fence": status["fence"],
+            "source_version_id": provenance["source_snapshot_hash"],
+            "config_identity": provenance["config_identity"],
+        },
+        "resume_status": "pass",
+        "reason": "read-only canonical readbacks verified the existing Agent, session, work, current attempt, and fence; no attempt was claimed",
+        "credential_exposed": False,
+    }
 
 
 def parse_envelope(completed: subprocess.CompletedProcess[str]) -> dict:
@@ -71,11 +652,41 @@ def json_contains_field(value: object, field: str, expected: object) -> bool:
     return False
 
 
+def failed_response_breakdown(workload: list[dict]) -> dict:
+    by_request_kind: dict[str, int] = {}
+    by_error_code: dict[str, int] = {}
+    unexpected_invalid_argument = 0
+    for item in workload:
+        if item.get("exit_code") == 0:
+            continue
+        request_kind = str(item.get("request_kind") or "unknown")
+        error = item.get("error")
+        code = str(error.get("code") or "unavailable") if isinstance(error, dict) else "unavailable"
+        by_request_kind[request_kind] = by_request_kind.get(request_kind, 0) + 1
+        by_error_code[code] = by_error_code.get(code, 0) + 1
+        if code == "invalid_argument" and request_kind in {"status", "work_show"}:
+            unexpected_invalid_argument += 1
+    return {
+        "classification": "observed_only",
+        "owner_approved_maximum": None,
+        "owner_approved": False,
+        "by_request_kind": dict(sorted(by_request_kind.items())),
+        "by_error_code": dict(sorted(by_error_code.items())),
+        "unexpected_invalid_argument_responses": unexpected_invalid_argument,
+        "invalid_argument_classification": "unexpected_error_for_valid_shaped_read_only_requests",
+        "valid_read_only_shapes": {
+            "status": ["status", "<project>", "--limit", "8", "--offset", "0"],
+            "work_show": ["work", "show", "<work-id>", "--project", "<project>"],
+        },
+    }
+
+
 def validation_identity(binary: Path) -> dict:
     def git_value(*args: str) -> str | None:
         completed = subprocess.run(
             ["git", *args],
             cwd=ROOT,
+            env=sanitized_environment(),
             text=True,
             capture_output=True,
             check=False,
@@ -86,12 +697,14 @@ def validation_identity(binary: Path) -> dict:
     diff = subprocess.run(
         ["git", "diff", "--binary", "HEAD"],
         cwd=ROOT,
+        env=sanitized_environment(),
         capture_output=True,
         check=False,
     )
     version = subprocess.run(
         [str(binary), "--version"],
         cwd=ROOT,
+        env=sanitized_environment(),
         text=True,
         capture_output=True,
         timeout=10.0,
@@ -130,7 +743,7 @@ def invoke(
     completed = subprocess.run(
         [str(binary), *args],
         cwd=cwd,
-        env=env,
+        env=sanitized_environment(env),
         text=True,
         capture_output=True,
         timeout=timeout,
@@ -184,6 +797,7 @@ def client(
         process = subprocess.Popen(
             argv,
             cwd=cwd,
+            env=sanitized_environment(),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -243,6 +857,7 @@ def compile_clock_shim(root: Path) -> tuple[Path | None, str | None]:
     output = root / "libboreal_fake_clock.dylib"
     completed = subprocess.run(
         [cc, "-dynamiclib", "-fPIC", "-O2", str(SHIM_SOURCE), "-o", str(output)],
+        env=sanitized_environment(),
         text=True,
         capture_output=True,
         check=False,
@@ -581,6 +1196,7 @@ def stop_service(
     except subprocess.TimeoutExpired:
         process.kill()
         stdout, stderr = process.communicate(timeout=5)
+        exited_at_unix_ms = time.time_ns() // 1_000_000
         return {
             "status": "fail",
             "reason": "service did not exit after SIGTERM; forced kill used for harness cleanup",
@@ -592,8 +1208,10 @@ def stop_service(
             "active_client_process_pids_at_request": active_client_process_pids,
             "active_client_snapshot_monotonic_ns": active_client_snapshot_monotonic_ns,
             "signal_sent_monotonic_ns": signal_sent_monotonic_ns,
+            "service_exited_at_unix_ms": exited_at_unix_ms,
             "request_to_exit_ms": round((time.perf_counter() - requested_at) * 1000.0, 3),
         }
+    exited_at_unix_ms = time.time_ns() // 1_000_000
     return {
         "status": "pass"
         if process.returncode == 0 and not socket_path.exists()
@@ -605,6 +1223,7 @@ def stop_service(
         "active_client_process_pids_at_request": active_client_process_pids,
         "active_client_snapshot_monotonic_ns": active_client_snapshot_monotonic_ns,
         "signal_sent_monotonic_ns": signal_sent_monotonic_ns,
+        "service_exited_at_unix_ms": exited_at_unix_ms,
         "request_to_exit_ms": round((time.perf_counter() - requested_at) * 1000.0, 3),
         "stdout_tail": stdout[-1000:],
         "stderr_tail": stderr[-1000:],
@@ -677,11 +1296,10 @@ def run_stop_recovery_probe(
 
     def one_request(index: int, iteration: int) -> dict:
         nonlocal requests_started, completed_requests
-        args = (
-            ["status", "--limit", "8", "--offset", "0"]
-            if iteration % 2 == 0
-            else ["work", "show", "dispatch-smoke-seed"]
-        )
+        request_kind = "status" if iteration % 2 == 0 else "work_show"
+        args = ["status", "--limit", "8", "--offset", "0"] if request_kind == "status" else [
+            "work", "show", "dispatch-smoke-seed"
+        ]
         with workload_lock:
             active.add(index)
             requests_started += 1
@@ -702,6 +1320,7 @@ def run_stop_recovery_probe(
             return {
                 "worker": index,
                 "iteration": iteration,
+                "request_kind": request_kind,
                 "started_at": response["client_process_started_at"],
                 "started_at_monotonic_ns": response["client_process_started_monotonic_ns"],
                 "completed_at": response["client_process_completed_at"],
@@ -714,6 +1333,7 @@ def run_stop_recovery_probe(
             return {
                 "worker": index,
                 "iteration": iteration,
+                "request_kind": request_kind,
                 "started_at": started_at,
                 "started_at_monotonic_ns": started_at_monotonic_ns,
                 "completed_at": time.perf_counter(),
@@ -970,6 +1590,7 @@ def run_stop_recovery_probe(
             "requests_started": len(workload),
             "successful_responses": sum(item["exit_code"] == 0 for item in workload),
             "failed_or_unavailable_responses": sum(item["exit_code"] != 0 for item in workload),
+            "failed_or_unavailable_response_breakdown": failed_response_breakdown(workload),
             "workers_with_responses": len(progress_by_worker),
             "workers_with_successful_responses": sum(value > 0 for value in worker_successes),
             "worker_progress": {str(worker): metrics for worker, metrics in progress_by_worker.items()},
@@ -1116,6 +1737,11 @@ def main() -> int:
         action="store_true",
         help="run the bounded full-mode evidence set in addition to the dispatch smoke",
     )
+    parser.add_argument(
+        "--agent-input",
+        type=Path,
+        help="opt in to an owner-supplied private Agent descriptor for authenticated readback",
+    )
     parser.add_argument("--control-latency-budget-ms", type=float)
     parser.add_argument("--control-latency-budget-source")
     parser.add_argument("--output", type=Path)
@@ -1129,9 +1755,20 @@ def main() -> int:
     if args.output is None:
         filename = "forensic-v10.latest.json" if args.full_v10 else "dispatch-admission-smoke.latest.json"
         args.output = Path(__file__).resolve().parent / "results" / filename
-    binary = args.bin.resolve()
+    binary = args.bin.absolute()
     if not binary.exists():
         parser.error(f"binary does not exist: {binary}")
+    if args.agent_input is not None and not args.full_v10:
+        parser.error("--agent-input requires --full-v10")
+
+    # This opt-in gate runs before any synthetic or production workload probe.
+    # A bad descriptor, credential, authority, session, claim, or resume
+    # binding aborts before the harness starts service/load activity.
+    agent_input_binding = (
+        run_agent_input_preflight(binary, args.agent_input)
+        if args.agent_input is not None
+        else None
+    )
 
     with tempfile.TemporaryDirectory(prefix="boreal-dispatch-admission-smoke-") as directory:
         root = Path(directory)
@@ -1191,7 +1828,7 @@ def main() -> int:
             raise RuntimeError(f"saturation seed work setup failed: {seeded}")
 
         shim, shim_reason = compile_clock_shim(root)
-        service_env = os.environ.copy()
+        service_env = sanitized_environment()
         if shim is not None:
             service_env["BOREAL_FAKE_CLOCK_FILE"] = str(clock_file)
             service_env["DYLD_INSERT_LIBRARIES"] = str(shim)
@@ -1257,6 +1894,12 @@ def main() -> int:
                 "dispatch-smoke-validator",
                 "dispatch-smoke-operator-session",
             )
+            stop_recovery["agent_input_binding"] = agent_input_binding or {
+                "status": "unavailable",
+                "attempted": False,
+                "authorized_agent": False,
+                "reason": "no owner-supplied Agent input descriptor was provided",
+            }
         else:
             stop_recovery = {
                 "status": "not_run",
@@ -1294,6 +1937,7 @@ def main() -> int:
         "actor_id": deadline_evidence.get("actor_id"),
         "agent_authority_readback": deadline_authority,
         "deadline_unix_ms": deadline_evidence.get("deadline_unix_ms"),
+        "service_exited_at_unix_ms": deadline_evidence.get("service_exited_at_unix_ms"),
         "service_restart_unix_ms": deadline_evidence.get("service_restart_unix_ms"),
         "attempt_id": deadline_evidence.get("attempt_id"),
         "fence": deadline_evidence.get("fence"),
@@ -1341,6 +1985,9 @@ def main() -> int:
         and deadline_authority.get("authority_granted") is True
         and deadline_proof_fields["deadline_crossed_while_service_stopped"] is True
         and type(deadline_proof_fields["deadline_unix_ms"]) is int
+        and type(deadline_proof_fields["service_exited_at_unix_ms"]) is int
+        and deadline_proof_fields["service_exited_at_unix_ms"]
+        < deadline_proof_fields["deadline_unix_ms"]
         and type(deadline_proof_fields["service_restart_unix_ms"]) is int
         and deadline_proof_fields["service_restart_unix_ms"]
         >= deadline_proof_fields["deadline_unix_ms"]
@@ -1359,11 +2006,23 @@ def main() -> int:
         and type(deadline_proof_fields["fence"]) is int
         and deadline_proof_fields["fence"] > 0
     )
+    agent_input_binding = stop_recovery.get("agent_input_binding") or {}
     attempt_authority = attempt_recovery.get("agent_authority_readback")
-    attempt_actor_id = attempt_recovery.get("actor_id")
+    if (
+        not isinstance(attempt_authority, dict)
+        and agent_input_binding.get("status") == "read_only_preflight_pass"
+    ):
+        attempt_authority = {
+            "actor_id": agent_input_binding.get("actor_id"),
+            "role": "agent",
+            "authority_granted": True,
+        }
+    attempt_actor_id = attempt_recovery.get("actor_id") or agent_input_binding.get("actor_id")
     attempt_after_restart = attempt_recovery.get("attempt_after_restart")
     attempt_deadline_unix_ms = attempt_recovery.get("deadline_unix_ms")
     attempt_restart_unix_ms = attempt_recovery.get("service_restart_unix_ms")
+    attempt_id = attempt_recovery.get("attempt_id") or agent_input_binding.get("attempt_id")
+    attempt_fence = attempt_recovery.get("fence") or agent_input_binding.get("fence")
     authorized_agent = (
         isinstance(attempt_actor_id, str)
         and bool(attempt_actor_id)
@@ -1375,6 +2034,8 @@ def main() -> int:
     attempt_after_due = (
         type(attempt_deadline_unix_ms) is int
         and type(attempt_restart_unix_ms) is int
+        and type(attempt_recovery.get("service_exited_at_unix_ms")) is int
+        and attempt_recovery.get("service_exited_at_unix_ms") <= attempt_deadline_unix_ms
         and attempt_restart_unix_ms >= attempt_deadline_unix_ms
         and attempt_recovery.get("deadline_crossed_while_service_stopped") is True
         and attempt_recovery.get("service_restarted_after_deadline") is True
@@ -1382,11 +2043,12 @@ def main() -> int:
     attempt_stop_proof_fields = {
         "authorized_agent": authorized_agent,
         "agent_authority_readback": attempt_authority,
-        "actor_id": attempt_recovery.get("actor_id"),
+        "actor_id": attempt_actor_id,
         "actor_role": attempt_authority.get("role") if isinstance(attempt_authority, dict) else None,
-        "attempt_id": attempt_recovery.get("attempt_id"),
-        "fence": attempt_recovery.get("fence"),
+        "attempt_id": attempt_id,
+        "fence": attempt_fence,
         "deadline_unix_ms": attempt_deadline_unix_ms,
+        "service_exited_at_unix_ms": attempt_recovery.get("service_exited_at_unix_ms"),
         "service_restart_unix_ms": attempt_restart_unix_ms,
         "deadline_crossed_while_service_stopped": attempt_after_due,
         "restart_disposition_readback": attempt_after_restart,
@@ -1396,6 +2058,7 @@ def main() -> int:
         "recovery_obligation": attempt_recovery.get("recovery_obligation"),
         "resource_reservation": attempt_recovery.get("resource_reservation"),
         "stale_fence_response": attempt_recovery.get("stale_fence_response"),
+        "agent_input_binding": agent_input_binding,
     }
     attempt_stop_complete = (
         attempt_stop_proof_fields["authorized_agent"]
@@ -1481,6 +2144,15 @@ def main() -> int:
         and restart_stop_observed
         and stop_recovery.get("drain_and_readback_observed") is True
     )
+    stop_component_status = (
+        "pass"
+        if stop_component_complete
+        else "unavailable"
+        if attempt_unavailable and full_mode
+        else "fail"
+        if full_mode
+        else "not_run"
+    )
     components = {
         "durable_deadline": {
             "status": deadline_status,
@@ -1490,6 +2162,8 @@ def main() -> int:
             "fake_clock_projection_status": clock["status"],
             "reason": None
             if deadline_complete
+            else "the Agent descriptor preflight is read-only; its project service was not stopped and restarted"
+            if agent_input_binding.get("status") == "read_only_preflight_pass"
             else deadline_evidence.get("reason")
             if deadline_status == "unavailable"
             else "the authorized attempt path ran but did not jointly read back expiry_pending, its recovery obligation, active reservation, and stale-fence rejection after restart",
@@ -1510,9 +2184,14 @@ def main() -> int:
                 "requests_per_worker_target": None,
                 "minimum_duration_ms": None,
                 "completion_target": None,
+                "maximum_failed_or_unavailable_responses_target": None,
                 "starvation_target": None,
             },
             "observed": stop_recovery.get("workload"),
+            "observed_completion_approved": False,
+            "observed_failure_breakdown": (stop_recovery.get("workload") or {}).get(
+                "failed_or_unavailable_response_breakdown"
+            ),
             "observed_profile": {
                 "workers": (stop_recovery.get("workload") or {}).get("workers"),
                 "requests_per_worker": (stop_recovery.get("workload") or {}).get(
@@ -1610,7 +2289,7 @@ def main() -> int:
             ),
         },
         "stop_recovery": {
-            "status": attempt_status,
+            "status": stop_component_status,
             "complete": stop_component_complete,
             "evidence_ref": "#/stop_recovery",
             "graceful_drain_and_readback_observed": stop_recovery.get(
@@ -1626,6 +2305,9 @@ def main() -> int:
                 "active_client_process_pids_at_request": first_stop_pids,
                 "active_client_snapshot_monotonic_ns": first_stop_snapshot_ns,
                 "signal_sent_monotonic_ns": first_stop_signal_ns,
+                "service_exited_at_unix_ms": first_sigterm.get(
+                    "service_exited_at_unix_ms"
+                ),
             },
             "same_database_restart_stop": {
                 "exit_code": restarted_service_stop.get("exit_code"),
@@ -1644,8 +2326,11 @@ def main() -> int:
                 ),
             },
             "attempt_stop_recovery": attempt_stop_proof_fields,
+            "agent_input_binding": agent_input_binding,
             "reason": None
             if stop_component_complete
+            else "the Agent descriptor preflight is read-only; the exact project attempt was not stopped/restarted"
+            if agent_input_binding.get("status") == "read_only_preflight_pass"
             else attempt_recovery.get("reason")
             if attempt_status == "unavailable"
             else "the authorized Agent attempt path ran but did not prove stop/recovery and the required post-restart disposition",
