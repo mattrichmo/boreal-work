@@ -19,7 +19,10 @@ jobs:
       - name: Check contracts
         run: python3 project/spec/validate_contracts.py
       - name: Test workspace
-        run: cargo test --workspace --locked
+        run: |
+          manifest="$RUNNER_TEMP/production-oracle-manifest.txt"
+          python3 crates/domain/tests/generate_production_oracle_manifest.py --output "$manifest"
+          BOREAL_PRODUCTION_ORACLE_MANIFEST="$manifest" cargo test --workspace --locked
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
