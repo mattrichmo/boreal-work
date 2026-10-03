@@ -5773,12 +5773,33 @@ impl SqliteStore {
             match work {
                 Ok((work, schedule, activation_at, retry_not_before)) => {
                     let canonical_seed = if self.canonical_production {
-                        Some(CanonicalStatusSeed {
-                            entity_revision: rows.column_optional_i64(14)?,
-                            proof_revision: rows.column_optional_i64(15)?,
-                            unresolved_recovery: rows.column_bool(16)?,
-                            has_gate_exception: rows.column_bool(17)?,
-                        })
+                        // Cursor values are also read by the per-row canonical
+                        // evaluator below. Keep malformed seed values out of
+                        // the project-wide row decoder so that evaluator can
+                        // quarantine only this work item and retain siblings.
+                        match (
+                            rows.column_optional_i64(14),
+                            rows.column_optional_i64(15),
+                            rows.column_bool(16),
+                            rows.column_bool(17),
+                        ) {
+                            (
+                                Ok(entity_revision),
+                                Ok(proof_revision),
+                                Ok(unresolved_recovery),
+                                Ok(has_gate_exception),
+                            ) => Some(CanonicalStatusSeed {
+                                entity_revision,
+                                proof_revision,
+                                unresolved_recovery,
+                                has_gate_exception,
+                            }),
+                            // A seed is an optimization for the canonical
+                            // per-row evaluator. If any projected value is
+                            // malformed, let that evaluator report the row's
+                            // own corruption rather than aborting its siblings.
+                            _ => None,
+                        }
                     } else {
                         None
                     };

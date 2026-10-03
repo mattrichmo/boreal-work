@@ -340,14 +340,12 @@ impl SqliteStore {
             }
             let pinned = pinned_requirements.get(work_id);
             let status_cursor = match (row.canonical_seed, pinned) {
-                (Some(seed), Some(pin)) => {
-                    super::status_facts::validate_pinned_status_cursor(
-                        snapshot.project_id.as_str(),
-                        work_id,
-                        seed,
-                        pin,
-                    )
-                }
+                (Some(seed), Some(pin)) => super::status_facts::validate_pinned_status_cursor(
+                    snapshot.project_id.as_str(),
+                    work_id,
+                    seed,
+                    pin,
+                ),
                 _ => Ok(None),
             };
             let inputs = status_cursor.and_then(|cursor| {
@@ -872,5 +870,105 @@ mod hierarchy_tests {
         assert!(issues.contains_key("invalid-child"));
         assert!(!issues.contains_key("direct"));
         assert!(!issues.contains_key("healthy"));
+    }
+}
+
+#[cfg(test)]
+mod canonical_cursor_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_cursor_quarantines_only_its_work_row() {
+        let store = SqliteStore::open(":memory:", PRODUCTION_SCHEMA_SQL)
+            .expect("canonical production schema should open");
+        store
+            .create_project("cursor-isolation-project", "unix-ms:1")
+            .expect("project should be created");
+        store
+            .ensure_actor(
+                "operator",
+                "operator",
+                "operator-credential",
+                "Operator",
+                "unix-ms:1",
+            )
+            .expect("operator actor should be created");
+        for (work_id, title) in [
+            ("corrupt-cursor", "Corrupt cursor"),
+            ("healthy-sibling", "Healthy sibling"),
+        ] {
+            let work = WorkItem::new(
+                ProjectId::new("cursor-isolation-project"),
+                WorkId::new(work_id),
+                WorkKind::Task,
+                None,
+                title,
+            )
+            .open();
+            store
+                .create_work(&work, "unix-ms:2")
+                .expect("work and pinned requirements should be created");
+        }
+
+        // Status reads resolve the caller's project authority. This fixture
+        // writes the minimal self-rooted principal directly so it does not
+        // need a filesystem workspace binding or a credential/session flow.
+        store
+            .execute_batch(
+                "INSERT INTO operation
+                    (operation_id, project_id, command, actor_id, session_id, expected_revision,
+                     attempt_id, fence, request_digest, outcome, result_json, revision, created_at, completed_at)
+                 VALUES ('project-init', 'cursor-isolation-project', 'project.init', 'operator',
+                         NULL, NULL, NULL, NULL, 'project-init-digest', 'changed', '{}', 0,
+                         'unix-ms:1', 'unix-ms:1');
+                 INSERT INTO boreal_principal
+                    (project_id, actor_id, role, authority_root, delegated_by, operation_id, created_at)
+                 VALUES ('cursor-isolation-project', 'operator', 'operator', 'operator', NULL,
+                         'project-init', 'unix-ms:1');",
+            )
+            .expect("project operation and principal should be installed");
+        store
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE boreal_entity_revision
+                    SET proof_revision = -1
+                  WHERE project_id = 'cursor-isolation-project'
+                    AND work_id = 'corrupt-cursor';
+                 PRAGMA ignore_check_constraints = OFF;",
+            )
+            .expect("fixture should corrupt exactly one cursor value");
+
+        let (snapshot, _) = store
+            .read_project_status_for_actor("cursor-isolation-project", "operator", TimestampMs(3))
+            .expect("one malformed cursor must not abort the project snapshot");
+
+        assert_eq!(snapshot.works.len(), 2, "both work rows remain readable");
+        let corrupt = snapshot
+            .works
+            .iter()
+            .find(|row| row.work.id.as_str() == "corrupt-cursor")
+            .expect("corrupt work remains visible for diagnosis");
+        assert_eq!(corrupt.action_facts.integrity, StatusIntegrity::Quarantined);
+        assert!(corrupt.action_facts.canonical_inputs.is_none());
+        assert!(
+            snapshot.diagnostics.iter().any(|diagnostic| {
+                diagnostic.work_id == "corrupt-cursor"
+                    && diagnostic.code == "decision_facts_corrupt"
+                    && diagnostic.detail == "SQLite returned negative integer: -1"
+            }),
+            "unexpected diagnostics: {:?}",
+            snapshot.diagnostics
+        );
+
+        let healthy = snapshot
+            .works
+            .iter()
+            .find(|row| row.work.id.as_str() == "healthy-sibling")
+            .expect("healthy sibling remains readable");
+        assert_eq!(healthy.action_facts.integrity, StatusIntegrity::Valid);
+        assert!(healthy.action_facts.canonical_inputs.is_some());
+        assert!(!snapshot.diagnostics.iter().any(|diagnostic| {
+            diagnostic.work_id == "healthy-sibling" && diagnostic.code == "decision_facts_corrupt"
+        }));
     }
 }
