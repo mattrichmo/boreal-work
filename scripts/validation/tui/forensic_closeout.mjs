@@ -273,15 +273,42 @@ async function claimAndStart(client, work_id, revision, source = SOURCE_VERSION,
   return { attempt_id, fence, revision: start.revision, session_id };
 }
 
-async function readStatus(client, label, project = PROJECT) {
-  const envelope = await client.readStatus({ project_id: project, limit: 100, offset: 0 });
-  const data = assertSuccess(label, envelope);
-  assertThat(data && Array.isArray(data.items), `${label}: missing items`);
-  // Make the production TypeScript DTO validator and projection consume the
-  // exact response we are about to record, rather than a hand-built fixture.
-  const validated = validateEnvelope(envelope);
-  const model = buildMonitoringModel(validated);
-  return { envelope, data, model };
+async function readStatusPages(client, label, project = PROJECT) {
+  const pages = [];
+  let offset = 0;
+  let revision = null;
+  let total = null;
+  const limit = 100;
+  for (let pageNumber = 0; pageNumber < 1_000; pageNumber += 1) {
+    const envelope = await client.readStatus({
+      project_id: project,
+      limit,
+      offset,
+      ...(revision === null ? {} : { cursor_revision: revision }),
+    });
+    const pageLabel = pageNumber === 0 ? label : `${label}/offset-${offset}`;
+    const data = assertSuccess(`${pageLabel} status`, envelope);
+    assertThat(data && Array.isArray(data.items), `${pageLabel}: missing items`);
+    const validated = validateEnvelope(envelope);
+    const model = buildMonitoringModel(validated);
+    assertThat(Number.isInteger(envelope.revision), `${pageLabel}: missing revision`);
+    assertThat(data.offset === offset && data.limit === limit, `${pageLabel}: service returned the wrong status page`);
+    if (revision === null) {
+      revision = envelope.revision;
+      total = data.total;
+    } else {
+      assertThat(envelope.revision === revision, `${pageLabel}: status revision changed during pagination`);
+      assertThat(data.total === total, `${pageLabel}: status total changed during pagination`);
+    }
+    pages.push({ envelope, data, model, label: pageLabel });
+    if (!data.has_more) return pages;
+    assertThat(Number.isInteger(data.next_offset) && data.next_offset > offset,
+      `${pageLabel}: bounded status page made no forward progress`);
+    assertThat(data.next_offset === offset + data.returned_rows,
+      `${pageLabel}: next_offset does not match the returned physical rows`);
+    offset = data.next_offset;
+  }
+  throw new Error(`${label}: status pagination exceeded its safety bound`);
 }
 
 function checkStatusDtoMatrix(snapshots) {
@@ -332,13 +359,12 @@ function checkStatusDtoMatrix(snapshots) {
     const modelItems = new Set(model.items.map((item) => item.work_id));
     assertThat(modelItems.size === data.items.length, `${label}: production TUI model dropped live items`);
   }
-  const byId = new Map(observations.map((item) => [`${item.label}/${item.work_id}`, item]));
   assertThat(seenKinds.has("milestone") && seenKinds.has("sprint") && seenKinds.has("task"), `V04 kind matrix incomplete: ${[...seenKinds]}; items=${observations.map((item) => `${item.label}/${item.work_id}:${item.kind}`).join(",")}`);
   assertThat(seenStates.has("ready") && [...seenStates].some((state) => ["claimed", "in_progress"].includes(state)), `V04 state matrix incomplete: ${[...seenStates]}`);
   assertThat(["checkpoint", "verification", "summary"].every((gate) => seenGates.has(gate)), `V04 gate matrix incomplete: ${[...seenGates]}`);
-  const initialTask = byId.get("initial/matrix-task");
+  const initialTask = observations.find((item) => item.label.startsWith("initial") && item.work_id === "matrix-task");
   assertThat(initialTask?.parent_id === "matrix-sprint", "V04 task parent DTO is not preserved");
-  assertThat(byId.get("initial/matrix-sprint")?.parent_id === "matrix-milestone", "V04 sprint parent DTO is not preserved");
+  assertThat(observations.find((item) => item.label.startsWith("initial") && item.work_id === "matrix-sprint")?.parent_id === "matrix-milestone", "V04 sprint parent DTO is not preserved");
   assertThat(observations.some((item) => item.has_deadlines), "V04 timestamp/deadline DTO is not observed");
   return { seen_states: [...seenStates].sort(), seen_kinds: [...seenKinds].sort(), seen_gates: [...seenGates].sort(), observations };
 }
@@ -367,6 +393,55 @@ async function readOperation(client, operation_id) {
   return envelope;
 }
 
+async function resolveSubmittedResourceRelease(operatorClient, socket, context) {
+  const recovery = await operatorClient.readWorkspaceView("recovery", PROJECT);
+  const data = assertSuccess("post-submit recovery list", recovery);
+  const obligation = data.items.find((item) => item.work_id === context.work_id
+    && item.attempt_id === context.attempt_id
+    && item.reason === "resource_unknown"
+    && item.resource_state === "release_pending");
+  assertThat(obligation, "operator recovery list omitted the submitted closeout resource obligation");
+  assertThat(Number.isInteger(recovery.revision), "operator recovery list omitted its project revision");
+
+  const inputPath = join(PROJECT_ROOT, ".boreal", "closeout-resource-release.json");
+  writeFileSync(inputPath, `${JSON.stringify({
+    resolution_id: nextOperation("closeout_resource_release_decision"),
+    outcome: "runtime_stopped",
+    reason: "Operator confirmed this isolated fixture has no external attempt resource to retain.",
+    resource_state: "released",
+  }, null, 2)}\n`, "utf8");
+  const resolution = cli([
+    "recovery", "resolve", obligation.obligation_id,
+    "--project", PROJECT,
+    "--input", ".boreal/closeout-resource-release.json",
+    "--expected-revision", String(recovery.revision),
+    "--yes",
+    "--socket", socket,
+    "--actor", OPERATOR,
+    "--harness", HARNESS,
+    "--session", "session-forensic-tui-operator",
+    "--operation-id", nextOperation("resolve_closeout_resource_release"),
+    "--json",
+  ], {}, PROJECT_ROOT);
+  assertThat(resolution.status === 0 && resolution.json?.outcome === "changed",
+    `operator recovery resolution failed: ${resolution.stdout}${resolution.stderr}`);
+  assertThat(resolution.json?.data?.obligation?.state === "resolved"
+    && resolution.json?.data?.obligation?.resource_state === "released",
+  `operator recovery resolution did not acknowledge the resource release: ${resolution.stdout}`);
+
+  const readback = await operatorClient.readWorkspaceView("recovery", PROJECT);
+  const readbackData = assertSuccess("operator recovery resolution readback", readback);
+  assertThat(!readbackData.items.some((item) => item.obligation_id === obligation.obligation_id),
+    "resolved closeout resource obligation remained in the unresolved recovery list");
+  return {
+    obligation_id: obligation.obligation_id,
+    operation_id: resolution.json.data.operation_id,
+    outcome: resolution.json.outcome,
+    resource_state: resolution.json.data.obligation.resource_state,
+    readback_revision: readback.revision,
+  };
+}
+
 class CapturedTty {
   is_tty = true;
   writes = [];
@@ -388,9 +463,10 @@ class CapturedTty {
   emit(value) { for (const listener of [...this.listeners]) listener(value); }
 }
 
-async function runFullScreenCloseout(client, serviceChild, socket, context, verificationOperation) {
+async function runFullScreenCloseout(serviceChild, socket, operatorClient, context, verificationOperation) {
+  const closeoutClient = serviceClient(socket, ACTOR, AGENT_CREDENTIAL, PROJECT, context.session_id);
   const realReadReceipt = async (project_id, work_id, attempt_id, fence) => {
-    const operation = await client.readOperation(project_id, verificationOperation);
+    const operation = await closeoutClient.readOperation(project_id, verificationOperation);
     const rawReceipt = operation.data?.receipt ?? operation.data?.execution?.receipt;
     assertThat(rawReceipt && rawReceipt.subject?.work_id === work_id
       && rawReceipt.subject?.attempt_id === attempt_id && rawReceipt.subject?.fence === fence,
@@ -402,19 +478,39 @@ async function runFullScreenCloseout(client, serviceChild, socket, context, veri
   };
   let finishRequest = null;
   let finishResponse = null;
+  let finishDispatchError = null;
+  let finishCompleted = false;
+  let resourceRecovery = null;
   const service = {
-    readStatus: client.readStatus.bind(client),
-    readOperation: client.readOperation.bind(client),
+    readStatus: closeoutClient.readStatus.bind(closeoutClient),
+    readOperation: closeoutClient.readOperation.bind(closeoutClient),
     readReceipt: realReadReceipt,
     finish: async (request) => {
       finishRequest = request;
-      const response = await client.finish(request);
-      finishResponse = response;
-      if (!["changed", "unchanged"].includes(response.outcome)) return response;
-      // Deliberately make the following controller refresh fail after the
-      // service has durably committed the mutation.
-      await stopService(serviceChild);
-      return response;
+      try {
+        let response = await closeoutClient.finish(request);
+        if (response.error?.code === "claim_conflict"
+          && response.error.message.includes("action_denied:status_denied")) {
+          resourceRecovery = await resolveSubmittedResourceRelease(operatorClient, socket, {
+            work_id: "closeout-task",
+            attempt_id: context.attempt_id,
+          });
+          // Retry this exact finish operation only after the separately
+          // authenticated operator has confirmed the fixture resource release.
+          response = await closeoutClient.finish(request);
+        }
+        finishResponse = response;
+        if (!["changed", "unchanged"].includes(response.outcome)) return response;
+        // Deliberately make the following controller refresh fail after the
+        // service has durably committed the mutation.
+        await stopService(serviceChild);
+        return response;
+      } catch (error) {
+        finishDispatchError = error instanceof Error ? error.message : String(error);
+        throw error;
+      } finally {
+        finishCompleted = true;
+      }
     },
   };
   const controller = new MountedWorkflowController(service, {
@@ -428,10 +524,43 @@ async function runFullScreenCloseout(client, serviceChild, socket, context, veri
   terminal.emit("typed forensic closeout summary");
   terminal.emit("\r");
   terminal.emit("y");
-  for (let index = 0; index < 100 && !finishRequest; index += 1) await delay(20);
-  assertThat(finishRequest, "full-screen closeout did not dispatch finish");
+  for (let index = 0; index < 100 && !finishCompleted; index += 1) await delay(20);
+  if (!finishRequest) {
+    const view = controller.view();
+    const diagnostic = {
+      selected_work: view.selected_work && {
+        work_id: view.selected_work.work_id,
+        status: view.selected_work.status,
+        attempt_session_id: view.selected_work.attempt?.session_id,
+      },
+      finish_action: view.actions.find((action) => action.action === "finish"),
+      notice: view.notice,
+      pending_operations: view.pending_operations,
+      terminal_tail: terminal.writes.join("").slice(-500),
+    };
+    terminal.emit("\x1b");
+    await delay(50);
+    terminal.emit("q");
+    await run;
+    controller.unmount();
+    await closeoutClient.close();
+    throw new Error(`full-screen closeout did not dispatch finish: ${JSON.stringify(diagnostic)}`);
+  }
   if (!["changed", "unchanged"].includes(finishResponse?.outcome)) {
-    throw new Error(`full-screen finish rejected: ${JSON.stringify({ response: finishResponse, receipt: finishRequest.data.receipt })}`);
+    const view = controller.view();
+    throw new Error(`full-screen finish rejected: ${JSON.stringify({
+      response: finishResponse,
+      dispatch_error: finishDispatchError,
+      notice: view.notice?.message,
+      selected_work: view.selected_work && {
+        work_id: view.selected_work.work_id,
+        status: view.selected_work.status,
+        attempt: view.selected_work.attempt,
+        gates: view.selected_work.gates,
+      },
+      finish_action: view.actions.find((action) => action.action === "finish"),
+      finish_session_id: finishRequest.data.session_id,
+    })}`);
   }
   for (let index = 0; index < 100 && !controller.view().notice; index += 1) await delay(20);
   assertThat(controller.view().notice?.message.includes("mutation committed") === true, `V07 did not preserve committed mutation: ${JSON.stringify(controller.view().notice)}`);
@@ -443,7 +572,14 @@ async function runFullScreenCloseout(client, serviceChild, socket, context, veri
   assertThat(finishRequest.data.receipt?.subject?.work_id === "closeout-task", "full-screen finish did not send the durable typed receipt");
   assertThat(finishRequest.data.receipt?.subject?.gate_id === "verification", "full-screen finish changed the service receipt gate id");
   assertThat(finishRequest.data.receipt?.coverage?.kind === "verification", "full-screen finish changed the service receipt coverage kind");
-  return { finish_operation_id: finishRequest.operation_id, notice: controller.view().notice?.message, terminal_output_bytes: terminal.writes.join("").length, receipt_dto_coverage_kind: finishRequest.data.receipt?.coverage?.kind };
+  await closeoutClient.close();
+  return {
+    finish_operation_id: finishRequest.operation_id,
+    notice: controller.view().notice?.message,
+    terminal_output_bytes: terminal.writes.join("").length,
+    receipt_dto_coverage_kind: finishRequest.data.receipt?.coverage?.kind,
+    resource_recovery: resourceRecovery,
+  };
 }
 
 async function main() {
@@ -513,14 +649,13 @@ async function main() {
     client = serviceClient(socket, ACTOR, AGENT_CREDENTIAL, PROJECT, SESSION);
     let revision = await createProjectAndHierarchy(operatorClient);
 
-    const initial = await readStatus(client, "initial status");
+    const initialPages = await readStatusPages(client, "initial status");
+    const initial = initialPages[0];
     const context = await claimAndStart(client, "matrix-task", initial.envelope.revision);
-    const claimed = await readStatus(client, "running status");
+    const claimedPages = await readStatusPages(client, "running status");
+    const claimed = claimedPages[0];
     revision = claimed.envelope.revision;
-    const v04 = checkStatusDtoMatrix([
-      { ...initial, label: "initial" },
-      { ...claimed, label: "running" },
-    ]);
+    const v04 = checkStatusDtoMatrix([...initialPages, ...claimedPages]);
     evidence.v04 = { status: "pass", ...v04 };
 
     // Three independent live-service crash points prove that the execution
@@ -559,6 +694,10 @@ async function main() {
       const readback = await readOperation(client, operation_id);
       assertThat(readback.outcome === "unknown", `${failpoint}: readback outcome=${readback.outcome}`);
       assertThat(readback.data.readback_required === true, `${failpoint}: readback_required was not true`);
+      const recoveredStatus = await client.readStatus({ project_id: PROJECT, limit: 1, offset: 0 });
+      assertSuccess(`${failpoint}: recovered status`, recoveredStatus);
+      assertThat(Number.isInteger(recoveredStatus.revision), `${failpoint}: recovered status omitted the current project revision`);
+      revision = recoveredStatus.revision;
       const state = readback.data.execution?.state ?? null;
       assertThat(["admitted", "running", "exited", "unknown"].includes(state), `${failpoint}: invalid execution state ${state}`);
       faultReadbacks.push({ failpoint, work_id, operation_id, client_exit: fault.status, readback_outcome: readback.outcome, execution_state: state });
@@ -580,11 +719,14 @@ async function main() {
       assertThat(result.status === 0 && result.json?.outcome === "changed", `successful ${gate_id} evidence failed: ${result.stdout}${result.stderr}`);
       gateOperations.push({ gate_id, operation_id });
     }
-    const afterEvidence = await readStatus(client, "after evidence");
-    const closeItem = afterEvidence.data.items.find((item) => item.work_id === "closeout-task");
+    const afterEvidencePages = await readStatusPages(client, "after evidence");
+    const closeItem = afterEvidencePages.flatMap((page) => page.data.items).find((item) => item.work_id === "closeout-task");
     assertThat(closeItem && closeItem.gates.satisfied.length === 3, `closeout-task did not expose all satisfied gates: ${JSON.stringify(closeItem?.gates)}`);
     const verificationOperation = gateOperations.find((entry) => entry.gate_id === "verification").operation_id;
-    const fullScreenEvidence = await runFullScreenCloseout(client, service, socket, closeContext, verificationOperation);
+    const fullScreenEvidence = await runFullScreenCloseout(service, socket, operatorClient, {
+      ...closeContext,
+      work_id: "closeout-task",
+    }, verificationOperation);
     service = null;
     client = null;
 
@@ -593,12 +735,15 @@ async function main() {
     service = startService(db, socket, fixture);
     await waitForSocket(socket, service);
     client = serviceClient(socket, ACTOR, AGENT_CREDENTIAL, PROJECT, SESSION);
-    const final = await readStatus(client, "post-closeout status");
-    const closed = final.data.items.find((item) => item.work_id === "closeout-task");
+    const finalPages = await readStatusPages(client, "post-closeout status");
+    const closed = finalPages.flatMap((page) => page.data.items).find((item) => item.work_id === "closeout-task");
     assertThat(closed && ["complete", "closed"].includes(closed.status), `post-closeout status is not terminal: ${JSON.stringify(closed)}`);
-    const finishReadback = await readOperation(client, fullScreenEvidence.finish_operation_id);
-    assertThat(finishReadback.data.operation?.result?.summary_id, "finish parent operation did not retain typed summary identity");
-    assertThat(finishReadback.data.operation?.result?.close_state, "finish parent operation did not retain typed close state");
+    const finishReadback = await readOperation(client, `${fullScreenEvidence.finish_operation_id}:result`);
+    const closeResult = finishReadback.data.operation?.result?.close;
+    assertThat(closeResult?.summary_id,
+      `finish result operation did not retain typed summary identity: ${JSON.stringify(finishReadback.data)}`);
+    assertThat(closeResult?.close_state,
+      `finish result operation did not retain typed close state: ${JSON.stringify(finishReadback.data)}`);
     evidence.v06 = { status: "pass", fault_boundaries: faultReadbacks, full_screen: fullScreenEvidence, finish_readback: finishReadback.data };
     evidence.v07 = { status: "pass", committed_status: closed.status, refresh_notice: fullScreenEvidence.notice, finish_operation_id: fullScreenEvidence.finish_operation_id };
 

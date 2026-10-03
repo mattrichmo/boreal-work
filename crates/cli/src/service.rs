@@ -4799,6 +4799,14 @@ mod unix {
             let coverage: Value =
                 serde_json::from_str(&durable.coverage_json).map_err(|_| invalid())?;
             let coverage_kind = format!("{:?}", receipt.coverage.kind);
+            let subject_gate_id = subject
+                .get("gate_id")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            let canonical_subject_gate = self
+                .store
+                .gate_id_for_work(project.as_str(), work_id, subject_gate_id)
+                .map_err(|_| invalid())?;
 
             if !witnessed_receipt_subject_matches(
                 &durable,
@@ -4817,7 +4825,7 @@ mod unix {
                 || subject.get("attempt_id").and_then(Value::as_str)
                     != Some(receipt.attempt_id.as_str())
                 || subject.get("fence").and_then(Value::as_u64) != Some(receipt.fence.get())
-                || subject.get("gate_id").and_then(Value::as_str) != Some(receipt.gate_id.as_str())
+                || canonical_subject_gate != canonical_gate
                 || coverage.get("kind").and_then(Value::as_str) != Some(coverage_kind.as_str())
                 || coverage.get("profile_id").and_then(Value::as_str)
                     != Some(receipt.coverage.profile_id.as_str())
@@ -5865,10 +5873,31 @@ mod tests {
         let receipt_path = evidence.2.as_ref().expect("evidence data")["receipt_path"]
             .as_str()
             .expect("evidence receipt path");
-        let receipt: Value = serde_json::from_str(
+        let receipt_sidecar: Value = serde_json::from_str(
             &fs::read_to_string(receipt_path).expect("witnessed receipt is readable"),
         )
         .expect("witnessed receipt is JSON");
+        let durable_receipt = handler
+            .store
+            .receipt(
+                receipt_sidecar["receipt_id"]
+                    .as_str()
+                    .expect("sidecar has a receipt id"),
+            )
+            .expect("durable receipt read succeeds")
+            .expect("witnessed receipt is durable");
+        let durable_subject: Value = serde_json::from_str(&durable_receipt.subject_json)
+            .expect("durable receipt subject is valid JSON");
+        assert_eq!(
+            durable_subject["gate_id"], "service-work:verification",
+            "the durable subject uses the canonical work-scoped gate ID",
+        );
+        let receipt = super::super::receipt_record_json(&durable_receipt)
+            .expect("durable receipt maps to the public DTO");
+        assert_eq!(
+            receipt["subject"]["gate_id"], "verification",
+            "the local DTO exposes the profile-facing gate ID",
+        );
         let finish = json!({
             "command": "finish_close",
             "project_id": "service-project",
