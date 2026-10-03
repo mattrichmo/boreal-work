@@ -1574,7 +1574,10 @@ mod unix {
             "session_id": parsed.options.session,
             "operation_id": operation,
         });
-        if super::parity_supported(&parsed.path) {
+        // Work creation has its own versioned service DTO below. Keep it out
+        // of the generic feature envelope so the service validates the typed
+        // fields, acceptance profile version and expected revision directly.
+        if super::parity_supported(&parsed.path) && parsed.path != ["work", "create"] {
             data["command"] = json!("cli_feature_v1");
             let mut forwarded = parsed.clone();
             forwarded.options.socket = None;
@@ -6205,7 +6208,11 @@ mod tests {
             )
             .expect("attempt claim succeeds");
         drop(handler);
-        let socket = PathBuf::from(format!("/private/tmp/bw-hooks-{}.sock", now_ms_u64()));
+        let socket = std::env::temp_dir().join(format!(
+            "bw-hooks-{}-{}.sock",
+            std::process::id(),
+            now_ms_u64()
+        ));
         let host = match bind_service_host(&db, &socket, ServiceHostConfig::default()) {
             Ok(host) => host,
             Err(error) if socket_unavailable_in_sandbox(&error.message) => {

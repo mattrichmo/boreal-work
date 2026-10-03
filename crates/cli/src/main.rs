@@ -10314,23 +10314,36 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_v3_routes_do_not_open_or_mutate_a_database() {
+    fn direct_only_v3_intake_service_route_is_rejected_before_database_open() {
         let path = env::temp_dir().join(format!("boreal-cli-v3-gap-{}.sqlite", now_ms_u64()));
         let db = path.to_string_lossy().to_string();
+        let socket = env::temp_dir()
+            .join(format!("boreal-cli-v3-gap-{}.sock", now_ms_u64()))
+            .to_string_lossy()
+            .into_owned();
         let _ = fs::remove_file(&path);
 
         let error = run(&args(&[
             "intake",
-            "promote",
+            "capture",
+            "--project",
             "project-1",
             "intake-1",
+            "captured note",
+            "--bucket",
+            "inbox",
             "--db",
             &db,
+            "--socket",
+            &socket,
             "--json",
         ]))
-        .expect_err("v3 intake capture must be unavailable in v2");
+        .expect_err("direct-only V3 intake capture must be unavailable through a service socket");
         assert_eq!(error.code, ErrorCode::UnknownCommandNamespace);
         assert_eq!(error.outcome, ApplicationOutcome::Rejected);
+        assert!(error
+            .message
+            .contains("not available through the selected service socket"));
         assert!(!path.exists(), "unavailable route opened a database");
 
         let _ = fs::remove_file(path);
