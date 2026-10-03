@@ -87,7 +87,7 @@ def service_client(
     if args[:1] == ["status"]:
         command = [args[0], project, *args[1:]]
     elif args[:2] == ["work", "show"]:
-        command = [args[0], args[1], project, *args[2:]]
+        command = [args[0], args[1], *args[2:], "--project", project]
     else:
         raise ValueError(f"unsupported production-client command shape: {args!r}")
     return invoke(

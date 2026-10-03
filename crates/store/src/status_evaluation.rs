@@ -259,13 +259,14 @@ impl SqliteStore {
     ) -> Result<(ProjectStatusRead, ActorContext), StoreError> {
         self.execute_batch("BEGIN")?;
         let result = (|| {
-            let actor = self.project_actor_context(project_id, actor_id)?;
-            let mut snapshot = self.read_project_status_in_transaction(project_id)?;
-            self.populate_status_action_facts_for_session(
+            let (mut snapshot, pinned_requirements) =
+                self.read_project_status_in_transaction(project_id)?;
+            let actor = self.populate_status_action_facts_for_session(
                 &mut snapshot,
                 actor_id,
                 session_id,
                 as_of,
+                &pinned_requirements,
             )?;
             Ok((snapshot, actor))
         })();
@@ -278,7 +279,8 @@ impl SqliteStore {
         actor_id: &str,
         requested_session: Option<&str>,
         as_of: TimestampMs,
-    ) -> Result<(), StoreError> {
+        pinned_requirements: &BTreeMap<String, PinnedRequirements>,
+    ) -> Result<ActorContext, StoreError> {
         // Schema-v2 compatibility projections do not have the authenticated
         // project/session boundary required by the paired action contract.
         // Mark their action facts as an explicit compatibility origin so the
@@ -288,7 +290,7 @@ impl SqliteStore {
             for row in &mut snapshot.works {
                 row.action_facts = StatusActionFacts::legacy_compatibility();
             }
-            return Ok(());
+            return self.project_actor_context(snapshot.project_id.as_str(), actor_id);
         }
         let actor = self.project_actor_context(snapshot.project_id.as_str(), actor_id)?;
         // Invalid/ended sessions remove mutation authority, not read access to healthy siblings.
@@ -300,23 +302,46 @@ impl SqliteStore {
             .map(str::to_owned);
         snapshot.caller_session_id = session_id.clone();
         for row in &mut snapshot.works {
-            row.action_facts.integrity = if snapshot
-                .diagnostics
-                .iter()
-                .any(|d| d.work_id == row.work.id.as_str())
-            {
-                StatusIntegrity::Quarantined
-            } else {
-                StatusIntegrity::Valid
-            };
-            match self.canonical_decision_inputs(
+            let work_id = row.work.id.as_str();
+            row.action_facts.integrity =
+                if snapshot.diagnostics.iter().any(|d| d.work_id == work_id) {
+                    StatusIntegrity::Quarantined
+                } else {
+                    StatusIntegrity::Valid
+                };
+            if !pinned_requirements.contains_key(work_id) {
+                let missing_pin_was_diagnosed = snapshot.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.work_id == work_id
+                        && diagnostic.code == "acceptance_requirements_corrupt"
+                        && diagnostic.detail == "missing pinned requirement revision"
+                });
+                if missing_pin_was_diagnosed {
+                    let detail = format!(
+                        "missing pinned requirement revision for {}/{}",
+                        snapshot.project_id, work_id
+                    );
+                    row.action_facts = StatusActionFacts::unavailable();
+                    row.work
+                        .hard_holds
+                        .push(ReasonCode::HardHold("integrity_quarantined".into()));
+                    snapshot.diagnostics.push(StatusRecordDiagnostic {
+                        work_id: work_id.to_owned(),
+                        title: Some(row.work.title.clone()),
+                        code: "decision_facts_corrupt".into(),
+                        detail,
+                    });
+                    continue;
+                }
+            }
+            let inputs = self.canonical_decision_inputs(
                 snapshot.project_id.as_str(),
                 Revision(snapshot.revision.0),
                 row,
                 &actor,
                 session_id.as_deref(),
                 as_of,
-            ) {
+            );
+            match inputs {
                 Ok(inputs) => {
                     let proof = inputs.requirements.as_present().map(|r| &r.proof);
                     let mut missing_facts = Vec::new();
@@ -356,7 +381,7 @@ impl SqliteStore {
                 }
             }
         }
-        Ok(())
+        Ok(actor)
     }
 
     /// Caller must hold the write transaction. This does not open a nested
@@ -418,9 +443,15 @@ impl SqliteStore {
         session_id: Option<&str>,
         as_of: TimestampMs,
     ) -> Result<WorkPolicyProjection, StoreError> {
-        let actor = self.project_actor_context(project_id, actor_id)?;
-        let mut snapshot = self.read_project_status_in_transaction(project_id)?;
-        self.populate_status_action_facts_for_session(&mut snapshot, actor_id, session_id, as_of)?;
+        let (mut snapshot, pinned_requirements) =
+            self.read_project_status_in_transaction(project_id)?;
+        let actor = self.populate_status_action_facts_for_session(
+            &mut snapshot,
+            actor_id,
+            session_id,
+            as_of,
+            &pinned_requirements,
+        )?;
         let row = snapshot
             .works
             .iter()

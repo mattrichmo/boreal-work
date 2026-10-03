@@ -94,13 +94,14 @@ impl SqliteStore {
                     "container rollup requires a non-claimable container work item".into(),
                 ));
             }
-            let mut status = self.read_project_status_in_transaction(project)?;
-            let actor = self.project_actor_context(project, actor_id)?;
-            self.populate_status_action_facts_for_session(
+            let (mut status, pinned_requirements) =
+                self.read_project_status_in_transaction(project)?;
+            let actor = self.populate_status_action_facts_for_session(
                 &mut status,
                 actor_id,
                 session_id,
                 as_of,
+                &pinned_requirements,
             )?;
             let mut descendants = BTreeSet::new();
             let mut frontier = BTreeSet::from([container_id.to_owned()]);
@@ -622,13 +623,14 @@ impl SqliteStore {
                     cursor = next_id;
                 }
             }
-            let mut status = self.read_project_status_in_transaction(project)?;
-            let actor = self.project_actor_context(project, actor_id)?;
-            self.populate_status_action_facts_for_session(
+            let (mut status, pinned_requirements) =
+                self.read_project_status_in_transaction(project)?;
+            let actor = self.populate_status_action_facts_for_session(
                 &mut status,
                 actor_id,
                 session_id,
                 as_of,
+                &pinned_requirements,
             )?;
             let mut accepted_outcomes = BTreeMap::new();
             let mut assignment_reasons = BTreeMap::new();

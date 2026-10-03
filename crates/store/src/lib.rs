@@ -781,6 +781,7 @@ struct StatusGateRow {
 struct StatusGateRead {
     diagnostics: BTreeMap<String, GateDiagnostics>,
     requirement_diagnostics: BTreeMap<String, String>,
+    requirements: BTreeMap<String, PinnedRequirements>,
 }
 
 #[derive(Clone, Debug)]
@@ -5476,7 +5477,9 @@ impl SqliteStore {
     /// may apply the application projection and pagination afterward.
     pub fn read_project_status(&self, project_id: &str) -> Result<ProjectStatusRead, StoreError> {
         self.execute_batch("BEGIN")?;
-        let result = self.read_project_status_in_transaction(project_id);
+        let result = self
+            .read_project_status_in_transaction(project_id)
+            .map(|(snapshot, _)| snapshot);
         finish_transaction(self, result)
     }
 
@@ -5540,12 +5543,24 @@ impl SqliteStore {
     fn read_project_status_in_transaction(
         &self,
         project_id: &str,
-    ) -> Result<ProjectStatusRead, StoreError> {
-        let revision = self.project_revision(project_id)?;
-        let mut count = self.prepare("SELECT COUNT(*) FROM work_item WHERE project_id = ?1")?;
-        count.bind_text(1, project_id)?;
-        let total = match count.step()? {
-            SQLITE_ROW => count.column_u64(0)?,
+    ) -> Result<(ProjectStatusRead, BTreeMap<String, PinnedRequirements>), StoreError> {
+        let mut project = self.prepare(
+            "SELECT p.project_revision,
+                    (SELECT COUNT(*) FROM work_item w WHERE w.project_id = p.project_id)
+             FROM project p WHERE p.project_id = ?1",
+        )?;
+        project.bind_text(1, project_id)?;
+        let (revision, total) = match project.step()? {
+            SQLITE_ROW => (
+                SnapshotRevision(project.column_u64(0)?),
+                project.column_u64(1)?,
+            ),
+            SQLITE_DONE => {
+                return Err(StoreError::NotFound {
+                    entity: "project",
+                    id: project_id.to_owned(),
+                })
+            }
             _ => return Err(StoreError::Corrupt("missing work total".to_owned())),
         };
 
@@ -5558,37 +5573,53 @@ impl SqliteStore {
         scoped_diagnostics.extend(hold_diagnostics);
         let gate_read =
             self.status_gate_diagnostics_for_project(project_id, &current_attempts, revision.0)?;
-        let gate_diagnostics = gate_read.diagnostics;
-        let requirement_diagnostics = gate_read.requirement_diagnostics;
-        let mut planning_facts = self.status_planning_facts_for_project(project_id)?;
-
-        let mut rows = self.prepare(
+        let mut gate_diagnostics = gate_read.diagnostics;
+        let mut requirement_diagnostics = gate_read.requirement_diagnostics;
+        let pinned_requirements = gate_read.requirements;
+        let work_model_v3_enabled = self.work_model_v3_enabled()?;
+        let inline_planning = self.canonical_production && work_model_v3_enabled;
+        let mut planning_facts = if inline_planning {
+            BTreeMap::new()
+        } else {
+            self.status_planning_facts_for_project(project_id)?
+        };
+        let work_query = if inline_planning {
             "SELECT work_id, project_id, kind, parent_id, lifecycle,
                     dispatch_policy, retry_not_before, priority,
                     acceptance_profile_id, acceptance_profile_version,
-                    title, description, rowid
-             FROM work_item WHERE project_id = ?1 ORDER BY work_id",
-        )?;
+                    title, description, rowid,
+                    (SELECT MIN(CASE ca.activation_policy
+                                  WHEN 'explicit_not_before' THEN ca.activation_at_utc_ms
+                                  WHEN 'at_cycle_start' THEN cycle.scheduled_start_utc_ms
+                                  ELSE NULL
+                                END)
+                     FROM cycle_assignment_v3 ca
+                     JOIN cycle_v3 cycle
+                       ON cycle.project_id = ca.project_id
+                      AND cycle.cycle_id = ca.cycle_id
+                     WHERE ca.project_id = work_item.project_id
+                       AND ca.work_id = work_item.work_id
+                       AND ca.state IN ('planned', 'committed'))
+             FROM work_item WHERE project_id = ?1 ORDER BY work_id"
+        } else {
+            "SELECT work_id, project_id, kind, parent_id, lifecycle,
+                    dispatch_policy, retry_not_before, priority,
+                    acceptance_profile_id, acceptance_profile_version,
+                    title, description, rowid, NULL
+             FROM work_item WHERE project_id = ?1 ORDER BY work_id"
+        };
+        let mut rows = self.prepare(work_query)?;
         rows.bind_text(1, project_id)?;
         let mut works = Vec::with_capacity(total as usize);
         let mut ordered_work_ids = Vec::with_capacity(total as usize);
-        let mut record_diagnostics = requirement_diagnostics
-            .iter()
-            .map(|(work_id, detail)| StatusRecordDiagnostic {
-                work_id: work_id.clone(),
-                title: None,
-                code: "acceptance_requirements_corrupt".to_owned(),
-                detail: detail.clone(),
-            })
-            .collect::<Vec<_>>();
-        record_diagnostics.extend(scoped_diagnostics);
+        let mut row_diagnostics = Vec::new();
         while rows.step()? == SQLITE_ROW {
             let work_id = match rows.column_text(0) {
                 Ok(id) => id,
                 Err(error) => {
                     let identity = format!("quarantined-row:{}", rows.column_i64(12)?);
                     ordered_work_ids.push(identity.clone());
-                    record_diagnostics.push(StatusRecordDiagnostic {
+                    row_diagnostics.push(StatusRecordDiagnostic {
                         work_id: identity,
                         title: rows.column_text(10).ok(),
                         code: "invalid_work_identity".to_owned(),
@@ -5598,6 +5629,27 @@ impl SqliteStore {
                 }
             };
             ordered_work_ids.push(work_id.clone());
+            if self.canonical_production
+                && !pinned_requirements.contains_key(&work_id)
+                && !requirement_diagnostics.contains_key(&work_id)
+            {
+                requirement_diagnostics.insert(
+                    work_id.clone(),
+                    "missing pinned requirement revision".to_owned(),
+                );
+                let attempt = current_attempts.get(&work_id);
+                gate_diagnostics
+                    .entry(work_id.clone())
+                    .or_insert_with(|| GateDiagnostics {
+                        project_id: project_id.to_owned(),
+                        work_id: work_id.clone(),
+                        attempt_id: attempt.map(|value| value.attempt_id.clone()),
+                        fence: attempt.map(|value| value.fence),
+                        revision: revision.0,
+                        gates: Vec::new(),
+                        missing: vec!["requirements_missing".to_owned()],
+                    });
+            }
             let current_attempt = current_attempts.get(&work_id).cloned();
             let diagnostics =
                 gate_diagnostics
@@ -5626,13 +5678,31 @@ impl SqliteStore {
                 .collect();
             let title = rows.column_text(10).ok();
             let work = (|| {
-                let (schedule, activation_at) = planning_facts
-                    .remove(&work_id)
-                    .unwrap_or(Ok((None, None)))?;
+                let (schedule, activation_at) = if inline_planning {
+                    let activation = rows.column_optional_signed_i64(13)?;
+                    let activation = activation
+                        .map(|value| {
+                            u64::try_from(value).map(TimestampMs).map_err(|_| {
+                                StoreError::Corrupt(format!(
+                                    "negative planning activation timestamp for work {work_id}: {value}"
+                                ))
+                            })
+                        })
+                        .transpose()?;
+                    (None, activation)
+                } else {
+                    planning_facts
+                        .remove(&work_id)
+                        .unwrap_or(Ok((None, None)))?
+                };
                 let mut hard_holds = active_holds.get(&work_id).cloned().unwrap_or_default();
-                if record_diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.work_id == work_id)
+                if requirement_diagnostics.contains_key(&work_id)
+                    || scoped_diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.work_id == work_id)
+                    || row_diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.work_id == work_id)
                 {
                     hard_holds.push(ReasonCode::HardHold("integrity_quarantined".to_owned()));
                 }
@@ -5669,7 +5739,7 @@ impl SqliteStore {
                         action_facts: StatusActionFacts::unavailable(),
                     })
                 }
-                Err(error) => record_diagnostics.push(StatusRecordDiagnostic {
+                Err(error) => row_diagnostics.push(StatusRecordDiagnostic {
                     work_id,
                     title,
                     code: "corrupt_record".to_owned(),
@@ -5677,6 +5747,18 @@ impl SqliteStore {
                 }),
             }
         }
+
+        let mut record_diagnostics = requirement_diagnostics
+            .iter()
+            .map(|(work_id, detail)| StatusRecordDiagnostic {
+                work_id: work_id.clone(),
+                title: None,
+                code: "acceptance_requirements_corrupt".to_owned(),
+                detail: detail.clone(),
+            })
+            .collect::<Vec<_>>();
+        record_diagnostics.extend(scoped_diagnostics);
+        record_diagnostics.extend(row_diagnostics);
 
         let mut dependencies = Vec::new();
         let mut edges = self.prepare(
@@ -5727,13 +5809,13 @@ impl SqliteStore {
             diagnostics: record_diagnostics,
             dependencies,
         };
-        let v3_nodes = if self.work_model_v3_enabled()? {
+        let v3_nodes = if work_model_v3_enabled {
             Some(self.work_nodes_v3(project_id)?)
         } else {
             None
         };
         status_evaluation::diagnose_status_integrity(&mut snapshot, v3_nodes.as_deref());
-        Ok(snapshot)
+        Ok((snapshot, pinned_requirements))
     }
 
     /// Atomically reserves one eligible task, records its operation and audit
@@ -6261,8 +6343,8 @@ impl SqliteStore {
         };
         let mut statement = self.prepare(gate_query)?;
         statement.bind_text(1, project_id)?;
+        let mut requirements = BTreeMap::<String, PinnedRequirements>::new();
         if pinned_schema_installed {
-            let mut requirements = BTreeMap::<String, PinnedRequirements>::new();
             while statement.step()? == SQLITE_ROW {
                 let work_id = statement
                     .column_text(0)
@@ -6410,22 +6492,6 @@ impl SqliteStore {
                     Err(error) => {
                         requirement_diagnostics.insert(work_id, error.to_string());
                     }
-                }
-            }
-
-            let mut work_ids = self
-                .prepare("SELECT work_id FROM work_item WHERE project_id = ?1 ORDER BY work_id")?;
-            work_ids.bind_text(1, project_id)?;
-            while work_ids.step()? == SQLITE_ROW {
-                let work_id = work_ids
-                    .column_text(0)
-                    .unwrap_or_else(|_| "unreadable-work".to_owned());
-                if self.canonical_production
-                    && !requirements.contains_key(&work_id)
-                    && !requirement_diagnostics.contains_key(&work_id)
-                {
-                    requirement_diagnostics
-                        .insert(work_id, "missing pinned requirement revision".to_owned());
                 }
             }
 
@@ -6650,8 +6716,11 @@ impl SqliteStore {
         gate_rows.retain(|row| !requirement_diagnostics.contains_key(&row.work_id));
 
         let mut receipts = BTreeMap::<(String, String, u64, String), StatusReceiptFact>::new();
-        let mut statement = self.prepare(
-            "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
+        let mut reviews = BTreeMap::<(String, String, u64, String), bool>::new();
+        let mut summaries = BTreeMap::<String, SummaryRecord>::new();
+        if !current_attempts.is_empty() {
+            let mut statement = self.prepare(
+                "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
                     r.receipt_id, r.result, r.rejection_code
              FROM receipt r
              JOIN work_item wi ON wi.work_id = r.work_id
@@ -6662,40 +6731,39 @@ impl SqliteStore {
              WHERE wi.project_id = ?1 AND r.gate_id IS NOT NULL
              ORDER BY r.work_id, r.attempt_id, r.fence, r.gate_id,
                       r.rowid DESC",
-        )?;
-        statement.bind_text(1, project_id)?;
-        while statement.step()? == SQLITE_ROW {
-            let work_id = statement
-                .column_text(0)
-                .unwrap_or_else(|_| "unreadable-work".to_owned());
-            let decoded = (|| -> Result<_, StoreError> {
-                Ok((
-                    (
-                        work_id.clone(),
-                        statement.column_text(1)?,
-                        statement.column_u64(2)?,
-                        statement.column_text(3)?,
-                    ),
-                    StatusReceiptFact {
-                        receipt_id: statement.column_text(4)?,
-                        result: parse_receipt_outcome(&statement.column_text(5)?)?,
-                        rejection_code: statement.column_optional_text(6)?,
-                    },
-                ))
-            })();
-            match decoded {
-                Ok((key, fact)) => {
-                    receipts.entry(key).or_insert(fact);
-                }
-                Err(error) => {
-                    requirement_diagnostics.insert(work_id, error.to_string());
+            )?;
+            statement.bind_text(1, project_id)?;
+            while statement.step()? == SQLITE_ROW {
+                let work_id = statement
+                    .column_text(0)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
+                let decoded = (|| -> Result<_, StoreError> {
+                    Ok((
+                        (
+                            work_id.clone(),
+                            statement.column_text(1)?,
+                            statement.column_u64(2)?,
+                            statement.column_text(3)?,
+                        ),
+                        StatusReceiptFact {
+                            receipt_id: statement.column_text(4)?,
+                            result: parse_receipt_outcome(&statement.column_text(5)?)?,
+                            rejection_code: statement.column_optional_text(6)?,
+                        },
+                    ))
+                })();
+                match decoded {
+                    Ok((key, fact)) => {
+                        receipts.entry(key).or_insert(fact);
+                    }
+                    Err(error) => {
+                        requirement_diagnostics.insert(work_id, error.to_string());
+                    }
                 }
             }
-        }
 
-        let mut reviews = BTreeMap::<(String, String, u64, String), bool>::new();
-        let mut statement = self.prepare(
-            "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
+            let mut statement = self.prepare(
+                "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
                     r.decision
              FROM review r
              JOIN work_item wi ON wi.work_id = r.work_id
@@ -6706,36 +6774,36 @@ impl SqliteStore {
              WHERE wi.project_id = ?1 AND r.gate_id IS NOT NULL
              ORDER BY r.work_id, r.attempt_id, r.fence, r.gate_id,
                       r.rowid DESC",
-        )?;
-        statement.bind_text(1, project_id)?;
-        while statement.step()? == SQLITE_ROW {
-            let work_id = statement
-                .column_text(0)
-                .unwrap_or_else(|_| "unreadable-work".to_owned());
-            let decoded = (|| -> Result<_, StoreError> {
-                Ok((
-                    (
-                        work_id.clone(),
-                        statement.column_text(1)?,
-                        statement.column_u64(2)?,
-                        statement.column_text(3)?,
-                    ),
-                    parse_review_decision(&statement.column_text(4)?)? == ReviewDecision::Accepted,
-                ))
-            })();
-            match decoded {
-                Ok((key, fact)) => {
-                    reviews.entry(key).or_insert(fact);
-                }
-                Err(error) => {
-                    requirement_diagnostics.insert(work_id, error.to_string());
+            )?;
+            statement.bind_text(1, project_id)?;
+            while statement.step()? == SQLITE_ROW {
+                let work_id = statement
+                    .column_text(0)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
+                let decoded = (|| -> Result<_, StoreError> {
+                    Ok((
+                        (
+                            work_id.clone(),
+                            statement.column_text(1)?,
+                            statement.column_u64(2)?,
+                            statement.column_text(3)?,
+                        ),
+                        parse_review_decision(&statement.column_text(4)?)?
+                            == ReviewDecision::Accepted,
+                    ))
+                })();
+                match decoded {
+                    Ok((key, fact)) => {
+                        reviews.entry(key).or_insert(fact);
+                    }
+                    Err(error) => {
+                        requirement_diagnostics.insert(work_id, error.to_string());
+                    }
                 }
             }
-        }
 
-        let mut summaries = BTreeMap::<String, SummaryRecord>::new();
-        let mut statement = self.prepare(
-            "SELECT s.summary_id, wi.project_id, s.work_id, s.attempt_id,
+            let mut statement = self.prepare(
+                "SELECT s.summary_id, wi.project_id, s.work_id, s.attempt_id,
                     s.fence, s.subject_ref, s.source_version_id,
                     s.config_identity, s.profile_id, s.profile_version,
                     s.body_digest, s.body_size, s.current, s.created_at
@@ -6747,18 +6815,19 @@ impl SqliteStore {
                            AND (a.current = 1 OR a.state = 'completed')
              WHERE wi.project_id = ?1 AND s.current = 1
              ORDER BY s.work_id, s.created_at DESC, s.summary_id DESC",
-        )?;
-        statement.bind_text(1, project_id)?;
-        while statement.step()? == SQLITE_ROW {
-            let work_id = statement
-                .column_text(2)
-                .unwrap_or_else(|_| "unreadable-work".to_owned());
-            match summary_from_statement(&statement) {
-                Ok(summary) => {
-                    summaries.entry(work_id).or_insert(summary);
-                }
-                Err(error) => {
-                    requirement_diagnostics.insert(work_id, error.to_string());
+            )?;
+            statement.bind_text(1, project_id)?;
+            while statement.step()? == SQLITE_ROW {
+                let work_id = statement
+                    .column_text(2)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
+                match summary_from_statement(&statement) {
+                    Ok(summary) => {
+                        summaries.entry(work_id).or_insert(summary);
+                    }
+                    Err(error) => {
+                        requirement_diagnostics.insert(work_id, error.to_string());
+                    }
                 }
             }
         }
@@ -6915,6 +6984,7 @@ impl SqliteStore {
         Ok(StatusGateRead {
             diagnostics,
             requirement_diagnostics,
+            requirements,
         })
     }
 
