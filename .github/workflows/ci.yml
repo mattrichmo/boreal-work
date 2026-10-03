@@ -84,3 +84,22 @@ jobs:
           --profile full
           --strict
           --online
+      - name: Upload full validation report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-validation-report-and-logs
+          if-no-files-found: ignore
+          path: |
+            scripts/validation/results/full-suite.latest.json
+            scripts/validation/results/full-suite.latest.md
+            scripts/validation/results/full-suite-*
+      - name: Add full validation report to step summary
+        if: always()
+        run: |
+          report="scripts/validation/results/full-suite.latest.md"
+          if [ -f "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Full validation report was not produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
