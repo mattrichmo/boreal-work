@@ -138,7 +138,7 @@ def v10_component_evidence_complete(
             and type(component.get("deadline_unix_ms")) is int
             and type(component.get("service_exited_at_unix_ms")) is int
             and type(component.get("service_restart_unix_ms")) is int
-            and component["service_exited_at_unix_ms"] <= component["deadline_unix_ms"]
+            and component["service_exited_at_unix_ms"] < component["deadline_unix_ms"]
             and component["service_restart_unix_ms"] >= component["deadline_unix_ms"]
             and isinstance(attempt, dict)
             and attempt.get("attempt_id") == attempt_id
@@ -346,7 +346,7 @@ def v10_component_evidence_complete(
             and type(deadline_ms) is int
             and type(stopped_ms) is int
             and type(restart_ms) is int
-            and stopped_ms <= deadline_ms
+            and stopped_ms < deadline_ms
             and restart_ms >= deadline_ms
             and attempt.get("deadline_crossed_while_service_stopped") is True
             and isinstance(disposition, dict)

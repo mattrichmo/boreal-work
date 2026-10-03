@@ -184,6 +184,10 @@ class ForensicAuditTests(unittest.TestCase):
         self.assertTrue(
             RUNNER.v10_component_evidence_complete("durable_deadline", component, **common)
         )
+        component["service_exited_at_unix_ms"] = 10
+        self.assertFalse(
+            RUNNER.v10_component_evidence_complete("durable_deadline", component, **common)
+        )
         component["service_exited_at_unix_ms"] = 11
         self.assertFalse(
             RUNNER.v10_component_evidence_complete("durable_deadline", component, **common)
