@@ -174,6 +174,10 @@ impl SqliteStore {
     }
     /// Admission journal, immutable review binding and registered Git job commit
     /// together. No filesystem effect occurs inside this transaction.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "this public store API preserves the established memory-publication admission fields"
+    )]
     pub fn admit_memory_publication(
         &self,
         context: &V3MutationContext,

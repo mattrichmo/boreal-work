@@ -909,10 +909,11 @@ impl<'a> ProfileStore<'a> {
                 return Ok(false);
             }
         }
-        for index in ["boreal_pinned_requirement_project"] {
-            if !self.store.schema_object_exists("index", index)? {
-                return Ok(false);
-            }
+        if !self
+            .store
+            .schema_object_exists("index", "boreal_pinned_requirement_project")?
+        {
+            return Ok(false);
         }
         for trigger in [
             "boreal_pinned_requirement_immutable_update",

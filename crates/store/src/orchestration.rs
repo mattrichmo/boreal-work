@@ -184,7 +184,12 @@ impl SqliteStore {
             if selector.get("pending_work").is_some_and(|v|!v.is_null()) && matches!(next,"paused"|"cancelled"|"failed"|"completed") {
                 return Err(StoreError::Conflict("a canonical claim operation is unresolved; replay or reconcile its tick before changing run state".into()));
             }
-            let valid=match (current.state.as_str(),next){("queued","running"|"paused"|"cancelled"|"failed")=>true,("running","paused"|"completed"|"cancelled"|"failed")=>true,("paused","running"|"cancelled"|"failed")=>true,_=>false};
+            let valid = matches!(
+                (current.state.as_str(), next),
+                ("queued", "running" | "paused" | "cancelled" | "failed")
+                    | ("running", "paused" | "completed" | "cancelled" | "failed")
+                    | ("paused", "running" | "cancelled" | "failed")
+            );
             if !valid{return Err(StoreError::Invalid(format!("invalid orchestration transition {} -> {next}",current.state)));}
             if current.revision!=expected{return Err(StoreError::Conflict("orchestration run revision conflict".into()));}
             let mut q=self.prepare("UPDATE orchestration_run SET state=?3,last_error=?4,updated_at=?5,revision=revision+1 WHERE project_id=?1 AND run_id=?2 AND revision=?6")?;q.bind_text(1,&c.project_id)?;q.bind_text(2,id)?;q.bind_text(3,next)?;q.bind_optional_text(4,error)?;q.bind_text(5,&c.now)?;q.bind_i64(6,expected)?;q.run()?;if q.changes()?==0{return Err(StoreError::Conflict("orchestration run changed during transition".into()));}
@@ -241,6 +246,10 @@ impl SqliteStore {
     /// Completes a pinned tick after canonical claim readback. `claimed`
     /// increments the bounded claim count; definite rejection clears the pin.
     /// Unknown claim outcomes must leave the pin intact for operation replay.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "this public store API preserves the established tick-finish command fields"
+    )]
     pub fn orchestration_tick_finish(
         &self,
         c: &V3MutationContext,

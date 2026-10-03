@@ -307,15 +307,14 @@ impl SqliteStore {
             let mut existing=self.prepare("SELECT policy_digest,definition_json FROM acceptance_profile WHERE profile_id=?1 AND version=?2")?;
             existing.bind_text(1, &profile.profile_id)?;
             existing.bind_i64(2, profile.version)?;
-            if existing.step()? == SQLITE_ROW {
-                if existing.column_text(0)? != profile.policy_digest
-                    || existing.column_text(1)? != profile.definition_json
-                {
-                    return Err(StoreError::Conflict(format!(
-                        "acceptance profile {} v{} conflicts with its registered immutable definition",
-                        profile.profile_id, profile.version
-                    )));
-                }
+            if existing.step()? == SQLITE_ROW
+                && (existing.column_text(0)? != profile.policy_digest
+                    || existing.column_text(1)? != profile.definition_json)
+            {
+                return Err(StoreError::Conflict(format!(
+                    "acceptance profile {} v{} conflicts with its registered immutable definition",
+                    profile.profile_id, profile.version
+                )));
             }
         }
         Ok(())
