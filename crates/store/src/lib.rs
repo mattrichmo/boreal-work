@@ -312,6 +312,10 @@ const SQLITE_OPEN_READWRITE: c_int = 0x0000_0002;
 const SQLITE_OPEN_CREATE: c_int = 0x0000_0004;
 const SQLITE_OPEN_READONLY: c_int = 0x0000_0001;
 const SQLITE_OPEN_FULLMUTEX: c_int = 0x0001_0000;
+const SQLITE_BUSY_TIMEOUT_MS: c_int = 250;
+// Keep ordinary reads responsive while allowing bounded admission for SQLite's
+// serialized writer queue.
+const SQLITE_WRITE_LOCK_TIMEOUT_MS: c_int = 2_000;
 
 #[allow(non_camel_case_types)]
 type sqlite3 = c_void;
@@ -1642,7 +1646,7 @@ impl SqliteStore {
             validated_work_model_v3_schema_cookie: AtomicI64::new(-1),
             canonical_production: false,
         };
-        unsafe { sqlite3_busy_timeout(store.database, 250) };
+        unsafe { sqlite3_busy_timeout(store.database, SQLITE_BUSY_TIMEOUT_MS) };
         store.execute_batch("PRAGMA foreign_keys = ON;")?;
         if flags & SQLITE_OPEN_READONLY == 0 {
             store.execute_batch("PRAGMA journal_mode = WAL;")?;
@@ -8070,7 +8074,15 @@ impl SqliteStore {
         self.query_metrics
             .batch_calls
             .fetch_add(1, Ordering::Relaxed);
+        let wait_for_writer = sql
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .eq_ignore_ascii_case("BEGIN IMMEDIATE");
         let sql = CString::new(sql)?;
+        if wait_for_writer {
+            unsafe { sqlite3_busy_timeout(self.database, SQLITE_WRITE_LOCK_TIMEOUT_MS) };
+        }
         let mut error = ptr::null_mut();
         let result = unsafe {
             sqlite3_exec(
@@ -8081,6 +8093,9 @@ impl SqliteStore {
                 &mut error,
             )
         };
+        if wait_for_writer {
+            unsafe { sqlite3_busy_timeout(self.database, SQLITE_BUSY_TIMEOUT_MS) };
+        }
         if result == SQLITE_OK {
             return Ok(());
         }
