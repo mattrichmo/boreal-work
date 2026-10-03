@@ -521,33 +521,6 @@ pub(super) fn add_skills(
     setup::install_skill_package(install_root, manifest_path, manifest_root, agent)
 }
 
-pub(super) fn schema_validate(database: &Path) -> Result<Value, CliError> {
-    if !database.is_file() {
-        return Err(error(format!(
-            "database does not exist: {}",
-            database.display()
-        )));
-    }
-    let store = boreal_store::SqliteStore::open_read_only(database)
-        .map_err(|e| error(format!("schema contract validation failed: {e}")))?;
-    let version = store.schema_version().map_err(|e| error(e.to_string()))?;
-    let integrity = store
-        .diagnostic_checks()
-        .map_err(|e| error(e.to_string()))?;
-    let quick_ok = integrity["quick_check"]
-        .as_array()
-        .is_some_and(|rows| rows.len() == 1 && rows[0] == "ok");
-    let fk_ok = integrity["foreign_key_violations"]
-        .as_array()
-        .is_some_and(|rows| rows.is_empty());
-    Ok(
-        json!({"database":database, "read_only":true, "schema_version":version,
-        "contract":"valid", "quick_check":if quick_ok {"pass"} else {"fail"},
-        "foreign_key_check":if fk_ok {"pass"} else {"fail"}, "details":integrity,
-        "passed":quick_ok && fk_ok}),
-    )
-}
-
 /// Validate checked-in user-facing docs and the exact embedded skill package.
 pub(super) fn docs_check() -> Result<Value, CliError> {
     let mut route_checks = Vec::new();

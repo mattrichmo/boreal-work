@@ -2807,6 +2807,7 @@ fn path_matches(path: &str, filter: Option<&str>) -> bool {
     filter.is_none_or(|value| path == value || path.starts_with(&format!("{value} ")))
 }
 
+#[cfg(test)]
 fn registry_result(filter: Option<&str>) -> Result<CliResult, CliError> {
     registry_page(filter, 25, 0)
 }
