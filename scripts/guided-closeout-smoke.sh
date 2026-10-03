@@ -255,7 +255,7 @@ for i in "${!works[@]}"; do
   finish=$(service agent finish "$work" --close --project "$PROJECT" --actor "$agent" --harness "$HARNESS" \
     --session "$session" --attempt "${attempts[$i]}" --fence "${fences[$i]}" \
     --receipt "${receipts[$i]}" --summary "${summaries[$i]}")
-  jq -e '.outcome == "changed" and .data.close_state == "closed" and (.data.receipt_id | type == "string" and length > 0)' \
+  jq -e '.outcome == "changed" and .data.close_state == "finalized" and (.data.receipt_id | type == "string" and length > 0)' \
     <<<"$finish" >/dev/null
 done
 
