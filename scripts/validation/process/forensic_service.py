@@ -147,6 +147,7 @@ static void hold_sigabrt(int signal_number) {
         char release;
         ssize_t count = read(release_fd, &release, 1);
         if (count == 1) return;
+        if (count == 0) return; /* No supervisor remains; resume the real abort. */
         if (count < 0 && errno != EAGAIN && errno != EINTR) _exit(127);
         struct timespec pause = {0, 1000000};
         (void)nanosleep(&pause, NULL);
