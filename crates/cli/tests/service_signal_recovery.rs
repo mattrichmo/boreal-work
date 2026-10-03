@@ -568,9 +568,7 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
         // Binding the socket happens before the host acquires database
         // ownership. A versioned status response proves the service is ready.
         if socket.exists() {
-            let remaining = startup_deadline.saturating_duration_since(Instant::now());
-            let probe_timeout = remaining.min(Duration::from_millis(250));
-            if service_status_is_ready(root, database, socket, project, actor, probe_timeout) {
+            if service_status_is_ready(root, database, socket, project, actor, startup_deadline) {
                 return Some(child);
             }
         }
@@ -590,12 +588,16 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
         thread::sleep(remaining.min(Duration::from_millis(10)));
     }
 
-    if child.try_wait().expect("service status reads").is_none() {
-        terminate_if_running(&mut child, SIGKILL);
-    } else {
-        let _ = child.wait_with_output();
-    }
-    panic!("service did not create its socket within the startup timeout");
+    // The service can exit between a status check and kill. Ignore kill
+    // errors here, then always wait so either path reaps the child.
+    let _ = child.kill();
+    let output = child
+        .wait_with_output()
+        .expect("service output reads after startup timeout");
+    panic!(
+        "service did not become ready within the startup timeout: {}",
+        text(&output)
+    );
 }
 
 fn service_status_is_ready(
@@ -604,8 +606,14 @@ fn service_status_is_ready(
     socket: &Path,
     project: &str,
     actor: &str,
-    timeout: Duration,
+    startup_deadline: Instant,
 ) -> bool {
+    // Set the per-probe deadline before spawn so process creation time counts
+    // against both the probe cap and the total startup deadline.
+    let probe_deadline = (Instant::now() + Duration::from_millis(250)).min(startup_deadline);
+    if Instant::now() >= probe_deadline {
+        return false;
+    }
     let Ok(mut probe) = Command::new(binary())
         .current_dir(root)
         .args(["status", project, "--actor", actor, "--db"])
@@ -619,17 +627,16 @@ fn service_status_is_ready(
     else {
         return false;
     };
-    let deadline = Instant::now() + timeout;
     let output = loop {
         match probe.try_wait() {
-            Ok(Some(_)) => {
+            Ok(Some(_)) if Instant::now() < probe_deadline => {
                 let Ok(output) = probe.wait_with_output() else {
                     return false;
                 };
                 break output;
             }
-            Ok(None) if Instant::now() < deadline => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
+            Ok(None) if Instant::now() < probe_deadline => {
+                let remaining = probe_deadline.saturating_duration_since(Instant::now());
                 thread::sleep(remaining.min(Duration::from_millis(10)));
             }
             _ => {
