@@ -1783,7 +1783,7 @@ mod unix {
                     .hold
                     .clone()
                     .map_or(Value::Null, Value::String);
-                data["profile"] = json!("focused");
+                data["profile"] = json!(super::super::acceptance_profile_option(parsed));
                 data["profile_version"] = json!("1");
                 data["expected_revision"] = parsed
                     .options
@@ -6328,6 +6328,25 @@ mod tests {
         assert_eq!(create_data["dispatch"], "automatic");
         assert_eq!(create_data["profile"], "focused");
         assert!(create_data.get("created_at").is_none());
+
+        let reviewed_create = super::super::parse(&[
+            "work".to_owned(),
+            "create".to_owned(),
+            "dto-project".to_owned(),
+            "dto-reviewed".to_owned(),
+            "Reviewed DTO work".to_owned(),
+            "--acceptance".to_owned(),
+            "reviewed".to_owned(),
+            "--socket".to_owned(),
+            "service.sock".to_owned(),
+            "--actor".to_owned(),
+            "creator".to_owned(),
+        ])
+        .expect("reviewed work create parses");
+        let reviewed_data = request_data(&reviewed_create, "op-create-reviewed-work-dto")
+            .expect("reviewed work creation DTO builds");
+        assert_eq!(reviewed_data["command"], "create_work");
+        assert_eq!(reviewed_data["profile"], "reviewed");
     }
 
     #[test]

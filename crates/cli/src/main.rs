@@ -5104,6 +5104,16 @@ fn session_end_result(
     })
 }
 
+fn acceptance_profile_option(parsed: &ParsedCommand) -> &str {
+    parsed
+        .options
+        .extra
+        .get("--acceptance")
+        .and_then(|values| values.last())
+        .map(String::as_str)
+        .unwrap_or("focused")
+}
+
 fn create_work_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
@@ -5154,14 +5164,7 @@ fn create_work_result(
             .into_iter()
             .map(ReasonCode::HardHold)
             .collect(),
-        acceptance_profile: match parsed
-            .options
-            .extra
-            .get("--acceptance")
-            .and_then(|v| v.last())
-            .map(String::as_str)
-            .unwrap_or("focused")
-        {
+        acceptance_profile: match acceptance_profile_option(parsed) {
             "focused" => AcceptanceProfile::focused(),
             "reviewed" => AcceptanceProfile::reviewed(),
             _ => {
