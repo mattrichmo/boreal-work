@@ -26,6 +26,17 @@ const RECOVERY_REASONS: &[&str] = &[
 const RECOVERY_STATES: &[&str] = &["unresolved", "resolved", "superseded"];
 const RESOURCE_STATES: &[&str] = &["active", "release_pending", "unknown", "released"];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeadlineReconciliationInput<'a> {
+    pub attempt_id: &'a str,
+    pub fence: u64,
+    pub expected_lease_deadline: &'a str,
+    pub expected_hard_deadline: &'a str,
+    pub operation_id: &'a str,
+    pub request_digest: &'a str,
+    pub at: &'a str,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryObligationInput {
     pub obligation_id: String,
@@ -324,14 +335,17 @@ impl SqliteStore {
     pub fn reconcile_attempt_deadline(
         &self,
         context: &IdentityContext,
-        attempt_id: &str,
-        fence: u64,
-        expected_lease_deadline: &str,
-        expected_hard_deadline: &str,
-        operation_id: &str,
-        request_digest: &str,
-        at: &str,
+        request: DeadlineReconciliationInput<'_>,
     ) -> Result<bool, StoreError> {
+        let DeadlineReconciliationInput {
+            attempt_id,
+            fence,
+            expected_lease_deadline,
+            expected_hard_deadline,
+            operation_id,
+            request_digest,
+            at,
+        } = request;
         for (value, field) in [
             (attempt_id, "attempt id"),
             (expected_lease_deadline, "expected lease deadline"),

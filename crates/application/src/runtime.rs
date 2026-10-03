@@ -14,9 +14,9 @@ use boreal_domain::{
 use boreal_store::{
     identity::{IdentityContext, IdentityError, IdentityStore},
     recovery::{
-        IdentityBoundRecoveryResolutionInput, RecoverActionDescriptorInput,
-        RecoverActionDisposition, RecoverActionInput, RecoveryObligationRecord,
-        RecoveryResolutionInput, ResourceReservationRecord,
+        DeadlineReconciliationInput, IdentityBoundRecoveryResolutionInput,
+        RecoverActionDescriptorInput, RecoverActionDisposition, RecoverActionInput,
+        RecoveryObligationRecord, RecoveryResolutionInput, ResourceReservationRecord,
     },
     AttemptMutationResult as StoreAttemptMutationResult, SqliteStore, StoreError,
 };
@@ -940,13 +940,15 @@ impl WorkApplication<'_> {
         self.store
             .reconcile_attempt_deadline(
                 &identity,
-                attempt_id.as_str(),
-                fence.get(),
-                &current.lease_deadline,
-                &current.hard_deadline,
-                &operation_id,
-                &request_digest,
-                &format!("unix-ms:{}", at.as_millis()),
+                DeadlineReconciliationInput {
+                    attempt_id: attempt_id.as_str(),
+                    fence: fence.get(),
+                    expected_lease_deadline: &current.lease_deadline,
+                    expected_hard_deadline: &current.hard_deadline,
+                    operation_id: &operation_id,
+                    request_digest: &request_digest,
+                    at: &format!("unix-ms:{}", at.as_millis()),
+                },
             )
             .map_err(ApplicationError::from)
     }
