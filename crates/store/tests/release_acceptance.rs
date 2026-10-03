@@ -23,9 +23,6 @@ fn seed_project(store: &SqliteStore) {
 }
 
 fn seed_work(store: &SqliteStore, count: usize) {
-    store
-        .execute_batch("DELETE FROM work_item")
-        .expect("clear release work");
     let mut sql = String::with_capacity(count.saturating_mul(180));
     for index in 0..count {
         sql.push_str(&format!(
@@ -106,12 +103,17 @@ fn status_read_release_benchmark_10k_100k() {
     assert!(!sizes.is_empty());
     assert!(sizes.iter().all(|size| *size > 0));
 
-    let store = SqliteStore::open_in_memory(SCHEMA_V2).expect("schema opens");
-    seed_project(&store);
-    let runtime = store.sqlite_runtime_identity();
+    // Each sample gets its own database. Deleting work rows between samples
+    // can violate this schema's foreign-key constraints; isolate the samples
+    // instead of bypassing constraints or deleting dependent records.
+    let runtime = SqliteStore::open_in_memory(SCHEMA_V2)
+        .expect("schema opens")
+        .sqlite_runtime_identity();
     let mut measurements = Vec::new();
 
     for size in sizes {
+        let store = SqliteStore::open_in_memory(SCHEMA_V2).expect("schema opens");
+        seed_project(&store);
         seed_work(&store, size);
         store.reset_query_metrics();
         let started = Instant::now();
