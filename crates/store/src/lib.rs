@@ -18,7 +18,6 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, NulError};
 use std::fmt;
-use std::fmt::Write as _;
 use std::fs;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
@@ -725,6 +724,22 @@ pub struct StatusRecordDiagnostic {
     pub title: Option<String>,
     pub code: String,
     pub detail: String,
+}
+
+type ActiveHardHolds = (
+    BTreeMap<String, Vec<ReasonCode>>,
+    Vec<StatusRecordDiagnostic>,
+);
+
+#[derive(Clone, Copy)]
+struct ProjectInitReadbackExpectation<'a> {
+    project_id: &'a str,
+    actor_id: &'a str,
+    actor_role: &'a str,
+    display_name: &'a str,
+    request_digest: &'a str,
+    database: &'a identity::DatabaseIdentity,
+    binding: &'a identity::WorkspaceBinding,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3157,13 +3172,15 @@ impl SqliteStore {
                 }
                 self.validate_project_init_readback(
                     &existing,
-                    project_id,
-                    actor_id,
-                    actor_role,
-                    display_name,
-                    request_digest,
-                    database,
-                    binding,
+                    ProjectInitReadbackExpectation {
+                        project_id,
+                        actor_id,
+                        actor_role,
+                        display_name,
+                        request_digest,
+                        database,
+                        binding,
+                    },
                 )?;
                 self.validate_existing_actor(actor_id, actor_role, credential_ref, display_name)?;
                 let context = identity.context(project_id).map_err(|error| {
@@ -3249,13 +3266,15 @@ impl SqliteStore {
                     })?;
                     self.validate_project_init_readback(
                         &original,
-                        project_id,
-                        actor_id,
-                        actor_role,
-                        display_name,
-                        request_digest,
-                        database,
-                        binding,
+                        ProjectInitReadbackExpectation {
+                            project_id,
+                            actor_id,
+                            actor_role,
+                            display_name,
+                            request_digest,
+                            database,
+                            binding,
+                        },
                     )?;
                     self.validate_existing_actor(
                         actor_id,
@@ -3856,14 +3875,17 @@ impl SqliteStore {
     fn validate_project_init_readback(
         &self,
         record: &OperationRecord,
-        project_id: &str,
-        actor_id: &str,
-        actor_role: &str,
-        display_name: &str,
-        request_digest: &str,
-        database: &identity::DatabaseIdentity,
-        binding: &identity::WorkspaceBinding,
+        expected: ProjectInitReadbackExpectation<'_>,
     ) -> Result<(), StoreError> {
+        let ProjectInitReadbackExpectation {
+            project_id,
+            actor_id,
+            actor_role,
+            display_name,
+            request_digest,
+            database,
+            binding,
+        } = expected;
         if record.project_id != project_id
             || record.command != "project.init"
             || record.actor_id != actor_id
@@ -4606,6 +4628,10 @@ impl SqliteStore {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "retained public entry point for callers that provide a session and revision"
+    )]
     pub fn create_work_operation_for_session(
         &self,
         work: &WorkItem,
@@ -6148,13 +6174,7 @@ impl SqliteStore {
     fn active_hard_holds_for_project(
         &self,
         project_id: &str,
-    ) -> Result<
-        (
-            BTreeMap<String, Vec<ReasonCode>>,
-            Vec<StatusRecordDiagnostic>,
-        ),
-        StoreError,
-    > {
+    ) -> Result<ActiveHardHolds, StoreError> {
         let mut statement = self.prepare(
             "SELECT wh.work_id, wh.reason_code
              FROM work_hold wh JOIN work_item wi ON wi.work_id = wh.work_id

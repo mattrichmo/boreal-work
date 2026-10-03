@@ -272,18 +272,6 @@ impl SqliteStore {
         finish_transaction(self, result)
     }
 
-    /// Attach the non-derived facts needed by the action projection while the
-    /// status snapshot's read transaction is still open. Missing facts remain
-    /// explicit; this method never invents a proof, session, or revision.
-    pub(crate) fn populate_status_action_facts(
-        &self,
-        snapshot: &mut ProjectStatusRead,
-        actor_id: &str,
-        as_of: TimestampMs,
-    ) -> Result<(), StoreError> {
-        self.populate_status_action_facts_for_session(snapshot, actor_id, None, as_of)
-    }
-
     pub(crate) fn populate_status_action_facts_for_session(
         &self,
         snapshot: &mut ProjectStatusRead,
