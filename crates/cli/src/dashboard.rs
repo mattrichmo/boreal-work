@@ -1614,11 +1614,9 @@ mod tests {
         let path = guard.path().to_owned();
         fs::write(&path, "fixture").unwrap();
         let error = guard.cleanup().unwrap_err();
-        assert!(
-            error
-                .message
-                .contains("refusing to remove a non-socket endpoint")
-        );
+        assert!(error
+            .message
+            .contains("refusing to remove a non-socket endpoint"));
         assert!(path.exists());
         assert_eq!(fs::read(&path).unwrap(), b"fixture");
         fs::remove_file(path).unwrap();

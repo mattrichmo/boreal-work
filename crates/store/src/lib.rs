@@ -13444,8 +13444,7 @@ fn validate_recover_action_descriptor(
         && input.recovery == current.recovery;
     if !exact {
         return Err(StoreError::Conflict(
-            "recover action descriptor is stale or does not match the authorized target"
-                .to_owned(),
+            "recover action descriptor is stale or does not match the authorized target".to_owned(),
         ));
     }
     Ok(())
