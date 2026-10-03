@@ -8,6 +8,10 @@ names one integration steward for the sprint. The sprint's `T90` task integrates
 accepted leaf work, runs the combined validation, and records the exact source
 identity consumed by dependent sprints.
 
+Leaf handoff follows the task's acceptance profile; do not add a separate
+per-task review ceremony unless that profile explicitly requires independent
+review. `T90` is the sprint-level integration and validation gate.
+
 An agent receives one task at a time. Task ownership is the exact write boundary
 in that task packet; lane labels and stream tables are scheduling hints and
 never grant extra paths. Worktree isolation and the Boreal attempt fence are
@@ -23,7 +27,8 @@ Before starting an agent, the coordinator confirms all of the following:
 3. The task has one implementer, one isolated worktree, and a precise write set.
 4. The worker has the required toolchain, external capability, and authority.
 5. The task's full write set has no active conflict with another assignment.
-6. Any required shared-file steward and integration reviewer are identified.
+6. Any required shared-file steward is identified; name an independent reviewer
+   only when the task's acceptance profile requires one.
 
 Graph readiness answers only whether dependencies are satisfied. It does not
 grant permission to claim, write, publish, or skip a required gate. A task that
@@ -94,8 +99,9 @@ handoff. A request or proposed diff does not transfer ownership by itself.
 
 At handoff, report the task and attempt/fence, exact source snapshot, exact
 changed paths, checks and receipts, remaining limitations, and any shared-patch
-requests. Do not edit sprint ledgers, accept your own review, or mark a task or
-sprint complete; the assigned review and `T90` integration own those decisions.
+requests. Do not edit sprint ledgers, self-certify a required independent review,
+or mark a task or sprint complete. The coordinator records leaf acceptance
+under its profile, and `T90` owns sprint integration and completion.
 
 If a worker stops or becomes unavailable, the coordinator preserves its
 worktree and patch first, checks the process and attempt state through supported
