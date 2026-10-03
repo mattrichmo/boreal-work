@@ -1388,11 +1388,12 @@ mod tests {
     }
 
     fn socket_path(label: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock is after Unix epoch")
-            .as_nanos();
-        PathBuf::from(format!("/private/tmp/boreal-service-{label}-{nonce}.sock"))
+        static NEXT_SOCKET_ID: AtomicUsize = AtomicUsize::new(0);
+        let socket_id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "boreal-service-{label}-{}-{socket_id}.sock",
+            std::process::id()
+        ))
     }
 
     fn request(id: &str, operation_id: &str) -> JsonRequest {
