@@ -817,6 +817,38 @@ fn paired_api_rejects_mismatched_profile_gates_dependencies_and_execution() {
             DecisionContextMismatch::Execution
         ))
     ));
+
+    let mut completed_attempt = unexpected_attempt;
+    completed_attempt.phase = AttemptPhase::Completed;
+    assert!(evaluate_parts(
+        &facts,
+        &work,
+        &prerequisites,
+        Some(&completed_attempt),
+        &gates,
+        &actor,
+        evaluated_at,
+        revision,
+    )
+    .is_ok());
+
+    let mut terminal_attempt_for_other_work = completed_attempt;
+    terminal_attempt_for_other_work.work_id = WorkId::new("other-work");
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            &work,
+            &prerequisites,
+            Some(&terminal_attempt_for_other_work),
+            &gates,
+            &actor,
+            evaluated_at,
+            revision,
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::Execution
+        ))
+    ));
 }
 
 #[test]
