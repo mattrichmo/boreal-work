@@ -24,9 +24,7 @@ node scripts/validation/tui/forensic_closeout.mjs
 ```
 
 The fixture writes `results/forensic-closeout.latest.json` and
-`results/forensic-closeout.latest.md`. The closeout readback currently needs a
-validation-side DTO normalization because `operation_show` exposes the stored
-`Verification` enum and canonical `WORK:verification` gate spelling, while the
-`ReceiptDto` ingress accepts lowercase `verification` and the short gate name.
-The raw spelling is retained in the report; this is evidence of a remaining
-service/protocol compatibility gap, not a skipped environment check.
+`results/forensic-closeout.latest.md`. Its full-screen flow passes the persisted
+receipt from `operation_show` directly into the controller; the operation
+readback boundary emits the same canonical receipt DTO accepted by evidence
+ingress.

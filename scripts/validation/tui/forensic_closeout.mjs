@@ -392,23 +392,12 @@ async function runFullScreenCloseout(client, serviceChild, socket, context, veri
   const realReadReceipt = async (project_id, work_id, attempt_id, fence) => {
     const operation = await client.readOperation(project_id, verificationOperation);
     const rawReceipt = operation.data?.receipt ?? operation.data?.execution?.receipt;
-    assertThat(rawReceipt && rawReceipt.subject?.work_id === work_id, "durable verification receipt readback is not bound to the work");
-    // operation_show currently serializes the persisted Rust enum spelling
-    // ("Verification"), while ReceiptDto ingress accepts the wire spelling
-    // ("verification"). Keep the exact observed mismatch in the report and
-    // apply only this validation-side DTO normalization so the rest of the
-    // live closeout path can be exercised without changing product code.
-    const receipt = {
-      ...rawReceipt,
-      subject: {
-        ...rawReceipt.subject,
-        gate_id: String(rawReceipt.subject?.gate_id ?? "").split(":").at(-1),
-      },
-      coverage: { ...rawReceipt.coverage, kind: String(rawReceipt.coverage?.kind ?? "").toLowerCase() },
-    };
+    assertThat(rawReceipt && rawReceipt.subject?.work_id === work_id
+      && rawReceipt.subject?.attempt_id === attempt_id && rawReceipt.subject?.fence === fence,
+    "durable verification receipt readback is not bound to the requested attempt");
     return {
       ...operation,
-      data: { project_id, work_id, attempt_id, fence, receipt, receipt_id: receipt.receipt_id, raw_coverage_kind: rawReceipt.coverage?.kind },
+      data: { project_id, work_id, attempt_id, fence, receipt: rawReceipt, receipt_id: rawReceipt.receipt_id },
     };
   };
   let finishRequest = null;
@@ -452,7 +441,9 @@ async function runFullScreenCloseout(client, serviceChild, socket, context, veri
   controller.unmount();
   assertThat(finishRequest.data.summary === "typed forensic closeout summary", "typed summary was not sent through the full-screen path");
   assertThat(finishRequest.data.receipt?.subject?.work_id === "closeout-task", "full-screen finish did not send the durable typed receipt");
-  return { finish_operation_id: finishRequest.operation_id, notice: controller.view().notice?.message, terminal_output_bytes: terminal.writes.join("").length, receipt_dto_raw_coverage_kind: finishRequest.data.receipt?.coverage?.kind === "verification" ? "Verification (normalized to verification)" : finishRequest.data.receipt?.coverage?.kind };
+  assertThat(finishRequest.data.receipt?.subject?.gate_id === "verification", "full-screen finish changed the service receipt gate id");
+  assertThat(finishRequest.data.receipt?.coverage?.kind === "verification", "full-screen finish changed the service receipt coverage kind");
+  return { finish_operation_id: finishRequest.operation_id, notice: controller.view().notice?.message, terminal_output_bytes: terminal.writes.join("").length, receipt_dto_coverage_kind: finishRequest.data.receipt?.coverage?.kind };
 }
 
 async function main() {

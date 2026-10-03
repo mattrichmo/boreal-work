@@ -14,10 +14,10 @@ use boreal_domain::{
 };
 use boreal_protocol::{
     models::{
-        AgentGuideDto, AgentNextDto, ContextRefDto, GuidanceContextDto, GuidanceProvenanceDto,
-        GuidanceStatusDto, NextActionDto, NextReasonDto, NextStatusDto, RequirementDto, SubjectDto,
-        WorkflowAssetDto, WorkflowCriterionDto, WorkflowInputDto, WorkflowPackageDto,
-        WorkflowShowDto,
+        AgentGuideDto, AgentNextDto, ContextRefDto, CoverageDto, GuidanceContextDto,
+        GuidanceProvenanceDto, GuidanceStatusDto, NextActionDto, NextReasonDto, NextStatusDto,
+        ReceiptDto, ReceiptSubjectDto, RequirementDto, SubjectDto, WorkflowAssetDto,
+        WorkflowCriterionDto, WorkflowInputDto, WorkflowPackageDto, WorkflowShowDto,
     },
     schema, ApplicationOutcome, DetailReference, Envelope, ErrorCode, ProtocolError,
     TransportOutcome, API_VERSION,
@@ -4814,6 +4814,7 @@ fn operation_show_result(
             "completed_at": operation.completed_at,
         })
     });
+    let receipt_json = receipt.as_ref().map(receipt_record_json).transpose()?;
     let execution_json = execution.as_ref().map(|execution| {
         json!({
             "operation_id": execution.operation_id,
@@ -4833,7 +4834,7 @@ fn operation_show_result(
             "exit_code": execution.exit_code,
             "receipt_id": execution.receipt_id,
             "failure_code": execution.failure_code,
-            "receipt": receipt.as_ref().map(receipt_record_json),
+            "receipt": receipt_json,
         })
     });
     let outcome = if execution
@@ -4862,7 +4863,7 @@ fn operation_show_result(
             "external_job": external_job_json,
             "recovery_obligations": recovery_json,
             "receipt_id": receipt.as_ref().map(|value| value.receipt_id.as_str()),
-            "receipt": receipt.as_ref().map(receipt_record_json),
+            "receipt": receipt_json,
             "readback_required": outcome == ApplicationOutcome::Unknown
                 || external_job.as_ref().is_some_and(|job| matches!(
                     job.stage.as_str(), "side_effect_started" | "side_effect_finished"
@@ -4877,48 +4878,175 @@ fn operation_show_result(
     })
 }
 
-fn receipt_record_json(receipt: &ReceiptRecord) -> Value {
-    json!({
-        "schema_version": "boreal.receipt.v1",
-        "fixture_id": Value::Null,
-        "receipt_id": receipt.receipt_id,
-        "operation_id": receipt.operation_id,
-        "subject": {
-            "work_id": receipt.work_id,
-            "attempt_id": receipt.attempt_id,
-            "fence": receipt.fence,
-            "gate_id": receipt.gate_id.clone().unwrap_or_default(),
+fn receipt_record_json(receipt: &ReceiptRecord) -> Result<Value, CliError> {
+    let subject: Value = serde_json::from_str(&receipt.subject_json).map_err(|error| {
+        CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Failed,
+            format!("durable receipt subject is not valid JSON: {error}"),
+        )
+    })?;
+    let subject_work_id = subject
+        .get("work_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| receipt_readback_mismatch("durable receipt subject is missing work_id"))?;
+    let subject_attempt_id = subject
+        .get("attempt_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            receipt_readback_mismatch("durable receipt subject is missing attempt_id")
+        })?;
+    let subject_fence = subject
+        .get("fence")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| receipt_readback_mismatch("durable receipt subject is missing fence"))?;
+    let subject_gate_id = subject
+        .get("gate_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| receipt_readback_mismatch("durable receipt subject is missing gate_id"))?;
+    if subject_work_id != receipt.work_id
+        || subject_attempt_id != receipt.attempt_id
+        || subject_fence != receipt.fence
+    {
+        return Err(receipt_readback_mismatch(
+            "durable receipt subject does not match its indexed identity",
+        ));
+    }
+    let indexed_gate_id = receipt
+        .gate_id
+        .as_deref()
+        .ok_or_else(|| receipt_readback_mismatch("durable receipt is missing its indexed gate"))?;
+    if indexed_gate_id != subject_gate_id {
+        return Err(receipt_readback_mismatch(
+            "durable receipt subject gate does not match its indexed gate",
+        ));
+    }
+    let scoped_gate_prefix = format!("{}:", receipt.work_id);
+    let wire_gate_id = subject_gate_id
+        .strip_prefix(&scoped_gate_prefix)
+        .unwrap_or(subject_gate_id);
+    if wire_gate_id.is_empty() {
+        return Err(receipt_readback_mismatch(
+            "durable receipt subject has an empty gate id",
+        ));
+    }
+
+    let coverage: Value = serde_json::from_str(&receipt.coverage_json).map_err(|error| {
+        CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Failed,
+            format!("durable receipt coverage is not valid JSON: {error}"),
+        )
+    })?;
+    let stored_kind = coverage
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| receipt_readback_mismatch("durable receipt coverage is missing kind"))?;
+    let kind = receipt_wire_gate_kind(stored_kind).ok_or_else(|| {
+        receipt_readback_mismatch("durable receipt coverage has an unknown gate kind")
+    })?;
+    let profile_id = coverage
+        .get("profile_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            receipt_readback_mismatch("durable receipt coverage is missing profile_id")
+        })?;
+    let profile_version = coverage
+        .get("profile_version")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            coverage
+                .get("profile_version")
+                .and_then(Value::as_u64)
+                .map(|version| version.to_string())
+        })
+        .ok_or_else(|| {
+            receipt_readback_mismatch("durable receipt coverage is missing profile_version")
+        })?;
+    let argv: Vec<String> = serde_json::from_str(&receipt.argv_json).map_err(|error| {
+        CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Failed,
+            format!("durable receipt argv is not valid: {error}"),
+        )
+    })?;
+    let source_snapshot_hash = receipt.source_version_id.clone().ok_or_else(|| {
+        receipt_readback_mismatch("durable receipt is missing its source snapshot identity")
+    })?;
+
+    let dto = ReceiptDto {
+        schema_version: "boreal.receipt.v1".to_owned(),
+        fixture_id: None,
+        receipt_id: receipt.receipt_id.clone(),
+        operation_id: receipt.operation_id.clone(),
+        subject: ReceiptSubjectDto {
+            work_id: subject_work_id.to_owned(),
+            attempt_id: subject_attempt_id.to_owned(),
+            fence: subject_fence,
+            gate_id: wire_gate_id.to_owned(),
         },
-        "executable": receipt.executable,
-        "argv": serde_json::from_str::<Value>(&receipt.argv_json).unwrap_or_else(|_| json!([])),
-        "cwd": receipt.cwd,
-        "exit_code": receipt.exit_code,
-        "started_at": receipt.started_at,
-        "ended_at": receipt.ended_at,
-        "source_snapshot_hash": receipt.source_version_id,
-        "config_identity": receipt.config_identity,
-        "environment_fingerprint": receipt.environment_fingerprint,
-        "output_digest": receipt.output_digest.clone().unwrap_or_default(),
-        "output_ref": receipt.output_ref,
-        "coverage": serde_json::from_str::<Value>(&receipt.coverage_json)
-            .unwrap_or_else(|_| json!({})),
-        "attestation": match receipt.attestation {
+        executable: receipt.executable.clone(),
+        argv,
+        cwd: receipt.cwd.clone(),
+        exit_code: receipt.exit_code,
+        started_at: receipt.started_at.clone(),
+        ended_at: receipt.ended_at.clone(),
+        source_snapshot_hash,
+        config_identity: receipt.config_identity.clone(),
+        environment_fingerprint: receipt.environment_fingerprint.clone(),
+        output_digest: receipt.output_digest.clone().unwrap_or_default(),
+        output_ref: receipt.output_ref.clone(),
+        coverage: CoverageDto {
+            kind: kind.to_owned(),
+            profile_id: profile_id.to_owned(),
+            profile_version,
+        },
+        attestation: match receipt.attestation {
             ReceiptAttestation::BorealWitnessed => "boreal_witnessed",
             ReceiptAttestation::ExternalAttested => "external_attested",
             ReceiptAttestation::SelfReported => "self_reported",
             ReceiptAttestation::Unknown => "unknown",
-        },
-        "result": match receipt.result {
+        }
+        .to_owned(),
+        result: match receipt.result {
             ReceiptOutcome::Passed => "passed",
             ReceiptOutcome::Failed => "failed",
             ReceiptOutcome::Rejected => "rejected",
             ReceiptOutcome::Unknown => "unknown",
             ReceiptOutcome::Stale => "stale",
-        },
-        "retention": Value::Null,
-        "rejection_code": receipt.rejection_code,
-        "created_at": receipt.created_at,
+        }
+        .to_owned(),
+        retention: None,
+    };
+    serde_json::to_value(dto).map_err(|error| {
+        CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Failed,
+            format!("durable receipt could not be encoded as ReceiptDto: {error}"),
+        )
     })
+}
+
+fn receipt_readback_mismatch(message: &str) -> CliError {
+    CliError::with(
+        ErrorCode::ProtocolMismatch,
+        ApplicationOutcome::Failed,
+        message,
+    )
+}
+
+fn receipt_wire_gate_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "Checkpoint" | "checkpoint" => Some("checkpoint"),
+        "Verification" | "verification" => Some("verification"),
+        "Review" | "review" => Some("review"),
+        "OperatorApproval" | "operator_approval" => Some("operator_approval"),
+        "Summary" | "summary" => Some("summary"),
+        "Audit" | "audit" => Some("audit"),
+        _ => None,
+    }
 }
 
 fn finish_parent_readback(

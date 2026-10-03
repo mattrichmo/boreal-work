@@ -6176,6 +6176,16 @@ mod tests {
         assert_eq!(data["receipt"]["schema_version"], "boreal.receipt.v1");
         assert!(data["receipt"]["receipt_id"].as_str().is_some());
         assert_eq!(data["receipt"]["subject"]["work_id"], "service-work");
+        assert_eq!(data["receipt"]["subject"]["gate_id"], "verification");
+        assert_eq!(data["receipt"]["coverage"]["kind"], "verification");
+        let receipt_dto: boreal_protocol::models::ReceiptDto =
+            serde_json::from_value(data["receipt"].clone())
+                .expect("durable receipt readback uses the ReceiptDto wire contract");
+        let receipt = super::super::receipt_from_dto(receipt_dto)
+            .expect("durable receipt readback satisfies the ReceiptDto ingress contract");
+        assert_eq!(receipt.gate_id.as_str(), "verification");
+        assert_eq!(receipt.coverage.kind, boreal_domain::GateKind::Verification);
+        assert_eq!(data["receipt"], data["execution"]["receipt"]);
         assert!(data["execution"]["receipt"].is_object());
         let _ = fs::remove_dir_all(root);
     }
