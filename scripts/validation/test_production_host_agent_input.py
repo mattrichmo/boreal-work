@@ -21,7 +21,10 @@ class AgentInputFixtures(unittest.TestCase):
         verify_cli = mock.patch.object(
             host,
             "verify_agent_cli",
-            return_value={"build_revision": "fixture-revision", "sha256": "fixture-sha256"},
+            return_value=(
+                Path("fixture-bwrk"),
+                {"build_revision": "fixture-revision", "sha256": "fixture-sha256"},
+            ),
         )
         verify_cli.start()
         self.addCleanup(verify_cli.stop)
@@ -132,8 +135,12 @@ class SecureAgentInputTests(AgentInputFixtures):
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"fixture executable")
         os.chmod(binary, 0o700)
+        snapshot_directory = self.root / "snapshot"
+        snapshot_directory.mkdir()
+        trusted_digest = host.file_sha256(binary)
         outputs = [
             mock.Mock(returncode=0, stdout="revision-1\n", stderr=""),
+            mock.Mock(returncode=0, stdout="", stderr=""),
             mock.Mock(returncode=0, stdout="", stderr=""),
             mock.Mock(
                 returncode=0,
@@ -148,9 +155,25 @@ class SecureAgentInputTests(AgentInputFixtures):
             mock.patch.object(host, "current_cli_source_id", return_value="sha256:fixture"),
             mock.patch.object(host.subprocess, "run", side_effect=outputs),
         ):
-            identity = self._verify_agent_cli(binary)
+            _snapshot, identity = self._verify_agent_cli(
+                binary,
+                trusted_sha256=trusted_digest,
+                snapshot_directory=snapshot_directory,
+            )
+        self.assertNotEqual(_snapshot, binary)
+        self.assertEqual(host.file_sha256(_snapshot), trusted_digest)
+        self.assertEqual(stat.S_IMODE(_snapshot.stat().st_mode), 0o500)
         self.assertEqual(identity["build_revision"], "revision-1")
         self.assertEqual(identity["build_source_id"], "sha256:fixture")
+
+        with mock.patch.object(host, "ROOT", self.root), self.assertRaisesRegex(
+            RuntimeError, "digest does not match"
+        ):
+            self._verify_agent_cli(
+                binary,
+                trusted_sha256="sha256:" + "0" * 64,
+                snapshot_directory=snapshot_directory,
+            )
 
         outputs[-1] = mock.Mock(
             returncode=0,
@@ -165,14 +188,45 @@ class SecureAgentInputTests(AgentInputFixtures):
             mock.patch.object(host.subprocess, "run", side_effect=outputs),
             self.assertRaisesRegex(RuntimeError, "does not match"),
         ):
-            self._verify_agent_cli(binary)
+            self._verify_agent_cli(
+                binary,
+                trusted_sha256=trusted_digest,
+                snapshot_directory=snapshot_directory,
+            )
 
         os.chmod(binary, 0o722)
         with (
             mock.patch.object(host, "ROOT", self.root),
             self.assertRaisesRegex(RuntimeError, "private executable"),
         ):
-            self._verify_agent_cli(binary)
+            self._verify_agent_cli(
+                binary,
+                trusted_sha256=trusted_digest,
+                snapshot_directory=snapshot_directory,
+            )
+
+    def test_agent_cli_rejects_untracked_build_inputs(self) -> None:
+        binary = self.root / "target" / "debug" / "bwrk"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"fixture executable")
+        os.chmod(binary, 0o700)
+        snapshot_directory = self.root / "snapshot"
+        snapshot_directory.mkdir()
+        outputs = [
+            mock.Mock(returncode=0, stdout="revision-1\n", stderr=""),
+            mock.Mock(returncode=0, stdout="", stderr=""),
+            mock.Mock(returncode=0, stdout="crates/cli/src/untracked.rs\n", stderr=""),
+        ]
+        with (
+            mock.patch.object(host, "ROOT", self.root),
+            mock.patch.object(host.subprocess, "run", side_effect=outputs),
+            self.assertRaisesRegex(RuntimeError, "untracked CLI source inputs"),
+        ):
+            self._verify_agent_cli(
+                binary,
+                trusted_sha256=host.file_sha256(binary),
+                snapshot_directory=snapshot_directory,
+            )
 
     def test_loads_existing_private_credential_from_only_standard_path(self) -> None:
         agent = host.load_agent_input(self.descriptor_path)
@@ -263,7 +317,12 @@ class SecureAgentInputTests(AgentInputFixtures):
 
     def test_preflight_readbacks_exact_existing_attempt_without_claim_mutation(self) -> None:
         invoke, calls, credentials = self.successful_fake_invoker()
-        result = host.run_agent_input_preflight(Path("fake-bwrk"), self.descriptor_path, invoke_fn=invoke)
+        result = host.run_agent_input_preflight(
+            Path("fake-bwrk"),
+            self.descriptor_path,
+            trusted_binary_sha256="sha256:fixture",
+            invoke_fn=invoke,
+        )
         self.assertEqual(
             [call[:2] for call in calls],
             [["auth", "show"], ["session", "show"], ["work", "show"], ["agent", "resume"]],
@@ -288,7 +347,12 @@ class SecureAgentInputTests(AgentInputFixtures):
                 return result
 
             with self.assertRaises(RuntimeError) as raised:
-                host.run_agent_input_preflight(Path("fake-bwrk"), self.descriptor_path, invoke_fn=invoke)
+                host.run_agent_input_preflight(
+                    Path("fake-bwrk"),
+                    self.descriptor_path,
+                    trusted_binary_sha256="sha256:fixture",
+                    invoke_fn=invoke,
+                )
             self.assertNotIn(self.secret, str(raised.exception))
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][:2], ["auth", "show"])
@@ -304,7 +368,12 @@ class SecureAgentInputTests(AgentInputFixtures):
             return result
 
         with self.assertRaises(RuntimeError):
-            host.run_agent_input_preflight(Path("fake-bwrk"), self.descriptor_path, invoke_fn=mismatched_session)
+            host.run_agent_input_preflight(
+                Path("fake-bwrk"),
+                self.descriptor_path,
+                trusted_binary_sha256="sha256:fixture",
+                invoke_fn=mismatched_session,
+            )
         self.assertEqual([call[:2] for call in calls], [["auth", "show"], ["session", "show"]])
 
     def test_resume_attempt_or_fence_mismatch_fails_closed(self) -> None:
@@ -324,7 +393,12 @@ class SecureAgentInputTests(AgentInputFixtures):
                 return result
 
             with self.subTest(key=key), self.assertRaises(RuntimeError):
-                host.run_agent_input_preflight(Path("fake-bwrk"), self.descriptor_path, invoke_fn=mismatched_resume)
+                host.run_agent_input_preflight(
+                    Path("fake-bwrk"),
+                    self.descriptor_path,
+                    trusted_binary_sha256="sha256:fixture",
+                    invoke_fn=mismatched_resume,
+                )
             self.assertEqual([call[:2] for call in calls][-1], ["agent", "resume"])
             self.assertFalse(any(call[:2] == ["work", "claim"] for call in calls))
 
@@ -336,6 +410,8 @@ class SecureAgentInputTests(AgentInputFixtures):
             "--full-v10",
             "--agent-input",
             str(self.descriptor_path),
+            "--agent-cli-sha256",
+            "sha256:" + "0" * 64,
             "--bin",
             str(binary),
             "--output",
@@ -356,9 +432,12 @@ class SecureAgentInputTests(AgentInputFixtures):
             os.environ,
             {
                 "BOREAL_CREDENTIAL": "ambient-secret",
+                "LD_LIBRARY_PATH": "/tmp/untrusted-libs",
                 "LD_PRELOAD": "/tmp/untrusted.so",
                 "LD_AUDIT": "/tmp/audit.so",
                 "DYLD_INSERT_LIBRARIES": "/tmp/inject.dylib",
+                "DYLD_LIBRARY_PATH": "/tmp/untrusted-dyld",
+                "DYLD_FRAMEWORK_PATH": "/tmp/untrusted-frameworks",
             },
         ), mock.patch.object(host.subprocess, "run", return_value=completed) as run:
             with self.assertRaises(RuntimeError) as raised:
@@ -369,9 +448,12 @@ class SecureAgentInputTests(AgentInputFixtures):
         child_env = run.call_args.kwargs["env"]
         self.assertEqual(child_env["BOREAL_CREDENTIAL"], self.secret)
         self.assertNotIn("ambient-secret", child_env.values())
+        self.assertNotIn("LD_LIBRARY_PATH", child_env)
         self.assertNotIn("LD_PRELOAD", child_env)
         self.assertNotIn("LD_AUDIT", child_env)
         self.assertNotIn("DYLD_INSERT_LIBRARIES", child_env)
+        self.assertNotIn("DYLD_LIBRARY_PATH", child_env)
+        self.assertNotIn("DYLD_FRAMEWORK_PATH", child_env)
         self.assertNotIn(self.secret, run.call_args.args[0])
 
     def test_invalid_argument_read_only_failures_are_unexpected_and_unapproved(self) -> None:

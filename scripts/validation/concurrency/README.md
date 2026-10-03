@@ -122,7 +122,10 @@ service-stop results. The report treats an unavailable Agent fixture as
 `fail`.
 
 An existing Agent may be supplied for a read-only identity preflight with
-`--agent-input PATH --full-v10`. The private JSON descriptor uses schema
+`--agent-input PATH --agent-cli-sha256 sha256:<hex> --full-v10`. The digest
+must come from an independent trusted build record; the harness checks it
+before it starts the CLI with a credential, then runs every preflight query
+through a private snapshot of those exact bytes. The private JSON descriptor uses schema
 `boreal.v10-agent-input.v1` and contains `project_id`, `actor_id`, absolute
 `project_root`, `work_id`, `source_version_id`, `config_identity`, `session_id`,
 `harness_id`, and the already-existing `attempt_id` and positive `fence`. The
@@ -132,7 +135,8 @@ without creating or changing credentials, then uses it only in short-lived
 child-process environments. Before exposing the credential, it requires a
 private executable owned by the running user, verifies its `--version --json`
 build revision and source fingerprint against the current clean CLI source
-inputs, and removes dynamic loader injection variables from the child
+inputs, rejects untracked source inputs, and removes dynamic loader search and
+injection variables from the child
 environment. It accepts only the repository's `target/debug/bwrk` binary. It
 verifies canonical `auth show`, `session show`,
 `work show`, and `agent resume` readbacks. Missing, revoked, insecure, or

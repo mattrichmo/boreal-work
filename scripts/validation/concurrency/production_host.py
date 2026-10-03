@@ -73,9 +73,18 @@ def sanitized_environment(source: dict[str, str] | None = None) -> dict[str, str
     environment = (source if source is not None else os.environ).copy()
     environment.pop("BOREAL_CREDENTIAL", None)
     for key in (
+        "LD_LIBRARY_PATH",
         "LD_PRELOAD",
         "LD_AUDIT",
+        "LD_ORIGIN_PATH",
+        "LD_DYNAMIC_WEAK",
         "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        "DYLD_ROOT_PATH",
+        "DYLD_IMAGE_SUFFIX",
         "DYLD_FORCE_FLAT_NAMESPACE",
     ):
         environment.pop(key, None)
@@ -128,8 +137,13 @@ def current_cli_source_id() -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def verify_agent_cli(binary: Path) -> dict:
-    """Fail closed unless the credential recipient is a clean, current bwrk build."""
+def verify_agent_cli(
+    binary: Path,
+    *,
+    trusted_sha256: str,
+    snapshot_directory: Path,
+) -> tuple[Path, dict]:
+    """Copy and verify the independently pinned CLI bytes before credential use."""
     try:
         metadata = binary.lstat()
     except OSError as error:
@@ -144,6 +158,44 @@ def verify_agent_cli(binary: Path) -> dict:
         or metadata.st_mode & 0o022
     ):
         raise RuntimeError("Agent preflight CLI is not a private executable owned by the running user")
+    if (
+        not isinstance(trusted_sha256, str)
+        or len(trusted_sha256) != 71
+        or not trusted_sha256.startswith("sha256:")
+        or any(char not in "0123456789abcdef" for char in trusted_sha256[7:])
+    ):
+        raise RuntimeError("Agent preflight requires a trusted CLI SHA-256 build record")
+    try:
+        source_fd = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError as error:
+        raise RuntimeError("Agent preflight CLI changed before it could be pinned") from error
+    try:
+        opened = os.fstat(source_fd)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise RuntimeError("Agent preflight CLI changed before it could be pinned")
+        snapshot_fd, snapshot_name = tempfile.mkstemp(prefix="bwrk-", dir=snapshot_directory)
+        snapshot_path = Path(snapshot_name)
+        digest = hashlib.sha256()
+        try:
+            while True:
+                chunk = os.read(source_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(snapshot_fd, view)
+                    view = view[written:]
+            os.fsync(snapshot_fd)
+            os.fchmod(snapshot_fd, 0o500)
+        finally:
+            os.close(snapshot_fd)
+        binary_sha256 = f"sha256:{digest.hexdigest()}"
+        if binary_sha256 != trusted_sha256:
+            snapshot_path.unlink(missing_ok=True)
+            raise RuntimeError("Agent preflight CLI digest does not match the trusted build record")
+    finally:
+        os.close(source_fd)
 
     revision = subprocess.run(
         ["git", "rev-parse", "--verify", "HEAD"],
@@ -178,8 +230,31 @@ def verify_agent_cli(binary: Path) -> dict:
     )
     if source_changes.returncode != 0:
         raise RuntimeError("Agent preflight refuses a CLI built from dirty source inputs")
+    untracked_sources = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--",
+            "crates",
+            "skills",
+            "project/spec/workflows",
+            "Cargo.toml",
+            "Cargo.lock",
+            "apps/tui/installer/wizard.cjs",
+            "apps/tui/installer/wizard-body.cjs",
+        ],
+        cwd=ROOT,
+        env=sanitized_environment(),
+        text=True,
+        capture_output=True,
+        timeout=10.0,
+        check=False,
+    )
+    if untracked_sources.returncode != 0 or untracked_sources.stdout.strip():
+        raise RuntimeError("Agent preflight refuses untracked CLI source inputs")
     version = subprocess.run(
-        [str(binary), "--version", "--json"],
+        [str(snapshot_path), "--version", "--json"],
         cwd=ROOT,
         env=sanitized_environment(),
         text=True,
@@ -200,9 +275,9 @@ def verify_agent_cli(binary: Path) -> dict:
         or data.get("build_source_id") != current_cli_source_id()
     ):
         raise RuntimeError("Agent preflight CLI build does not match the current source revision")
-    return {
+    return snapshot_path, {
         "path": str(binary),
-        "sha256": file_sha256(binary),
+        "sha256": binary_sha256,
         "build_revision": data["build_revision"],
         "build_source_id": data["build_source_id"],
     }
@@ -455,12 +530,33 @@ def run_agent_input_preflight(
     binary: Path,
     descriptor_path: Path,
     *,
+    trusted_binary_sha256: str,
     invoke_fn=invoke_with_credential,
 ) -> dict:
     """Authenticate and prove exact session/claim/resume bindings before probes."""
-    cli_identity = verify_agent_cli(binary)
-    agent = load_agent_input(descriptor_path)
+    with tempfile.TemporaryDirectory(prefix="boreal-agent-cli-verified-") as directory:
+        pinned_binary, cli_identity = verify_agent_cli(
+            binary,
+            trusted_sha256=trusted_binary_sha256,
+            snapshot_directory=Path(directory),
+        )
+        agent = load_agent_input(descriptor_path)
+        return _run_agent_input_preflight_steps(
+            pinned_binary,
+            agent,
+            cli_identity,
+            invoke_fn=invoke_fn,
+        )
 
+
+def _run_agent_input_preflight_steps(
+    binary: Path,
+    agent: AgentInput,
+    cli_identity: dict,
+    *,
+    invoke_fn,
+) -> dict:
+    """Run read-only identity queries through one pinned executable snapshot."""
     def run(arguments: list[str], command: str) -> dict:
         return invoke_fn(
             binary,
@@ -1742,6 +1838,10 @@ def main() -> int:
         type=Path,
         help="opt in to an owner-supplied private Agent descriptor for authenticated readback",
     )
+    parser.add_argument(
+        "--agent-cli-sha256",
+        help="sha256:<hex> from an independent trusted build record; required with --agent-input",
+    )
     parser.add_argument("--control-latency-budget-ms", type=float)
     parser.add_argument("--control-latency-budget-source")
     parser.add_argument("--output", type=Path)
@@ -1760,12 +1860,18 @@ def main() -> int:
         parser.error(f"binary does not exist: {binary}")
     if args.agent_input is not None and not args.full_v10:
         parser.error("--agent-input requires --full-v10")
+    if (args.agent_input is None) != (args.agent_cli_sha256 is None):
+        parser.error("--agent-input and --agent-cli-sha256 must be supplied together")
 
     # This opt-in gate runs before any synthetic or production workload probe.
     # A bad descriptor, credential, authority, session, claim, or resume
     # binding aborts before the harness starts service/load activity.
     agent_input_binding = (
-        run_agent_input_preflight(binary, args.agent_input)
+        run_agent_input_preflight(
+            binary,
+            args.agent_input,
+            trusted_binary_sha256=args.agent_cli_sha256,
+        )
         if args.agent_input is not None
         else None
     )
@@ -2035,7 +2141,7 @@ def main() -> int:
         type(attempt_deadline_unix_ms) is int
         and type(attempt_restart_unix_ms) is int
         and type(attempt_recovery.get("service_exited_at_unix_ms")) is int
-        and attempt_recovery.get("service_exited_at_unix_ms") <= attempt_deadline_unix_ms
+        and attempt_recovery.get("service_exited_at_unix_ms") < attempt_deadline_unix_ms
         and attempt_restart_unix_ms >= attempt_deadline_unix_ms
         and attempt_recovery.get("deadline_crossed_while_service_stopped") is True
         and attempt_recovery.get("service_restarted_after_deadline") is True
