@@ -42,7 +42,15 @@ direct() {
 }
 
 service() {
-  "$BIN" "$@" --db "$DB" --socket "$SOCKET" --json
+  local result status
+  if result=$("$BIN" "$@" --db "$DB" --socket "$SOCKET" --json); then
+    printf '%s\n' "$result"
+  else
+    status=$?
+    printf 'guided closeout smoke: service command failed (exit %s): %s\n%s\n' \
+      "$status" "$*" "$result" >&2
+    return "$status"
+  fi
 }
 
 require_direct() {
