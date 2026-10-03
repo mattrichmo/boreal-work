@@ -4039,6 +4039,19 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn failed_descendant_inspection_is_running(pid: u32, stderr: &str) -> bool {
+        // The child can exit and be reaped after the initial liveness check but
+        // before `ps` inspects it. Treat that race as completed cleanup, while
+        // preserving a hard failure for any process that is still live or
+        // whose state is unknown.
+        if process_is_definitely_dead(pid) {
+            return false;
+        }
+
+        panic!("ps failed while inspecting descendant {pid}: {stderr}");
+    }
+
+    #[cfg(unix)]
     fn descendant_is_running(pid: u32) -> bool {
         if process_is_definitely_dead(pid) {
             return false;
@@ -4048,11 +4061,12 @@ mod tests {
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
             .expect("ps must be available to inspect a spawned descendant");
-        assert!(
-            output.status.success(),
-            "ps failed while inspecting descendant {pid}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if !output.status.success() {
+            return failed_descendant_inspection_is_running(
+                pid,
+                &String::from_utf8_lossy(&output.stderr),
+            );
+        }
         process_state_is_running(&String::from_utf8_lossy(&output.stdout))
     }
 
@@ -4076,6 +4090,23 @@ mod tests {
         assert!(process_state_is_running("S"));
         assert!(process_state_is_running("R+"));
         assert!(!process_state_is_running(""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_ps_after_descendant_was_reaped_is_not_running() {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+
+        assert!(!failed_descendant_inspection_is_running(pid, ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(expected = "ps failed while inspecting descendant")]
+    fn failed_ps_for_live_descendant_remains_a_failure() {
+        let _ = failed_descendant_inspection_is_running(std::process::id(), "");
     }
 
     fn draft() -> Draft {
