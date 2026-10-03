@@ -6934,9 +6934,62 @@ impl SqliteStore {
         request: impl Borrow<AttemptMutationRequest>,
     ) -> Result<AttemptMutationResult, StoreError> {
         let request = request.borrow();
+        self.apply_attempt_mutation_with_recover_descriptor(request, None)
+    }
+
+    /// Submit the versioned Recover action as a descriptor-bound expiry. The
+    /// adapter cannot choose an arbitrary attempt identity: every descriptor
+    /// field is checked again against canonical status/action facts while the
+    /// same write transaction applies expiry and records its durable receipt.
+    pub fn submit_recover_action(
+        &self,
+        input: &recovery::RecoverActionInput,
+    ) -> Result<AttemptMutationResult, StoreError> {
+        let attempt = input.descriptor.attempt.as_ref().ok_or_else(|| {
+            StoreError::Conflict(
+                "recover descriptor is incomplete: the current attempt and fence are absent"
+                    .to_owned(),
+            )
+        })?;
+        let request = AttemptMutationRequest {
+            project_id: input.descriptor.target.project_id.clone(),
+            work_id: input.descriptor.target.work_id.clone(),
+            attempt_id: attempt.attempt_id.clone(),
+            actor_id: input.actor_id.clone(),
+            harness_id: None,
+            session_id: Some(input.session_id.clone()),
+            fence: attempt.fence,
+            operation_id: input.operation_id.clone(),
+            request_digest: input.request_digest.clone(),
+            at: input.at.clone(),
+            expected_project_revision: Some(input.descriptor.expected_project_revision),
+            expected_work_revision: None,
+            expected_attempt_revision: Some(attempt.fence),
+            expected_phase: None,
+            expected_lease_deadline: None,
+            expected_hard_deadline: None,
+            mutation: AttemptMutationKind::Expire {
+                stop_confirmed: input.confirmed,
+            },
+            reason: Some(format!(
+                "recovery_disposition:{}",
+                recovery::recover_action_disposition_name(input.disposition)
+            )),
+        };
+        self.apply_attempt_mutation_with_recover_descriptor(&request, Some(input))
+    }
+
+    fn apply_attempt_mutation_with_recover_descriptor(
+        &self,
+        request: &AttemptMutationRequest,
+        recover_action: Option<&recovery::RecoverActionInput>,
+    ) -> Result<AttemptMutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             let command = format!("attempt.{}", mutation_name(&request.mutation));
+            if let Some(input) = recover_action {
+                validate_recover_action_envelope(self, input, request)?;
+            }
             if let Some(existing) = self.preflight_operation_replay(
                 &request.project_id,
                 &request.operation_id,
@@ -6970,13 +7023,24 @@ impl SqliteStore {
                     });
                 }
             }
-            let current = self
-                .attempt_record(&request.attempt_id, false)?
-                .ok_or_else(|| StoreError::NotFound {
-                    entity: "attempt",
-                    id: request.attempt_id.clone(),
-                })?;
-            self.validate_attempt_subject(request, &current)?;
+            let current = if recover_action.is_some() {
+                self.current_attempt_for_work(&request.project_id, &request.work_id)?
+                    .ok_or_else(|| StoreError::NotFound {
+                        entity: "current_attempt",
+                        id: format!("{}/{}", request.project_id, request.work_id),
+                    })?
+            } else {
+                self.attempt_record(&request.attempt_id, false)?
+                    .ok_or_else(|| StoreError::NotFound {
+                        entity: "attempt",
+                        id: request.attempt_id.clone(),
+                    })?
+            };
+            if recover_action.is_some() {
+                validate_recover_attempt_subject(request, &current)?;
+            } else {
+                self.validate_attempt_subject(request, &current)?;
+            }
             if self.canonical_production {
                 self.principal_authority(&request.project_id, &request.actor_id)?;
                 self.validate_project_session(
@@ -7002,7 +7066,7 @@ impl SqliteStore {
                     | AttemptMutationKind::RenewLease { .. } => None,
                 };
                 if let Some(action) = action {
-                    self.authorize_work_action_in_transaction(
+                    let descriptor = self.authorize_work_action_in_transaction(
                         &request.project_id,
                         &request.work_id,
                         &request.actor_id,
@@ -7010,7 +7074,15 @@ impl SqliteStore {
                         status_evaluation::canonical_status_timestamp(&request.at)?,
                         action,
                     )?;
+                    if let Some(input) = recover_action {
+                        validate_recover_action_descriptor(&input.descriptor, &descriptor)?;
+                    }
                 }
+            } else if recover_action.is_some() {
+                return Err(StoreError::Conflict(
+                    "descriptor-bound recovery requires canonical production action facts"
+                        .to_owned(),
+                ));
             }
 
             if current.fence != request.fence {
@@ -13137,6 +13209,219 @@ fn profile_version_for_work(
         definition_json,
         now,
     )
+}
+
+fn validate_recover_action_envelope(
+    store: &SqliteStore,
+    input: &recovery::RecoverActionInput,
+    request: &AttemptMutationRequest,
+) -> Result<(), StoreError> {
+    let descriptor = &input.descriptor;
+    if !store.canonical_production {
+        return Err(StoreError::Conflict(
+            "descriptor-bound recovery requires canonical production action facts".to_owned(),
+        ));
+    }
+    if descriptor.action != "recover"
+        || descriptor.target.project_id != request.project_id
+        || descriptor.target.work_id != request.work_id
+        || descriptor.expected_project_revision != request.expected_project_revision.unwrap_or(0)
+        || descriptor.attempt.as_ref().is_none_or(|attempt| {
+            attempt.attempt_id != request.attempt_id || attempt.fence != request.fence
+        })
+        || input.actor_id != request.actor_id
+        || input.session_id != request.session_id.as_deref().unwrap_or_default()
+        || input.operation_id != request.operation_id
+        || input.request_digest != request.request_digest
+        || !input.confirmed
+        || !matches!(
+            request.mutation,
+            AttemptMutationKind::Expire {
+                stop_confirmed: true
+            }
+        )
+    {
+        return Err(StoreError::Conflict(
+            "recover action input does not match its command identity or confirmation".to_owned(),
+        ));
+    }
+    for (value, field) in [
+        (&input.actor_id, "actor"),
+        (&input.session_id, "session"),
+        (&input.operation_id, "operation"),
+        (&input.request_digest, "request digest"),
+        (&descriptor.target.project_id, "project"),
+        (&descriptor.target.work_id, "work"),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Invalid(format!(
+                "recover action {field} must not be empty"
+            )));
+        }
+    }
+    if descriptor.target.entity_revision.is_none()
+        || descriptor.expected_entity_revision.is_none()
+        || descriptor.attempt.is_none()
+        || descriptor.confirmation.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(StoreError::Conflict(
+            "recover descriptor is incomplete: entity revision, current attempt/fence, and confirmation are required".to_owned(),
+        ));
+    }
+    if descriptor.read_only || !descriptor.recovery {
+        return Err(StoreError::Conflict(
+            "recover descriptor has incompatible action flags".to_owned(),
+        ));
+    }
+    if !matches!(
+        request.mutation,
+        AttemptMutationKind::Expire {
+            stop_confirmed: true
+        }
+    ) {
+        return Err(StoreError::Conflict(
+            "Recover only submits the confirmed attempt-expiry transition".to_owned(),
+        ));
+    }
+
+    identity::IdentityStore::new(store)
+        .validate_context(&input.context)
+        .map_err(|error| StoreError::Conflict(format!("recover identity: {error}")))?;
+    if input.context.project_id != request.project_id {
+        return Err(StoreError::WrongSubject {
+            expected: input.context.project_id.clone(),
+            actual: request.project_id.clone(),
+        });
+    }
+    if input.disposition == recovery::RecoverActionDisposition::ReviewedSafeRecovery {
+        let (role, _) = store.principal_authority(&request.project_id, &request.actor_id)?;
+        if role != boreal_domain::ActorRole::Operator {
+            return Err(StoreError::Conflict(
+                "role_denied: reviewed safe recovery requires project operator authority"
+                    .to_owned(),
+            ));
+        }
+    }
+    store.validate_project_session(&request.project_id, &request.actor_id, &input.session_id)?;
+    Ok(())
+}
+
+fn validate_recover_action_descriptor(
+    input: &recovery::RecoverActionDescriptorInput,
+    current: &boreal_domain::actions::ActionDescriptor,
+) -> Result<(), StoreError> {
+    use boreal_domain::actions::{ActionInputKind, ActionKind};
+
+    let expected_attempt =
+        current
+            .attempt
+            .as_ref()
+            .map(|attempt| recovery::RecoverActionAttemptInput {
+                attempt_id: attempt.attempt_id.as_str().to_owned(),
+                fence: attempt.fence.get(),
+            });
+    if input.action != "recover" || current.action != ActionKind::Recover {
+        return Err(StoreError::Conflict(
+            "server action descriptor is not Recover".to_owned(),
+        ));
+    }
+    if expected_attempt.is_none() || input.attempt.is_none() {
+        return Err(StoreError::Conflict(
+            "recover descriptor is incomplete or stale: no current attempt/fence is authorized"
+                .to_owned(),
+        ));
+    }
+    let expected_roles = current
+        .required_roles
+        .iter()
+        .map(|role| match role {
+            boreal_domain::ActorRole::Agent => "agent",
+            boreal_domain::ActorRole::Reviewer => "reviewer",
+            boreal_domain::ActorRole::Operator => "operator",
+            boreal_domain::ActorRole::Publisher => "publisher",
+        })
+        .collect::<Vec<_>>();
+    let expected_inputs = current
+        .required_inputs
+        .iter()
+        .map(|input| match input {
+            ActionInputKind::ExpectedProjectRevision => "expected_project_revision",
+            ActionInputKind::ExpectedEntityRevision => "expected_entity_revision",
+            ActionInputKind::ExpectedProofRevision => "expected_proof_revision",
+            ActionInputKind::AttemptId => "attempt_id",
+            ActionInputKind::Fence => "fence",
+            ActionInputKind::SessionId => "session_id",
+            ActionInputKind::OperationId => "operation_id",
+            ActionInputKind::Confirmation => "confirmation",
+            ActionInputKind::Reason => "reason",
+            ActionInputKind::Comment => "comment",
+            ActionInputKind::Evidence => "evidence",
+            ActionInputKind::Summary => "summary",
+            ActionInputKind::ReviewDecision => "review_decision",
+            ActionInputKind::RecoveryDisposition => "recovery_disposition",
+        })
+        .collect::<Vec<_>>();
+    let exact = input.target.project_id == current.target.project_id.as_str()
+        && input.target.work_id == current.target.work_id.as_str()
+        && input.target.entity_revision == Some(current.target.revision.get())
+        && input.expected_project_revision == current.expected_project_revision.0
+        && input.expected_entity_revision == Some(current.expected_entity_revision.get())
+        && input.expected_proof_revision
+            == current
+                .expected_proof_revision
+                .map(|revision| revision.get())
+        && input.attempt == expected_attempt
+        && input
+            .required_roles
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            == expected_roles
+        && input
+            .required_inputs
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            == expected_inputs
+        && input.confirmation.as_deref() == current.confirmation
+        && input.read_only == current.read_only
+        && input.recovery == current.recovery;
+    if !exact {
+        return Err(StoreError::Conflict(
+            "recover action descriptor is stale or does not match the authorized target"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recover_attempt_subject(
+    request: &AttemptMutationRequest,
+    current: &AttemptRecord,
+) -> Result<(), StoreError> {
+    if current.project_id != request.project_id || current.work_id != request.work_id {
+        return Err(StoreError::WrongSubject {
+            expected: format!("{}/{}", request.project_id, request.work_id),
+            actual: format!("{}/{}", current.project_id, current.work_id),
+        });
+    }
+    if !current.current {
+        return Err(StoreError::NotCurrent {
+            attempt_id: current.attempt_id.clone(),
+        });
+    }
+    if current.attempt_id != request.attempt_id {
+        return Err(StoreError::Conflict(
+            "recover descriptor attempt no longer matches the current work attempt".to_owned(),
+        ));
+    }
+    if current.fence != request.fence {
+        return Err(StoreError::StaleFence {
+            expected: request.fence,
+            actual: current.fence,
+        });
+    }
+    Ok(())
 }
 
 fn recovery_obligation_for_attempt_mutation(

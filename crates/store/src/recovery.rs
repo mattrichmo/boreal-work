@@ -116,6 +116,71 @@ pub struct RecoveryResolutionResult {
     pub replayed: bool,
 }
 
+/// Typed stop/recovery choice bound to a server-issued `Recover` descriptor.
+/// Both choices permit the same fenced expiry transition; the selected value
+/// is retained in the operation audit reason for later review.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoverActionDisposition {
+    AdapterAcknowledged,
+    ReviewedSafeRecovery,
+}
+
+pub(crate) const fn recover_action_disposition_name(
+    disposition: RecoverActionDisposition,
+) -> &'static str {
+    match disposition {
+        RecoverActionDisposition::AdapterAcknowledged => "adapter_acknowledged",
+        RecoverActionDisposition::ReviewedSafeRecovery => "reviewed_safe_recovery",
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionTargetInput {
+    pub project_id: String,
+    pub work_id: String,
+    pub entity_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionAttemptInput {
+    pub attempt_id: String,
+    pub fence: u64,
+}
+
+/// The descriptor fields emitted by the canonical action read model. The
+/// store compares these values with a freshly authorized descriptor while the
+/// attempt expiry transaction holds its write lock; this value is never a
+/// bearer token by itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionDescriptorInput {
+    pub action: String,
+    pub target: RecoverActionTargetInput,
+    pub expected_project_revision: u64,
+    pub expected_entity_revision: Option<u64>,
+    pub expected_proof_revision: Option<u64>,
+    pub attempt: Option<RecoverActionAttemptInput>,
+    pub required_roles: Vec<String>,
+    pub required_inputs: Vec<String>,
+    pub confirmation: Option<String>,
+    pub read_only: bool,
+    pub recovery: bool,
+}
+
+/// One request to execute the descriptor-bound attempt-expiry action.
+/// `recovery.resolve` remains a separate obligation-resolution operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionInput {
+    pub context: IdentityContext,
+    pub actor_id: String,
+    pub session_id: String,
+    pub operation_id: String,
+    pub request_digest: String,
+    pub descriptor: RecoverActionDescriptorInput,
+    pub confirmed: bool,
+    pub disposition: RecoverActionDisposition,
+    pub at: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceReservationInput {
     pub reservation_id: String,

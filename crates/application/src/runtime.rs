@@ -14,13 +14,15 @@ use boreal_domain::{
 use boreal_store::{
     identity::{IdentityContext, IdentityError, IdentityStore},
     recovery::{
-        IdentityBoundRecoveryResolutionInput, RecoveryObligationRecord, RecoveryResolutionInput,
-        ResourceReservationRecord,
+        IdentityBoundRecoveryResolutionInput, RecoverActionDescriptorInput,
+        RecoverActionDisposition, RecoverActionInput, RecoveryObligationRecord,
+        RecoveryResolutionInput, ResourceReservationRecord,
     },
-    SqliteStore, StoreError,
+    AttemptMutationResult as StoreAttemptMutationResult, SqliteStore, StoreError,
 };
+use serde_json::json;
 
-use crate::{ApplicationError, OperationResult, WorkApplication};
+use crate::{canonical_request_digest, ApplicationError, OperationResult, WorkApplication};
 
 pub const DEFAULT_HARD_ATTEMPT_TIME_LIMIT_MS: u64 = DEFAULT_HARD_TIME_LIMIT_MS;
 pub const DEFAULT_RENEWABLE_LEASE_TTL_MS: u64 = DEFAULT_LEASE_TTL_MS;
@@ -324,6 +326,22 @@ pub struct RecoveryResolveRequest {
     pub at: String,
     pub expected_project_revision: Option<u64>,
     pub session_id: Option<String>,
+}
+
+/// A submission of the current server-issued Recover descriptor. The
+/// application computes the operation digest and maps the typed disposition
+/// to the canonical store transaction; callers cannot provide a store digest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionRequest {
+    pub project_id: ProjectId,
+    pub work_id: WorkId,
+    pub actor_id: ActorId,
+    pub session_id: SessionId,
+    pub operation_id: OperationId,
+    pub descriptor: RecoverActionDescriptorInput,
+    pub confirmed: bool,
+    pub disposition: StopConfirmation,
+    pub at: TimestampMs,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -907,6 +925,102 @@ impl WorkApplication<'_> {
         )
     }
 
+    /// Apply the trusted Recover descriptor as the canonical expired-attempt
+    /// transition. The store re-reads action facts, principal/session, current
+    /// attempt and fence under the same transaction that writes expiry,
+    /// operation history and the recovery obligation.
+    pub fn recover_attempt_action(
+        &self,
+        request: RecoverActionRequest,
+    ) -> Result<OperationResult<AttemptMutation>, ApplicationError> {
+        let disposition = match request.disposition {
+            StopConfirmation::AdapterAcknowledged => RecoverActionDisposition::AdapterAcknowledged,
+            StopConfirmation::ReviewedSafeRecovery => {
+                RecoverActionDisposition::ReviewedSafeRecovery
+            }
+        };
+        let disposition_name = match disposition {
+            RecoverActionDisposition::AdapterAcknowledged => "adapter_acknowledged",
+            RecoverActionDisposition::ReviewedSafeRecovery => "reviewed_safe_recovery",
+        };
+        let descriptor = &request.descriptor;
+        let request_digest = canonical_request_digest(
+            "attempt.recover/v1",
+            json!({
+            "actor_id": request.actor_id.as_str(),
+                "session_id": request.session_id.as_str(),
+                "descriptor": {
+                    "action": descriptor.action,
+                    "target": {
+                        "project_id": descriptor.target.project_id,
+                        "work_id": descriptor.target.work_id,
+                        "entity_revision": descriptor.target.entity_revision,
+                    },
+                    "expected_project_revision": descriptor.expected_project_revision,
+                    "expected_entity_revision": descriptor.expected_entity_revision,
+                    "expected_proof_revision": descriptor.expected_proof_revision,
+                    "attempt": descriptor.attempt.as_ref().map(|attempt| json!({
+                        "attempt_id": attempt.attempt_id,
+                        "fence": attempt.fence,
+                    })),
+                    "required_roles": descriptor.required_roles,
+                    "required_inputs": descriptor.required_inputs,
+                    "confirmation": descriptor.confirmation,
+                    "read_only": descriptor.read_only,
+                    "recovery": descriptor.recovery,
+                },
+                "confirmed": request.confirmed,
+                "disposition": disposition_name,
+            }),
+        );
+        let identity = IdentityStore::new(self.store)
+            .context(request.project_id.as_str())
+            .map_err(|error| {
+                ApplicationError::Store(StoreError::Conflict(format!("recovery identity: {error}")))
+            })?;
+        let stored = self.store.submit_recover_action(&RecoverActionInput {
+            context: identity,
+            actor_id: request.actor_id.as_str().to_owned(),
+            session_id: request.session_id.as_str().to_owned(),
+            operation_id: request.operation_id.as_str().to_owned(),
+            request_digest: request_digest.clone(),
+            descriptor: request.descriptor.clone(),
+            confirmed: request.confirmed,
+            disposition,
+            at: format!("unix-ms:{}", request.at.as_millis()),
+        })?;
+
+        if !stored.replayed {
+            let attempt_identity = request.descriptor.attempt.as_ref().ok_or_else(|| {
+                ApplicationError::Invalid(
+                    "recover descriptor is incomplete: the current attempt and fence are absent"
+                        .to_owned(),
+                )
+            })?;
+            let attempt = AttemptRequest::new(
+                request.project_id.clone(),
+                request.work_id.clone(),
+                AttemptId::new(attempt_identity.attempt_id.clone()),
+                request.actor_id.clone(),
+                None,
+                Some(request.session_id.clone()),
+                Fence::new(attempt_identity.fence),
+                request.operation_id.clone(),
+                request_digest,
+                request.at,
+            );
+            self.request_terminal_resource_readback(
+                &attempt,
+                AttemptCommandKind::Expire {
+                    confirmation: request.disposition,
+                },
+            )?;
+        }
+
+        let mutation = attempt_mutation_from_store(stored)?;
+        Ok(operation_result(mutation))
+    }
+
     pub fn cancel<A: AttemptLifecycleAdapter>(
         &self,
         adapter: &A,
@@ -1147,6 +1261,33 @@ fn operation_result(result: AttemptMutation) -> OperationResult<AttemptMutation>
         changed: result.changed,
         value: result,
     }
+}
+
+fn attempt_mutation_from_store(
+    result: StoreAttemptMutationResult,
+) -> Result<AttemptMutation, ApplicationError> {
+    let parse_deadline = |value: &str| {
+        value
+            .strip_prefix("unix-ms:")
+            .ok_or_else(|| {
+                ApplicationError::Invalid(format!("unsupported attempt deadline: {value}"))
+            })?
+            .parse::<u64>()
+            .map(TimestampMs::from_millis)
+            .map_err(|_| ApplicationError::Invalid(format!("invalid attempt deadline: {value}")))
+    };
+    Ok(AttemptMutation {
+        operation_id: OperationId::new(result.operation_id),
+        request_digest: result.request_digest,
+        attempt_id: AttemptId::new(result.attempt_id),
+        fence: Fence::new(result.fence),
+        phase: result.phase,
+        lease_deadline: parse_deadline(&result.lease_deadline)?,
+        hard_deadline: parse_deadline(&result.hard_deadline)?,
+        revision: result.revision,
+        changed: result.changed && !result.replayed,
+        replayed: result.replayed,
+    })
 }
 
 #[cfg(test)]

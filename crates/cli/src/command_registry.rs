@@ -1628,6 +1628,15 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "record an operator decision and reconcile an original recovery obligation",
     },
     CommandSpec {
+        path: "recovery recover",
+        syntax: "bwrk recovery recover --project PROJECT --input PATH --expected-revision N --yes [--session ID] [--operation-id ID] [--socket PATH] [--json]",
+        action: "mutate",
+        output: "attempt_recovery",
+        direct: true,
+        service: true,
+        summary: "apply the server-issued Recover descriptor to an exact eligible attempt and retain durable recovery history",
+    },
+    CommandSpec {
         path: "maintenance show",
         syntax: "bwrk maintenance show --project PROJECT OPERATION_ID [--input RESTORE_PACKAGE_DIR] [--socket PATH] [--json]",
         action: "read",

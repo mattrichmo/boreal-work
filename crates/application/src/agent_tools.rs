@@ -69,7 +69,7 @@ pub const TRUSTED_DIRECTIVES: &[(&str, &str)] = &[
     ),
     (
         "guidance.recover@v1",
-        "Resolve the current recovery obligation with durable readback.",
+        "Submit the current descriptor-bound expired-attempt recovery action with its confirmation, fence, session, and typed stop disposition; the transaction records the expiry obligation, which remains a separate resolution step.",
     ),
     (
         "guidance.inspect@v1",
