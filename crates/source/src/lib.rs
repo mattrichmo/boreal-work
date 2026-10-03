@@ -2087,7 +2087,7 @@ pub fn content_digest(bytes: &[u8]) -> String {
     padded.resize(padded_len - 8, 0);
     padded.extend_from_slice(&bit_length.to_be_bytes());
 
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut words = [0_u32; 64];
         for (index, word) in words[..16].iter_mut().enumerate() {
             let offset = index * 4;
