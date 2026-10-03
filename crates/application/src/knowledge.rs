@@ -1727,29 +1727,6 @@ fn input_contains_format(input: &str, format: &str) -> bool {
         .is_some_and(|value| value == format)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_empty_operation_and_project_ids() {
-        assert!(matches!(
-            require_operation(" "),
-            Err(KnowledgeError::Invalid(_))
-        ));
-        assert!(matches!(
-            require_project("project id"),
-            Err(KnowledgeError::Invalid(_))
-        ));
-    }
-
-    #[test]
-    fn current_migration_format_is_detected_without_heuristic_loss() {
-        let input = serde_json::json!({"format": FORMAT, "version": FORMAT_VERSION});
-        assert!(!input_contains_format(&input.to_string(), LEGACY_FORMAT));
-    }
-}
-
 fn citations_json(citations: &[boreal_memory::Citation]) -> Value {
     json!(citations
         .iter()
@@ -2148,5 +2125,28 @@ impl KnowledgeApplication<'_> {
             manifest,
             git,
         )?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_operation_and_project_ids() {
+        assert!(matches!(
+            require_operation(" "),
+            Err(KnowledgeError::Invalid(_))
+        ));
+        assert!(matches!(
+            require_project("project id"),
+            Err(KnowledgeError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn current_migration_format_is_detected_without_heuristic_loss() {
+        let input = serde_json::json!({"format": FORMAT, "version": FORMAT_VERSION});
+        assert!(!input_contains_format(&input.to_string(), LEGACY_FORMAT));
     }
 }
