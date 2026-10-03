@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
-"""Exercise V10 through the real ``bwrk service run``/Unix client boundary.
+"""Run a bounded read-only dispatch-admission smoke through the CLI service.
 
-This is intentionally a production-composition harness rather than a Rust
-unit test.  It starts the shipping CLI service process, uses separate bwrk
-client processes, fills the normal dispatch lane, probes a control request,
-advances an optional macOS fake realtime clock, and proves SIGTERM cleanup.
-The output distinguishes observed production facts from unavailable host
-features; it never turns a missing fake-clock facility into a pass.
+The smoke starts the CLI service with one dispatch worker and queue capacity
+two, launches separate ``bwrk work show`` clients, and sends a status control
+request after a dispatch-full response while normal clients are still active.
+It records the CLI's actual error envelope and control timing/overlap.  The
+optional fake-clock and SIGTERM observations are supplemental; this script is
+not a V10 acceptance test or a scale/performance benchmark.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import ctypes.util
 import json
 import os
 import platform
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
 SHIM_SOURCE = Path(__file__).with_name("fake_clock.c")
+SMOKE_DISPATCH_WORKERS = 1
+SMOKE_DISPATCH_CAPACITY = 2
 
 
 def parse_envelope(completed: subprocess.CompletedProcess[str]) -> dict:
@@ -109,7 +110,7 @@ def wait_for_socket(socket_path: Path, process: subprocess.Popen[str]) -> None:
         if process.poll() is not None:
             stdout, stderr = process.communicate(timeout=1)
             raise RuntimeError(
-                f"service exited before readiness: code={process.returncode} "
+                f"service exited before readiness on Unix socket {socket_path}: code={process.returncode} "
                 f"stdout={stdout!r} stderr={stderr!r}"
             )
         if socket_path.exists():
@@ -161,20 +162,79 @@ def run_saturation(
     count: int,
 ) -> dict:
     started = time.perf_counter()
+    state_lock = threading.Lock()
+    active_clients: dict[int, float] = {}
+    completed_clients: list[dict] = []
+    max_active_clients = 0
 
-    def one(_index: int) -> dict:
+    def one(index: int) -> dict:
+        nonlocal max_active_clients
         # Keep the saturated workload read-only. Work creation would require
         # optimistic revision/session tokens and would serialize on SQLite,
         # obscuring whether service admission itself applies backpressure.
-        return client(binary, socket_path, project, ["work", "show", "v10-saturation-seed"], cwd=root)
+        request_started = time.perf_counter()
+        with state_lock:
+            active_clients[index] = request_started
+            max_active_clients = max(max_active_clients, len(active_clients))
+        response = None
+        try:
+            response = client(
+                binary,
+                socket_path,
+                project,
+                ["work", "show", "dispatch-smoke-seed"],
+                cwd=root,
+            )
+            return {
+                "index": index,
+                "started_at": request_started,
+                "completed_at": time.perf_counter(),
+                "response": response,
+            }
+        finally:
+            request_completed = time.perf_counter()
+            error = (response or {}).get("envelope", {}).get("error") or {}
+            with state_lock:
+                active_clients.pop(index, None)
+                completed_clients.append(
+                    {
+                        "index": index,
+                        "started_at": request_started,
+                        "completed_at": request_completed,
+                        "error_code": error.get("code"),
+                        "error_message": error.get("message", ""),
+                    }
+                )
 
-    results: list[dict] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(count, 64)) as pool:
+    max_clients = min(count, 64)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_clients) as pool:
         futures = [pool.submit(one, index) for index in range(count)]
-        # Give the host a short admission window before probing the reserved
-        # control lane.  The worker count/capacity are production defaults.
-        time.sleep(0.02)
-        control_started = time.perf_counter()
+        # Wait for an externally visible full-queue response before probing
+        # control progress.  The deadline only bounds the harness wait; failure
+        # to observe dispatch-full remains a smoke assertion failure.
+        admission_deadline = time.perf_counter() + 5.0
+        while time.perf_counter() < admission_deadline:
+            with state_lock:
+                full_seen = any(
+                    "dispatch queue is full" in item["error_message"].lower()
+                    for item in completed_clients
+                )
+                requests_active = bool(active_clients)
+                requests_remain = len(completed_clients) < count
+            if full_seen and requests_active:
+                break
+            if not requests_remain:
+                break
+            time.sleep(0.005)
+
+        with state_lock:
+            control_started = time.perf_counter()
+            active_at_control_start = len(active_clients)
+            full_responses_before_control = sum(
+                "dispatch queue is full" in item["error_message"].lower()
+                and item["completed_at"] <= control_started
+                for item in completed_clients
+            )
         control = client(
             binary,
             socket_path,
@@ -183,47 +243,81 @@ def run_saturation(
             cwd=root,
             timeout=30.0,
         )
-        control_latency_ms = (time.perf_counter() - control_started) * 1000.0
-        for future in futures:
-            results.append(future.result())
+        with state_lock:
+            control_completed = time.perf_counter()
+            active_at_control_response = len(active_clients)
+        results = [future.result() for future in futures]
 
+    normal_finished = time.perf_counter()
     error_objects = [
-        item["envelope"].get("error")
+        item["response"]["envelope"].get("error")
         for item in results
-        if item["envelope"].get("error")
+        if item["response"]["envelope"].get("error")
     ]
-    errors = [item.get("code") for item in error_objects]
-    error_messages = [item.get("message", "") for item in error_objects]
-    queue_full = any(
-        code == "service_busy"
-        or "queue is full" in message.lower()
-        or "dispatch queue" in message.lower()
-        for code, message in zip(errors, error_messages)
+    dispatch_full_errors = [
+        error
+        for error in error_objects
+        if "dispatch queue is full" in error.get("message", "").lower()
+    ]
+    grouped_dispatch_errors: dict[tuple[str | None, str], int] = {}
+    for error in dispatch_full_errors:
+        key = (error.get("code"), error.get("message", ""))
+        grouped_dispatch_errors[key] = grouped_dispatch_errors.get(key, 0) + 1
+    dispatch_error_details = [
+        {"code": code, "message": message, "count": count}
+        for (code, message), count in sorted(
+            grouped_dispatch_errors.items(), key=lambda item: (item[0][0] or "", item[0][1])
+        )
+    ]
+    overlapping_normal_clients = sum(
+        item["started_at"] < control_completed
+        and item["completed_at"] > control_started
+        for item in results
     )
-    queue_busy_message_count = sum(
-        "queue is full" in message.lower() or "dispatch queue" in message.lower()
-        for message in error_messages
-    )
+    control_error = control["envelope"].get("error")
+    control_response_received = control["exit_code"] == 0 and control_error is None
+    assertions = {
+        "dispatch_full_response_observed_before_control": full_responses_before_control > 0,
+        "normal_client_active_when_control_started": active_at_control_start > 0,
+        "control_response_received": control_response_received,
+        "normal_client_active_when_control_responded": active_at_control_response > 0,
+        "control_overlapped_normal_client_interval": overlapping_normal_clients > 0,
+    }
+    assertions["passed"] = all(assertions.values())
     return {
         "normal_requests": count,
-        "normal_elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+        "normal_client_concurrency_limit": max_clients,
+        "normal_max_in_flight_client_processes": max_active_clients,
+        "normal_elapsed_ms": round((normal_finished - started) * 1000.0, 3),
         "normal_outcomes": {
-            outcome: sum(item["envelope"].get("outcome") == outcome for item in results)
+            outcome: sum(item["response"]["envelope"].get("outcome") == outcome for item in results)
             for outcome in ("changed", "unchanged", "rejected", "failed", "unknown")
         },
-        "normal_error_codes": sorted(code for code in errors if code),
-        "normal_error_details": error_objects[:20],
-        "queue_saturation_observed": queue_full,
-        "queue_busy_message_count": queue_busy_message_count,
-        "busy_transport_note": "CLI currently maps the service busy protocol to protocol_mismatch while retaining the typed busy message",
+        "normal_error_codes": sorted(
+            error["code"]
+            for error in error_objects
+            if error.get("code")
+        ),
+        "dispatch_full_responses": len(dispatch_full_errors),
+        "dispatch_full_error_details": dispatch_error_details,
+        "dispatch_full_responses_before_control": full_responses_before_control,
         "control": {
             "outcome": control["envelope"].get("outcome"),
-            "error_code": (control["envelope"].get("error") or {}).get("code"),
-            "latency_ms": round(control_latency_ms, 3),
-            "response_received": control["exit_code"] == 0
-            and control["envelope"].get("error") is None,
+            "exit_code": control["exit_code"],
+            "error": control_error,
+            "request_started_after_smoke_start_ms": round((control_started - started) * 1000.0, 3),
+            "response_completed_after_smoke_start_ms": round((control_completed - started) * 1000.0, 3),
+            "latency_ms": round((control_completed - control_started) * 1000.0, 3),
+            "normal_clients_active_at_request_start": active_at_control_start,
+            "normal_clients_active_at_response": active_at_control_response,
+            "overlapping_normal_client_count": overlapping_normal_clients,
+            "overlapped_normal_clients": overlapping_normal_clients > 0,
+            "dispatch_full_responses_before_request": full_responses_before_control,
+            "response_received": control_response_received,
         },
+        "assertions": assertions,
         "production_boundary": "separate bwrk client processes over the Unix service socket",
+        "saturation_scope": "read-only work-show clients; client overlap is recorded but service queue depth is not externally counted",
     }
 
 
@@ -248,14 +342,14 @@ def run_fake_clock_probe(
         [
             "work",
             "create",
-            "v10-clock-task",
-            "V10 fake-clock task",
+            "dispatch-smoke-clock-task",
+            "Dispatch-admission smoke clock task",
             "--kind",
             "task",
             "--actor",
-            "v10-validator",
+            "dispatch-smoke-validator",
             "--operation-id",
-            "op_v10_create_clock_task",
+            "op_smoke_create_clock_task",
         ],
         cwd=root,
     )
@@ -268,19 +362,19 @@ def run_fake_clock_probe(
         [
             "work",
             "claim",
-            "v10-clock-task",
+            "dispatch-smoke-clock-task",
             "--actor",
-            "v10-validator",
+            "dispatch-smoke-validator",
             "--harness",
-            "v10-production-host",
+            "dispatch-admission-smoke",
             "--session",
-            "v10-clock-session",
+            "dispatch-smoke-clock-session",
             "--lease-ttl",
             "1s",
             "--time-limit",
             "30s",
             "--operation-id",
-            "op_v10_claim_clock_task",
+            "op_smoke_claim_clock_task",
         ],
         cwd=root,
     )
@@ -305,7 +399,7 @@ def run_fake_clock_probe(
 
     def find_clock_item(envelope: dict) -> dict | None:
         for item in (envelope.get("data") or {}).get("items", []):
-            if item.get("work_id") == "v10-clock-task":
+            if item.get("work_id") == "dispatch-smoke-clock-task":
                 return item
         return None
 
@@ -360,7 +454,7 @@ def main() -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(__file__).resolve().parent / "results" / "production-host.latest.json",
+        default=Path(__file__).resolve().parent / "results" / "dispatch-admission-smoke.latest.json",
     )
     args = parser.parse_args()
     if args.normal_requests < 32:
@@ -369,7 +463,7 @@ def main() -> int:
     if not binary.exists():
         parser.error(f"binary does not exist: {binary}")
 
-    with tempfile.TemporaryDirectory(prefix="boreal-v10-production-host-") as directory:
+    with tempfile.TemporaryDirectory(prefix="boreal-dispatch-admission-smoke-") as directory:
         root = Path(directory)
         database = root / ".boreal" / "boreal.sqlite"
         socket_path = root / "service.sock"
@@ -380,15 +474,15 @@ def main() -> int:
             [
                 "init",
                 "--project",
-                "v10-project",
+                "dispatch-smoke-project",
                 "--project-root",
                 str(root),
                 "--actor",
-                "v10-validator",
+                "dispatch-smoke-validator",
                 "--db",
                 str(database),
                 "--operation-id",
-                "op_v10_init",
+                "op_smoke_init",
                 "--json",
             ],
             cwd=root,
@@ -396,17 +490,17 @@ def main() -> int:
         if init["exit_code"] != 0 or init["envelope"].get("error"):
             raise RuntimeError(f"project init failed: {init}")
 
-        status = invoke(binary, ["status", "v10-project", "--db", str(database), "--json"], cwd=root)
+        status = invoke(binary, ["status", "dispatch-smoke-project", "--db", str(database), "--json"], cwd=root)
         revision = (status["envelope"].get("data") or {}).get("revision", status["envelope"].get("revision"))
         if status["exit_code"] != 0 or not isinstance(revision, int):
             raise RuntimeError(f"initial project status omitted its revision: {status}")
         session = invoke(
             binary,
             [
-                "session", "start", "--project", "v10-project", "--session", "v10-operator-session",
-                "--harness", "v10-production-host", "--actor", "v10-validator",
+                "session", "start", "--project", "dispatch-smoke-project", "--session", "dispatch-smoke-operator-session",
+                "--harness", "dispatch-admission-smoke", "--actor", "dispatch-smoke-validator",
                 "--expected-revision", str(revision), "--db", str(database),
-                "--operation-id", "op_v10_session_start", "--json",
+                "--operation-id", "op_smoke_session_start", "--json",
             ],
             cwd=root,
         )
@@ -416,10 +510,10 @@ def main() -> int:
         seeded = invoke(
             binary,
             [
-                "work", "create", "v10-project", "v10-saturation-seed", "V10 read-only saturation seed",
-                "--kind", "task", "--actor", "v10-validator", "--session", "v10-operator-session",
+                "work", "create", "dispatch-smoke-project", "dispatch-smoke-seed", "Read-only dispatch smoke seed",
+                "--kind", "task", "--actor", "dispatch-smoke-validator", "--session", "dispatch-smoke-operator-session",
                 "--expected-revision", str(revision), "--db", str(database),
-                "--operation-id", "op_v10_saturation_seed", "--json",
+                "--operation-id", "op_smoke_saturation_seed", "--json",
             ],
             cwd=root,
         )
@@ -440,14 +534,13 @@ def main() -> int:
                 str(database),
                 "--socket",
                 str(socket_path),
-                # Deliberately use the smallest valid production queue so the
-                # harness can prove typed backpressure deterministically while
-                # the reserved control lane remains available. Normal users
-                # retain the larger service defaults.
+                # Deliberately use the small 1/2 configuration for this
+                # admission smoke. It does not model default or full-load
+                # production capacity.
                 "--dispatch-workers",
-                "1",
+                str(SMOKE_DISPATCH_WORKERS),
                 "--dispatch-capacity",
-                "2",
+                str(SMOKE_DISPATCH_CAPACITY),
                 "--json",
             ],
             cwd=root,
@@ -458,29 +551,35 @@ def main() -> int:
         )
         try:
             wait_for_socket(socket_path, service)
-            ready_status(binary, socket_path, "v10-project", root)
+            ready_status(binary, socket_path, "dispatch-smoke-project", root)
             saturation = run_saturation(
                 binary,
                 socket_path,
-                "v10-project",
+                "dispatch-smoke-project",
                 root,
                 args.normal_requests,
             )
-            clock = run_fake_clock_probe(
-                binary,
-                socket_path,
-                "v10-project",
-                root,
-                clock_file,
-                shim is not None,
-            )
+            if shim is None:
+                clock = {"status": "unavailable", "reason": shim_reason}
+            else:
+                try:
+                    clock = run_fake_clock_probe(
+                        binary,
+                        socket_path,
+                        "dispatch-smoke-project",
+                        root,
+                        clock_file,
+                        True,
+                    )
+                except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                    clock = {"status": "fail", "reason": str(error)}
         finally:
             stop = stop_service(service, socket_path)
 
     result = {
-        "result_version": "boreal.forensic-v10-production-host/1",
+        "result_version": "boreal.dispatch-admission-smoke/1",
         "generated_at_unix_ms": int(time.time() * 1000),
-        "scenario": "V10",
+        "scenario": "bounded_read_only_dispatch_admission_smoke",
         "binary": str(binary),
         "host": {
             "system": platform.system(),
@@ -488,30 +587,82 @@ def main() -> int:
             "machine": platform.machine(),
             "python": platform.python_version(),
         },
-        "production_service": True,
+        "production_service_boundary": True,
+        "configuration": {
+            "dispatch_workers": SMOKE_DISPATCH_WORKERS,
+            "dispatch_capacity": SMOKE_DISPATCH_CAPACITY,
+            "service_defaults_workers": 4,
+            "service_defaults_capacity": 32,
+            "normal_requests": args.normal_requests,
+        },
         "fake_clock": {
             "shim": str(shim) if shim else None,
-            "status": "available" if shim else "unavailable",
-            "reason": shim_reason,
+            "status": clock["status"],
+            "reason": clock.get("reason", shim_reason),
+            "scope": "supplemental create/claim and expiry-display check in the disposable project; not part of the normal saturation batch",
+            "probe": clock,
         },
         "queue_and_control": saturation,
-        "deadline_clock": clock,
-        "stop_proof": stop,
+        "service_stop_observation": stop,
+        "smoke_status": "pass" if saturation["assertions"]["passed"] else "fail",
+        "v10_acceptance": {
+            "status": "not_established",
+            "reason": "this report is a bounded read-only dispatch-admission smoke, not the V10 acceptance gate",
+        },
         "limitations": [
-            "The fake clock shifts realtime only inside the service process; monotonic timer scheduling remains real.",
-            "Queue saturation is observed from typed service_busy responses; the production CLI does not expose internal queue depth counters.",
-            "The current production hook is a wake/stop boundary; this harness does not claim durable expiry reconciliation after a deadline callback.",
+            "The 1-worker/2-capacity setup is a deliberately constrained smoke configuration; production service defaults are 4 workers and capacity 32.",
+            "The saturated requests are repeated read-only work-show calls, not a mixed multi-agent workload, fairness test, scale benchmark, or soak.",
+            "The CLI may report dispatch-full using protocol_mismatch while preserving the dispatch-queue-full message; this is not evidence of a typed service_busy CLI response.",
+            "Control latency is recorded without a preapproved latency budget or a claim about full normal-load progress.",
+            "The optional fake-clock probe checks expiry display projection only; it does not prove durable deadline reconciliation, restart recovery, or timer scheduling under a shifted monotonic clock.",
+            "SIGTERM process exit and socket removal are supplemental observations; this smoke does not prove V10 stop/recovery behavior under full workload.",
         ],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"output": str(args.output), "clock": clock, "stop": stop}, sort_keys=True))
-    return 0 if saturation["queue_saturation_observed"] and saturation["control"]["response_received"] and stop["status"] == "pass" and clock["status"] == "pass" else 1
+    print(
+        json.dumps(
+            {
+                "output": str(args.output),
+                "smoke_status": result["smoke_status"],
+                "assertions": saturation["assertions"],
+                "fake_clock_status": clock["status"],
+                "stop_status": stop["status"],
+                "v10_acceptance": result["v10_acceptance"]["status"],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if saturation["assertions"]["passed"] else 1
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-        print(f"FAIL: {error}", file=sys.stderr)
+        message = str(error)
+        lowered = message.lower()
+        if (
+            "operation not permitted" in lowered or "permission denied" in lowered
+        ) and ("socket" in lowered or "unix" in lowered):
+            print(
+                json.dumps(
+                    {
+                        "output": None,
+                        "smoke_status": "unavailable",
+                        "assertions": None,
+                        "fake_clock_status": "unavailable",
+                        "stop_status": "not_run",
+                        "v10_acceptance": "not_established",
+                        "reason": "Unix socket/process capability unavailable",
+                    },
+                    sort_keys=True,
+                )
+            )
+            print(
+                f"BOREAL_VALIDATION_SKIP: Unix socket/process capability unavailable: {message}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"FAIL: {message}", file=sys.stderr)
         raise SystemExit(1) from error

@@ -43,22 +43,56 @@ the result records `os_processes: 1`. It is not evidence for multi-process
 fairness, crash recovery, TUI rendering, source/memory throughput, or release
 capacity.
 
-## C4-B production-host evidence
+## Bounded read-only dispatch-admission smoke
 
-Run the V10 production-composition probe with:
+Run the dispatch-admission smoke against a built CLI with:
 
 ```sh
 python3 production_host.py --bin ../../../../target/debug/bwrk
 ```
 
-The probe starts `bwrk service run`, drives separate `bwrk` clients through
-the Unix socket, records typed `service_busy` results while normal work fills
-the bounded dispatch lanes, measures a control `status` response, advances an
-optional macOS realtime-clock interposer for expiry projection, and verifies
-SIGTERM/socket cleanup. The result is written to
-`results/production-host.latest.json`.
+The script starts the real `bwrk service run` process and uses separate CLI
+client processes over its Unix socket. The normal request batch consists of
+read-only `work show` calls. Its fixed dispatch configuration is **1 worker
+and queue capacity 2**; the service defaults are 4 workers and capacity 32.
+This deliberately small setup is only for a bounded admission smoke and does
+not represent production load or capacity.
 
-The fake-clock component is intentionally optional: non-macOS hosts retain an
-explicit unavailable result. The production host currently has no durable
-deadline-reconciliation proof exposed through its CLI, so the report does not
-claim that missing gate.
+Before sending the control `status` request, the harness waits briefly for an
+externally visible dispatch-full response while normal client processes are
+active. It records the response's actual CLI error code and message. Current
+CLI behavior can be `protocol_mismatch` with an `application dispatch queue
+is full ...` message; the smoke does not describe that as a typed
+`service_busy` CLI response. It also records when the control request starts
+and finishes, its latency, the number of normal clients active at each point,
+and how many normal client intervals overlapped it. No latency target is
+asserted, and the service does not expose queue-depth counters to this
+harness.
+
+The smoke passes only when a dispatch-full message was observed before the
+control request, normal clients were active when it started, the control
+response succeeded, and normal clients remained active when the control
+response arrived. These are admission and overlap assertions only; the result
+makes no throughput, fairness, scale, soak, or broad performance claim. The
+JSON report is written to `results/dispatch-admission-smoke.latest.json`.
+
+`fake_clock.status` is explicitly `pass`, `fail`, or `unavailable`. On a
+non-Darwin host it is `unavailable`, and that does not fail the narrow smoke.
+When available, the optional probe checks only expiry display projection in
+the temporary project after creating and claiming a disposable task. This
+write is outside the normal read-only saturation batch. `service_stop_observation` records SIGTERM
+exit/socket removal as a supplemental observation; neither optional result
+determines smoke status.
+
+If the environment denies Unix socket/process startup, the script emits a
+`BOREAL_VALIDATION_SKIP` marker and a machine-readable `smoke_status` of
+`unavailable`; the fake-clock status is also reported as `unavailable` because
+the service-side probe could not run.
+
+This is partial dispatch-admission evidence, **not V10 acceptance**. It does
+not establish durable deadline reconciliation or restart recovery, full
+normal-load worker/queue behavior, typed `service_busy` CLI behavior, a
+preapproved control-latency budget, or stop/recovery behavior during a full
+workload. The forensic audit records the smoke as a separate subresult and
+keeps full V10 acceptance blocked; acceptance requires separate supporting
+evidence beyond this smoke.

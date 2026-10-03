@@ -209,9 +209,12 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
             (
                 Check("service runtime unit tests", cargo_args("-p", "boreal-service", "--lib", online=online)),
                 Check("guided lifecycle clock tests", cargo_args("-p", "boreal-application", "--test", "p2_guided_flow", "p2_guided_flow_claims_three_harnesses_and_fences_recovery", online=online)),
-                Check("production gate V10", production_gate("scripts/validation/concurrency/production_host.py")),
+                Check(
+                    "bounded read-only dispatch-admission smoke",
+                    production_gate("scripts/validation/concurrency/production_host.py"),
+                ),
             ),
-            "A production host test must use a fake clock, saturate workers and the normal queue, and measure typed control latency and stop proof.",
+            "Full V10 acceptance remains blocked. The bounded read-only dispatch-admission smoke is partial evidence only; V10 also requires durable deadline reconciliation, full normal-load worker/queue coverage, typed control behavior against an acceptance budget, and stop/recovery evidence.",
         ),
         Scenario(
             "V11",
@@ -293,7 +296,7 @@ def run_command(check: Check, *, log_dir: Path, online: bool) -> dict[str, Any]:
     stem = check.label.replace(" ", "-").replace("/", "-")
     (log_dir / f"{stem}.stdout.log").write_text(stdout, encoding="utf-8")
     (log_dir / f"{stem}.stderr.log").write_text(stderr, encoding="utf-8")
-    return {
+    result = {
         "label": check.label,
         "command": command,
         "status": status,
@@ -303,6 +306,14 @@ def run_command(check: Check, *, log_dir: Path, online: bool) -> dict[str, Any]:
         "stdout_log": str(log_dir / f"{stem}.stdout.log"),
         "stderr_log": str(log_dir / f"{stem}.stderr.log"),
     }
+    if check.label == "bounded read-only dispatch-admission smoke":
+        try:
+            summary = json.loads(next(line for line in reversed(stdout.splitlines()) if line.strip()))
+        except (StopIteration, json.JSONDecodeError):
+            summary = None
+        if isinstance(summary, dict):
+            result["smoke_subresult"] = summary
+    return result
 
 
 def markdown(result: dict[str, Any]) -> str:
@@ -312,14 +323,16 @@ def markdown(result: dict[str, Any]) -> str:
         f"Overall: **{result['status']}**; pass **{result['counts']['pass']}**, skip **{result['counts']['skip']}**, unavailable **{result['counts']['unavailable']}**, fail **{result['counts']['fail']}**.",
         "",
         "A scenario is green only when its exact production-composition gate is implemented and every listed check passes. Partial checks are retained as evidence and cannot establish a pass by themselves.",
+        "V10 includes the bounded read-only dispatch-admission smoke as partial evidence. Its success does not establish full V10 acceptance; the scenario remains blocked pending separately supported deadline, load, control-budget, and stop/recovery evidence.",
         "",
-        "| Scenario | Status | Findings | Checks | Missing complete gate |",
-        "| --- | --- | --- | --- | --- |",
+        "| Scenario | Status | Acceptance | Findings | Checks | Missing complete gate |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for scenario in result["scenarios"]:
         checks = ", ".join(f"{item['label']}={item['status']}" for item in scenario["checks"])
+        acceptance = scenario.get("acceptance", {}).get("status", "")
         lines.append(
-            f"| `{scenario['id']}` | **{scenario['status']}** | {', '.join(scenario['findings'])} | {checks} | {scenario['complete_gate']} |"
+            f"| `{scenario['id']}` | **{scenario['status']}** | {acceptance} | {', '.join(scenario['findings'])} | {checks} | {scenario['complete_gate']} |"
         )
     lines.extend(["", f"Logs: `{result['log_dir']}`", ""])
     return "\n".join(lines)
@@ -360,26 +373,51 @@ def main() -> int:
             status = "skip"
         elif "unavailable" in check_statuses:
             status = "unavailable"
+        elif scenario.scenario_id == "V10":
+            # This smoke is intentionally only a partial V10 result. A zero
+            # exit code proves its bounded assertions, not full V10 acceptance.
+            status = "unavailable"
         else:
             has_production_gate = any(
                 item["label"].startswith("production gate") for item in checks
             )
             status = "pass" if has_production_gate else "unavailable"
-        records.append(
-            {
-                "id": scenario.scenario_id,
-                "title": scenario.title,
-                "findings": list(scenario.findings),
-                "status": status,
-                "checks": checks,
-                "complete_gate": scenario.complete_gate,
-                "complete": status == "pass",
+        record = {
+            "id": scenario.scenario_id,
+            "title": scenario.title,
+            "findings": list(scenario.findings),
+            "status": status,
+            "checks": checks,
+            "complete_gate": scenario.complete_gate,
+            "complete": status == "pass",
+        }
+        if scenario.scenario_id == "V10":
+            smoke_check = next(
+                (item for item in checks if item["label"] == "bounded read-only dispatch-admission smoke"),
+                None,
+            )
+            smoke_summary = (smoke_check or {}).get("smoke_subresult") or {}
+            record["acceptance"] = {
+                "status": "blocked",
+                "complete": False,
+                "separate_full_acceptance_evidence": "not_supplied",
+                "reason": "the dispatch-admission smoke does not satisfy full V10 acceptance",
             }
-        )
+            record["subresults"] = {
+                "read_only_dispatch_admission_smoke": {
+                    "status": smoke_summary.get("smoke_status", (smoke_check or {}).get("status", "unavailable")),
+                    "report": smoke_summary.get("output"),
+                    "assertions": smoke_summary.get("assertions"),
+                    "fake_clock_status": smoke_summary.get("fake_clock_status"),
+                    "stop_status": smoke_summary.get("stop_status"),
+                    "v10_acceptance": "not_established",
+                }
+            }
+        records.append(record)
     counts = {status: sum(item["status"] == status for item in records) for status in ("pass", "skip", "unavailable", "fail")}
     overall = "pass" if counts["fail"] == 0 and counts["skip"] == 0 and counts["unavailable"] == 0 else "incomplete"
     result = {
-        "result_version": "boreal.forensic-audit/1",
+        "result_version": "boreal.forensic-audit/2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "status": overall,
         "profile": "online" if args.online else "offline",
@@ -390,6 +428,7 @@ def main() -> int:
         "limitations": [
             "A V01-V12 pass requires the named production gate in addition to its partial unit/application/TUI checks.",
             "A complete scenario requires a test through the actual bwrk service composition and its declared fault/scale boundary.",
+            "V10 full acceptance remains blocked even if the bounded read-only dispatch-admission smoke passes; its result is recorded separately as partial evidence.",
             "Environment skips remain visible and are release-blocking unless an explicit non-release exploratory override is used.",
         ],
     }
