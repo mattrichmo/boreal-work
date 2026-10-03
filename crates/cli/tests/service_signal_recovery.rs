@@ -567,10 +567,10 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
     while Instant::now() < startup_deadline {
         // Binding the socket happens before the host acquires database
         // ownership. A versioned status response proves the service is ready.
-        if socket.exists() {
-            if service_status_is_ready(root, database, socket, project, actor, startup_deadline) {
-                return Some(child);
-            }
+        if socket.exists()
+            && service_status_is_ready(root, database, socket, project, actor, startup_deadline)
+        {
+            return Some(child);
         }
         if child.try_wait().expect("service status reads").is_some() {
             let output = child
