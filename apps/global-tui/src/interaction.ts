@@ -372,8 +372,13 @@ export async function runInteractive(controller: GlobalController, terminal: Key
     if (key === "enter") {
       if (project) { controller.selectProject(controller.projects.indexOf(project)); return; }
       if (item || note) { showSelectedInInspector("details", true); return; }
-      if (association) { showSelectedInInspector("linked"); return; }
-      if (status || controller.route === "history") { showSelectedInInspector(); return; }
+      if (association) {
+        if (controller.route === "links" && association.kind === "workspace") openLinkedReader(association);
+        else showSelectedInInspector("linked");
+        return;
+      }
+      if (controller.route === "history") { void loadHistoryPage(0); return; }
+      if (status) { showSelectedInInspector(); return; }
     }
     if (key === "H" && association?.kind === "workspace" && association.path && terminal.openLinkedWorkspace) {
       if (escapeTimer) clearTimeout(escapeTimer);
