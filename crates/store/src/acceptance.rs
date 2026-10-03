@@ -482,6 +482,13 @@ impl SqliteStore {
         row.run()
     }
 
+    // Keep the revision fence explicit at this crate-internal boundary: each
+    // argument maps to a distinct persisted predicate consumed by
+    // `status_facts`, which is outside this bounded lint-cleanup surface.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the dependency waiver lookup preserves its explicit subject and predecessor revision fences for the existing status-facts caller"
+    )]
     pub(crate) fn active_dependency_waiver(
         &self,
         project_id: &str,

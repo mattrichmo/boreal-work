@@ -256,6 +256,13 @@ impl SqliteStore {
 
     /// Append lineage after validating the endpoint snapshot and fencing the
     /// mutation to that exact revision in the journal/audit transaction.
+    // These explicit persisted values are part of the public store/application
+    // boundary. Grouping them would change that API and require coordinated
+    // changes outside the assigned files.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserve the public field-by-field maintenance lineage API used by the application crate"
+    )]
     pub fn record_maintenance_lineage(
         &self,
         context: &V3MutationContext,
@@ -575,6 +582,12 @@ impl SqliteStore {
         )))
     }
 
+    // Keep replay inputs aligned with `record_compaction_summary` and the
+    // public application/store boundary without changing that API.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserve the public field-by-field compaction replay API used by the application crate"
+    )]
     pub fn compaction_summary_replay(
         &self,
         context: &V3MutationContext,
@@ -643,6 +656,12 @@ impl SqliteStore {
         )))
     }
 
+    // These explicit persisted values are part of the public store/application
+    // boundary; consolidating them requires coordinated API changes elsewhere.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserve the public field-by-field compaction persistence API used by the application crate"
+    )]
     pub fn record_compaction_summary(
         &self,
         context: &V3MutationContext,
