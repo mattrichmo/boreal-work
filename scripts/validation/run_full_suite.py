@@ -26,6 +26,12 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def output_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
 def child_environment(overrides: dict[str, str] | None = None) -> dict[str, str]:
     """Keep a caller-provided oracle manifest scoped to the workspace test."""
     environment = os.environ.copy()
@@ -85,8 +91,8 @@ def run_check(
         completed = subprocess.CompletedProcess(
             command,
             124,
-            error.stdout or "",
-            error.stderr or "",
+            output_text(error.stdout),
+            output_text(error.stderr),
         )
     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
     stdout_path = log_dir / f"{label}.stdout.log"
@@ -171,8 +177,8 @@ def run_workspace_check(
                     env=child_environment(),
                 )
             except subprocess.TimeoutExpired as error:
-                stdout_path.write_text(error.stdout or "", encoding="utf-8")
-                stderr_path.write_text(error.stderr or "", encoding="utf-8")
+                stdout_path.write_text(output_text(error.stdout), encoding="utf-8")
+                stderr_path.write_text(output_text(error.stderr), encoding="utf-8")
                 return {
                     "label": "cargo-workspace",
                     "command": command,
