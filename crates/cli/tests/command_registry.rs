@@ -217,7 +217,11 @@ fn commands_expose_revision_checked_planning_mutations() {
 
 #[test]
 fn public_command_syntax_exposes_required_identity_and_proof_inputs() {
-    let claim = command_syntax("work claim");
+    let claim_entry = command_entry("work claim");
+    assert_eq!(claim_entry["availability"], "available");
+    assert_eq!(claim_entry["adapters"]["direct"], true);
+    assert_eq!(claim_entry["adapters"]["service"], true);
+    let claim = claim_entry["syntax"].as_str().unwrap();
     assert!(claim.contains("--source-version ID"));
     assert!(claim.contains("--config-identity ID"));
 
