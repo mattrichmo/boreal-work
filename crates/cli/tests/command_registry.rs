@@ -9,25 +9,33 @@ fn invoke(args: &[&str]) -> (bool, serde_json::Value) {
     (output.status.success(), value)
 }
 
-fn command_syntax(envelope: &serde_json::Value, path: &str) -> String {
+fn command_entry(path: &str) -> serde_json::Value {
+    let mut args = vec!["commands"];
+    args.extend(path.split_whitespace());
+    args.push("--json");
+    let (success, envelope) = invoke(&args);
+    assert!(
+        success,
+        "command registry query for {path} should succeed: {envelope}"
+    );
     envelope["data"]["available"]
         .as_array()
         .expect("command registry available routes")
         .iter()
         .find(|entry| entry["path"] == path)
-        .unwrap_or_else(|| panic!("missing available route {path}"))["syntax"]
+        .unwrap_or_else(|| panic!("missing available route {path}"))
+        .clone()
+}
+
+fn command_syntax(path: &str) -> String {
+    command_entry(path)["syntax"]
         .as_str()
         .unwrap_or_else(|| panic!("route {path} has no syntax"))
         .to_owned()
 }
 
-fn command_summary(envelope: &serde_json::Value, path: &str) -> String {
-    envelope["data"]["available"]
-        .as_array()
-        .expect("command registry available routes")
-        .iter()
-        .find(|entry| entry["path"] == path)
-        .unwrap_or_else(|| panic!("missing available route {path}"))["summary"]
+fn command_summary(path: &str) -> String {
+    command_entry(path)["summary"]
         .as_str()
         .unwrap_or_else(|| panic!("route {path} has no summary"))
         .to_owned()
@@ -192,29 +200,28 @@ fn commands_catalogue_lists_the_implemented_intake_capture_route_as_available() 
 
 #[test]
 fn commands_expose_revision_checked_planning_mutations() {
-    let (success, envelope) = invoke(&["commands", "work", "--json"]);
-    assert!(success);
-    let paths = envelope["data"]["available"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["path"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert!(paths.contains(&"work hold add"));
-    assert!(paths.contains(&"work hold resolve"));
-    assert!(paths.contains(&"work dispatch set"));
+    for path in ["work hold add", "work hold resolve", "work dispatch set"] {
+        let entry = command_entry(path);
+        assert_eq!(entry["availability"], "available", "{path}");
+        assert_eq!(entry["adapters"]["direct"], true, "{path}");
+        assert_eq!(entry["adapters"]["service"], true, "{path}");
+        assert!(
+            entry["syntax"]
+                .as_str()
+                .unwrap()
+                .contains("--expected-revision N"),
+            "{path} must expose its revision fence"
+        );
+    }
 }
 
 #[test]
 fn public_command_syntax_exposes_required_identity_and_proof_inputs() {
-    let (success, envelope) = invoke(&["commands", "--json"]);
-    assert!(success);
-
-    let claim = command_syntax(&envelope, "work claim");
+    let claim = command_syntax("work claim");
     assert!(claim.contains("--source-version ID"));
     assert!(claim.contains("--config-identity ID"));
 
-    let finish = command_syntax(&envelope, "agent finish");
+    let finish = command_syntax("agent finish");
     assert!(finish.contains("--close --receipt PATH --summary PATH"));
 
     for path in [
@@ -245,7 +252,7 @@ fn public_command_syntax_exposes_required_identity_and_proof_inputs() {
         "memory reconcile",
     ] {
         assert!(
-            command_syntax(&envelope, path).contains("--project PROJECT"),
+            command_syntax(path).contains("--project PROJECT"),
             "{path} syntax must expose its project scope"
         );
     }
@@ -256,27 +263,27 @@ fn public_command_syntax_exposes_required_identity_and_proof_inputs() {
         "sprint board",
         "sprint report",
     ] {
-        let syntax = command_syntax(&envelope, path);
+        let syntax = command_syntax(path);
         assert!(syntax.contains("CYCLE_ID"), "{path} requires an ID");
         assert!(!syntax.contains("[CYCLE_ID]"), "{path} ID is not optional");
     }
 
-    assert!(command_syntax(&envelope, "memory show").contains("DRAFT_ID"));
-    assert!(command_syntax(&envelope, "memory search").contains("QUERY"));
-    assert!(command_syntax(&envelope, "memory readback").contains("OPERATION_ID"));
+    assert!(command_syntax("memory show").contains("DRAFT_ID"));
+    assert!(command_syntax("memory search").contains("QUERY"));
+    assert!(command_syntax("memory readback").contains("OPERATION_ID"));
 
     for path in ["memory draft", "memory review", "memory publish"] {
-        let syntax = command_syntax(&envelope, path);
+        let syntax = command_syntax(path);
         assert!(syntax.contains("--yes --expected-revision N"), "{path}");
         assert!(!syntax.contains("[--yes"), "{path}");
     }
-    assert!(command_syntax(&envelope, "memory publish").contains("REVIEW_ID"));
-    assert!(!command_syntax(&envelope, "memory publish").contains("DRAFT_ID"));
-    assert!(command_summary(&envelope, "memory publish").contains("expected_manifest_identity"));
+    assert!(command_syntax("memory publish").contains("REVIEW_ID"));
+    assert!(!command_syntax("memory publish").contains("DRAFT_ID"));
+    assert!(command_summary("memory publish").contains("expected_manifest_identity"));
 
-    let agent_start = command_syntax(&envelope, "agent start");
+    let agent_start = command_syntax("agent start");
     assert!(agent_start.contains("[--source-version ID --config-identity ID]"));
-    assert!(command_summary(&envelope, "agent start").contains("new attempt requires both"));
+    assert!(command_summary("agent start").contains("new attempt requires both"));
 
     for path in [
         "review approve",
@@ -291,7 +298,7 @@ fn public_command_syntax_exposes_required_identity_and_proof_inputs() {
         "work retry",
         "work publish",
     ] {
-        let summary = command_summary(&envelope, path);
+        let summary = command_summary(path);
         assert!(
             summary.contains("expected_entity_revision"),
             "{path}: {summary}"
