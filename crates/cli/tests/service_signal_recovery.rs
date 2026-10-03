@@ -540,6 +540,17 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
         assert_success(initialized, "service test init");
     }
 
+    let project_metadata: Value = serde_json::from_slice(
+        &fs::read(root.join(".boreal/project.json")).expect("project metadata reads"),
+    )
+    .expect("project metadata parses");
+    let project = project_metadata["project_id"]
+        .as_str()
+        .expect("project metadata has its project id");
+    let actor = project_metadata["operator_actor"]
+        .as_str()
+        .expect("project metadata has its operator actor");
+
     let mut child = Command::new(binary())
         .current_dir(root)
         .args(["service", "run", "--db"])
@@ -553,7 +564,9 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
         .expect("service launches");
 
     for _ in 0..300 {
-        if socket.exists() && UnixStream::connect(socket).is_ok() {
+        // Binding the socket happens before the host acquires database
+        // ownership. A versioned status response proves the service is ready.
+        if socket.exists() && service_status_is_ready(root, database, socket, project, actor) {
             return Some(child);
         }
         if child.try_wait().expect("service status reads").is_some() {
@@ -573,6 +586,39 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
 
     terminate_if_running(&mut child, SIGKILL);
     panic!("service did not create its socket within the startup timeout");
+}
+
+fn service_status_is_ready(
+    root: &Path,
+    database: &Path,
+    socket: &Path,
+    project: &str,
+    actor: &str,
+) -> bool {
+    let Ok(output) = Command::new(binary())
+        .current_dir(root)
+        .args(["status", project, "--actor", actor, "--db"])
+        .arg(database)
+        .args(["--socket"])
+        .arg(socket)
+        .args(["--json"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(envelope) = serde_json::from_slice::<Value>(&output.stdout) else {
+        return false;
+    };
+    envelope["api_version"] == "2"
+        && envelope["schema_version"] == "boreal.protocol.envelope.v1"
+        && envelope["outcome"] == "unchanged"
+        && envelope["error"].is_null()
+        && envelope["data"]["command"] == "status"
+        && envelope["data"]["project_id"] == project
+        && envelope["data"]["recovery"]["service_state"] == "ready"
 }
 
 fn stop_service(mut child: Child, socket: &Path, signal: c_int) -> Output {
