@@ -1124,12 +1124,10 @@ fn validate_workspace_details(input: &str) -> Result<ValidatedWorkspace, CliErro
     };
     project_context::validate_store(&context, &store)?;
     let identities = IdentityStore::new(&store);
-    let database_identity = identities
-        .database_identity()
-        .map_err(|error| app_error(error))?;
+    let database_identity = identities.database_identity().map_err(app_error)?;
     let identity = identities
         .context(&metadata.project_id)
-        .map_err(|error| app_error(error))?;
+        .map_err(app_error)?;
     if identity.database_instance_id != database_identity.database_instance_id {
         return Err(CliError::with(
             ErrorCode::OperationConflict,

@@ -1637,25 +1637,23 @@ pub(super) fn begin(plan: &SetupPlan) -> Result<(), CliError> {
     } else {
         "setup-pending.json"
     };
-    for name in [marker] {
-        let path = plan.project_root.join(".boreal").join(name);
-        if path.is_file() {
-            let bytes = fs::read(&path).map_err(|e| setup_error(e.to_string()))?;
-            if plan.metadata_digest.as_deref() != Some(boreal_store::checksum(&bytes).as_str()) {
-                return Err(setup_error(
-                    "project setup changed while preparing; rerun init",
-                ));
-            }
-            let saved: Value =
-                serde_json::from_slice(&bytes).map_err(|e| setup_error(e.to_string()))?;
-            if saved["project_id"].as_str() != Some(&plan.project_id)
-                || saved["database"].as_str() != plan.database.to_str()
-                || saved["memory_layout"].as_str() != Some(&plan.memory_layout)
-            {
-                return Err(setup_error(
-                    "project setup binding changed; rerun init to read the current configuration",
-                ));
-            }
+    let path = plan.project_root.join(".boreal").join(marker);
+    if path.is_file() {
+        let bytes = fs::read(&path).map_err(|e| setup_error(e.to_string()))?;
+        if plan.metadata_digest.as_deref() != Some(boreal_store::checksum(&bytes).as_str()) {
+            return Err(setup_error(
+                "project setup changed while preparing; rerun init",
+            ));
+        }
+        let saved: Value =
+            serde_json::from_slice(&bytes).map_err(|e| setup_error(e.to_string()))?;
+        if saved["project_id"].as_str() != Some(&plan.project_id)
+            || saved["database"].as_str() != plan.database.to_str()
+            || saved["memory_layout"].as_str() != Some(&plan.memory_layout)
+        {
+            return Err(setup_error(
+                "project setup binding changed; rerun init to read the current configuration",
+            ));
         }
     }
     if plan.project_root.join(".boreal/project.json").exists() {
