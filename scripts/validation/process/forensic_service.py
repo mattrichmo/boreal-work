@@ -48,12 +48,14 @@ class HarnessError(RuntimeError):
     """A scenario failed or could not establish its production boundary."""
 
 
-def short_socket(label: str) -> Path:
-    """Return a unique macOS-safe endpoint (macOS caps sockaddr_un paths)."""
+def short_socket(root: Path, label: str) -> Path:
+    """Return a unique short endpoint inside its selected project root."""
     global _SOCKET_COUNTER
     _SOCKET_COUNTER += 1
-    safe = "".join(character for character in label if character.isalnum() or character == "-")[:22]
-    return Path(f"/tmp/boreal-c4a-{os.getpid()}-{_SOCKET_COUNTER}-{safe}.sock")
+    # Local project context rejects sockets outside the selected workspace.
+    # Keep the basename tiny as macOS still caps sockaddr_un path lengths.
+    del label
+    return root / ".boreal" / f"s{_SOCKET_COUNTER}.sock"
 
 
 def op(value: str) -> str:
@@ -151,6 +153,47 @@ def stat_is_socket(path: Path) -> bool:
     return path.exists() and path.stat().st_mode & 0o170000 == 0o140000
 
 
+def wait_for_service_ready(
+    binary: Path,
+    db: Path,
+    socket_path: Path,
+    process: subprocess.Popen[str],
+    *,
+    cwd: Path,
+    project: str,
+    timeout: float = 10.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            output = process.stdout.read() if process.stdout is not None else ""
+            raise HarnessError(
+                f"service exited before readiness: code={process.returncode} output={output[-1600:]}"
+            )
+        if socket_path.exists() and stat_is_socket(socket_path):
+            status = run_cli(
+                binary,
+                [
+                    "status",
+                    project,
+                    "--db",
+                    str(db),
+                    "--socket",
+                    str(socket_path),
+                    "--json",
+                ],
+                cwd=cwd,
+                timeout=1.0,
+            )
+            recovery = status.data().get("recovery")
+            if status.exit_code == 0 and isinstance(recovery, dict) and recovery.get("service_state") == "ready":
+                return
+            last = status.compact()
+        time.sleep(0.02)
+    raise HarnessError(f"service status readiness failed: {last!r}")
+
+
 def start_service(
     binary: Path,
     db: Path,
@@ -176,6 +219,10 @@ def start_service(
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    if max_requests is not None:
+        # The authenticated status probe below consumes one ordinary service
+        # request, so retain the caller's requested application-call budget.
+        args.extend(["--max-requests", str(max_requests + 1)])
     process = subprocess.Popen(
         args,
         cwd=cwd,
@@ -184,7 +231,15 @@ def start_service(
         stderr=subprocess.STDOUT,
         text=True,
     )
-    wait_for_socket(socket_path, process)
+    metadata = json.loads((cwd / ".boreal" / "project.json").read_text())
+    wait_for_service_ready(
+        binary,
+        db,
+        socket_path,
+        process,
+        cwd=cwd,
+        project=metadata["project_id"],
+    )
     return process
 
 
@@ -248,8 +303,14 @@ def assert_error(call: Call, codes: set[str], label: str) -> None:
 
 
 def prepare_project(binary: Path, root: Path, project: str, work: str) -> tuple[Path, Path]:
-    db = root / "boreal.sqlite"
-    gates = root / "gates"
+    # The production project context confines its database to the selected
+    # project root.  Use the temporary fixture directory itself as that root;
+    # `init --project ... --project-root ...` keeps the project identity and
+    # workspace boundary explicit without relying on cwd-derived paths.
+    db = root / ".boreal" / "boreal.sqlite"
+    # evidence run resolves its declaration directory beside the canonical
+    # project database (`<project>/.boreal/gates`).
+    gates = db.parent / "gates"
     gates.mkdir(parents=True, exist_ok=True)
     for gate in ("checkpoint.json", "verification.json", "summary.json"):
         (gates / gate).write_bytes((GATE_SOURCE / gate).read_bytes())
@@ -257,7 +318,10 @@ def prepare_project(binary: Path, root: Path, project: str, work: str) -> tuple[
         binary,
         [
             "init",
+            "--project",
             project,
+            "--project-root",
+            str(root),
             "--db",
             str(db),
             "--operation-id",
@@ -267,6 +331,91 @@ def prepare_project(binary: Path, root: Path, project: str, work: str) -> tuple[
         cwd=root,
     )
     assert_success(initialized, f"{project} init")
+    status = run_cli(
+        binary,
+        ["status", project, "--db", str(db), "--json"],
+        cwd=root,
+    )
+    status_data = assert_success(status, f"{project} initial status")
+    revision = status_data.get("revision")
+    if not isinstance(revision, int):
+        revision = (status.envelope or {}).get("revision")
+    if not isinstance(revision, int):
+        raise HarnessError(f"{project} initial status omitted its revision: {status.compact()}")
+    enrollment = run_cli(
+        binary,
+        [
+            "auth",
+            "key",
+            "--actor",
+            "agent-1",
+            "--actor-role",
+            "agent",
+            "--db",
+            str(db),
+            "--operation-id",
+            op(f"{project}-agent-key"),
+            "--json",
+        ],
+        cwd=root,
+    )
+    enrollment_data = assert_success(enrollment, f"{project} agent key")
+    enrollment_path = enrollment_data.get("enrollment_path")
+    if not isinstance(enrollment_path, str):
+        raise HarnessError(f"{project} agent key omitted its private enrollment path: {enrollment.compact()}")
+    granted = run_cli(
+        binary,
+        [
+            "auth",
+            "grant",
+            "--actor",
+            "operator",
+            "--input",
+            enrollment_path,
+            "--expected-revision",
+            str(revision),
+            "--reason",
+            "Isolated production service validation agent",
+            "--yes",
+            "--db",
+            str(db),
+            "--operation-id",
+            op(f"{project}-agent-grant"),
+            "--json",
+        ],
+        cwd=root,
+    )
+    assert_success(granted, f"{project} agent grant")
+    revision = (granted.envelope or {}).get("revision")
+    if not isinstance(revision, int):
+        raise HarnessError(f"{project} agent grant omitted its revision: {granted.compact()}")
+    session = run_cli(
+        binary,
+        [
+            "session",
+            "start",
+            "--project",
+            project,
+            "--actor",
+            "operator",
+            "--harness",
+            "cli",
+            "--session",
+            "session-operator",
+            "--expected-revision",
+            str(revision),
+            "--db",
+            str(db),
+            "--operation-id",
+            op(f"{project}-session-start"),
+            "--json",
+        ],
+        cwd=root,
+    )
+    assert_success(session, f"{project} operator session start")
+    revision = (session.envelope or {}).get("revision")
+    if not isinstance(revision, int):
+        raise HarnessError(f"{project} session start omitted its revision: {session.compact()}")
     created = run_cli(
         binary,
         [
@@ -277,6 +426,12 @@ def prepare_project(binary: Path, root: Path, project: str, work: str) -> tuple[
             "C4-A validation work",
             "--kind",
             "task",
+            "--actor",
+            "operator",
+            "--session",
+            "session-operator",
+            "--expected-revision",
+            str(revision),
             "--db",
             str(db),
             "--operation-id",
@@ -299,8 +454,9 @@ def service_once(
     max_requests: int = 1,
     extra_env: dict[str, str] | None = None,
     session: str = "c4-a-session",
+    actor: str = "agent-1",
 ) -> Call:
-    socket_path = short_socket(operation)
+    socket_path = short_socket(root, operation)
     process = start_service(
         binary,
         db,
@@ -316,6 +472,7 @@ def service_once(
         args,
         cwd=root,
         operation=operation,
+        actor=actor,
         session=session,
     )
     if process.poll() is None and max_requests is not None:
@@ -394,7 +551,7 @@ def evidence_setup(
         gate_file.write_text(json.dumps(declaration, indent=2) + "\n")
     if slow_gate:
         write_slow_gate(gates)
-    socket_path = short_socket("setup")
+    socket_path = short_socket(root, "setup")
     process = start_service(binary, db, socket_path, cwd=root, max_requests=2)
     claimed = service_call(
         binary,
@@ -433,13 +590,22 @@ def evidence_setup(
     fence = data.get("fence") or claim_data.get("fence")
     if not isinstance(attempt_id, str) or not isinstance(fence, int):
         raise HarnessError(f"agent start did not return attempt identity: {started.compact()}")
-    return db, root / "gates", attempt_id, fence
+    return db, db.parent / "gates", attempt_id, fence
 
 
 def run_v01(binary: Path, parent: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="boreal-v01-", dir=parent) as directory:
         root = Path(directory)
         db, _ = prepare_project(binary, root, "v01-project", "seed")
+        status = run_cli(
+            binary,
+            ["status", "v01-project", "--db", str(db), "--json"],
+            cwd=root,
+        )
+        assert_success(status, "V01 initial status")
+        expected_revision = (status.envelope or {}).get("revision")
+        if not isinstance(expected_revision, int):
+            raise HarnessError(f"V01 initial status omitted its revision: {status.compact()}")
         create_args = [
             "work",
             "create",
@@ -448,10 +614,28 @@ def run_v01(binary: Path, parent: Path) -> dict[str, Any]:
             "Restart identity",
             "--kind",
             "task",
+            "--expected-revision",
+            str(expected_revision),
         ]
-        first = service_once(binary, root, db, create_args, operation="v01-create")
+        first = service_once(
+            binary,
+            root,
+            db,
+            create_args,
+            operation="v01-create",
+            session="session-operator",
+            actor="operator",
+        )
         assert_success(first, "V01 first create", "changed")
-        replay = service_once(binary, root, db, create_args, operation="v01-create")
+        replay = service_once(
+            binary,
+            root,
+            db,
+            create_args,
+            operation="v01-create",
+            session="session-operator",
+            actor="operator",
+        )
         assert_success(replay, "V01 replay after restart", "unchanged")
         changed = service_once(
             binary,
@@ -465,8 +649,12 @@ def run_v01(binary: Path, parent: Path) -> dict[str, Any]:
                 "Changed payload",
                 "--kind",
                 "task",
+                "--expected-revision",
+                str(expected_revision),
             ],
             operation="v01-create",
+            session="session-operator",
+            actor="operator",
         )
         assert_error(changed, {"operation_conflict", "claim_conflict"}, "V01 changed payload")
         readback = operation_show_direct(binary, root, db, "v01-project", "v01-create")
@@ -510,7 +698,7 @@ def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
         db, _, attempt, fence = evidence_setup(
             binary, root, project="v02-admitted", work="task", session="session-admitted"
         )
-        socket_path = short_socket("admitted")
+        socket_path = short_socket(root, "admitted")
         service = start_service(
             binary,
             db,
@@ -551,7 +739,7 @@ def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
         db, _, attempt, fence = evidence_setup(
             binary, root, project="v02-exited", work="task", session="session-exited"
         )
-        socket_path = short_socket("exited")
+        socket_path = short_socket(root, "exited")
         service = start_service(
             binary,
             db,
@@ -597,7 +785,7 @@ def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
             session="session-running",
             slow_gate=True,
         )
-        socket_path = short_socket("running")
+        socket_path = short_socket(root, "running")
         service = start_service(binary, db, socket_path, cwd=root)
         evidence_args = [
             str(binary),
@@ -681,7 +869,7 @@ def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
         db, _, attempt, fence = evidence_setup(
             binary, root, project="v02-unknown", work="task", session="session-unknown"
         )
-        socket_path = short_socket("unknown")
+        socket_path = short_socket(root, "unknown")
         crashed = start_service(
             binary,
             db,
@@ -712,7 +900,7 @@ def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
             session="session-unknown",
         )
         crashed.wait(timeout=10)
-        recovered_socket = short_socket("recovered")
+        recovered_socket = short_socket(root, "recovered")
         recovered = start_service(binary, db, recovered_socket, cwd=root, max_requests=1)
         readback = service_call(
             binary,
@@ -735,7 +923,7 @@ def run_v05(binary: Path, parent: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="boreal-v05-", dir=parent) as directory:
         root = Path(directory)
         db, _ = prepare_project(binary, root, "v05-project", "task")
-        socket_path = short_socket("v05")
+        socket_path = short_socket(root, "v05")
         service = start_service(binary, db, socket_path, cwd=root, max_requests=3)
         started = service_call(
             binary,
@@ -829,7 +1017,7 @@ def run_v08(binary: Path, parent: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="boreal-v08-", dir=parent) as directory:
         root = Path(directory)
         db, _ = prepare_project(binary, root, "v08-project", "task")
-        socket_path = short_socket("v08")
+        socket_path = short_socket(root, "v08")
         pid_path = root / "service.pid"
         helper = subprocess.Popen(
             [sys.executable, "-c", PARENT_CODE, str(binary), str(db), str(socket_path), str(pid_path)],
@@ -880,9 +1068,6 @@ def direct_mutation_cases(root: Path, project: str, db: Path) -> list[list[str]]
     common = ["--db", str(db), "--json"]
     attempt = ["--attempt", "missing-attempt", "--fence", "1"]
     return [
-        ["init", project, "--yes"],
-        ["setup", project, "--yes"],
-        ["install", project, "--yes"],
         ["work", "create", project, "direct-new", "Direct new", "--kind", "task"],
         ["work", "edit", project, "task", "--title", "edited", "--expected-revision", "0"],
         ["dep", "add", project, "task", "direct-new", "--expected-revision", "0"],
@@ -915,7 +1100,7 @@ def run_v09(binary: Path, parent: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="boreal-v09-", dir=parent) as directory:
         root = Path(directory)
         db, _ = prepare_project(binary, root, "v09-project", "task")
-        socket_path = short_socket("v09")
+        socket_path = short_socket(root, "v09")
         service = start_service(binary, db, socket_path, cwd=root)
         records = []
         unavailable_routes = {
@@ -1032,7 +1217,8 @@ def main() -> int:
             "V04, V06, V07, V10, V11, and V12 remain outside this C4-A lane.",
             "The V02 admitted/exited observations use the debug-only production failpoints already exposed by the validation build; they do not claim optimized-build crash coverage.",
             "V08 proves the service process lifetime and inherited pipe boundary, not every external executor descendant shape.",
-            "V09 enumerates every currently available database-mutating CLI route reported by the checked-in command registry; machine update/upgrade routes are intentionally excluded because they do not mutate the project database.",
+        "V09 enumerates every currently available database-mutating CLI route reported by the checked-in command registry; machine update/upgrade routes are intentionally excluded because they do not mutate the project database.",
+        "Local bootstrap/setup/install commands are excluded from V09 because they are workspace-bound setup flows rather than direct database mutation routes; project bootstrap is intentionally local-only.",
         ],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

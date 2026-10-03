@@ -11,7 +11,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -34,10 +34,14 @@ const REPORT_JSON = join(REPORT_DIR, "forensic-closeout.latest.json");
 const REPORT_MD = join(REPORT_DIR, "forensic-closeout.latest.md");
 
 const PROJECT = "forensic-tui-project";
+const OPERATOR = "operator";
 const ACTOR = "forensic-tui-agent";
 const HARNESS = "forensic-tui-harness";
 const SESSION = "session-forensic-tui";
 let SOURCE_VERSION = "source-forensic-tui";
+let PROJECT_ROOT = null;
+let OPERATOR_CREDENTIAL = "";
+let AGENT_CREDENTIAL = "";
 const CONFIG_IDENTITY = "config-forensic-tui";
 
 let operationSequence = 0;
@@ -93,20 +97,21 @@ function assertSuccess(label, envelope) {
   return envelope.data;
 }
 
-function serviceClient(socket, project = PROJECT, session = SESSION) {
+function serviceClient(socket, actor, credential, project = PROJECT, session = SESSION) {
   const transport = new UnixSocketFramedTransport(socket, { timeout_ms: 10_000 });
   const client = new VersionedServiceClient(transport, {
     project_id: project,
-    actor_id: ACTOR,
+    actor_id: actor,
+    credential_ref: credential,
     harness_id: HARNESS,
     session_id: session,
   });
   return client;
 }
 
-function cli(args, environment = {}) {
+function cli(args, environment = {}, cwd = ROOT) {
   const result = spawnSync(BIN, args, {
-    cwd: ROOT,
+    cwd,
     env: { ...process.env, ...environment },
     encoding: "utf8",
     maxBuffer: 4 * 1024 * 1024,
@@ -138,9 +143,9 @@ async function waitForSocket(path, child, timeoutMs = 8_000) {
   throw new Error(`service socket did not appear: ${path}; stderr=${child.stderrText}`);
 }
 
-function startService(db, socket, failpoint = null) {
+function startService(db, socket, projectRoot, failpoint = null) {
   const child = spawn(BIN, ["service", "run", "--db", db, "--socket", socket, "--json"], {
-    cwd: ROOT,
+    cwd: projectRoot,
     env: failpoint ? { ...process.env, BOREAL_VALIDATION_FAILPOINT: failpoint } : { ...process.env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -173,7 +178,7 @@ function removeSocket(socket) {
   try { rmSync(socket, { force: true }); } catch { /* isolated fixture cleanup */ }
 }
 
-function writeGatePolicies(gateRoot, source = "source-forensic-tui", config = "config-forensic-tui") {
+function writeGatePolicies(gateRoot, source, config, verifierDigest) {
   mkdirSync(gateRoot, { recursive: true });
   const fingerprint = environmentFingerprint();
   const gates = [
@@ -184,9 +189,11 @@ function writeGatePolicies(gateRoot, source = "source-forensic-tui", config = "c
   for (const [gate_id, kind] of gates) {
     writeFileSync(join(gateRoot, `${gate_id}.json`), `${JSON.stringify({
       gate_id,
+      policy_revision: 1,
       kind,
-      executable: "/usr/bin/printf",
-      argv: ["/usr/bin/printf", `${gate_id}-forensic-pass\\n`],
+      executable: "./verify.sh",
+      verifier_digest: verifierDigest,
+      argv: ["./verify.sh", `${gate_id}-forensic-pass`],
       cwd: ".",
       source_snapshot_hash: source,
       config_identity: config,
@@ -198,17 +205,18 @@ function writeGatePolicies(gateRoot, source = "source-forensic-tui", config = "c
   }
 }
 
+function projectCredential(root, actor) {
+  const actorHash = createHash("sha256").update(actor).digest("hex");
+  const path = join(root, ".boreal", "credentials", `sha256-${actorHash}.json`);
+  const value = JSON.parse(readFileSync(path, "utf8")).credential;
+  assertThat(typeof value === "string" && value.length > 0, `local credential for ${actor} is invalid`);
+  return value;
+}
+
 async function createProjectAndHierarchy(client) {
-  const project = client.createProject(requestEnvelope(nextOperation("create_project"), {
-    project_id: PROJECT,
-    actor_id: ACTOR,
-    actor_role: "operator",
-    credential_ref: "forensic-tui",
-    display_name: "Forensic TUI operator",
-  }));
-  const projectEnvelope = await project;
-  assertSuccess("create project", projectEnvelope);
-  let revision = projectEnvelope.revision;
+  const initial = await client.readStatus({ project_id: PROJECT, limit: 1, offset: 0 });
+  assertSuccess("initial project status", initial);
+  let revision = initial.revision;
   const items = [
     ["matrix-milestone", "milestone", "Forensic milestone", null],
     ["matrix-sprint", "sprint", "Forensic sprint", "matrix-milestone"],
@@ -218,7 +226,7 @@ async function createProjectAndHierarchy(client) {
     const created = await client.createWork(requestEnvelope(nextOperation(`create_${work_id}`), {
       project_id: PROJECT,
       work_id,
-      actor_id: ACTOR,
+      actor_id: OPERATOR,
       kind,
       title,
       parent_id,
@@ -325,7 +333,7 @@ function checkStatusDtoMatrix(snapshots) {
     assertThat(modelItems.size === data.items.length, `${label}: production TUI model dropped live items`);
   }
   const byId = new Map(observations.map((item) => [`${item.label}/${item.work_id}`, item]));
-  assertThat(seenKinds.has("milestone") && seenKinds.has("sprint") && seenKinds.has("task"), `V04 kind matrix incomplete: ${[...seenKinds]}`);
+  assertThat(seenKinds.has("milestone") && seenKinds.has("sprint") && seenKinds.has("task"), `V04 kind matrix incomplete: ${[...seenKinds]}; items=${observations.map((item) => `${item.label}/${item.work_id}:${item.kind}`).join(",")}`);
   assertThat(seenStates.has("ready") && [...seenStates].some((state) => ["claimed", "in_progress"].includes(state)), `V04 state matrix incomplete: ${[...seenStates]}`);
   assertThat(["checkpoint", "verification", "summary"].every((gate) => seenGates.has(gate)), `V04 gate matrix incomplete: ${[...seenGates]}`);
   const initialTask = byId.get("initial/matrix-task");
@@ -349,7 +357,7 @@ async function runEvidence(client, socket, work_id, gate_id, context, operation_
     "--session", context.session_id,
     "--operation-id", operation_id,
     "--json",
-  ], environment);
+  ], environment, PROJECT_ROOT ?? ROOT);
   return result;
 }
 
@@ -454,30 +462,65 @@ async function main() {
   }
   assertThat(existsSync(BIN), `missing current bwrk binary: ${BIN}`);
   const fixture = mkdtempSync(join(tmpdir(), "boreal-forensic-tui-"));
-  const db = join(fixture, "boreal.sqlite");
+  PROJECT_ROOT = fixture;
+  const db = join(fixture, ".boreal", "boreal.sqlite");
   const socket = join(fixture, "service.sock");
-  const gateRoot = join(fixture, "gates");
-  const sourceFixture = join(fixture, "source-fixture.md");
-  writeFileSync(sourceFixture, "# Boreal forensic TUI source\n\nThis immutable fixture binds live evidence receipts.\n", "utf8");
+  const gateRoot = join(fixture, ".boreal", "gates");
+  const sourceFixture = join(fixture, "workspace-fixture");
+  mkdirSync(sourceFixture, { recursive: true });
+  writeFileSync(join(sourceFixture, "README.md"), "# Boreal forensic TUI source\n\nThis immutable fixture binds live evidence receipts.\n", "utf8");
+  const verifierPath = join(sourceFixture, "verify.sh");
+  writeFileSync(verifierPath, "#!/bin/sh\nprintf '%s\\n' \"$1\"\n", { encoding: "utf8", mode: 0o755 });
+  chmodSync(verifierPath, 0o755);
   let service = null;
   let client = null;
+  let operatorClient = null;
   const evidence = { fixture, v04: null, v06: null, v07: null };
   try {
     // The source adapter is intentionally direct-only in the current public
     // registry. Seed its immutable source before the service host is elected;
     // all lifecycle, status, evidence, restart, and closeout assertions still
     // cross the live service boundary below.
-    const init = cli(["init", PROJECT, "--project-root", fixture, "--db", db, "--actor", ACTOR, "--actor-role", "operator", "--yes", "--json"]);
+    const init = cli(["init", "--project", PROJECT, "--project-root", fixture, "--db", db, "--actor", OPERATOR, "--actor-role", "operator", "--yes", "--json"], {}, fixture);
     assertThat(init.status === 0 && init.json?.outcome === "changed", `fixture init failed: ${init.stdout}${init.stderr}`);
-    const source = cli(["source", "add", PROJECT, "--input", sourceFixture, "--origin", "forensic-tui", "--media-type", "text/markdown", "--db", db, "--actor", ACTOR, "--json"]);
+    OPERATOR_CREDENTIAL = projectCredential(fixture, OPERATOR);
+    const operatorSession = cli([
+      "session", "start", "--project", PROJECT, "--session", "session-forensic-tui-operator",
+      "--harness", HARNESS, "--actor", OPERATOR, "--expected-revision", String(init.json.revision),
+      "--db", db, "--operation-id", "op_forensic_tui_operator_session", "--json",
+    ], {}, fixture);
+    assertThat(operatorSession.status === 0 && operatorSession.json?.outcome === "changed", `operator session setup failed: ${operatorSession.stdout}${operatorSession.stderr}`);
+    const enrollment = cli(["auth", "key", "--actor", ACTOR, "--actor-role", "agent", "--db", db, "--json"], {}, fixture);
+    const enrollmentPath = enrollment.json?.data?.enrollment_path;
+    assertThat(enrollment.status === 0 && typeof enrollmentPath === "string", `Agent enrollment failed: ${enrollment.stdout}${enrollment.stderr}`);
+    const grant = cli([
+      "auth", "grant", "--actor", OPERATOR, "--input", enrollmentPath,
+      "--expected-revision", String(operatorSession.json.revision), "--reason", "isolated forensic TUI fixture", "--yes",
+      "--db", db, "--operation-id", "op_forensic_tui_agent_grant", "--json",
+    ], {}, fixture);
+    assertThat(grant.status === 0 && grant.json?.outcome === "changed", `Agent grant failed: ${grant.stdout}${grant.stderr}`);
+    AGENT_CREDENTIAL = projectCredential(fixture, ACTOR);
+    const source = cli(["source", "add", PROJECT, "--input", sourceFixture, "--origin", "forensic-tui", "--db", db, "--actor", OPERATOR, "--harness", HARNESS, "--session", "session-forensic-tui-operator", "--expected-revision", String(grant.json.revision), "--operation-id", "op_forensic_tui_source", "--json"], {}, fixture);
     assertThat(source.status === 0 && source.json?.outcome === "changed", `fixture source add failed: ${source.stdout}${source.stderr}`);
     SOURCE_VERSION = source.json?.data?.source?.source_version_id ?? SOURCE_VERSION;
     assertThat(SOURCE_VERSION.startsWith("sv_"), `fixture source add did not return a source version: ${source.stdout}`);
-    writeGatePolicies(gateRoot, SOURCE_VERSION, CONFIG_IDENTITY);
-    service = startService(db, socket);
+    writeGatePolicies(gateRoot, SOURCE_VERSION, CONFIG_IDENTITY, `sha256:${createHash("sha256").update(readFileSync(verifierPath)).digest("hex")}`);
+    let policyRevision = source.json.revision;
+    for (const gate_id of ["checkpoint", "verification", "summary"]) {
+      const publish = cli([
+        "gate", "policy", "publish", "--project", PROJECT, "--gate", gate_id,
+        "--input", `.boreal/gates/${gate_id}.json`, "--expected-revision", String(policyRevision), "--yes",
+        "--actor", OPERATOR, "--harness", HARNESS, "--session", "session-forensic-tui-operator",
+        "--db", db, "--operation-id", nextOperation(`publish_${gate_id}`), "--json",
+      ], {}, fixture);
+      assertThat(publish.status === 0 && publish.json?.outcome === "changed", `gate policy ${gate_id} publish failed: ${publish.stdout}${publish.stderr}`);
+      policyRevision = publish.json.revision;
+    }
+    service = startService(db, socket, fixture);
     await waitForSocket(socket, service);
-    client = serviceClient(socket);
-    let revision = await createProjectAndHierarchy(client);
+    operatorClient = serviceClient(socket, OPERATOR, OPERATOR_CREDENTIAL, PROJECT, "session-forensic-tui-operator");
+    client = serviceClient(socket, ACTOR, AGENT_CREDENTIAL, PROJECT, SESSION);
+    let revision = await createProjectAndHierarchy(operatorClient);
 
     const initial = await readStatus(client, "initial status");
     const context = await claimAndStart(client, "matrix-task", initial.envelope.revision);
@@ -499,8 +542,8 @@ async function main() {
     ];
     const faultReadbacks = [];
     for (const [failpoint, work_id] of faultCases) {
-      const created = await client.createWork(requestEnvelope(nextOperation(`create_${work_id}`), {
-        project_id: PROJECT, work_id, actor_id: ACTOR, kind: "task", title: failpoint,
+      const created = await operatorClient.createWork(requestEnvelope(nextOperation(`create_${work_id}`), {
+        project_id: PROJECT, work_id, actor_id: OPERATOR, kind: "task", title: failpoint,
         parent_id: "matrix-sprint", description: "fault boundary", priority: 10,
         dispatch_policy: "automatic", hard_holds: [], acceptance_profile: { id: "focused", version: "1" },
       }, revision));
@@ -511,17 +554,17 @@ async function main() {
       await client.close();
       client = null;
       await stopService(service);
-      service = startService(db, socket, failpoint);
+      service = startService(db, socket, fixture, failpoint);
       await waitForSocket(socket, service);
-      client = serviceClient(socket);
+      client = serviceClient(socket, ACTOR, AGENT_CREDENTIAL, PROJECT, SESSION);
       const fault = await runEvidence(client, socket, work_id, "verification", faultContext, operation_id, { BOREAL_VALIDATION_FAILPOINT: failpoint });
       const crashed = await waitForExit(service);
       assertThat(crashed !== 0, `${failpoint}: service did not fault at the requested boundary`);
       service = null;
       removeSocket(socket);
-      service = startService(db, socket);
+      service = startService(db, socket, fixture);
       await waitForSocket(socket, service);
-      client = serviceClient(socket);
+      client = serviceClient(socket, ACTOR, AGENT_CREDENTIAL, PROJECT, SESSION);
       const readback = await readOperation(client, operation_id);
       assertThat(readback.outcome === "unknown", `${failpoint}: readback outcome=${readback.outcome}`);
       assertThat(readback.data.readback_required === true, `${failpoint}: readback_required was not true`);
@@ -532,8 +575,8 @@ async function main() {
 
     // Real successful evidence for all focused gates, followed by a mounted
     // full-screen closeout using durable receipt readback.
-    const closeWork = await client.createWork(requestEnvelope(nextOperation("create_closeout"), {
-      project_id: PROJECT, work_id: "closeout-task", actor_id: ACTOR, kind: "task", title: "Closeout task",
+    const closeWork = await operatorClient.createWork(requestEnvelope(nextOperation("create_closeout"), {
+      project_id: PROJECT, work_id: "closeout-task", actor_id: OPERATOR, kind: "task", title: "Closeout task",
       parent_id: "matrix-sprint", description: "typed closeout", priority: 10,
       dispatch_policy: "automatic", hard_holds: [], acceptance_profile: { id: "focused", version: "1" },
     }, revision));
@@ -556,9 +599,9 @@ async function main() {
 
     // V06/V07 must survive the stop-after-commit refresh failure and be
     // visible to a fresh production client after restart.
-    service = startService(db, socket);
+    service = startService(db, socket, fixture);
     await waitForSocket(socket, service);
-    client = serviceClient(socket);
+    client = serviceClient(socket, ACTOR, AGENT_CREDENTIAL, PROJECT, SESSION);
     const final = await readStatus(client, "post-closeout status");
     const closed = final.data.items.find((item) => item.work_id === "closeout-task");
     assertThat(closed && ["complete", "closed"].includes(closed.status), `post-closeout status is not terminal: ${JSON.stringify(closed)}`);
@@ -597,6 +640,7 @@ async function main() {
     return 1;
   } finally {
     try { await client?.close?.(); } catch { /* cleanup */ }
+    try { await operatorClient?.close?.(); } catch { /* cleanup */ }
     try { await stopService(service); } catch { /* preserve report failure */ }
     removeSocket(socket);
     rmSync(fixture, { recursive: true, force: true });

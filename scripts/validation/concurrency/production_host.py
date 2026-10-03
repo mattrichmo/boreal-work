@@ -87,6 +87,12 @@ def client(
         command = [args[0], project, *args[1:]]
     elif args[:2] in (["work", "create"], ["work", "claim"]):
         command = [args[0], args[1], project, *args[2:]]
+    elif args[:2] == ["work", "show"]:
+        # The service adapter's work-show route takes `--project` and a
+        # single work identifier. Supplying two positional identifiers is
+        # accepted by the direct command parser but dispatches the project ID
+        # as the requested work ID over the service boundary.
+        command = [args[0], args[1], *args[2:], "--project", project]
     else:
         raise ValueError(f"unsupported production-client command shape: {args!r}")
     return invoke(
@@ -147,21 +153,6 @@ def ready_status(
     raise RuntimeError(f"service did not answer status readiness: {last!r}")
 
 
-def work_create_command(index: int) -> list[str]:
-    return [
-        "work",
-        "create",
-        f"v10-work-{index:04d}",
-        f"V10 saturation item {index}",
-        "--kind",
-        "task",
-        "--actor",
-        "v10-validator",
-        "--operation-id",
-        f"op_v10_create_{index:04d}",
-    ]
-
-
 def run_saturation(
     binary: Path,
     socket_path: Path,
@@ -171,8 +162,11 @@ def run_saturation(
 ) -> dict:
     started = time.perf_counter()
 
-    def one(index: int) -> dict:
-        return client(binary, socket_path, project, work_create_command(index), cwd=root)
+    def one(_index: int) -> dict:
+        # Keep the saturated workload read-only. Work creation would require
+        # optimistic revision/session tokens and would serialize on SQLite,
+        # obscuring whether service admission itself applies backpressure.
+        return client(binary, socket_path, project, ["work", "show", "v10-saturation-seed"], cwd=root)
 
     results: list[dict] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(count, 64)) as pool:
@@ -377,7 +371,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="boreal-v10-production-host-") as directory:
         root = Path(directory)
-        database = root / "boreal.sqlite"
+        database = root / ".boreal" / "boreal.sqlite"
         socket_path = root / "service.sock"
         clock_file = root / "clock-offset-ms"
         clock_file.write_text("0\n", encoding="ascii")
@@ -385,7 +379,10 @@ def main() -> int:
             binary,
             [
                 "init",
+                "--project",
                 "v10-project",
+                "--project-root",
+                str(root),
                 "--actor",
                 "v10-validator",
                 "--db",
@@ -398,6 +395,36 @@ def main() -> int:
         )
         if init["exit_code"] != 0 or init["envelope"].get("error"):
             raise RuntimeError(f"project init failed: {init}")
+
+        status = invoke(binary, ["status", "v10-project", "--db", str(database), "--json"], cwd=root)
+        revision = (status["envelope"].get("data") or {}).get("revision", status["envelope"].get("revision"))
+        if status["exit_code"] != 0 or not isinstance(revision, int):
+            raise RuntimeError(f"initial project status omitted its revision: {status}")
+        session = invoke(
+            binary,
+            [
+                "session", "start", "--project", "v10-project", "--session", "v10-operator-session",
+                "--harness", "v10-production-host", "--actor", "v10-validator",
+                "--expected-revision", str(revision), "--db", str(database),
+                "--operation-id", "op_v10_session_start", "--json",
+            ],
+            cwd=root,
+        )
+        revision = session["envelope"].get("revision")
+        if session["exit_code"] != 0 or session["envelope"].get("error") or not isinstance(revision, int):
+            raise RuntimeError(f"operator session setup failed: {session}")
+        seeded = invoke(
+            binary,
+            [
+                "work", "create", "v10-project", "v10-saturation-seed", "V10 read-only saturation seed",
+                "--kind", "task", "--actor", "v10-validator", "--session", "v10-operator-session",
+                "--expected-revision", str(revision), "--db", str(database),
+                "--operation-id", "op_v10_saturation_seed", "--json",
+            ],
+            cwd=root,
+        )
+        if seeded["exit_code"] != 0 or seeded["envelope"].get("error"):
+            raise RuntimeError(f"saturation seed work setup failed: {seeded}")
 
         shim, shim_reason = compile_clock_shim(root)
         service_env = os.environ.copy()
