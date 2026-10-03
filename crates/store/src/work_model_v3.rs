@@ -300,7 +300,9 @@ impl SqliteStore {
                 if let Some(parent_id) = &work.parent_id {
                     let parent = self
                         .work(&input.project_id, parent_id.as_str())?
-                        .ok_or_else(|| StoreError::Invalid("work parent is not in this project".into()))?;
+                        .ok_or_else(|| {
+                            StoreError::Invalid("work parent is not in this project".into())
+                        })?;
                     let compatible = matches!(
                         (parent.kind.as_str(), work.kind),
                         ("milestone", boreal_domain::WorkKind::Sprint)

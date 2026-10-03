@@ -6,7 +6,7 @@
 
 use super::{CliError, ParsedCommand, SetupCliOptions};
 use boreal_protocol::{ApplicationOutcome, ErrorCode};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     env, fs,
     io::{self, IsTerminal, Write},
@@ -1691,13 +1691,11 @@ pub(super) fn begin(plan: &SetupPlan) -> Result<(), CliError> {
             }
         }
     }
-    config["new_memory_files"] = json!(
-        candidates
-            .iter()
-            .filter(|p| !p.exists())
-            .map(|p| relative(&plan.project_root, p))
-            .collect::<Vec<_>>()
-    );
+    config["new_memory_files"] = json!(candidates
+        .iter()
+        .filter(|p| !p.exists())
+        .map(|p| relative(&plan.project_root, p))
+        .collect::<Vec<_>>());
     let mut digests = serde_json::Map::new();
     for (name, contents) in MEMORY_FILES {
         digests.insert(

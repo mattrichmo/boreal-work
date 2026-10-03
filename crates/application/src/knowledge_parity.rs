@@ -664,7 +664,10 @@ impl<'a> KnowledgeParityApplication<'a> {
             ));
         }
         if work.parent_id.is_none()
-            && !matches!(work.kind, boreal_domain::WorkKind::Milestone | boreal_domain::WorkKind::Task)
+            && !matches!(
+                work.kind,
+                boreal_domain::WorkKind::Milestone | boreal_domain::WorkKind::Task
+            )
         {
             return Err(ApplicationError::Invalid(
                 "sprints require a parent; root work must be a milestone or task".into(),

@@ -97,8 +97,8 @@ fn relative_below_root(root: &Path, target: &Path) -> Option<PathBuf> {
 }
 
 pub(super) fn resolve(parsed: &ParsedCommand) -> Result<ProjectContext, CliError> {
-    if let Some(root)=parsed.options.service_workspace.as_deref() {
-        return resolve_from(parsed,root);
+    if let Some(root) = parsed.options.service_workspace.as_deref() {
+        return resolve_from(parsed, root);
     }
     #[cfg(test)]
     if let Some(fixture_root) = super::test_fixture_project_root(parsed) {

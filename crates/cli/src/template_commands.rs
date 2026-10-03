@@ -1,6 +1,6 @@
 //! Versioned work-template discovery, validation, dry-run, capture, and apply.
 use super::*;
-use boreal_application::{TemplateParameter, TemplateWorkItem, WorkTemplate, instantiate_template};
+use boreal_application::{instantiate_template, TemplateParameter, TemplateWorkItem, WorkTemplate};
 use std::collections::BTreeMap;
 
 pub(crate) fn supported(path: &[String]) -> bool {
