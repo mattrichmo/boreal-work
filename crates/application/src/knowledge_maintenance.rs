@@ -215,6 +215,10 @@ impl<'a> KnowledgeMaintenanceApplication<'a> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserves the public CLI-facing API whose plan and source identity are independently validated"
+    )]
     pub fn apply_compaction(
         &self,
         context: &V3MutationContext,
