@@ -23,8 +23,9 @@ Run it from the repository root with Unix-socket/process permission:
 node scripts/validation/tui/forensic_closeout.mjs
 ```
 
-The fixture writes `results/forensic-closeout.latest.json` and
-`results/forensic-closeout.latest.md`. Its full-screen flow passes the persisted
+The fixture writes its generated reports under the ignored `results/` directory
+as `forensic-closeout.latest.json` and `forensic-closeout.latest.md`, keeping
+run-specific evidence out of tracked source files. Its full-screen flow passes the persisted
 receipt from `operation_show` directly into the controller; the operation
 readback boundary emits the same canonical receipt DTO accepted by evidence
 ingress.

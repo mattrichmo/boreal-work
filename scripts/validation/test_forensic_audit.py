@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,33 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class ForensicAuditTests(unittest.TestCase):
+    def test_tui_forensic_reports_are_written_under_ignored_results_directory(self) -> None:
+        fixture = (ROOT / "scripts/validation/tui/forensic_closeout.mjs").read_text()
+        self.assertIn(
+            'const REPORT_DIR = join(ROOT, "scripts/validation/tui/results");',
+            fixture,
+        )
+        self.assertIn(
+            'const REPORT_JSON = join(REPORT_DIR, "forensic-closeout.latest.json");',
+            fixture,
+        )
+        self.assertIn(
+            'const REPORT_MD = join(REPORT_DIR, "forensic-closeout.latest.md");',
+            fixture,
+        )
+        ignored_report = subprocess.run(
+            [
+                "git",
+                "check-ignore",
+                "--quiet",
+                "--",
+                "scripts/validation/tui/results/forensic-closeout.latest.json",
+            ],
+            cwd=ROOT,
+            check=False,
+        )
+        self.assertEqual(ignored_report.returncode, 0)
+
     def test_matrix_contains_each_blocking_scenario_once(self) -> None:
         matrix = RUNNER.scenarios(online=False)
         self.assertEqual([item.scenario_id for item in matrix], [f"V{index:02d}" for index in range(1, 13)])
