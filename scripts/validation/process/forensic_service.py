@@ -1004,6 +1004,25 @@ os._exit(0)
 
 
 def process_alive(pid: int) -> bool:
+    # kill(pid, 0) reports Linux zombies as present even though they have
+    # already exited and cannot own children, hold pipes, or respond to
+    # signals.  V08 deliberately detaches the service by exiting its parent,
+    # so the orphan may briefly remain a zombie until PID 1 reaps it.  Treat
+    # that state as exited while retaining the portable kill(0) fallback for
+    # other Unix platforms or environments without a readable /proc entry.
+    if sys.platform.startswith("linux") and Path("/proc").is_dir():
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        except FileNotFoundError:
+            return False
+        except OSError:
+            pass
+        else:
+            # The comm field is parenthesized and may itself contain spaces
+            # or ')', so split only after its final closing parenthesis.
+            fields = stat.rsplit(")", 1)[-1].split()
+            if fields and fields[0] in {"Z", "X"}:
+                return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1103,10 +1122,6 @@ def run_v09(binary: Path, parent: Path) -> dict[str, Any]:
         socket_path = short_socket(root, "v09")
         service = start_service(binary, db, socket_path, cwd=root)
         records = []
-        unavailable_routes = {
-            ("intake", "bucket"),
-            ("intake", "capture"),
-        }
         try:
             for index, command in enumerate(direct_mutation_cases(root, "v09-project", db)):
                 operation = op(f"v09-direct-{index}")
@@ -1126,11 +1141,11 @@ def run_v09(binary: Path, parent: Path) -> dict[str, Any]:
                 ]
                 call = run_cli(binary, full, cwd=root)
                 route = " ".join(command[:3])
-                expected_error = (
-                    "unknown_command_namespace"
-                    if tuple(command[:2]) in unavailable_routes
-                    else "service_busy"
-                )
+                # Every direct database route first tries to acquire the
+                # database-identity election. This includes routes that are
+                # not exposed over the service socket: their direct-mode
+                # invocation is rejected by the live owner before dispatch.
+                expected_error = "service_busy"
                 records.append(
                     {
                         "route": route,
@@ -1139,7 +1154,9 @@ def run_v09(binary: Path, parent: Path) -> dict[str, Any]:
                     }
                 )
                 if call.error_code != expected_error:
-                    raise HarnessError(f"V09 direct mutation bypassed election: {records[-1]}")
+                    raise HarnessError(
+                        f"V09 direct mutation did not return the ownership rejection: {records[-1]}"
+                    )
         finally:
             stop_process(service)
         return {
