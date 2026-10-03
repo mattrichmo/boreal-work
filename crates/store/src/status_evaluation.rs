@@ -292,12 +292,17 @@ impl SqliteStore {
             }
             return self.project_actor_context(snapshot.project_id.as_str(), actor_id);
         }
-        let actor = self.project_actor_context(snapshot.project_id.as_str(), actor_id)?;
+        let (actor, authority_root) =
+            self.project_actor_context_with_authority_root(snapshot.project_id.as_str(), actor_id)?;
         // Invalid/ended sessions remove mutation authority, not read access to healthy siblings.
         let session_id = requested_session
             .filter(|session| {
-                self.validate_project_session(snapshot.project_id.as_str(), actor_id, session)
-                    .is_ok()
+                self.validate_project_session_binding(
+                    snapshot.project_id.as_str(),
+                    actor_id,
+                    session,
+                )
+                .is_ok()
             })
             .map(str::to_owned);
         snapshot.caller_session_id = session_id.clone();
@@ -333,14 +338,60 @@ impl SqliteStore {
                     continue;
                 }
             }
-            let inputs = self.canonical_decision_inputs(
-                snapshot.project_id.as_str(),
-                Revision(snapshot.revision.0),
-                row,
-                &actor,
-                session_id.as_deref(),
-                as_of,
-            );
+            let pinned = pinned_requirements.get(work_id);
+            let status_cursor = match (row.canonical_seed, pinned) {
+                (Some(seed), Some(pin)) => {
+                    super::status_facts::validate_pinned_status_cursor(
+                        snapshot.project_id.as_str(),
+                        work_id,
+                        seed,
+                        pin,
+                    )
+                }
+                _ => Ok(None),
+            };
+            let inputs = status_cursor.and_then(|cursor| {
+                let has_dependency = snapshot
+                    .dependencies
+                    .iter()
+                    .any(|edge| edge.dependent_id.as_str() == work_id);
+                let can_build_from_status_seed = session_id.is_some()
+                    && row.work.kind == WorkKind::Task
+                    && row.work.lifecycle == PersistedLifecycle::Open
+                    && row.current_attempt.is_none()
+                    && row.work.hard_holds.is_empty()
+                    && row.action_facts.integrity == StatusIntegrity::Valid
+                    && !row.gate_diagnostics.gates.is_empty()
+                    && !has_dependency
+                    && !row
+                        .canonical_seed
+                        .is_some_and(|seed| seed.unresolved_recovery || seed.has_gate_exception);
+                if can_build_from_status_seed {
+                    if let (Some(cursor), Some(pin)) = (cursor, pinned) {
+                        return Self::canonical_decision_inputs_from_status_seed(
+                            snapshot.project_id.as_str(),
+                            Revision(snapshot.revision.0),
+                            row,
+                            pin,
+                            cursor,
+                            has_dependency,
+                            &actor,
+                            &authority_root,
+                            session_id.as_deref(),
+                            as_of,
+                        );
+                    }
+                }
+                self.canonical_decision_inputs(
+                    snapshot.project_id.as_str(),
+                    Revision(snapshot.revision.0),
+                    row,
+                    &actor,
+                    &authority_root,
+                    session_id.as_deref(),
+                    as_of,
+                )
+            });
             match inputs {
                 Ok(inputs) => {
                     let proof = inputs.requirements.as_present().map(|r| &r.proof);

@@ -15,7 +15,7 @@ import json
 import os
 import platform
 import signal
-import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -85,7 +85,15 @@ def service_client(
     timeout: float = 60.0,
 ) -> dict:
     if args[:1] == ["status"]:
-        command = [args[0], project, *args[1:]]
+        command = [
+            args[0],
+            project,
+            *args[1:],
+            "--actor",
+            "v11-agent",
+            "--session",
+            "session-v11-agent",
+        ]
     elif args[:2] == ["work", "show"]:
         command = [args[0], args[1], *args[2:], "--project", project]
     else:
@@ -120,49 +128,166 @@ def seed_fixture(binary: Path, database: Path, root: Path, count: int) -> dict:
     if init["exit_code"] != 0 or init["envelope"].get("error"):
         raise RuntimeError(f"project init failed: {init}")
 
-    # Scale setup is deliberately outside the acceptance boundary.  It uses
-    # the checked-in v2 schema after bwrk initializes the project and leaves
-    # the target reads to the elected production service.  This avoids 1,101
-    # process launches while retaining a schema-valid, reproducible fixture.
-    sqlite = shutil.which("sqlite3")
-    if sqlite is None:
-        raise RuntimeError("sqlite3 CLI is required to seed the V11 scale fixture")
-    rows = [
-        "PRAGMA foreign_keys = ON;",
-        "INSERT OR IGNORE INTO acceptance_profile "
-        "(profile_id, version, policy_digest, definition_json, created_at) "
-        "VALUES ('focused', 1, 'sha256:v11-validator', '{}', 'unix-ms:1');",
-    ]
-    for index in range(1, count + 1):
-        work_id = f"work-{index:04d}"
-        title = f"V11 scale item {index}"
-        rows.append(
-            "INSERT INTO work_item (work_id, project_id, kind, parent_id, lifecycle, "
-            "dispatch_policy, priority, acceptance_profile_id, acceptance_profile_version, "
-            "title, description, created_at, updated_at) VALUES "
-            f"('{work_id}', 'v11-project', 'task', NULL, 'open', 'automatic', "
-            f"{index % 256}, 'focused', 1, '{title}', 'V11 production-client fixture', "
-            "'unix-ms:1', 'unix-ms:1');"
-        )
-    rows.append(
-        "UPDATE project SET project_revision = project_revision + "
-        f"{count}, updated_at = 'unix-ms:1' WHERE project_id = 'v11-project';"
-    )
-    sql = "\n".join(rows) + "\n"
-    completed = subprocess.run(
-        [sqlite, str(database)],
-        input=sql,
+    # Keep one production-created canonical row inside the scale fixture. Its
+    # cursor and immutable pinned requirements provide the healthy decision
+    # case; the other rows exercise missing-pin quarantine at the same scale.
+    init_revision = init["envelope"].get("revision")
+    if not isinstance(init_revision, int):
+        raise RuntimeError(f"project init omitted its revision: {init}")
+    operator_session = invoke(
+        binary,
+        [
+            "session",
+            "start",
+            "--project",
+            "v11-project",
+            "--session",
+            "session-v11-operator",
+            "--harness",
+            "v11-validator",
+            "--actor",
+            "v11-validator",
+            "--db",
+            str(database),
+            "--json",
+        ],
         cwd=root,
-        text=True,
-        capture_output=True,
-        check=False,
     )
-    if completed.returncode != 0:
-        raise RuntimeError(f"scale fixture seed failed: {completed.stderr.strip()}")
+    if operator_session["exit_code"] != 0 or operator_session["envelope"].get("error"):
+        raise RuntimeError(f"operator session creation failed: {operator_session}")
+    operator_revision = operator_session["envelope"].get("revision")
+    if not isinstance(operator_revision, int):
+        raise RuntimeError(f"operator session omitted its revision: {operator_session}")
+    healthy_work = invoke(
+        binary,
+        [
+            "work",
+            "create",
+            "--project",
+            "v11-project",
+            "work-1001",
+            "V11 scale item 1001",
+            "--actor",
+            "v11-validator",
+            "--session",
+            "session-v11-operator",
+            "--expected-revision",
+            str(operator_revision),
+            "--db",
+            str(database),
+            "--json",
+        ],
+        cwd=root,
+    )
+    if healthy_work["exit_code"] != 0 or healthy_work["envelope"].get("error"):
+        raise RuntimeError(f"canonical healthy work creation failed: {healthy_work}")
+    work_revision = healthy_work["envelope"].get("revision")
+    if not isinstance(work_revision, int):
+        raise RuntimeError(f"canonical healthy work omitted its revision: {healthy_work}")
+
+    # Scale setup is deliberately outside the acceptance boundary. It writes
+    # through Python's SQLite binding to the initialized schema and leaves
+    # target reads to the elected production service. This avoids 1,100
+    # process launches while retaining a fully canonical healthy row.
+    try:
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            for index in range(1, count + 1):
+                if index == 1001:
+                    continue
+                connection.execute(
+                    "INSERT INTO work_item (work_id, project_id, kind, parent_id, lifecycle, "
+                    "dispatch_policy, priority, acceptance_profile_id, acceptance_profile_version, "
+                    "title, description, created_at, updated_at) "
+                    "VALUES (?, 'v11-project', 'task', NULL, 'open', 'automatic', ?, "
+                    "'focused', 1, ?, 'V11 production-client fixture', 'unix-ms:1', 'unix-ms:1')",
+                    (f"work-{index:04d}", index % 256, f"V11 scale item {index}"),
+                )
+            connection.execute(
+                "UPDATE project SET project_revision = project_revision + ?, "
+                "updated_at = 'unix-ms:1' WHERE project_id = 'v11-project'",
+                (count - 1,),
+            )
+    except sqlite3.Error as error:
+        raise RuntimeError(f"scale fixture seed failed: {error}") from error
+
+    enrollment = invoke(
+        binary,
+        [
+            "auth",
+            "key",
+            "--project",
+            "v11-project",
+            "--actor",
+            "v11-agent",
+            "--actor-role",
+            "agent",
+            "--db",
+            str(database),
+            "--json",
+        ],
+        cwd=root,
+    )
+    if enrollment["exit_code"] != 0 or enrollment["envelope"].get("error"):
+        raise RuntimeError(f"agent enrollment creation failed: {enrollment}")
+    enrollment_path = (enrollment["envelope"].get("data") or {}).get("enrollment_path")
+    if not isinstance(enrollment_path, str):
+        raise RuntimeError(f"agent enrollment omitted its path: {enrollment}")
+
+    grant = invoke(
+        binary,
+        [
+            "auth",
+            "grant",
+            "--project",
+            "v11-project",
+            "--actor",
+            "v11-validator",
+            "--input",
+            enrollment_path,
+            "--reason",
+            "V11 healthy scale-row probe",
+            "--expected-revision",
+            str(work_revision + count - 1),
+            "--yes",
+            "--db",
+            str(database),
+            "--json",
+        ],
+        cwd=root,
+    )
+    if grant["exit_code"] != 0 or grant["envelope"].get("error"):
+        raise RuntimeError(f"agent principal grant failed: {grant}")
+
+    session = invoke(
+        binary,
+        [
+            "session",
+            "start",
+            "--project",
+            "v11-project",
+            "--session",
+            "session-v11-agent",
+            "--harness",
+            "v11-validator",
+            "--actor",
+            "v11-agent",
+            "--db",
+            str(database),
+            "--json",
+        ],
+        cwd=root,
+    )
+    if session["exit_code"] != 0 or session["envelope"].get("error"):
+        raise RuntimeError(f"agent session creation failed: {session}")
     return {
-        "method": "sqlite3 CLI after bwrk init",
-        "schema": "project/spec/schema-v2.sql via bwrk initialization",
+        "method": "bwrk canonical work create plus Python SQLite scale inserts",
+        "schema": "production schema via bwrk initialization",
         "work_items": count,
+        "healthy_work_id": "work-1001",
+        "healthy_work_created_by": "bwrk work create",
+        "action_actor": "v11-agent",
+        "action_session": "session-v11-agent",
         "ordered_ids": "work-0001..work-%04d" % count,
         "production_read_boundary": "not used for setup; service boundary begins after election",
     }
@@ -224,7 +349,14 @@ def paged_status(
     envelope = response["envelope"]
     data = envelope.get("data") or {}
     items = data.get("items") or []
-    actual = items[0].get("work_id") if len(items) == 1 else None
+    item = items[0] if len(items) == 1 else {}
+    actual = item.get("work_id")
+    row_diagnostics = [
+        diagnostic
+        for diagnostic in (data.get("diagnostics") or [])
+        if diagnostic.get("work_id") == expected_work_id
+    ]
+    action_context = item.get("action_context") or {}
     metrics = data.get("service_query_metrics") or {}
     queries = metrics.get("statements_prepared", 0)
     batches = metrics.get("batch_calls", 0)
@@ -248,6 +380,10 @@ def paged_status(
         "returned_work_id": actual,
         "expected_work_id": expected_work_id,
         "exact_ordinal_reached": actual == expected_work_id,
+        "display_status": item.get("display_status"),
+        "claimable_for_actor": item.get("claimable_for_actor"),
+        "action_context": action_context,
+        "row_diagnostics": row_diagnostics,
         "elapsed_ms": round(elapsed_ms, 3),
         "service_query_metrics": metrics,
         "service_sqlite_prepare_count": queries,
@@ -349,26 +485,86 @@ def main() -> int:
                 binary,
                 socket_path,
                 "v11-project",
-                ["work", "show", "work-0101"],
+                ["work", "show", "work-1001"],
                 cwd=root,
             )
             exact_route_error = exact_route["envelope"].get("error") or {}
+            exact_route_data = exact_route["envelope"].get("data") or {}
+            exact_lookup = exact_route_data.get("work_id") == "work-1001"
             exact_route_result = {
                 "status": (
                     "available"
-                    if not exact_route_error
+                    if not exact_route_error and exact_lookup
                     else "unexpected"
                 ),
+                "expected_work_id": "work-1001",
+                "returned_work_id": exact_route_data.get("work_id"),
+                "exact_lookup_assertion": exact_lookup,
                 "error": exact_route["envelope"].get("error"),
-                "data": exact_route["envelope"].get("data"),
+                "data": exact_route_data,
                 "reason": (
                     "work show returned a service response"
-                    if not exact_route_error
+                    if not exact_route_error and exact_lookup
                     else "work show returned an unexpected service error"
                 ),
+                "request_shape": "bwrk work show work-1001 --project v11-project",
             }
         finally:
             stop = stop_service(service, socket_path)
+
+    healthy_scale_row = {
+        "work_id": page_1001["returned_work_id"],
+        "ready": page_1001["display_status"] == "ready",
+        "claimable": page_1001["claimable_for_actor"] is True,
+        "action_context_available": page_1001["action_context"].get("state") == "available",
+        "integrity_valid": page_1001["action_context"].get("integrity") == "valid",
+        "missing_facts_empty": page_1001["action_context"].get("missing_facts") == [],
+        "diagnostics_empty": page_1001["row_diagnostics"] == [],
+    }
+    missing_pin_diagnostic = any(
+        diagnostic.get("code") == "decision_facts_corrupt"
+        and "missing pinned requirement revision" in diagnostic.get("detail", "")
+        for diagnostic in page_101["row_diagnostics"]
+    )
+    missing_pin_fail_closed = {
+        "work_id": page_101["returned_work_id"],
+        "blocked": page_101["display_status"] == "blocked",
+        "nonclaimable": page_101["claimable_for_actor"] is False,
+        "integrity_quarantined": page_101["action_context"].get("integrity") == "quarantined",
+        "unavailable_facts_reported": "canonical_decision_facts_unavailable"
+        in page_101["action_context"].get("missing_facts", []),
+        "missing_pin_diagnostic": missing_pin_diagnostic,
+    }
+    complete = (
+        page_101["exact_ordinal_reached"]
+        and page_1001["exact_ordinal_reached"]
+        and page_101["query_budget"]["within_budget"]
+        and page_1001["query_budget"]["within_budget"]
+        and all(
+            healthy_scale_row[key]
+            for key in (
+                "ready",
+                "claimable",
+                "action_context_available",
+                "integrity_valid",
+                "missing_facts_empty",
+                "diagnostics_empty",
+            )
+        )
+        and all(
+            missing_pin_fail_closed[key]
+            for key in (
+                "blocked",
+                "nonclaimable",
+                "integrity_quarantined",
+                "unavailable_facts_reported",
+                "missing_pin_diagnostic",
+            )
+        )
+        and exact_route_result["status"] == "available"
+        and exact_route_result["exact_lookup_assertion"]
+        and stop["status"] == "pass"
+    )
 
     result = {
         "result_version": "boreal.forensic-v11-production-client/1",
@@ -391,26 +587,21 @@ def main() -> int:
             "ordinal_1001": page_1001,
         },
         "exact_work_route": exact_route_result,
+        "healthy_scale_row": healthy_scale_row,
+        "missing_pin_fail_closed": missing_pin_fail_closed,
         "stop_proof": stop,
         "complete_gate": {
-            "status": "pass"
-            if page_101["exact_ordinal_reached"]
-            and page_1001["exact_ordinal_reached"]
-            and page_101["query_budget"]["within_budget"]
-            and page_1001["query_budget"]["within_budget"]
-            and exact_route_result["status"] == "available"
-            and stop["status"] == "pass"
-            else "incomplete",
+            "status": "pass" if complete else "incomplete",
             "reason": (
-                "ordinal reachability, service-side query evidence within the "
-                "declared query-count budget, and public work show service "
-                "routing are real"
-                if exact_route_result["status"] == "available"
-                else "ordinal reachability or public work show service evidence is incomplete"
+                "all ordinal, healthy-row, fail-closed, query-budget, exact-lookup, "
+                "and service-stop assertions passed"
+                if complete
+                else "one or more ordinal, healthy-row, fail-closed, query-budget, "
+                "exact-lookup, or service-stop assertions failed"
             ),
         },
         "limitations": [
-            "The scale fixture is schema-valid direct SQL setup before service election; target reads are all through the production bwrk service client.",
+            "The healthy row is created by bwrk; sibling scale rows are inserted directly before service election. Target reads are all through the production bwrk service client.",
             "Service query metrics count store-boundary prepared statements, rows, and text bytes for each status request; they do not replace query-plan or wall-clock analysis.",
             "The public work show route is service-routed, so exact item proof remains inside the elected service boundary.",
         ],
@@ -423,6 +614,8 @@ def main() -> int:
                 "output": str(args.output),
                 "page_101": page_101["exact_ordinal_reached"],
                 "page_1001": page_1001["exact_ordinal_reached"],
+                "healthy_row_claimable": page_1001["claimable_for_actor"] is True,
+                "missing_pin_failed_closed": page_101["claimable_for_actor"] is False,
                 "prepare_counts": [
                     page_101["service_sqlite_prepare_count"],
                     page_1001["service_sqlite_prepare_count"],

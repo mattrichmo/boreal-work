@@ -648,10 +648,23 @@ pub struct StatusWorkRecord {
     pub activation_at: Option<TimestampMs>,
     pub current_attempt: Option<AttemptRecord>,
     pub gate_diagnostics: GateDiagnostics,
+    /// Canonical facts selected with the project status query that allow the
+    /// store to assemble a healthy, unattempted decision input without a
+    /// per-work cursor or empty-relation query. Rows with any exceptional
+    /// state still use the full canonical evaluator.
+    pub canonical_seed: Option<CanonicalStatusSeed>,
     /// Canonical facts read alongside the status row for action-context
     /// projections. These are observations only; the application still
     /// evaluates the action policy and mutations re-read them transactionally.
     pub action_facts: StatusActionFacts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanonicalStatusSeed {
+    pub entity_revision: Option<u64>,
+    pub proof_revision: Option<u64>,
+    pub unresolved_recovery: bool,
+    pub has_gate_exception: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5583,32 +5596,62 @@ impl SqliteStore {
         } else {
             self.status_planning_facts_for_project(project_id)?
         };
-        let work_query = if inline_planning {
-            "SELECT work_id, project_id, kind, parent_id, lifecycle,
-                    dispatch_policy, retry_not_before, priority,
-                    acceptance_profile_id, acceptance_profile_version,
-                    title, description, rowid,
-                    (SELECT MIN(CASE ca.activation_policy
-                                  WHEN 'explicit_not_before' THEN ca.activation_at_utc_ms
-                                  WHEN 'at_cycle_start' THEN cycle.scheduled_start_utc_ms
-                                  ELSE NULL
-                                END)
-                     FROM cycle_assignment_v3 ca
-                     JOIN cycle_v3 cycle
-                       ON cycle.project_id = ca.project_id
-                      AND cycle.cycle_id = ca.cycle_id
-                     WHERE ca.project_id = work_item.project_id
-                       AND ca.work_id = work_item.work_id
-                       AND ca.state IN ('planned', 'committed'))
-             FROM work_item WHERE project_id = ?1 ORDER BY work_id"
+        let activation_projection = if inline_planning {
+            "(SELECT MIN(CASE ca.activation_policy
+                           WHEN 'explicit_not_before' THEN ca.activation_at_utc_ms
+                           WHEN 'at_cycle_start' THEN cycle.scheduled_start_utc_ms
+                           ELSE NULL
+                         END)
+             FROM cycle_assignment_v3 ca
+             JOIN cycle_v3 cycle
+               ON cycle.project_id = ca.project_id
+              AND cycle.cycle_id = ca.cycle_id
+             WHERE ca.project_id = wi.project_id
+               AND ca.work_id = wi.work_id
+               AND ca.state IN ('planned', 'committed'))"
         } else {
-            "SELECT work_id, project_id, kind, parent_id, lifecycle,
-                    dispatch_policy, retry_not_before, priority,
-                    acceptance_profile_id, acceptance_profile_version,
-                    title, description, rowid, NULL
-             FROM work_item WHERE project_id = ?1 ORDER BY work_id"
+            "NULL"
         };
-        let mut rows = self.prepare(work_query)?;
+        let (status_cursor_join, canonical_seed_projection) = if self.canonical_production {
+            (
+                "LEFT JOIN boreal_entity_revision status_cursor
+                   ON status_cursor.project_id = wi.project_id
+                  AND status_cursor.work_id = wi.work_id
+                 LEFT JOIN (
+                     SELECT project_id, work_id
+                     FROM boreal_recovery_obligation
+                     WHERE state = 'unresolved'
+                     GROUP BY project_id, work_id
+                 ) status_recovery
+                   ON status_recovery.project_id = wi.project_id
+                  AND status_recovery.work_id = wi.work_id
+                 LEFT JOIN (
+                     SELECT project_id, work_id, proof_revision
+                     FROM boreal_policy_exception
+                     WHERE kind = 'gate'
+                     GROUP BY project_id, work_id, proof_revision
+                 ) status_exception
+                   ON status_exception.project_id = wi.project_id
+                  AND status_exception.work_id = wi.work_id
+                  AND status_exception.proof_revision = status_cursor.proof_revision",
+                "status_cursor.entity_revision,
+                 status_cursor.proof_revision,
+                 status_recovery.work_id IS NOT NULL,
+                 status_exception.work_id IS NOT NULL",
+            )
+        } else {
+            ("", "NULL, NULL, 0, 0")
+        };
+        let work_query = format!(
+            "SELECT wi.work_id, wi.project_id, wi.kind, wi.parent_id, wi.lifecycle,
+                    wi.dispatch_policy, wi.retry_not_before, wi.priority,
+                    wi.acceptance_profile_id, wi.acceptance_profile_version,
+                    wi.title, wi.description, wi.rowid, {activation_projection},
+                    {canonical_seed_projection}
+             FROM work_item wi {status_cursor_join}
+             WHERE wi.project_id = ?1 ORDER BY wi.work_id"
+        );
+        let mut rows = self.prepare(&work_query)?;
         rows.bind_text(1, project_id)?;
         let mut works = Vec::with_capacity(total as usize);
         let mut ordered_work_ids = Vec::with_capacity(total as usize);
@@ -5729,6 +5772,16 @@ impl SqliteStore {
             })();
             match work {
                 Ok((work, schedule, activation_at, retry_not_before)) => {
+                    let canonical_seed = if self.canonical_production {
+                        Some(CanonicalStatusSeed {
+                            entity_revision: rows.column_optional_i64(14)?,
+                            proof_revision: rows.column_optional_i64(15)?,
+                            unresolved_recovery: rows.column_bool(16)?,
+                            has_gate_exception: rows.column_bool(17)?,
+                        })
+                    } else {
+                        None
+                    };
                     works.push(StatusWorkRecord {
                         work,
                         retry_not_before,
@@ -5736,6 +5789,7 @@ impl SqliteStore {
                         activation_at,
                         current_attempt,
                         gate_diagnostics: diagnostics,
+                        canonical_seed,
                         action_facts: StatusActionFacts::unavailable(),
                     })
                 }

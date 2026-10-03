@@ -1443,6 +1443,7 @@ mod tests {
                 gates: gate_rows,
                 missing: Vec::new(),
             },
+            canonical_seed: None,
             // This isolated row fixture exercises the status-only compatibility
             // projection. Canonical timing/context consistency is covered by
             // the paired domain API regression.
