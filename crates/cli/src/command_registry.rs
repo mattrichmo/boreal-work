@@ -3211,6 +3211,52 @@ fn input_schema(path: &str) -> Value {
         "summary backfill" => {
             json!({"type":"object","description":"Historical import only; requires summary_id or id (or --subject). Preserves the supplied legacy JSON record and never establishes live acceptance proof.","properties":{"summary_id":{"type":"string"},"id":{"type":"string"},"work_id":{"type":"string"},"body":{},"title":{},"metadata":{}}})
         }
+        "recovery recover" => {
+            json!({
+                "type": "object",
+                "required": ["descriptor", "disposition"],
+                "properties": {
+                    "descriptor": {
+                        "type": "object",
+                        "required": [
+                            "action", "target", "expected_project_revision",
+                            "expected_entity_revision", "expected_proof_revision", "attempt",
+                            "required_roles", "required_inputs", "confirmation", "read_only", "recovery"
+                        ],
+                        "properties": {
+                            "action": {"const": "recover"},
+                            "target": {
+                                "type": "object",
+                                "required": ["project_id", "work_id", "entity_revision"],
+                                "properties": {
+                                    "project_id": {"type": "string", "minLength": 1},
+                                    "work_id": {"type": "string", "minLength": 1},
+                                    "entity_revision": {"type": "integer", "minimum": 0}
+                                }
+                            },
+                            "expected_project_revision": {"type": "integer", "minimum": 0},
+                            "expected_entity_revision": {"type": "integer", "minimum": 0},
+                            "expected_proof_revision": {"type": ["integer", "null"], "minimum": 0},
+                            "attempt": {
+                                "type": "object",
+                                "required": ["attempt_id", "fence"],
+                                "properties": {
+                                    "attempt_id": {"type": "string", "minLength": 1},
+                                    "fence": {"type": "integer", "minimum": 1}
+                                }
+                            },
+                            "required_roles": {"type": "array", "items": {"type": "string"}},
+                            "required_inputs": {"type": "array", "items": {"type": "string"}},
+                            "confirmation": {"type": "string", "minLength": 1},
+                            "read_only": {"const": false},
+                            "recovery": {"const": true}
+                        }
+                    },
+                    "disposition": {"enum": ["adapter_acknowledged", "reviewed_safe_recovery"]}
+                },
+                "description": "Copy the current server-issued Recover descriptor exactly. Pass its expected_project_revision again as --expected-revision; --yes confirms the descriptor confirmation. Disposition records the typed recovery choice; it does not replace recovery.resolve."
+            })
+        }
         "template validate" | "template run" => {
             json!({
                 "type": "object",
