@@ -2954,7 +2954,7 @@ fn version_result() -> Result<CliResult, CliError> {
             "sqlite_runtime_release_floor": {
                 "libversion_at_least": "3.51.3",
                 "reason": "SQLite WAL-reset fix required by the release policy",
-                "enforced": false,
+                "enforced": true,
             },
         })),
         None,
@@ -3114,6 +3114,14 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn version_reports_the_sqlite_release_floor_as_enforced() {
+        let version = version_result().unwrap();
+        let floor = &version.data.unwrap()["sqlite_runtime_release_floor"];
+        assert_eq!(floor["libversion_at_least"], "3.51.3");
+        assert_eq!(floor["enforced"], true);
     }
 
     #[test]
