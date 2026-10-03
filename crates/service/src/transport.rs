@@ -1266,11 +1266,25 @@ mod tests {
         let counter = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
         // The managed macOS test sandbox may deny Unix-domain sockets below
         // its per-process temp directory; /private/tmp is the documented
-        // writable local runtime area.
-        PathBuf::from(format!(
-            "/private/tmp/boreal-service-transport-{}-{nonce}-{counter}.sock",
+        // writable local runtime area there. On other Unix systems, use the
+        // system temp directory instead of assuming the macOS path exists.
+        #[cfg(target_os = "macos")]
+        let temp_dir = PathBuf::from("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let temp_dir = std::env::temp_dir();
+        temp_dir.join(format!(
+            "boreal-service-transport-{}-{nonce}-{counter}.sock",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn temp_socket_path_uses_an_existing_directory() {
+        let socket_path = temp_socket_path();
+        let parent = socket_path
+            .parent()
+            .expect("temporary socket path should have a parent");
+        assert!(parent.is_dir(), "socket directory should exist: {parent:?}");
     }
 
     #[cfg(unix)]
