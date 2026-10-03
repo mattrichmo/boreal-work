@@ -3006,26 +3006,6 @@ fn dependency_edge(source: &str, target: &str, kind: &str) -> Option<(String, St
     }
 }
 
-#[cfg(test)]
-mod global_date_tests {
-    use super::utc_date_from_iso;
-
-    #[test]
-    fn date_only_is_stable_and_instants_cross_utc_midnight_by_offset() {
-        assert_eq!(utc_date_from_iso("2026-01-02"), Some("2026-01-02".into()));
-        assert_eq!(
-            utc_date_from_iso("2026-01-02T00:30:00+01:00"),
-            Some("2026-01-01".into())
-        );
-        assert_eq!(
-            utc_date_from_iso("2026-01-01T23:30:00-01:00"),
-            Some("2026-01-02".into())
-        );
-        assert_eq!(utc_date_from_iso("2026-02-30"), None);
-        assert_eq!(utc_date_from_iso("2026-01-02T00:30:00"), None);
-    }
-}
-
 fn validate_labels(labels: &Value) -> Result<(), StoreError> {
     if !labels.is_array()
         || labels.as_array().is_some_and(|values| {
@@ -3108,4 +3088,24 @@ fn compact_item_link(state: &Value, item: &Value) -> Value {
 
 fn compact_note_link(note: &Value) -> Value {
     json!({"id":note["id"],"project_id":note["project_id"],"title":bound_text(note["title"].as_str().unwrap_or_default(),160),"archived":note["archived"],"updated_at":note["updated_at"]})
+}
+
+#[cfg(test)]
+mod global_date_tests {
+    use super::utc_date_from_iso;
+
+    #[test]
+    fn date_only_is_stable_and_instants_cross_utc_midnight_by_offset() {
+        assert_eq!(utc_date_from_iso("2026-01-02"), Some("2026-01-02".into()));
+        assert_eq!(
+            utc_date_from_iso("2026-01-02T00:30:00+01:00"),
+            Some("2026-01-01".into())
+        );
+        assert_eq!(
+            utc_date_from_iso("2026-01-01T23:30:00-01:00"),
+            Some("2026-01-02".into())
+        );
+        assert_eq!(utc_date_from_iso("2026-02-30"), None);
+        assert_eq!(utc_date_from_iso("2026-01-02T00:30:00"), None);
+    }
 }
