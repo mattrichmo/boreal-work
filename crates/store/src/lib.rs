@@ -7312,6 +7312,17 @@ impl SqliteStore {
                 }
             }
 
+            if current.phase == AttemptPhase::ExpiryPending
+                && !matches!(
+                    request.mutation,
+                    AttemptMutationKind::Expire { .. } | AttemptMutationKind::Cancel { .. }
+                )
+            {
+                return Err(StoreError::Conflict(
+                    "attempt expiry recovery is pending; execution writes are fenced".to_owned(),
+                ));
+            }
+
             let permits_expired_time = matches!(
                 request.mutation,
                 AttemptMutationKind::Expire { .. } | AttemptMutationKind::Cancel { .. }

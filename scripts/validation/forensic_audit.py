@@ -12,7 +12,9 @@ only when all of its commands pass *and* the declared complete gate exists;
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import platform
 import shutil
 import subprocess
@@ -49,6 +51,366 @@ def cargo_args(*parts: str, online: bool) -> tuple[str, ...]:
 
 def production_gate(script: str, *args: str) -> tuple[str, ...]:
     return ("python3", script, "--bin", str(ROOT / "target" / "debug" / "bwrk"), *args)
+
+
+def finite_json_number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def json_at(value: Any, *path: str) -> Any:
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def approved_json_contract(reference: Any, *, schema: str) -> dict[str, Any] | None:
+    if not isinstance(reference, dict):
+        return None
+    path_value = reference.get("path")
+    digest = reference.get("sha256")
+    if not isinstance(path_value, str) or not path_value:
+        return None
+    if Path(path_value).is_absolute() or not isinstance(digest, str):
+        return None
+    path = (ROOT / path_value).resolve()
+    try:
+        path.relative_to(ROOT.resolve())
+        payload = path.read_bytes()
+        document = json.loads(payload)
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    if actual_digest != digest or not isinstance(document, dict):
+        return None
+    if (
+        document.get("schema") != schema
+        or document.get("status") != "approved"
+        or not isinstance(document.get("decision_id"), str)
+        or not document.get("decision_id")
+        or not isinstance(document.get("approved_by"), str)
+        or not document.get("approved_by")
+        or not isinstance(document.get("approved_at"), str)
+        or not document.get("approved_at")
+        or not isinstance(document.get("contract_version"), str)
+        or not document.get("contract_version")
+    ):
+        return None
+    return document
+
+
+def v10_component_evidence_complete(
+    name: str,
+    component: Any,
+    *,
+    report: dict[str, Any],
+    budget: Any,
+    budget_document: dict[str, Any] | None,
+    profile_document: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(component, dict):
+        return False
+    if component.get("status") != "pass" or component.get("complete") is not True:
+        return False
+    if name == "durable_deadline":
+        authority = component.get("agent_authority_readback")
+        attempt = component.get("attempt_after_restart")
+        obligation = component.get("recovery_obligation")
+        reservation = component.get("resource_reservation")
+        stale = component.get("stale_fence_response")
+        attempt_id = component.get("attempt_id")
+        fence = component.get("fence")
+        actor_id = component.get("actor_id")
+        return (
+            isinstance(attempt_id, str)
+            and bool(attempt_id)
+            and isinstance(actor_id, str)
+            and bool(actor_id)
+            and type(fence) is int
+            and fence > 0
+            and isinstance(authority, dict)
+            and authority.get("actor_id") == actor_id
+            and authority.get("role") == "agent"
+            and authority.get("authority_granted") is True
+            and component.get("deadline_crossed_while_service_stopped") is True
+            and component.get("service_restarted_after_deadline") is True
+            and type(component.get("deadline_unix_ms")) is int
+            and type(component.get("service_restart_unix_ms")) is int
+            and component["service_restart_unix_ms"] >= component["deadline_unix_ms"]
+            and isinstance(attempt, dict)
+            and attempt.get("attempt_id") == attempt_id
+            and type(attempt.get("fence")) is int
+            and attempt.get("fence") == fence
+            and attempt.get("current") is True
+            and component.get("attempt_state_after_restart") == "expiry_pending"
+            and component.get("recovery_obligation_readback") is True
+            and isinstance(obligation, dict)
+            and isinstance(obligation.get("obligation_id"), str)
+            and bool(obligation.get("obligation_id"))
+            and obligation.get("attempt_id") == attempt_id
+            and obligation.get("state") == "unresolved"
+            and component.get("resource_ownership_active_after_restart") is True
+            and isinstance(reservation, dict)
+            and reservation.get("attempt_id") == attempt_id
+            and reservation.get("state") == "active"
+            and component.get("stale_fence_rejected") is True
+            and isinstance(stale, dict)
+            and type(stale.get("exit_code")) is int
+            and stale.get("exit_code") != 0
+            and json_at(stale, "envelope", "error", "code") == "stale_fence"
+        )
+    if name == "full_load":
+        if profile_document is None:
+            return False
+        profile = component.get("approved_profile")
+        measured = component.get("observed_profile")
+        if not isinstance(profile, dict) or not isinstance(measured, dict):
+            return False
+        thresholds = {
+            "worker_target": "workers",
+            "dispatch_workers_target": "dispatch_workers",
+            "dispatch_capacity_target": "dispatch_capacity",
+            "requests_per_worker_target": "requests_per_worker",
+            "minimum_duration_ms": "observed_duration_ms",
+            "completion_target": "successful_responses",
+            "starvation_target": "observed_max_success_progress_gap_ms",
+        }
+        if (
+            profile.get("status") != "approved"
+            or not isinstance(profile.get("profile_id"), str)
+            or profile.get("profile_id") != profile_document.get("profile_id")
+            or not isinstance(profile_document.get("source"), str)
+            or not profile_document.get("source")
+            or profile.get("source") != profile_document.get("source")
+            or any(type(profile_document.get(key)) is not int for key in thresholds)
+            or any(profile_document[key] < 1 for key in thresholds)
+            or any(
+                type(profile.get(key)) is not int
+                or profile.get(key) != profile_document.get(key)
+                for key in thresholds
+            )
+        ):
+            return False
+        if any(not finite_json_number(measured.get(field)) for field in thresholds.values()):
+            return False
+        integer_metrics = (
+            "workers",
+            "dispatch_workers",
+            "dispatch_capacity",
+            "requests_per_worker",
+            "successful_responses",
+            "requests_started",
+            "failed_or_unavailable_responses",
+            "workers_with_successful_responses",
+            "workers_with_zero_successful_responses",
+            "observed_starvation_workers_with_zero_progress",
+        )
+        if any(type(measured.get(key)) is not int for key in integer_metrics):
+            return False
+        worker_progress = measured.get("worker_progress")
+        if (
+            type(measured.get("workers")) is not int
+            or not isinstance(worker_progress, dict)
+            or len(worker_progress) != measured["workers"]
+        ):
+            return False
+        if any(
+            not isinstance(progress, dict)
+            or type(progress.get("successful_responses")) is not int
+            or progress["successful_responses"] <= 0
+            or type(progress.get("requests_completed")) is not int
+            or progress["successful_responses"] > progress["requests_completed"]
+            or progress["requests_completed"] < profile_document["requests_per_worker_target"]
+            or not finite_json_number(progress.get("max_success_progress_gap_ms"))
+            or progress["max_success_progress_gap_ms"] > profile_document["starvation_target"]
+            for progress in worker_progress.values()
+        ):
+            return False
+        progress_successes = sum(
+            progress["successful_responses"]
+            for progress in worker_progress.values()
+        )
+        progress_requests = sum(
+            progress["requests_completed"]
+            for progress in worker_progress.values()
+        )
+        if (
+            progress_successes != measured["successful_responses"]
+            or progress_requests != measured["requests_started"]
+            or measured["failed_or_unavailable_responses"]
+            != measured["requests_started"] - measured["successful_responses"]
+            or measured["workers_with_successful_responses"] != measured["workers"]
+        ):
+            return False
+        return all(
+            measured[field] >= profile_document[threshold]
+            for threshold, field in thresholds.items()
+            if threshold != "starvation_target"
+        ) and (
+            measured["observed_max_success_progress_gap_ms"]
+            <= profile_document["starvation_target"]
+            and type(measured.get("requests_started")) is int
+            and measured["requests_started"]
+            == measured["workers"] * measured["requests_per_worker"]
+            and type(measured.get("observed_starvation_workers_with_zero_progress")) is int
+            and measured.get("observed_starvation_workers_with_zero_progress") == 0
+            and type(measured.get("workers_with_zero_successful_responses")) is int
+            and measured.get("workers_with_zero_successful_responses") == 0
+        )
+    if name == "typed_control":
+        if budget_document is None or not isinstance(budget, dict):
+            return False
+        latency = component.get("latency_ms")
+        target = budget.get("target_ms")
+        queue_error = component.get("typed_service_busy_error_details")
+        control_response = component.get("control_response")
+        return (
+            component.get("dispatch_queue_full_observed") is True
+            and component.get("typed_service_busy_observed") is True
+            and isinstance(queue_error, list)
+            and any(
+                isinstance(item, dict)
+                and item.get("code") == "service_busy"
+                and "dispatch queue is full" in str(item.get("message", "")).lower()
+                for item in queue_error
+            )
+            and isinstance(control_response, dict)
+            and control_response.get("response_received") is True
+            and finite_json_number(latency)
+            and finite_json_number(control_response.get("latency_ms"))
+            and latency == control_response.get("latency_ms")
+            and finite_json_number(target)
+            and budget.get("status") == "approved"
+            and budget.get("source") == budget_document.get("source")
+            and budget_document.get("target_ms") == target
+            and component.get("target_ms") == target
+            and target > 0
+            and component.get("latency_within_target") is (latency <= target)
+            and latency <= target
+        )
+    if name == "stop_recovery":
+        attempt = component.get("attempt_stop_recovery")
+        first_stop = component.get("sigterm_drain")
+        restart_stop = component.get("same_database_restart_stop")
+        readback = component.get("restart_readback_before_retry")
+        stop_report = report.get("stop_recovery")
+        if not isinstance(stop_report, dict):
+            return False
+        workload = stop_report.get("workload")
+        mutation = stop_report.get("mutation_delivery")
+        if not all(isinstance(value, dict) for value in (attempt, first_stop, restart_stop, readback, workload)):
+            return False
+        if not isinstance(mutation, dict):
+            return False
+        disposition = attempt.get("restart_disposition_readback")
+        actor_id = attempt.get("actor_id")
+        authority = attempt.get("agent_authority_readback")
+        deadline_ms = attempt.get("deadline_unix_ms")
+        restart_ms = attempt.get("service_restart_unix_ms")
+        obligation = attempt.get("recovery_obligation")
+        reservation = attempt.get("resource_reservation")
+        stale = attempt.get("stale_fence_response")
+        operation_data = readback.get("operation_data")
+        operation = operation_data.get("operation") if isinstance(operation_data, dict) else None
+        work_data = readback.get("work_data")
+        if not isinstance(operation, dict) or not isinstance(work_data, dict):
+            return False
+        operation_id = mutation.get("operation_id")
+        work_id = mutation.get("work_id")
+        return (
+            attempt.get("authorized_agent") is True
+            and attempt.get("actor_role") == "agent"
+            and isinstance(actor_id, str)
+            and bool(actor_id)
+            and isinstance(authority, dict)
+            and authority.get("actor_id") == actor_id
+            and authority.get("role") == "agent"
+            and authority.get("authority_granted") is True
+            and isinstance(attempt.get("attempt_id"), str)
+            and bool(attempt.get("attempt_id"))
+            and type(attempt.get("fence")) is int
+            and attempt["fence"] > 0
+            and type(deadline_ms) is int
+            and type(restart_ms) is int
+            and restart_ms >= deadline_ms
+            and attempt.get("deadline_crossed_while_service_stopped") is True
+            and isinstance(disposition, dict)
+            and disposition.get("attempt_id") == attempt.get("attempt_id")
+            and type(disposition.get("fence")) is int
+            and disposition.get("fence") == attempt.get("fence")
+            and disposition.get("phase") == "expiry_pending"
+            and disposition.get("current") is True
+            and isinstance(obligation, dict)
+            and isinstance(obligation.get("obligation_id"), str)
+            and bool(obligation.get("obligation_id"))
+            and obligation.get("attempt_id") == attempt.get("attempt_id")
+            and obligation.get("state") == "unresolved"
+            and isinstance(reservation, dict)
+            and reservation.get("attempt_id") == attempt.get("attempt_id")
+            and reservation.get("state") == "active"
+            and isinstance(stale, dict)
+            and type(stale.get("exit_code")) is int
+            and stale.get("exit_code") != 0
+            and json_at(stale, "envelope", "error", "code") == "stale_fence"
+            and first_stop.get("signal") == "SIGTERM"
+            and type(first_stop.get("exit_code")) is int
+            and first_stop.get("exit_code") == 0
+            and first_stop.get("socket_removed") is True
+            and type(first_stop.get("active_client_processes_at_request")) is int
+            and first_stop["active_client_processes_at_request"] > 0
+            and isinstance(first_stop.get("active_client_process_pids_at_request"), list)
+            and len(first_stop["active_client_process_pids_at_request"])
+            == first_stop["active_client_processes_at_request"]
+            and all(
+                type(pid) is int and pid > 0
+                for pid in first_stop["active_client_process_pids_at_request"]
+            )
+            and type(first_stop.get("active_client_snapshot_monotonic_ns")) is int
+            and type(first_stop.get("signal_sent_monotonic_ns")) is int
+            and 0
+            <= first_stop["signal_sent_monotonic_ns"]
+            - first_stop["active_client_snapshot_monotonic_ns"]
+            <= 250_000_000
+            and type(restart_stop.get("exit_code")) is int
+            and restart_stop.get("exit_code") == 0
+            and restart_stop.get("socket_removed") is True
+            and readback.get("operation_result_subject_match") is True
+            and readback.get("work_readback_exact_id") is True
+            and readback.get("operation_error") is None
+            and readback.get("work_error") is None
+            and isinstance(operation_id, str)
+            and bool(operation_id)
+            and isinstance(work_id, str)
+            and bool(work_id)
+            and isinstance(operation.get("project_id"), str)
+            and bool(operation.get("project_id"))
+            and operation.get("operation_id") == operation_id
+            and operation.get("command") in {"work.create", "work_create"}
+            and json_at(operation, "result", "work_id") == work_id
+            and find_json_field(operation_data, "project_id") == operation.get("project_id")
+            and find_json_field(work_data, "work_id") == work_id
+            and find_json_field(work_data, "project_id") == operation.get("project_id")
+            and type(workload.get("successful_responses_before_sigterm")) is int
+            and workload.get("successful_responses_before_sigterm") > 0
+        )
+    return False
+
+
+def find_json_field(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        if name in value:
+            return value[name]
+        for child in value.values():
+            found = find_json_field(child, name)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_json_field(child, name)
+            if found is not None:
+                return found
+    return None
 
 
 def tui_production_gate() -> tuple[str, ...]:
@@ -213,8 +575,12 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     "bounded read-only dispatch-admission smoke",
                     production_gate("scripts/validation/concurrency/production_host.py"),
                 ),
+                Check(
+                    "full V10 production acceptance",
+                    production_gate("scripts/validation/concurrency/production_host.py", "--full-v10"),
+                ),
             ),
-            "Full V10 acceptance remains blocked. The bounded read-only dispatch-admission smoke is partial evidence only; V10 also requires durable deadline reconciliation, full normal-load worker/queue coverage, typed control behavior against an acceptance budget, and stop/recovery evidence.",
+            "V10 passes only with source- and binary-bound evidence for durable deadline reconciliation after restart, full normal-load worker/queue coverage, typed service_busy and control progress against a preapproved budget, and stop/recovery under workload.",
         ),
         Scenario(
             "V11",
@@ -306,13 +672,276 @@ def run_command(check: Check, *, log_dir: Path, online: bool) -> dict[str, Any]:
         "stdout_log": str(log_dir / f"{stem}.stdout.log"),
         "stderr_log": str(log_dir / f"{stem}.stderr.log"),
     }
-    if check.label == "bounded read-only dispatch-admission smoke":
+    if check.label in {
+        "bounded read-only dispatch-admission smoke",
+        "full V10 production acceptance",
+    }:
         try:
             summary = json.loads(next(line for line in reversed(stdout.splitlines()) if line.strip()))
         except (StopIteration, json.JSONDecodeError):
             summary = None
         if isinstance(summary, dict):
-            result["smoke_subresult"] = summary
+            if check.label == "bounded read-only dispatch-admission smoke":
+                result["smoke_subresult"] = summary
+            else:
+                result["v10_gate_subresult"] = summary
+                report_path = summary.get("output")
+                report: dict[str, Any] | None = None
+                report_digest: str | None = None
+                report_error: str | None = None
+                if not isinstance(report_path, str) or not report_path.strip():
+                    report_error = "full V10 gate did not identify its JSON evidence report"
+                else:
+                    evidence_path = Path(report_path)
+                    if not evidence_path.is_absolute():
+                        evidence_path = ROOT / evidence_path
+                    try:
+                        payload = evidence_path.read_bytes()
+                        report_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+                        decoded = json.loads(payload)
+                        if isinstance(decoded, dict):
+                            report = decoded
+                        else:
+                            report_error = "full V10 evidence report is not a JSON object"
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                        report_error = f"cannot read full V10 evidence report: {error}"
+
+                acceptance = report.get("v10_acceptance") if report else None
+                identity = (
+                    acceptance.get("identity")
+                    if isinstance(acceptance, dict)
+                    else None
+                )
+                if identity is None and report:
+                    identity = report.get("identity")
+                components = acceptance.get("components") if isinstance(acceptance, dict) else None
+                budget = acceptance.get("control_latency_budget") if isinstance(acceptance, dict) else None
+                required_components = (
+                    "durable_deadline",
+                    "full_load",
+                    "typed_control",
+                    "stop_recovery",
+                )
+                budget_document = approved_json_contract(
+                    budget.get("approval_artifact") if isinstance(budget, dict) else None,
+                    schema="boreal.v10-control-latency-budget/v1",
+                )
+                profile_reference = (
+                    components.get("full_load", {}).get("approved_profile")
+                    if isinstance(components, dict)
+                    and isinstance(components.get("full_load"), dict)
+                    else None
+                )
+                profile_document = approved_json_contract(
+                    profile_reference,
+                    schema="boreal.v10-load-profile/v1",
+                )
+                component_evidence = {
+                    name: v10_component_evidence_complete(
+                        name,
+                        components.get(name) if isinstance(components, dict) else None,
+                        report=report or {},
+                        budget=budget,
+                        budget_document=budget_document,
+                        profile_document=profile_document,
+                    )
+                    for name in required_components
+                }
+                evidence_errors = [
+                    f"{name} is marked pass without complete raw evidence"
+                    for name in required_components
+                    if isinstance(components, dict)
+                    and isinstance(components.get(name), dict)
+                    and components[name].get("status") == "pass"
+                    and not component_evidence[name]
+                ]
+                if (
+                    isinstance(budget, dict)
+                    and budget.get("status") == "approved"
+                    and (
+                        budget_document is None
+                        or budget.get("source") != budget_document.get("source")
+                        or budget.get("target_ms") != budget_document.get("target_ms")
+                    )
+                ):
+                    evidence_errors.append(
+                        "control latency budget is marked approved without a matching approved artifact"
+                    )
+                components_complete = (
+                    isinstance(components, dict)
+                    and all(component_evidence.values())
+                )
+                budget_approved = (
+                    isinstance(budget, dict)
+                    and budget.get("status") == "approved"
+                    and isinstance(budget.get("source"), str)
+                    and bool(budget.get("source"))
+                    and finite_json_number(budget.get("target_ms"))
+                    and budget.get("target_ms") > 0
+                    and budget_document is not None
+                    and budget_document.get("source") == budget.get("source")
+                    and budget_document.get("target_ms") == budget.get("target_ms")
+                )
+                identity_complete = (
+                    isinstance(identity, dict)
+                    and isinstance(identity.get("source"), dict)
+                    and isinstance(identity["source"].get("commit"), str)
+                    and isinstance(identity["source"].get("tree"), str)
+                    and identity["source"].get("dirty") is False
+                    and isinstance(identity["source"].get("diff_sha256"), str)
+                    and isinstance(identity["source"].get("production_host_sha256"), str)
+                    and isinstance(identity.get("binary"), dict)
+                    and isinstance(identity["binary"].get("sha256"), str)
+                    and isinstance(identity["binary"].get("version"), str)
+                    and isinstance(identity.get("run_id"), str)
+                    and bool(identity.get("run_id"))
+                )
+                identity_errors: list[str] = []
+                if report is not None:
+                    if report.get("mode") != "full_v10":
+                        identity_errors.append("evidence report is not from full V10 mode")
+                    if summary.get("mode") != "full_v10":
+                        identity_errors.append("command summary is not from full V10 mode")
+                    report_run_id = identity.get("run_id") if isinstance(identity, dict) else None
+                    if summary.get("run_id") != report_run_id:
+                        identity_errors.append("command summary run ID does not match evidence report")
+                    if summary.get("report_sha256") != report_digest:
+                        identity_errors.append("command summary digest does not match evidence report bytes")
+                    report_acceptance_status = (
+                        acceptance.get("status") if isinstance(acceptance, dict) else None
+                    )
+                    if summary.get("v10_acceptance") != report_acceptance_status:
+                        identity_errors.append("command summary acceptance does not match evidence report")
+                incomplete_exit = (
+                    result["exit_code"] == 1
+                    and isinstance(acceptance, dict)
+                    and acceptance.get("status") != "pass"
+                    and not identity_errors
+                )
+                if incomplete_exit:
+                    result["status"] = "unavailable"
+                    result["reason"] = "full V10 gate produced incomplete acceptance evidence"
+                elif result["status"] != "pass":
+                    identity_errors.append("full V10 command did not complete successfully")
+                if identity_complete:
+                    source_identity = identity["source"]
+                    binary_identity = identity["binary"]
+                    try:
+                        current_commit = subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=ROOT,
+                            text=True,
+                            capture_output=True,
+                            check=True,
+                        ).stdout.strip()
+                        current_tree = subprocess.run(
+                            ["git", "rev-parse", "HEAD^{tree}"],
+                            cwd=ROOT,
+                            text=True,
+                            capture_output=True,
+                            check=True,
+                        ).stdout.strip()
+                        current_status = subprocess.run(
+                            ["git", "status", "--porcelain"],
+                            cwd=ROOT,
+                            text=True,
+                            capture_output=True,
+                            check=True,
+                        ).stdout
+                        current_diff = subprocess.run(
+                            ["git", "diff", "--binary", "HEAD"],
+                            cwd=ROOT,
+                            capture_output=True,
+                            check=True,
+                        ).stdout
+                        if source_identity.get("commit") != current_commit:
+                            identity_errors.append("source commit does not match the audited checkout")
+                        if source_identity.get("tree") != current_tree:
+                            identity_errors.append("source tree does not match the audited checkout")
+                        if source_identity.get("dirty") is not False:
+                            identity_errors.append("evidence source checkout was dirty")
+                        if source_identity.get("diff_sha256") != "sha256:" + hashlib.sha256(b"").hexdigest():
+                            identity_errors.append("evidence source diff is not empty")
+                        if current_status:
+                            identity_errors.append("audited checkout is dirty")
+                        if source_identity.get("diff_sha256") != "sha256:" + hashlib.sha256(current_diff).hexdigest():
+                            identity_errors.append("source diff does not match the audited checkout")
+                        production_host_path = ROOT / "scripts/validation/concurrency/production_host.py"
+                        production_host_digest = "sha256:" + hashlib.sha256(
+                            production_host_path.read_bytes()
+                        ).hexdigest()
+                        if source_identity.get("production_host_sha256") != production_host_digest:
+                            identity_errors.append("production host script digest does not match the audited checkout")
+                        expected_binary = (ROOT / "target/debug/bwrk").resolve()
+                        reported_binary = Path(str(binary_identity.get("path", ""))).resolve()
+                        if reported_binary != expected_binary:
+                            identity_errors.append("binary path does not match the freshly built audit binary")
+                        if not expected_binary.is_file():
+                            identity_errors.append("freshly built audit binary is missing")
+                        else:
+                            binary_digest = "sha256:" + hashlib.sha256(expected_binary.read_bytes()).hexdigest()
+                            if binary_identity.get("sha256") != binary_digest:
+                                identity_errors.append("binary digest does not match the freshly built audit binary")
+                    except (OSError, subprocess.SubprocessError) as error:
+                        identity_errors.append(f"cannot verify source/binary identity: {error}")
+                if report_error:
+                    if result["status"] not in {"skip", "unavailable"}:
+                        result["status"] = "fail"
+                    result["reason"] = report_error
+                elif not isinstance(acceptance, dict):
+                    result["status"] = "unavailable"
+                    result["reason"] = "full V10 evidence report has no acceptance record"
+                elif any(
+                    isinstance(components, dict)
+                    and isinstance(components.get(name), dict)
+                    and components[name].get("status") == "fail"
+                    for name in required_components
+                ):
+                    result["status"] = "fail"
+                    result["reason"] = "one or more V10 acceptance components failed"
+                elif evidence_errors or (
+                    isinstance(acceptance, dict)
+                    and acceptance.get("status") == "pass"
+                    and not (components_complete and budget_approved)
+                ):
+                    result["status"] = "fail"
+                    result["reason"] = "; ".join(evidence_errors) or (
+                        "V10 acceptance claims pass without all approved component evidence"
+                    )
+                elif identity_errors:
+                    result["status"] = "fail"
+                    result["reason"] = "; ".join(identity_errors)
+                elif (
+                    result["status"] == "pass"
+                    and not identity_errors
+                    and acceptance.get("status") == "pass"
+                    and acceptance.get("complete") is True
+                    and components_complete
+                    and budget_approved
+                    and identity_complete
+                ):
+                    result["status"] = "pass"
+                    result["reason"] = None
+                else:
+                    result["status"] = "unavailable"
+                    result["reason"] = (
+                        acceptance.get("reason")
+                        or "full V10 acceptance is incomplete or its control budget is not approved"
+                    )
+                result["v10_evidence"] = {
+                    "path": report_path,
+                    "sha256": report_digest,
+                    "acceptance": acceptance,
+                    "identity": identity,
+                    "identity_errors": identity_errors,
+                    "component_evidence": component_evidence,
+                    "evidence_errors": evidence_errors,
+                    "report_error": report_error,
+                }
+        elif check.label == "full V10 production acceptance":
+            if result["status"] not in {"skip", "unavailable"}:
+                result["status"] = "fail"
+            result["reason"] = "full V10 gate returned no machine-readable report summary"
     return result
 
 
@@ -323,7 +952,7 @@ def markdown(result: dict[str, Any]) -> str:
         f"Overall: **{result['status']}**; pass **{result['counts']['pass']}**, skip **{result['counts']['skip']}**, unavailable **{result['counts']['unavailable']}**, fail **{result['counts']['fail']}**.",
         "",
         "A scenario is green only when its exact production-composition gate is implemented and every listed check passes. Partial checks are retained as evidence and cannot establish a pass by themselves.",
-        "V10 includes the bounded read-only dispatch-admission smoke as partial evidence. Its success does not establish full V10 acceptance; the scenario remains blocked pending separately supported deadline, load, control-budget, and stop/recovery evidence.",
+        "The V10 dispatch-admission smoke is partial evidence. V10 passes only when a separately reported full gate proves all four required components and an owner-approved control budget against the exact source and binary.",
         "",
         "| Scenario | Status | Acceptance | Findings | Checks | Missing complete gate |",
         "| --- | --- | --- | --- | --- | --- |",
@@ -373,15 +1002,16 @@ def main() -> int:
             status = "skip"
         elif "unavailable" in check_statuses:
             status = "unavailable"
-        elif scenario.scenario_id == "V10":
-            # This smoke is intentionally only a partial V10 result. A zero
-            # exit code proves its bounded assertions, not full V10 acceptance.
-            status = "unavailable"
         else:
             has_production_gate = any(
                 item["label"].startswith("production gate") for item in checks
             )
-            status = "pass" if has_production_gate else "unavailable"
+            has_full_v10_gate = any(
+                item["label"] == "full V10 production acceptance"
+                and item["status"] == "pass"
+                for item in checks
+            )
+            status = "pass" if has_production_gate or (scenario.scenario_id == "V10" and has_full_v10_gate) else "unavailable"
         record = {
             "id": scenario.scenario_id,
             "title": scenario.title,
@@ -397,11 +1027,21 @@ def main() -> int:
                 None,
             )
             smoke_summary = (smoke_check or {}).get("smoke_subresult") or {}
+            full_check = next(
+                (item for item in checks if item["label"] == "full V10 production acceptance"),
+                None,
+            )
+            full_evidence = (full_check or {}).get("v10_evidence") or {}
+            full_acceptance = full_evidence.get("acceptance") or {}
             record["acceptance"] = {
-                "status": "blocked",
-                "complete": False,
-                "separate_full_acceptance_evidence": "not_supplied",
-                "reason": "the dispatch-admission smoke does not satisfy full V10 acceptance",
+                "status": "pass" if status == "pass" else status,
+                "complete": status == "pass",
+                "separate_full_acceptance_evidence": full_evidence.get("path", "not_supplied"),
+                "evidence_sha256": full_evidence.get("sha256"),
+                "components": full_acceptance.get("components"),
+                "control_latency_budget": full_acceptance.get("control_latency_budget"),
+                "identity": full_evidence.get("identity"),
+                "reason": (full_check or {}).get("reason") or full_acceptance.get("reason"),
             }
             record["subresults"] = {
                 "read_only_dispatch_admission_smoke": {
@@ -411,7 +1051,15 @@ def main() -> int:
                     "fake_clock_status": smoke_summary.get("fake_clock_status"),
                     "stop_status": smoke_summary.get("stop_status"),
                     "v10_acceptance": "not_established",
-                }
+                },
+                "full_acceptance": {
+                    "status": (full_check or {}).get("status", "unavailable"),
+                    "report": full_evidence.get("path"),
+                    "report_sha256": full_evidence.get("sha256"),
+                    "components": full_acceptance.get("components"),
+                    "control_latency_budget": full_acceptance.get("control_latency_budget"),
+                    "identity": full_evidence.get("identity"),
+                },
             }
         records.append(record)
     counts = {status: sum(item["status"] == status for item in records) for status in ("pass", "skip", "unavailable", "fail")}
@@ -428,7 +1076,7 @@ def main() -> int:
         "limitations": [
             "A V01-V12 pass requires the named production gate in addition to its partial unit/application/TUI checks.",
             "A complete scenario requires a test through the actual bwrk service composition and its declared fault/scale boundary.",
-            "V10 full acceptance remains blocked even if the bounded read-only dispatch-admission smoke passes; its result is recorded separately as partial evidence.",
+            "V10 cannot pass on the bounded smoke alone; the full acceptance record must show four complete components and an approved control budget tied to the exact run identity.",
             "Environment skips remain visible and are release-blocking unless an explicit non-release exploratory override is used.",
         ],
     }
