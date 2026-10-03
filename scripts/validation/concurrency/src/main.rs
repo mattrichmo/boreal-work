@@ -5,7 +5,10 @@ use boreal_domain::{
     AcceptanceProfile, ActorContext, ActorId, ActorRole, AttemptId, DispatchPolicy, Fence,
     HarnessId, OperationId, PersistedLifecycle, ProjectId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
-use boreal_store::{SqliteStore, SCHEMA_VERSION, STATUS_CONTRACT_VERSION};
+use boreal_store::{
+    identity::{IdentityStore, WorkspaceBinding},
+    SqliteStore, SCHEMA_VERSION, STATUS_CONTRACT_VERSION,
+};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -87,7 +90,9 @@ fn run() -> Result<String, String> {
 
 fn run_once(config: Config, db_path: &Path) -> Result<String, String> {
     let seed_store = SqliteStore::open(db_path, SCHEMA).map_err(store_error)?;
-    seed(&seed_store, config)?;
+    seed(&seed_store, config, db_path.parent().ok_or_else(|| {
+        "temporary database path has no parent".to_owned()
+    })?)?;
     drop(seed_store);
 
     let release = Arc::new(Barrier::new(config.workers + 1 + usize::from(config.tui)));
@@ -155,8 +160,20 @@ fn run_once(config: Config, db_path: &Path) -> Result<String, String> {
     Ok(render_json(config, metrics))
 }
 
-fn seed(store: &SqliteStore, config: Config) -> Result<(), String> {
+fn seed(store: &SqliteStore, config: Config, db_root: &Path) -> Result<(), String> {
     let project = ProjectId::new(PROJECT_ID);
+    let canonical_root = fs::canonicalize(db_root).map_err(|error| error.to_string())?;
+    let canonical_root = canonical_root.to_string_lossy().into_owned();
+    let binding = WorkspaceBinding::new(
+        canonical_root.clone(),
+        canonical_root.clone(),
+        boreal_store::checksum(canonical_root.as_bytes()),
+    )
+    .map_err(|error| error.to_string())?;
+    let identities = IdentityStore::new(store);
+    identities
+        .database_identity()
+        .map_err(|error| error.to_string())?;
     let app = WorkApplication::new(store);
     app.init_project(
         &project,
@@ -168,6 +185,9 @@ fn seed(store: &SqliteStore, config: Config) -> Result<(), String> {
         "p5-seed-project",
     )
     .map_err(app_error)?;
+    identities
+        .bind_project(project.as_str(), &binding, &stamp(BASE_TIME_MS))
+        .map_err(|error| error.to_string())?;
     for worker in 0..config.workers {
         store
             .ensure_actor(
