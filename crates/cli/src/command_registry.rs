@@ -3109,7 +3109,7 @@ mod tests {
 
         let memory = registry_result(Some("memory")).unwrap();
         let memory_data = memory.data.unwrap();
-        assert_eq!(memory_data["available"].as_array().unwrap().len(), 7);
+        assert_eq!(memory_data["available"].as_array().unwrap().len(), 8);
         assert!(memory_data["unavailable_routes"]
             .as_array()
             .unwrap()
