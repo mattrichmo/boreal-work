@@ -207,3 +207,54 @@ budget must define the request cadence and sample count across the same active
 load window, confirm normal clients remain active and a typed queue-full result
 was observed, and identify which aggregate latency statistic is compared with
 the owner-approved limit. No sample count or latency target is assumed here.
+
+On Linux and macOS, the optional clock shim is compiled into the temporary
+runner directory and injected into the service process only. It shifts
+realtime reads while leaving monotonic timers untouched. Unsupported platforms
+or compilation failures stay `unavailable`; no system clock or client process
+is changed.
+
+An owner can supply a repository-local, digest-bound typed-control decision
+with `--control-budget PATH --full-v10`. The JSON artifact must use schema
+`boreal.v10-control-latency-budget/v1`, status `approved`, and include the
+decision ID, approver, approval time, contract version, source, p95 target,
+per-sample maximum, sample count, and interval in milliseconds. The harness
+then keeps 32 separate read-only status/work-show clients pumping during the
+approved control samples. It records every scheduled sample, response time,
+active-client counts, typed queue errors, p95, and maximum. The existing
+`--control-latency-budget-ms` value remains an unapproved diagnostic candidate.
+
+An owner-approved disposable Agent fixture can be selected with
+`--disposable-agent-authorization PATH --full-v10`. The artifact must use
+schema `boreal.v10-disposable-agent-authorization/v1` and bind the decision to
+Agent `v10-recovery-agent`, project `dispatch-smoke-project`, temporary-project
+credential persistence, explicit credential creation and project grant,
+claim/readback scope, lease/time limits, and revocation before cleanup. Without
+that artifact the harness creates no Agent credential. With it, the harness
+uses the supported source and work service routes, then stops the service
+cleanly before direct-mode auth key, grant, and session setup accesses SQLite.
+It restarts the service before claim and post-restart readback. The temporary
+credential is read from the private project credential directory and supplied
+only through the short-lived CLI child environment. Authenticated `agent
+resume` binds the post-restart actor, session, harness, work, attempt, and fence
+as the canonical current-attempt proof; `status` supplies the attempt phase.
+The fixture revokes the Agent before removing its local credential files.
+
+The claim-only fixture does not supervise an Agent executor, and SIGTERM of
+the service is not evidence that an executor stopped. The CLI currently does
+not persist the required `expiry_pending` recovery transition. The exact
+post-restart result therefore remains a strict failure or unavailable result
+until the application exposes that behavior. The harness does not issue a
+same-fence release to manufacture a `stale_fence` response. Any future stale
+fence evidence must record the actual command invocation and response under
+one invocation ID, bind the request to a previously claimed token from an
+older attempt, and show that a distinct higher-fence attempt remains current.
+The current authorization scope allows claim and readback only, so this
+stale-token gate stays incomplete.
+
+Approved control samples must also meet the actual cadence, not only their
+planned schedule. The harness records monotonic start times and accepts a
+maximum scheduling difference of 5% of the interval, capped at 50 ms and
+floored at 5 ms. If a sample misses its cadence window, it is recorded as
+missed and later samples are not bunched to catch up. Either condition fails
+the approved control component.

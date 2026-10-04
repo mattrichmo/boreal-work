@@ -15,8 +15,10 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 import platform
 import signal
@@ -52,6 +54,13 @@ AGENT_INPUT_FIELDS = frozenset(
 )
 MAX_AGENT_INPUT_BYTES = 16 * 1024
 MAX_CREDENTIAL_BYTES = 8 * 1024
+V10_CONTROL_BUDGET_SCHEMA = "boreal.v10-control-latency-budget/v1"
+V10_LOAD_PROFILE_SCHEMA = "boreal.v10-load-profile/v1"
+V10_DISPOSABLE_AGENT_SCHEMA = "boreal.v10-disposable-agent-authorization/v1"
+DISPOSABLE_AGENT_ID = "v10-recovery-agent"
+DISPOSABLE_AGENT_SESSION_ID = "v10-recovery-session"
+DISPOSABLE_AGENT_HARNESS_ID = "v10-recovery-harness"
+DISPOSABLE_AGENT_WORK_ID = "dispatch-smoke-agent-recovery"
 
 
 @dataclass(frozen=True)
@@ -761,6 +770,730 @@ def file_sha256(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def load_approved_artifact(path: Path, *, schema: str) -> tuple[dict, dict]:
+    """Read an owner decision artifact from the repository and bind its bytes."""
+    supplied_path = path.expanduser()
+    if not supplied_path.is_absolute():
+        supplied_path = ROOT / supplied_path
+    try:
+        metadata = supplied_path.lstat()
+        artifact_path = supplied_path.resolve(strict=True)
+        relative_path = artifact_path.relative_to(ROOT.resolve()).as_posix()
+    except (OSError, ValueError) as error:
+        raise RuntimeError("approval artifacts must be readable files inside the repository") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError("approval artifact must be a regular non-symlink file")
+    payload = artifact_path.read_bytes()
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("approval artifact is not valid UTF-8 JSON") from error
+    if not isinstance(document, dict):
+        raise RuntimeError("approval artifact must be a JSON object")
+    for field_name in ("decision_id", "approved_by", "approved_at", "contract_version"):
+        if not isinstance(document.get(field_name), str) or not document[field_name].strip():
+            raise RuntimeError(f"approval artifact requires {field_name}")
+    if document.get("schema") != schema or document.get("status") != "approved":
+        raise RuntimeError(f"approval artifact must be owner-approved with schema {schema}")
+    return document, {
+        "path": relative_path,
+        "sha256": f"sha256:{hashlib.sha256(payload).hexdigest()}",
+    }
+
+
+def validate_control_budget(document: dict) -> None:
+    """Reject incomplete or ambiguous multi-sample control decisions."""
+    if (
+        not isinstance(document.get("source"), str)
+        or not document["source"].strip()
+        or type(document.get("target_ms")) not in (int, float)
+        or not math.isfinite(document["target_ms"])
+        or document["target_ms"] <= 0
+        or type(document.get("max_sample_ms")) not in (int, float)
+        or not math.isfinite(document["max_sample_ms"])
+        or document["max_sample_ms"] <= 0
+        or type(document.get("sample_count")) is not int
+        or not 1 <= document["sample_count"] <= 100
+        or type(document.get("interval_ms")) is not int
+        or document["interval_ms"] <= 0
+        or document.get("statistic") != "p95"
+    ):
+        raise RuntimeError("approved control budget must specify p95, sample cadence/count, and latency limits")
+
+
+def validate_disposable_agent_authorization(document: dict) -> None:
+    """Require a narrow approval for one temporary Agent in the smoke project."""
+    if (
+        document.get("project_id") != "dispatch-smoke-project"
+        or document.get("actor_id") != DISPOSABLE_AGENT_ID
+        or document.get("role") != "agent"
+        or document.get("scope") != "temporary_project_only"
+        or document.get("credential_persistence") != "temporary_project"
+        or document.get("revoke_before_cleanup") is not True
+        or document.get("allow_credential_create") is not True
+        or document.get("allow_project_grant") is not True
+        or document.get("allow_attempt_claim_and_readback") is not True
+        or type(document.get("lease_ttl_ms")) is not int
+        or not 1000 <= document["lease_ttl_ms"] <= 30000
+        or type(document.get("time_limit_ms")) is not int
+        or not document["lease_ttl_ms"] < document["time_limit_ms"] <= 300000
+    ):
+        raise RuntimeError("disposable Agent authorization exceeds or does not match the temporary-project scope")
+
+
+def envelope_data(response: dict, *, command: str) -> dict:
+    envelope = response.get("envelope") if isinstance(response, dict) else None
+    error = envelope.get("error") if isinstance(envelope, dict) else None
+    data = envelope.get("data") if isinstance(envelope, dict) else None
+    if (
+        not isinstance(envelope, dict)
+        or response.get("exit_code") != 0
+        or error is not None
+        or not isinstance(data, dict)
+    ):
+        code = error.get("code") if isinstance(error, dict) else None
+        raise RuntimeError(f"disposable Agent {command} did not succeed (error={code or 'unknown'})")
+    return data
+
+
+def project_revision(response: dict, *, command: str) -> int:
+    data = envelope_data(response, command=command)
+    envelope = response["envelope"]
+    revision = data.get("revision", envelope.get("revision"))
+    if type(revision) is not int or revision < 0:
+        raise RuntimeError(f"disposable Agent {command} omitted the project revision")
+    return revision
+
+
+def unix_ms_from_stamp(value: object) -> int | None:
+    if type(value) is int:
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
+def find_object(value: object, predicate) -> dict | None:
+    if isinstance(value, dict):
+        if predicate(value):
+            return value
+        for child in value.values():
+            found = find_object(child, predicate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_object(child, predicate)
+            if found is not None:
+                return found
+    return None
+
+
+def stale_fence_request_matches_claim(
+    request: object,
+    *,
+    project_id: object,
+    work_id: object,
+    actor_id: object,
+    attempt_id: object,
+    fence: object,
+) -> bool:
+    if not isinstance(request, dict):
+        return False
+    claim = request.get("claim_readback")
+    current = request.get("current_attempt_readback")
+    stale_attempt_id = request.get("attempt_id")
+    stale_fence = request.get("fence")
+    expected_argv = [
+        "agent", "release", "--project", project_id,
+        "--work", work_id, "--actor", actor_id,
+        "--attempt", stale_attempt_id, "--fence", str(stale_fence),
+    ]
+    return (
+        request.get("command") == "agent release"
+        and isinstance(request.get("invocation_id"), str)
+        and bool(request.get("invocation_id"))
+        and request.get("argv") == expected_argv
+        and request.get("project_id") == project_id
+        and request.get("work_id") == work_id
+        and request.get("actor_id") == actor_id
+        and isinstance(stale_attempt_id, str)
+        and bool(stale_attempt_id)
+        and type(stale_fence) is int
+        and stale_fence > 0
+        and stale_attempt_id != attempt_id
+        and type(fence) is int
+        and fence > stale_fence
+        and request.get("previously_issued_by_claim") is True
+        and isinstance(claim, dict)
+        and claim.get("attempt_id") == stale_attempt_id
+        and type(claim.get("fence")) is int
+        and claim.get("fence") == stale_fence
+        and isinstance(current, dict)
+        and current.get("attempt_id") == attempt_id
+        and type(current.get("fence")) is int
+        and current.get("fence") == fence
+    )
+
+
+def stale_fence_response_matches_request(response: object, request: object) -> bool:
+    return (
+        isinstance(response, dict)
+        and isinstance(request, dict)
+        and isinstance(request.get("invocation_id"), str)
+        and bool(request.get("invocation_id"))
+        and response.get("invocation_id") == request.get("invocation_id")
+        and response.get("argv") == request.get("argv")
+        and type(response.get("exit_code")) is int
+        and response.get("exit_code", 0) != 0
+        and (response.get("envelope") or {}).get("error", {}).get("code") == "stale_fence"
+    )
+
+
+def provision_disposable_agent_work(
+    binary: Path,
+    database: Path,
+    socket_path: Path,
+    root: Path,
+    *,
+    operator_actor: str,
+    operator_session: str,
+    invoke_fn=None,
+    client_fn=None,
+) -> tuple[str, str]:
+    """Register one temporary source and task through supported CLI routes."""
+    invoke_fn = invoke_fn or invoke
+    client_fn = client_fn or client
+    source_file = root / "v10-agent-fixture.txt"
+    source_file.write_text("Disposable V10 Agent fixture source v1.\n", encoding="utf-8")
+    before_source = client_fn(
+        binary, socket_path, "dispatch-smoke-project", ["status"], cwd=root
+    )
+    revision = project_revision(before_source or {}, command="pre-source status")
+    source_response = invoke_fn(
+        binary,
+        [
+            "source", "add", "dispatch-smoke-project",
+            "--input", str(source_file),
+            "--origin", "test://v10-disposable-agent-fixture",
+            "--media-type", "text/plain",
+            "--actor", operator_actor,
+            "--session", operator_session,
+            "--expected-revision", str(revision),
+            "--socket", str(socket_path), "--db", str(database),
+            "--operation-id", "op_v10_disposable_source", "--json",
+        ],
+        cwd=root,
+    )
+    source_data = envelope_data(source_response, command="temporary Agent source add")
+    source = source_data.get("source")
+    source_version_id = source.get("source_version_id") if isinstance(source, dict) else None
+    if not isinstance(source_version_id, str) or not source_version_id.startswith("sv_"):
+        raise RuntimeError("temporary Agent source registration omitted its canonical source version")
+
+    before_work = client_fn(
+        binary, socket_path, "dispatch-smoke-project", ["status"], cwd=root
+    )
+    revision = project_revision(before_work or {}, command="pre-work status")
+    work_response = invoke_fn(
+        binary,
+        [
+            "work", "create", "dispatch-smoke-project", DISPOSABLE_AGENT_WORK_ID,
+            "Disposable V10 Agent recovery fixture",
+            "--kind", "task", "--actor", operator_actor,
+            "--session", operator_session,
+            "--expected-revision", str(revision),
+            "--socket", str(socket_path), "--db", str(database),
+            "--operation-id", "op_v10_disposable_work", "--json",
+        ],
+        cwd=root,
+    )
+    envelope_data(work_response, command="temporary Agent work create")
+    config_identity = "sha256:" + hashlib.sha256(
+        b"boreal.v10.disposable-agent-config/v1"
+    ).hexdigest()
+    return source_version_id, config_identity
+
+
+def setup_disposable_agent_fixture(
+    binary: Path,
+    database: Path,
+    root: Path,
+    authorization: dict,
+    authorization_ref: dict,
+    *,
+    source_version_id: str,
+    config_identity: str,
+    invoke_fn=None,
+) -> dict:
+    """Create and grant one short-lived Agent only inside the disposable project."""
+    invoke_fn = invoke_fn or invoke
+    validate_disposable_agent_authorization(authorization)
+    key = invoke_fn(
+        binary,
+        [
+            "auth", "key", "--project", "dispatch-smoke-project",
+            "--actor", DISPOSABLE_AGENT_ID, "--actor-role", "agent",
+            "--db", str(database), "--json",
+        ],
+        cwd=root,
+    )
+    key_data = envelope_data(key, command="auth key")
+    enrollment_value = key_data.get("enrollment_path")
+    if not isinstance(enrollment_value, str) or not enrollment_value:
+        raise RuntimeError("disposable Agent auth key omitted its enrollment path")
+    enrollment_path = Path(enrollment_value)
+    if not enrollment_path.is_absolute():
+        enrollment_path = root / enrollment_path
+    try:
+        enrollment_metadata = enrollment_path.lstat()
+    except OSError as error:
+        raise RuntimeError("disposable Agent enrollment is unavailable") from error
+    if (
+        stat.S_ISLNK(enrollment_metadata.st_mode)
+        or not stat.S_ISREG(enrollment_metadata.st_mode)
+        or enrollment_metadata.st_uid != os.geteuid()
+        or enrollment_metadata.st_mode & 0o077
+    ):
+        raise RuntimeError("disposable Agent enrollment must be a private regular file owned by this user")
+    enrollment_path = enrollment_path.resolve(strict=True)
+    credentials_root = (root / ".boreal" / "credentials").resolve(strict=True)
+    try:
+        enrollment_path.relative_to(credentials_root)
+    except ValueError as error:
+        raise RuntimeError("disposable Agent enrollment escaped the temporary project") from error
+    if not isinstance(source_version_id, str) or not source_version_id.startswith("sv_"):
+        raise RuntimeError("disposable Agent fixture requires the registered temporary source version")
+    if not isinstance(config_identity, str) or not config_identity.startswith("sha256:"):
+        raise RuntimeError("disposable Agent fixture requires a deterministic configuration identity")
+
+    before = invoke_fn(
+        binary,
+        ["status", "dispatch-smoke-project", "--db", str(database), "--json"],
+        cwd=root,
+    )
+    revision = project_revision(before, command="pre-grant status")
+    granted = invoke_fn(
+        binary,
+        [
+            "auth", "grant", "--project", "dispatch-smoke-project",
+            "--input", str(enrollment_path), "--actor", "dispatch-smoke-validator",
+            "--expected-revision", str(revision),
+            "--reason", "Owner-approved disposable V10 recovery fixture", "--yes",
+            "--db", str(database), "--operation-id", f"op_v10_agent_grant_{uuid.uuid4().hex}", "--json",
+        ],
+        cwd=root,
+    )
+    granted_data = envelope_data(granted, command="auth grant")
+    after_grant = invoke_fn(
+        binary,
+        ["status", "dispatch-smoke-project", "--db", str(database), "--json"],
+        cwd=root,
+    )
+    revision = project_revision(after_grant, command="post-grant status")
+    session = invoke_fn(
+        binary,
+        [
+            "session", "start", "--project", "dispatch-smoke-project",
+            "--session", DISPOSABLE_AGENT_SESSION_ID,
+            "--harness", DISPOSABLE_AGENT_HARNESS_ID,
+            "--actor", DISPOSABLE_AGENT_ID,
+            "--expected-revision", str(revision), "--db", str(database),
+            "--operation-id", f"op_v10_agent_session_{uuid.uuid4().hex}", "--json",
+        ],
+        cwd=root,
+    )
+    session_data = envelope_data(session, command="Agent session start")
+    authority = invoke_fn(
+        binary,
+        [
+            "auth", "show", "--project", "dispatch-smoke-project",
+            "--actor", DISPOSABLE_AGENT_ID, "--db", str(database), "--json",
+        ],
+        cwd=root,
+    )
+    authority_data = envelope_data(authority, command="Agent authority readback")
+    if (
+        authority_data.get("actor_id") != DISPOSABLE_AGENT_ID
+        or authority_data.get("role") != "agent"
+        or authority_data.get("project_id") != "dispatch-smoke-project"
+    ):
+        raise RuntimeError("disposable Agent authority readback does not match the approved scope")
+    session_readback = invoke_fn(
+        binary,
+        [
+            "session", "show", "--project", "dispatch-smoke-project",
+            "--session", DISPOSABLE_AGENT_SESSION_ID,
+            "--actor", DISPOSABLE_AGENT_ID, "--db", str(database), "--json",
+        ],
+        cwd=root,
+    )
+    session_data = envelope_data(session_readback, command="Agent session readback")
+    if (
+        session_data.get("actor_id") != DISPOSABLE_AGENT_ID
+        or session_data.get("session_id") != DISPOSABLE_AGENT_SESSION_ID
+        or session_data.get("harness_id") != DISPOSABLE_AGENT_HARNESS_ID
+        or session_data.get("state") != "active"
+    ):
+        raise RuntimeError("disposable Agent session readback does not match the approved scope")
+    return {
+        "status": "ready",
+        "project_id": "dispatch-smoke-project",
+        "actor_id": DISPOSABLE_AGENT_ID,
+        "role": "agent",
+        "session_id": DISPOSABLE_AGENT_SESSION_ID,
+        "harness_id": DISPOSABLE_AGENT_HARNESS_ID,
+        "work_id": DISPOSABLE_AGENT_WORK_ID,
+        "source_version_id": source_version_id,
+        "config_identity": config_identity,
+        "lease_ttl_ms": authorization["lease_ttl_ms"],
+        "time_limit_ms": authorization["time_limit_ms"],
+        "enrollment_path": str(enrollment_path),
+        "grant_operation_id": granted_data.get("operation_id"),
+        "authorization_artifact": authorization_ref,
+        "credential_exposed": False,
+        "granted": True,
+    }
+
+
+def revoke_disposable_agent_fixture(
+    binary: Path,
+    database: Path,
+    root: Path,
+    fixture: dict,
+    *,
+    invoke_fn=None,
+) -> dict:
+    """Revoke the temporary Agent grant before the enclosing project is removed."""
+    invoke_fn = invoke_fn or invoke
+    if fixture.get("granted") is not True:
+        return {"status": "not_needed", "revoked": False}
+    current = invoke_fn(
+        binary,
+        ["status", "dispatch-smoke-project", "--db", str(database), "--json"],
+        cwd=root,
+    )
+    revision = project_revision(current, command="pre-revoke status")
+    revoked = invoke_fn(
+        binary,
+        [
+            "auth", "revoke", DISPOSABLE_AGENT_ID,
+            "--project", "dispatch-smoke-project", "--actor", "dispatch-smoke-validator",
+            "--expected-revision", str(revision),
+            "--reason", "End owner-approved disposable V10 recovery fixture", "--yes",
+            "--db", str(database), "--operation-id", f"op_v10_agent_revoke_{uuid.uuid4().hex}", "--json",
+        ],
+        cwd=root,
+    )
+    envelope_data(revoked, command="auth revoke")
+    actor_hash = hashlib.sha256(DISPOSABLE_AGENT_ID.encode("utf-8")).hexdigest()
+    credentials_directory = root / ".boreal" / "credentials"
+    removed = []
+    for filename in (f"sha256-{actor_hash}.json", f"sha256-{actor_hash}.enrollment.json"):
+        path = credentials_directory / filename
+        if path.exists() and not path.is_symlink() and path.is_file():
+            path.unlink()
+            removed.append(filename)
+    fixture["granted"] = False
+    return {
+        "status": "pass",
+        "revoked": True,
+        "project_id": "dispatch-smoke-project",
+        "actor_id": DISPOSABLE_AGENT_ID,
+        "removed_local_files": removed,
+        "secure_erasure_claimed": False,
+    }
+
+
+def claim_disposable_agent_attempt(
+    binary: Path,
+    socket_path: Path,
+    root: Path,
+    fixture: dict,
+    *,
+    client_fn=None,
+) -> dict:
+    client_fn = client_fn or client
+    if fixture.get("granted") is not True:
+        raise RuntimeError("disposable Agent claim requires a granted test-only identity")
+    credential = _read_standard_credential(
+        root, fixture["project_id"], fixture["actor_id"]
+    )
+    claim = client_fn(
+        binary,
+        socket_path,
+        fixture["project_id"],
+        [
+            "work", "claim", fixture["work_id"],
+            "--actor", fixture["actor_id"],
+            "--harness", fixture["harness_id"],
+            "--session", fixture["session_id"],
+            "--source-version", fixture["source_version_id"],
+            "--config-identity", fixture["config_identity"],
+            "--lease-ttl", f"{fixture['lease_ttl_ms']}ms",
+            "--time-limit", f"{fixture['time_limit_ms']}ms",
+            "--operation-id", f"op_v10_agent_claim_{uuid.uuid4().hex}",
+        ],
+        cwd=root,
+        timeout=20.0,
+        credential=credential,
+    )
+    data = envelope_data(claim or {}, command="Agent work claim")
+    attempt = find_object(
+        data,
+        lambda item: isinstance(item.get("attempt_id"), str)
+        and type(item.get("fence")) is int,
+    )
+    if attempt is None:
+        attempt = data
+    attempt_id = attempt.get("attempt_id")
+    fence = attempt.get("fence")
+    deadline_ms = unix_ms_from_stamp(attempt.get("lease_deadline"))
+    if (
+        not isinstance(attempt_id, str)
+        or not attempt_id
+        or type(fence) is not int
+        or fence <= 0
+        or deadline_ms is None
+    ):
+        raise RuntimeError("disposable Agent claim omitted its exact attempt, fence, or lease deadline")
+    return {
+        "attempt_id": attempt_id,
+        "fence": fence,
+        "lease_deadline": attempt.get("lease_deadline"),
+        "deadline_unix_ms": deadline_ms,
+        "claim_readback": {key: attempt.get(key) for key in ("attempt_id", "fence", "phase", "lease_deadline", "hard_deadline")},
+        "operation_id": (data.get("operation_id") if isinstance(data, dict) else None),
+    }
+
+
+def read_disposable_agent_recovery(
+    binary: Path,
+    socket_path: Path,
+    database: Path,
+    root: Path,
+    fixture: dict,
+    claim: dict,
+    *,
+    service_exited_at_unix_ms: int,
+    service_restart_unix_ms: int,
+    invoke_fn=None,
+    client_fn=None,
+) -> dict:
+    """Collect read-only post-restart state for the exact disposable Agent claim."""
+    invoke_fn = invoke_fn or invoke
+    client_fn = client_fn or client
+    project = fixture["project_id"]
+    actor = fixture["actor_id"]
+    attempt_id = claim["attempt_id"]
+    fence = claim["fence"]
+    credential = _read_standard_credential(root, project, actor)
+    resume_response = client_fn(
+        binary,
+        socket_path,
+        project,
+        [
+            "agent", "resume", "--project", project, "--actor", actor,
+            "--harness", fixture["harness_id"], "--session", fixture["session_id"],
+            "--attempt", attempt_id,
+        ],
+        cwd=root,
+        credential=credential,
+    )
+    resume = envelope_data(resume_response or {}, command="post-restart Agent resume")
+    resume_context = resume.get("context")
+    resume_status = resume.get("status")
+    resume_bound = (
+        isinstance(resume_context, dict)
+        and resume_context.get("mode") == "resume"
+        and resume_context.get("project_id") == project
+        and resume_context.get("actor_id") == actor
+        and resume_context.get("harness_id") == fixture["harness_id"]
+        and resume_context.get("session_id") == fixture["session_id"]
+        and isinstance(resume_status, dict)
+        and resume_status.get("work_id") == fixture["work_id"]
+        and resume_status.get("attempt_id") == attempt_id
+        and type(resume_status.get("fence")) is int
+        and resume_status.get("fence") == fence
+    )
+    authority = {
+        "project_id": project,
+        "actor_id": actor if resume_bound else None,
+        "role": "agent" if resume_bound else None,
+        "authority_granted": resume_bound,
+        "readback_command": "agent resume",
+        "authenticated": resume_bound,
+    }
+    status_response = client_fn(
+        binary,
+        socket_path,
+        project,
+        ["status", "--actor", actor, "--session", fixture["session_id"], "--limit", "100"],
+        cwd=root,
+        credential=credential,
+    )
+    status_data = envelope_data(status_response or {}, command="post-restart Agent status")
+    work = client_fn(
+        binary,
+        socket_path,
+        project,
+        ["work", "show", fixture["work_id"]],
+        cwd=root,
+        credential=credential,
+    )
+    work_data = envelope_data(work or {}, command="post-restart work show")
+    attempt_predicate = lambda item: item.get("attempt_id") == attempt_id
+    status_attempt = find_object(status_data, attempt_predicate)
+    work_attempt = find_object(work_data, attempt_predicate)
+    observed_attempt = status_attempt or work_attempt
+    if status_attempt is not None and work_attempt is not None:
+        if (
+            status_attempt.get("fence") != work_attempt.get("fence")
+            or status_attempt.get("attempt_id") != work_attempt.get("attempt_id")
+        ):
+            observed_attempt = None
+    attempt_after_restart = None
+    if isinstance(observed_attempt, dict):
+        attempt_after_restart = {
+            "attempt_id": observed_attempt.get("attempt_id"),
+            "fence": observed_attempt.get("fence"),
+            "phase": observed_attempt.get("phase"),
+            # Successful agent resume is the canonical current-attempt route;
+            # status supplies the phase, which does not include a current flag.
+            "current": resume_bound,
+            "currentness_readback": {
+                "command": "agent resume",
+                "work_id": resume_status.get("work_id") if isinstance(resume_status, dict) else None,
+                "attempt_id": resume_status.get("attempt_id") if isinstance(resume_status, dict) else None,
+                "fence": resume_status.get("fence") if isinstance(resume_status, dict) else None,
+                "context": resume_context,
+            },
+        }
+
+    recovery_response = invoke_with_credential(
+        binary,
+        ["recovery", "list", "--project", project, "--limit", "100", "--socket", str(socket_path), "--json"],
+        cwd=root,
+        credential=credential,
+    )
+    recovery_data = envelope_data(recovery_response, command="recovery list")
+    obligations = recovery_data.get("items", recovery_data.get("obligations", []))
+    obligation = find_object(
+        obligations,
+        lambda item: item.get("attempt_id") == attempt_id and item.get("state") == "unresolved",
+    )
+
+    reservation_response = invoke_with_credential(
+        binary,
+        [
+            "reservation", "list", "--project", project, "--owner", actor,
+            "--work", fixture["work_id"], "--status", "active", "--limit", "100",
+            "--socket", str(socket_path), "--json",
+        ],
+        cwd=root,
+        credential=credential,
+    )
+    reservation_data = envelope_data(reservation_response, command="reservation list")
+    reservations = reservation_data.get("items", reservation_data.get("reservations", []))
+    reservation = find_object(
+        reservations,
+        lambda item: item.get("attempt_id") == attempt_id and item.get("state") == "active",
+    )
+
+    # The temporary authorization permits claim and readback only. A same-fence
+    # release could succeed and mutate a current attempt, so this harness does
+    # not issue a mutating request to manufacture a stale-fence response.
+    stale_fence_response = None
+    deadline_ms = claim.get("deadline_unix_ms")
+    deadline_crossed = (
+        type(service_exited_at_unix_ms) is int
+        and type(deadline_ms) is int
+        and type(service_restart_unix_ms) is int
+        and service_exited_at_unix_ms < deadline_ms <= service_restart_unix_ms
+    )
+    authority_readback = {
+        "actor_id": authority.get("actor_id"),
+        "role": authority.get("role"),
+        "authority_granted": authority.get("role") == "agent",
+        "readback_command": authority.get("readback_command"),
+        "authenticated": authority.get("authenticated") is True,
+    }
+    attempt_match = (
+        isinstance(attempt_after_restart, dict)
+        and attempt_after_restart.get("attempt_id") == attempt_id
+        and attempt_after_restart.get("fence") == fence
+        and attempt_after_restart.get("current") is True
+    )
+    recovery_obligation = obligation
+    resource_reservation = reservation
+    stale_fence_rejected = False
+    assertions = {
+        "agent_authority_readback": authority_readback,
+        "deadline_crossed_while_service_stopped": deadline_crossed,
+        "service_restarted_after_deadline": deadline_crossed,
+        "same_attempt_and_fence_current_after_restart": attempt_match,
+        "attempt_expiry_pending_after_restart": (
+            isinstance(attempt_after_restart, dict)
+            and attempt_after_restart.get("phase") == "expiry_pending"
+        ),
+        "unresolved_recovery_obligation_readback": (
+            isinstance(recovery_obligation, dict)
+            and recovery_obligation.get("attempt_id") == attempt_id
+            and recovery_obligation.get("state") == "unresolved"
+        ),
+        "active_resource_reservation_readback": (
+            isinstance(resource_reservation, dict)
+            and resource_reservation.get("attempt_id") == attempt_id
+            and resource_reservation.get("state") == "active"
+        ),
+        "stale_fence_rejected": stale_fence_rejected,
+    }
+    complete = all(
+        (value.get("role") == "agent" and value.get("authority_granted") is True)
+        if key == "agent_authority_readback"
+        else value
+        for key, value in assertions.items()
+    )
+    return {
+        "status": "pass" if complete else "fail",
+        "attempted": True,
+        "authorized_agent": authority_readback.get("authority_granted") is True,
+        "actor_role": authority_readback.get("role"),
+        "project_id": project,
+        "work_id": fixture["work_id"],
+        "session_id": fixture["session_id"],
+        "harness_id": fixture["harness_id"],
+        "actor_id": actor,
+        "agent_authority_readback": authority_readback,
+        "attempt_id": attempt_id,
+        "fence": fence,
+        "deadline_unix_ms": deadline_ms,
+        "service_exited_at_unix_ms": service_exited_at_unix_ms,
+        "service_restart_unix_ms": service_restart_unix_ms,
+        "deadline_crossed_while_service_stopped": deadline_crossed,
+        "service_restarted_after_deadline": deadline_crossed,
+        "attempt_after_restart": attempt_after_restart,
+        "attempt_state_after_restart": attempt_after_restart.get("phase") if attempt_after_restart else None,
+        "restart_disposition_readback": attempt_after_restart,
+        "recovery_obligation_readback": assertions["unresolved_recovery_obligation_readback"],
+        "recovery_obligation": recovery_obligation,
+        "resource_ownership_active_after_restart": assertions["active_resource_reservation_readback"],
+        "resource_reservation": resource_reservation,
+        "stale_fence_rejected": stale_fence_rejected,
+        "stale_fence_response": stale_fence_response,
+        "stale_fence_request": None,
+        "assertions": assertions,
+        "stale_fence_probe": "not_run; authorization permits claim/readback only",
+        "reason": None if complete else "post-restart readbacks did not prove every V10 recovery requirement; no mutating stale-fence request was authorized",
+    }
+
+
 def json_contains_field(value: object, field: str, expected: object) -> bool:
     if isinstance(value, dict):
         return value.get(field) == expected or any(
@@ -888,6 +1621,7 @@ def client(
     active_process_lock: threading.Lock | None = None,
     active_process_max: list[int] | None = None,
     admission_stopped: threading.Event | None = None,
+    credential: str | None = None,
 ) -> dict | None:
     if args[:1] == ["status"]:
         command = [args[0], project, *args[1:]]
@@ -904,10 +1638,16 @@ def client(
         # accepted by the direct command parser but dispatches the project ID
         # as the requested work ID over the service boundary.
         command = [args[0], args[1], *args[2:], "--project", project]
+    elif args[:2] == ["agent", "resume"]:
+        command = list(args)
     else:
         raise ValueError(f"unsupported production-client command shape: {args!r}")
     args = [*command, "--socket", str(socket_path), "--json"]
     if active_processes is None:
+        if credential is not None:
+            return invoke_with_credential(
+                binary, args, cwd=cwd, credential=credential, timeout=timeout
+            )
         return invoke(binary, args, cwd=cwd, timeout=timeout)
     if active_process_lock is None:
         raise ValueError("tracked clients require their registry lock")
@@ -920,10 +1660,13 @@ def client(
         # later shutdown snapshot appear in its active-process count.
         if admission_stopped is not None and admission_stopped.is_set():
             return None
+        child_environment = sanitized_environment()
+        if credential is not None:
+            child_environment["BOREAL_CREDENTIAL"] = credential
         process = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=sanitized_environment(),
+            env=child_environment,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -948,7 +1691,12 @@ def client(
         with active_process_lock:
             active_processes.pop(process.pid, None)
     completed = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
-    envelope = parse_envelope(completed)
+    try:
+        envelope = parse_envelope(completed)
+    except RuntimeError:
+        if credential is not None:
+            raise RuntimeError("credentialed service client returned an invalid response") from None
+        raise
     return {
         "exit_code": process.returncode,
         "envelope": envelope,
@@ -977,12 +1725,20 @@ def wait_for_socket(socket_path: Path, process: subprocess.Popen[str]) -> None:
 
 
 def compile_clock_shim(root: Path) -> tuple[Path | None, str | None]:
-    if platform.system() != "Darwin":
-        return None, "fake realtime clock interposition is implemented only for macOS"
+    operating_system = platform.system()
+    if operating_system == "Darwin":
+        output = root / "libboreal_fake_clock.dylib"
+        flags = ["-dynamiclib", "-fPIC", "-O2"]
+        libraries = []
+    elif operating_system == "Linux":
+        output = root / "libboreal_fake_clock.so"
+        flags = ["-shared", "-fPIC", "-O2"]
+        libraries = ["-ldl"]
+    else:
+        return None, f"fake realtime clock interposition is unsupported on {operating_system}"
     cc = os.environ.get("CC", "cc")
-    output = root / "libboreal_fake_clock.dylib"
     completed = subprocess.run(
-        [cc, "-dynamiclib", "-fPIC", "-O2", str(SHIM_SOURCE), "-o", str(output)],
+        [cc, *flags, str(SHIM_SOURCE), "-o", str(output), *libraries],
         env=sanitized_environment(),
         text=True,
         capture_output=True,
@@ -991,6 +1747,20 @@ def compile_clock_shim(root: Path) -> tuple[Path | None, str | None]:
     if completed.returncode != 0:
         return None, f"could not compile fake clock shim: {completed.stderr.strip()}"
     return output, None
+
+
+def configure_clock_environment(environment: dict[str, str], shim: Path | None) -> str | None:
+    """Enable the process-local clock shim for the service only."""
+    if shim is None:
+        return None
+    variable = {
+        "Darwin": "DYLD_INSERT_LIBRARIES",
+        "Linux": "LD_PRELOAD",
+    }.get(platform.system())
+    if variable is None:
+        return None
+    environment[variable] = str(shim)
+    return variable
 
 
 def ready_status(
@@ -1152,6 +1922,379 @@ def run_saturation(
         "normal_client_active_when_control_responded": active_at_control_response > 0,
         "control_overlapped_normal_client_interval": overlapping_normal_clients > 0,
     }
+
+
+def aggregate_control_samples(samples: list[dict], budget: dict) -> dict:
+    """Aggregate a bounded set of approved control samples without hiding gaps."""
+    sample_count = budget.get("sample_count")
+    interval_ms = budget.get("interval_ms")
+    target_ms = budget.get("target_ms")
+    max_sample_ms = budget.get("max_sample_ms")
+    statistic = budget.get("statistic")
+    valid_budget = (
+        type(sample_count) is int
+        and sample_count > 0
+        and type(interval_ms) is int
+        and interval_ms > 0
+        and type(target_ms) in (int, float)
+        and math.isfinite(target_ms)
+        and target_ms > 0
+        and type(max_sample_ms) in (int, float)
+        and math.isfinite(max_sample_ms)
+        and max_sample_ms > 0
+        and statistic == "p95"
+    )
+    latencies = [
+        sample.get("latency_ms")
+        for sample in samples
+        if isinstance(sample, dict)
+        and type(sample.get("latency_ms")) in (int, float)
+        and math.isfinite(sample["latency_ms"])
+    ]
+    ordered = sorted(latencies)
+    p95 = ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)] if ordered else None
+    maximum = max(ordered) if ordered else None
+    cadence_tolerance_ms = min(50.0, max(5.0, interval_ms * 0.05)) if valid_budget else None
+
+    def cadence_matches(index: int, sample: dict) -> bool:
+        started_ns = sample.get("started_at_monotonic_ns")
+        window_ns = sample.get("sample_window_started_monotonic_ns")
+        scheduled_ns = sample.get("scheduled_at_monotonic_ns")
+        lag_ms = sample.get("cadence_lag_ms")
+        expected_scheduled_ns = (
+            window_ns + index * interval_ms * 1_000_000
+            if type(window_ns) is int and valid_budget
+            else None
+        )
+        if (
+            type(started_ns) is not int
+            or type(window_ns) is not int
+            or scheduled_ns != expected_scheduled_ns
+            or type(lag_ms) not in (int, float)
+            or not math.isfinite(lag_ms)
+            or abs(lag_ms - (started_ns - scheduled_ns) / 1_000_000.0) > 0.001
+            or abs(lag_ms) > cadence_tolerance_ms
+            or sample.get("cadence_tolerance_ms") != cadence_tolerance_ms
+            or sample.get("cadence_within_tolerance") is not True
+        ):
+            return False
+        if index == 0:
+            return sample.get("actual_interval_ms") is None
+        previous = samples[index - 1]
+        previous_ns = previous.get("started_at_monotonic_ns") if isinstance(previous, dict) else None
+        actual_interval_ms = sample.get("actual_interval_ms")
+        expected_interval_ms = (
+            (started_ns - previous_ns) / 1_000_000.0
+            if type(previous_ns) is int
+            else None
+        )
+        return (
+            type(actual_interval_ms) in (int, float)
+            and math.isfinite(actual_interval_ms)
+            and expected_interval_ms is not None
+            and abs(actual_interval_ms - expected_interval_ms) <= 0.001
+            and abs(actual_interval_ms - interval_ms) <= cadence_tolerance_ms
+        )
+
+    sample_contract_complete = (
+        valid_budget
+        and len(samples) == sample_count
+        and len(latencies) == sample_count
+        and all(
+            sample.get("index") == index
+            and sample.get("scheduled_after_window_start_ms") == index * interval_ms
+            and type(sample.get("started_at_monotonic_ns")) is int
+            and sample["started_at_monotonic_ns"] > 0
+            and cadence_matches(index, sample)
+            and sample.get("response_received") is True
+            and type(sample.get("normal_clients_active_at_request_start")) is int
+            and sample["normal_clients_active_at_request_start"] > 0
+            and type(sample.get("normal_clients_active_at_response")) is int
+            and sample["normal_clients_active_at_response"] > 0
+            for index, sample in enumerate(samples)
+        )
+    )
+    return {
+        "status": "pass"
+        if sample_contract_complete and p95 <= target_ms and maximum <= max_sample_ms
+        else "fail",
+        "sample_count": len(samples),
+        "sample_count_target": sample_count,
+        "interval_ms": interval_ms,
+        "cadence_tolerance_ms": cadence_tolerance_ms,
+        "statistic": statistic,
+        "latency_ms": p95,
+        "max_latency_ms": maximum,
+        "target_ms": target_ms,
+        "max_sample_ms": max_sample_ms,
+        "latency_within_target": p95 is not None and p95 <= target_ms,
+        "samples_complete": sample_contract_complete,
+        "samples": samples,
+    }
+
+
+def run_multi_sample_control_probe(
+    binary: Path,
+    socket_path: Path,
+    project: str,
+    root: Path,
+    *,
+    worker_count: int,
+    budget: dict,
+) -> dict:
+    """Sample control progress while real read-only clients keep saturating the service."""
+    sample_count = budget.get("sample_count")
+    interval_ms = budget.get("interval_ms")
+    if type(worker_count) is not int or worker_count <= 0 or worker_count > 64:
+        raise ValueError("approved control worker_count must be between 1 and 64")
+    if type(sample_count) is not int or sample_count <= 0 or sample_count > 100:
+        raise ValueError("approved control sample_count must be between 1 and 100")
+    if type(interval_ms) is not int or interval_ms <= 0:
+        raise ValueError("approved control interval_ms must be positive")
+
+    stop_workers = threading.Event()
+    state_lock = threading.Lock()
+    active_processes: dict[int, subprocess.Popen[str]] = {}
+    active_process_max = [0]
+    workload_results: list[dict] = []
+    worker_iterations = [0 for _ in range(worker_count)]
+
+    def worker(index: int) -> None:
+        while not stop_workers.is_set():
+            iteration = worker_iterations[index]
+            worker_iterations[index] += 1
+            request_started = time.perf_counter()
+            request_args = (
+                ["status", "--limit", "8", "--offset", "0"]
+                if iteration % 2 == 0
+                else ["work", "show", "dispatch-smoke-seed"]
+            )
+            try:
+                response = client(
+                    binary,
+                    socket_path,
+                    project,
+                    request_args,
+                    cwd=root,
+                    timeout=15.0,
+                    active_processes=active_processes,
+                    active_process_lock=state_lock,
+                    active_process_max=active_process_max,
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                response = {
+                    "exit_code": None,
+                    "envelope": {"error": client_error_details(error)},
+                    "client_process_started_at": request_started,
+                    "client_process_completed_at": time.perf_counter(),
+                }
+            if response is None:
+                break
+            with state_lock:
+                workload_results.append(
+                    {
+                        "worker": index,
+                        "request_kind": request_args[0]
+                        if request_args[0] == "status"
+                        else "work_show",
+                        "started_at": response.get("client_process_started_at", request_started),
+                        "completed_at": response.get("client_process_completed_at", time.perf_counter()),
+                        "exit_code": response.get("exit_code"),
+                        "error": (response.get("envelope") or {}).get("error"),
+                    }
+                )
+            stop_workers.wait(0.005)
+
+    def current_active_processes() -> int:
+        with state_lock:
+            return sum(process.poll() is None for process in active_processes.values())
+
+    samples: list[dict] = []
+    saw_typed_busy = False
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = [pool.submit(worker, index) for index in range(worker_count)]
+        try:
+            startup_deadline = time.perf_counter() + 5.0
+            while time.perf_counter() < startup_deadline:
+                with state_lock:
+                    saw_typed_busy = saw_typed_busy or any(
+                        (item.get("error") or {}).get("code") == "service_busy"
+                        and "dispatch queue is full"
+                        in str((item.get("error") or {}).get("message", "")).lower()
+                        for item in workload_results
+                    )
+                if saw_typed_busy and current_active_processes() > 0:
+                    break
+                time.sleep(0.005)
+
+            sample_window_started_ns = time.monotonic_ns()
+            sample_window_started = sample_window_started_ns / 1_000_000_000.0
+            cadence_tolerance_ms = min(50.0, max(5.0, interval_ms * 0.05))
+            cadence_tolerance_ns = int(cadence_tolerance_ms * 1_000_000)
+            interval_ns = interval_ms * 1_000_000
+            previous_started_ns = None
+            for index in range(sample_count):
+                scheduled_ns = sample_window_started_ns + index * interval_ns
+                while time.monotonic_ns() < scheduled_ns:
+                    remaining = (scheduled_ns - time.monotonic_ns()) / 1_000_000_000.0
+                    time.sleep(min(0.001, max(0.0, remaining)))
+                now_ns = time.monotonic_ns()
+                if now_ns > scheduled_ns + cadence_tolerance_ns:
+                    with state_lock:
+                        active_at_missed_sample = sum(
+                            process.poll() is None for process in active_processes.values()
+                        )
+                        full_before = sum(
+                            (item.get("error") or {}).get("code") == "service_busy"
+                            and "dispatch queue is full"
+                            in str((item.get("error") or {}).get("message", "")).lower()
+                            and item["completed_at"] <= time.perf_counter()
+                            for item in workload_results
+                        )
+                    samples.append(
+                        {
+                            "index": index,
+                            "scheduled_after_window_start_ms": index * interval_ms,
+                            "sample_window_started_monotonic_ns": sample_window_started_ns,
+                            "scheduled_at_monotonic_ns": scheduled_ns,
+                            "started_at_monotonic_ns": None,
+                            "cadence_lag_ms": round((now_ns - scheduled_ns) / 1_000_000.0, 3),
+                            "actual_interval_ms": None,
+                            "cadence_tolerance_ms": cadence_tolerance_ms,
+                            "cadence_within_tolerance": False,
+                            "latency_ms": None,
+                            "response_received": False,
+                            "error": {"code": "missed_approved_sample_cadence"},
+                            "normal_clients_active_at_request_start": active_at_missed_sample,
+                            "normal_clients_active_at_response": active_at_missed_sample,
+                            "dispatch_full_responses_before_request": full_before,
+                            "overlapped_normal_clients": active_at_missed_sample > 0,
+                        }
+                    )
+                    continue
+                with state_lock:
+                    full_before = sum(
+                        (item.get("error") or {}).get("code") == "service_busy"
+                        and "dispatch queue is full"
+                        in str((item.get("error") or {}).get("message", "")).lower()
+                        and item["completed_at"] <= time.perf_counter()
+                        for item in workload_results
+                    )
+                active_at_start = current_active_processes()
+                control = client(
+                    binary,
+                    socket_path,
+                    project,
+                    ["status", "--limit", "1", "--offset", "0"],
+                    cwd=root,
+                    timeout=30.0,
+                    active_processes=active_processes,
+                    active_process_lock=state_lock,
+                    active_process_max=active_process_max,
+                )
+                control_started_ns = (control or {}).get("client_process_started_monotonic_ns")
+                control_completed_ns = (control or {}).get("client_process_completed_monotonic_ns")
+                raw_error = (control or {}).get("envelope", {}).get("error")
+                error = raw_error or {}
+                active_at_response = current_active_processes()
+                latency_ms = (
+                    (control_completed_ns - control_started_ns) / 1_000_000.0
+                    if type(control_started_ns) is int and type(control_completed_ns) is int
+                    else None
+                )
+                cadence_lag_ms = (
+                    (control_started_ns - scheduled_ns) / 1_000_000.0
+                    if type(control_started_ns) is int
+                    else None
+                )
+                actual_interval_ms = (
+                    (control_started_ns - previous_started_ns) / 1_000_000.0
+                    if type(control_started_ns) is int and type(previous_started_ns) is int
+                    else None
+                )
+                cadence_within_tolerance = (
+                    cadence_lag_ms is not None
+                    and abs(cadence_lag_ms) <= cadence_tolerance_ms
+                    and (
+                        previous_started_ns is None
+                        or (
+                            actual_interval_ms is not None
+                            and abs(actual_interval_ms - interval_ms) <= cadence_tolerance_ms
+                        )
+                    )
+                )
+                if type(control_started_ns) is int:
+                    previous_started_ns = control_started_ns
+                samples.append(
+                    {
+                        "index": index,
+                        "scheduled_after_window_start_ms": index * interval_ms,
+                        "sample_window_started_monotonic_ns": sample_window_started_ns,
+                        "scheduled_at_monotonic_ns": scheduled_ns,
+                        "started_at_monotonic_ns": control_started_ns,
+                        "cadence_lag_ms": round(cadence_lag_ms, 3)
+                        if cadence_lag_ms is not None
+                        else None,
+                        "actual_interval_ms": round(actual_interval_ms, 3)
+                        if actual_interval_ms is not None
+                        else None,
+                        "cadence_tolerance_ms": cadence_tolerance_ms,
+                        "cadence_within_tolerance": cadence_within_tolerance,
+                        "latency_ms": round(latency_ms, 3) if latency_ms is not None else None,
+                        "response_received": bool(
+                            control
+                            and control.get("exit_code") == 0
+                            and raw_error is None
+                        ),
+                        "error": error or None,
+                        "normal_clients_active_at_request_start": active_at_start,
+                        "normal_clients_active_at_response": active_at_response,
+                        "dispatch_full_responses_before_request": full_before,
+                        "overlapped_normal_clients": active_at_start > 0
+                        or active_at_response > 0,
+                    }
+                )
+            end = time.perf_counter()
+        finally:
+            stop_workers.set()
+        for future in futures:
+            future.result(timeout=30.0)
+
+    errors: dict[tuple[str | None, str], int] = {}
+    for item in workload_results:
+        error = item.get("error") or {}
+        if error:
+            key = (error.get("code"), str(error.get("message", "")))
+            errors[key] = errors.get(key, 0) + 1
+    error_details = [
+        {"code": code, "message": message, "count": count}
+        for (code, message), count in sorted(errors.items(), key=lambda item: (item[0][0] or "", item[0][1]))
+    ]
+    saw_typed_busy = any(
+        item["code"] == "service_busy"
+        and "dispatch queue is full" in item["message"].lower()
+        for item in error_details
+    )
+    aggregate = aggregate_control_samples(samples, budget)
+    return {
+        **aggregate,
+        "control_response": {
+            "response_received": aggregate["samples_complete"],
+            "latency_ms": aggregate["latency_ms"],
+            "response_count": aggregate["sample_count"],
+        },
+        "worker_count": worker_count,
+        "normal_requests": len(workload_results),
+        "normal_elapsed_ms": round((end - sample_window_started) * 1000.0, 3),
+        "normal_max_in_flight_client_processes": active_process_max[0],
+        "typed_service_busy_observed": saw_typed_busy,
+        "typed_service_busy_error_details": [
+            item for item in error_details if item["code"] == "service_busy"
+        ],
+        "normal_error_details": error_details,
+        "production_boundary": "separate bwrk clients over the Unix service socket",
+        "saturation_scope": "approved mixed status/work-show pump; queue depth is not directly observed",
+    }
     assertions["passed"] = all(assertions.values())
     return {
         "normal_requests": count,
@@ -1201,7 +2344,7 @@ def run_fake_clock_probe(
     if not offset_supported:
         return {
             "status": "unavailable",
-            "reason": "macOS fake clock shim was not available",
+            "reason": "the runner's supported realtime clock shim was not available",
         }
 
     created = client(
@@ -1402,6 +2545,9 @@ def run_stop_recovery_probe(
     *,
     worker_count: int = 32,
     requests_per_worker: int = 8,
+    agent_fixture: dict | None = None,
+    clock_file: Path | None = None,
+    fake_clock_supported: bool = False,
 ) -> dict:
     """Exercise SIGTERM drain and durable operation readback across restart.
 
@@ -1420,6 +2566,16 @@ def run_stop_recovery_probe(
     max_active_client_processes = [0]
     requests_started = 0
     completed_requests = 0
+    agent_claim = None
+    clock_offset_ms = 0
+    attempt_recovery = {
+        "status": "unavailable",
+        "attempted": False,
+        "authorized_agent": False,
+        "actor_id": None,
+        "agent_authority_readback": None,
+        "reason": "no owner-approved disposable Agent fixture was supplied",
+    }
 
     def one_request(index: int, iteration: int) -> dict | None:
         nonlocal requests_started, completed_requests
@@ -1498,6 +2654,18 @@ def run_stop_recovery_probe(
     try:
         wait_for_socket(socket_path, service)
         ready_status(binary, socket_path, project, root)
+        if agent_fixture is not None:
+            if not fake_clock_supported or clock_file is None:
+                attempt_recovery["reason"] = (
+                    "the authorized Agent fixture requires the supported process-local realtime clock shim"
+                )
+            else:
+                agent_claim = claim_disposable_agent_attempt(
+                    binary,
+                    socket_path,
+                    root,
+                    agent_fixture,
+                )
         before = client(binary, socket_path, project, ["status", "--limit", "1", "--offset", "0"], cwd=root)
         revision = before["envelope"].get("revision")
         if not isinstance(revision, int):
@@ -1562,10 +2730,29 @@ def run_stop_recovery_probe(
 
         # Restart on the same SQLite file before retrying or interpreting an
         # uncertain delivery. This readback is the gate that permits any retry.
+        if agent_claim is not None and clock_file is not None and fake_clock_supported:
+            stopped_at = stop.get("service_exited_at_unix_ms")
+            deadline = agent_claim.get("deadline_unix_ms")
+            if type(stopped_at) is int and type(deadline) is int and stopped_at < deadline:
+                clock_offset_ms = max(0, deadline - time.time_ns() // 1_000_000 + 1000)
+                clock_file.write_text(f"{clock_offset_ms}\n", encoding="ascii")
         restarted = start_service(binary, database, socket_path, root, env)
         try:
             wait_for_socket(socket_path, restarted)
             ready_status(binary, socket_path, project, root)
+            if agent_claim is not None and agent_fixture is not None:
+                restart_at = time.time_ns() // 1_000_000 + clock_offset_ms
+                attempt_recovery = read_disposable_agent_recovery(
+                    binary,
+                    socket_path,
+                    database,
+                    root,
+                    agent_fixture,
+                    agent_claim,
+                    service_exited_at_unix_ms=stop.get("service_exited_at_unix_ms"),
+                    service_restart_unix_ms=restart_at,
+                )
+                attempt_recovery["claim_readback"] = agent_claim.get("claim_readback")
             readback = client(
                 binary,
                 socket_path,
@@ -1627,6 +2814,8 @@ def run_stop_recovery_probe(
                 cwd=root,
             )
         finally:
+            if clock_file is not None and fake_clock_supported:
+                clock_file.write_text("0\n", encoding="ascii")
             restart_stop = stop_service(restarted, socket_path)
 
         mutation_error = mutation["envelope"].get("error") or {}
@@ -1806,37 +2995,11 @@ def run_stop_recovery_probe(
             "status": status,
             "drain_and_readback_observed": drain_and_readback_observed,
             "attempt_stop_recovery": {
-                "status": "unavailable",
-                "attempted": False,
-                "authorized_agent": False,
-                "actor_role": None,
-                "attempt_id": None,
-                "fence": None,
+                **attempt_recovery,
+                "actor_role": attempt_recovery.get("actor_role"),
                 "attempt_stop_observed": False,
-                "restart_disposition_readback": False,
-                "attempt_after_restart": None,
-                "recovery_obligation": None,
-                "resource_reservation": None,
-                "stale_fence_response": None,
-                "reason": "the environment owner has not supplied an authorized Agent credential; the harness does not create a substitute Agent identity",
             },
-            "deadline_recovery": {
-                "status": "unavailable",
-                "attempted": False,
-                "actor_id": None,
-                "agent_authority_readback": None,
-                "deadline_unix_ms": None,
-                "service_restart_unix_ms": None,
-                "attempt_id": None,
-                "fence": None,
-                "deadline_crossed_while_service_stopped": False,
-                "service_restarted_after_deadline": False,
-                "attempt_after_restart": None,
-                "recovery_obligation": None,
-                "resource_reservation": None,
-                "stale_fence_response": None,
-                "reason": "the environment owner has not supplied an authorized Agent credential; the harness does not create a substitute Agent identity",
-            },
+            "deadline_recovery": attempt_recovery,
             "configuration": {
                 "dispatch_workers": 4,
                 "dispatch_capacity": 32,
@@ -1912,6 +3075,16 @@ def main() -> int:
         "--agent-cli-sha256",
         help="sha256:<hex> from an independent trusted build record; required with --agent-input",
     )
+    parser.add_argument(
+        "--disposable-agent-authorization",
+        type=Path,
+        help="owner-approved repository JSON artifact allowing one temporary Agent fixture",
+    )
+    parser.add_argument(
+        "--control-budget",
+        type=Path,
+        help="owner-approved repository JSON artifact for multi-sample typed control latency",
+    )
     parser.add_argument("--control-latency-budget-ms", type=float)
     parser.add_argument("--control-latency-budget-source")
     parser.add_argument("--output", type=Path)
@@ -1930,8 +3103,34 @@ def main() -> int:
         parser.error(f"binary does not exist: {binary}")
     if args.agent_input is not None and not args.full_v10:
         parser.error("--agent-input requires --full-v10")
+    if args.disposable_agent_authorization is not None and not args.full_v10:
+        parser.error("--disposable-agent-authorization requires --full-v10")
+    if args.control_budget is not None and not args.full_v10:
+        parser.error("--control-budget requires --full-v10")
+    if args.agent_input is not None and args.disposable_agent_authorization is not None:
+        parser.error("--agent-input and --disposable-agent-authorization select different Agent fixtures")
     if (args.agent_input is None) != (args.agent_cli_sha256 is None):
         parser.error("--agent-input and --agent-cli-sha256 must be supplied together")
+
+    control_budget_document = None
+    control_budget_ref = {"path": None, "sha256": None}
+    control_budget = None
+    if args.control_budget is not None:
+        control_budget_document, control_budget_ref = load_approved_artifact(
+            args.control_budget,
+            schema=V10_CONTROL_BUDGET_SCHEMA,
+        )
+        validate_control_budget(control_budget_document)
+        control_budget = {**control_budget_document, "status": "approved"}
+
+    disposable_agent_authorization = None
+    disposable_agent_authorization_ref = {"path": None, "sha256": None}
+    if args.disposable_agent_authorization is not None:
+        disposable_agent_authorization, disposable_agent_authorization_ref = load_approved_artifact(
+            args.disposable_agent_authorization,
+            schema=V10_DISPOSABLE_AGENT_SCHEMA,
+        )
+        validate_disposable_agent_authorization(disposable_agent_authorization)
 
     # This opt-in gate runs before any synthetic or production workload probe.
     # A bad descriptor, credential, authority, session, claim, or resume
@@ -1946,6 +3145,10 @@ def main() -> int:
         else None
     )
 
+    control_samples = None
+    control_probe = None
+    disposable_agent_fixture = None
+    disposable_agent_setup = None
     with tempfile.TemporaryDirectory(prefix="boreal-dispatch-admission-smoke-") as directory:
         root = Path(directory)
         database = root / ".boreal" / "boreal.sqlite"
@@ -2007,31 +3210,20 @@ def main() -> int:
         service_env = sanitized_environment()
         if shim is not None:
             service_env["BOREAL_FAKE_CLOCK_FILE"] = str(clock_file)
-            service_env["DYLD_INSERT_LIBRARIES"] = str(shim)
-        service = subprocess.Popen(
-            [
-                str(binary),
-                "service",
-                "run",
-                "--db",
-                str(database),
-                "--socket",
-                str(socket_path),
-                # Deliberately use the small 1/2 configuration for this
-                # admission smoke. It does not model default or full-load
-                # production capacity.
-                "--dispatch-workers",
-                str(SMOKE_DISPATCH_WORKERS),
-                "--dispatch-capacity",
-                str(SMOKE_DISPATCH_CAPACITY),
-                "--json",
-            ],
-            cwd=root,
-            env=service_env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            configure_clock_environment(service_env, shim)
+        service = start_service(
+            binary,
+            database,
+            socket_path,
+            root,
+            service_env,
+            # Deliberately use the small 1/2 configuration for this
+            # admission smoke. It does not model default or full-load
+            # production capacity.
+            dispatch_workers=SMOKE_DISPATCH_WORKERS,
+            dispatch_capacity=SMOKE_DISPATCH_CAPACITY,
         )
+        setup_service_stop = None
         try:
             wait_for_socket(socket_path, service)
             ready_status(binary, socket_path, "dispatch-smoke-project", root)
@@ -2042,6 +3234,16 @@ def main() -> int:
                 root,
                 args.normal_requests,
             )
+            if control_budget is not None:
+                control_probe = run_multi_sample_control_probe(
+                    binary,
+                    socket_path,
+                    "dispatch-smoke-project",
+                    root,
+                    worker_count=32,
+                    budget=control_budget,
+                )
+                control_samples = control_probe.get("samples")
             if shim is None:
                 clock = {"status": "unavailable", "reason": shim_reason}
             else:
@@ -2056,25 +3258,125 @@ def main() -> int:
                     )
                 except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                     clock = {"status": "fail", "reason": str(error)}
+                finally:
+                    clock_file.write_text("0\n", encoding="ascii")
+
+            if disposable_agent_authorization is not None:
+                if shim is None:
+                    disposable_agent_setup = {
+                        "status": "unavailable",
+                        "attempted": False,
+                        "reason": "the supported process-local realtime clock shim is unavailable; no Agent credential was created",
+                        "authorization_artifact": disposable_agent_authorization_ref,
+                    }
+                else:
+                    source_version_id, config_identity = provision_disposable_agent_work(
+                        binary,
+                        database,
+                        socket_path,
+                        root,
+                        operator_actor="dispatch-smoke-validator",
+                        operator_session="dispatch-smoke-operator-session",
+                    )
+                    # auth key/grant/show and the project auth database access
+                    # are direct-mode commands. Stop the service cleanly before
+                    # they use SQLite's owner lock, then restart for the normal
+                    # service-backed smoke and readbacks.
+                    setup_service_stop = stop_service(service, socket_path)
+                    if setup_service_stop.get("status") != "pass":
+                        raise RuntimeError(
+                            "service did not stop cleanly before disposable Agent enrollment"
+                        )
+                    service = None
+                    try:
+                        disposable_agent_fixture = setup_disposable_agent_fixture(
+                            binary,
+                            database,
+                            root,
+                            disposable_agent_authorization,
+                            disposable_agent_authorization_ref,
+                            source_version_id=source_version_id,
+                            config_identity=config_identity,
+                        )
+                    except Exception:
+                        # If setup failed after a grant committed, make a
+                        # best-effort revision-bound revocation before the
+                        # temporary project directory is removed.
+                        try:
+                            revoke_disposable_agent_fixture(
+                                binary, database, root, {"granted": True}
+                            )
+                        except (OSError, RuntimeError, subprocess.SubprocessError):
+                            pass
+                        raise
+                    service = start_service(
+                        binary,
+                        database,
+                        socket_path,
+                        root,
+                        service_env,
+                        dispatch_workers=SMOKE_DISPATCH_WORKERS,
+                        dispatch_capacity=SMOKE_DISPATCH_CAPACITY,
+                    )
+                    wait_for_socket(socket_path, service)
+                    ready_status(binary, socket_path, "dispatch-smoke-project", root)
+                    disposable_agent_setup = {
+                        "status": "ready",
+                        "attempted": False,
+                        "project_id": disposable_agent_fixture["project_id"],
+                        "actor_id": disposable_agent_fixture["actor_id"],
+                        "role": disposable_agent_fixture["role"],
+                        "session_id": disposable_agent_fixture["session_id"],
+                        "harness_id": disposable_agent_fixture["harness_id"],
+                        "work_id": disposable_agent_fixture["work_id"],
+                        "source_version_id": source_version_id,
+                        "authorization_artifact": disposable_agent_authorization_ref,
+                        "credential_exposed": False,
+                    }
         finally:
-            stop = stop_service(service, socket_path)
+            if service is not None:
+                stop = stop_service(service, socket_path)
+            else:
+                stop = setup_service_stop or {
+                    "status": "unavailable",
+                    "reason": "the smoke service was not running when closeout began",
+                    "exit_code": None,
+                    "socket_removed": not socket_path.exists(),
+                }
 
         if args.full_v10:
-            stop_recovery = run_stop_recovery_probe(
-                binary,
-                database,
-                socket_path,
-                "dispatch-smoke-project",
-                root,
-                service_env,
-                "dispatch-smoke-validator",
-                "dispatch-smoke-operator-session",
-            )
+            stop_recovery = {}
+            try:
+                stop_recovery = run_stop_recovery_probe(
+                    binary,
+                    database,
+                    socket_path,
+                    "dispatch-smoke-project",
+                    root,
+                    service_env,
+                    "dispatch-smoke-validator",
+                    "dispatch-smoke-operator-session",
+                    agent_fixture=disposable_agent_fixture,
+                    clock_file=clock_file,
+                    fake_clock_supported=shim is not None,
+                )
+            finally:
+                if disposable_agent_fixture is not None and disposable_agent_fixture.get("granted"):
+                    cleanup = revoke_disposable_agent_fixture(
+                        binary, database, root, disposable_agent_fixture
+                    )
+                    if stop_recovery:
+                        stop_recovery["disposable_agent_cleanup"] = cleanup
             stop_recovery["agent_input_binding"] = agent_input_binding or {
                 "status": "unavailable",
                 "attempted": False,
                 "authorized_agent": False,
                 "reason": "no owner-supplied Agent input descriptor was provided",
+            }
+            stop_recovery["disposable_agent_setup"] = disposable_agent_setup or {
+                "status": "unavailable",
+                "attempted": False,
+                "reason": "no owner-approved disposable Agent authorization was supplied; no credential was created",
             }
         else:
             stop_recovery = {
@@ -2089,10 +3391,27 @@ def main() -> int:
         if item["code"] == "service_busy"
         and "dispatch queue is full" in item["message"].lower()
     ]
+    if control_probe is not None:
+        typed_queue_busy_details.extend(
+            item
+            for item in control_probe.get("typed_service_busy_error_details", [])
+            if item.get("code") == "service_busy"
+            and "dispatch queue is full" in str(item.get("message", "")).lower()
+        )
     typed_busy_observed = bool(typed_queue_busy_details)
-    budget_status = "not_approved"
-    control_latency_ms = saturation["control"]["latency_ms"]
-    budget_target_ms = args.control_latency_budget_ms
+    budget_status = "approved" if control_budget_document is not None else "not_approved"
+    control_latency_ms = (
+        control_probe.get("latency_ms")
+        if control_probe is not None
+        else saturation["control"]["latency_ms"]
+    )
+    budget_target_ms = (
+        control_budget_document.get("target_ms")
+        if control_budget_document is not None
+        else args.control_latency_budget_ms
+    )
+    max_latency_ms = control_probe.get("max_latency_ms") if control_probe is not None else None
+    max_sample_target_ms = control_budget_document.get("max_sample_ms") if control_budget_document else None
     control_within_candidate_target = (
         None
         if budget_target_ms is None
@@ -2110,6 +3429,10 @@ def main() -> int:
     deadline_authority = deadline_evidence.get("agent_authority_readback")
     deadline_attempt_after = deadline_evidence.get("attempt_after_restart")
     deadline_proof_fields = {
+        "project_id": deadline_evidence.get("project_id"),
+        "work_id": deadline_evidence.get("work_id"),
+        "session_id": deadline_evidence.get("session_id"),
+        "harness_id": deadline_evidence.get("harness_id"),
         "actor_id": deadline_evidence.get("actor_id"),
         "agent_authority_readback": deadline_authority,
         "deadline_unix_ms": deadline_evidence.get("deadline_unix_ms"),
@@ -2144,13 +3467,20 @@ def main() -> int:
         ),
         "resource_reservation": resource_reservation,
         "stale_fence_rejected": (
-            isinstance(stale_fence_response, dict)
-            and type(stale_fence_response.get("exit_code")) is int
-            and stale_fence_response.get("exit_code", 0) != 0
-            and (stale_fence_response.get("envelope") or {}).get("error", {}).get("code")
-            == "stale_fence"
+            stale_fence_request_matches_claim(
+                deadline_evidence.get("stale_fence_request"),
+                project_id=deadline_evidence.get("project_id"),
+                work_id=deadline_evidence.get("work_id"),
+                actor_id=deadline_evidence.get("actor_id"),
+                attempt_id=deadline_evidence.get("attempt_id"),
+                fence=deadline_evidence.get("fence"),
+            )
+            and stale_fence_response_matches_request(
+                stale_fence_response, deadline_evidence.get("stale_fence_request")
+            )
         ),
         "stale_fence_response": stale_fence_response,
+        "stale_fence_request": deadline_evidence.get("stale_fence_request"),
     }
     deadline_complete = (
         isinstance(deadline_authority, dict)
@@ -2219,6 +3549,10 @@ def main() -> int:
     attempt_stop_proof_fields = {
         "authorized_agent": authorized_agent,
         "agent_authority_readback": attempt_authority,
+        "project_id": attempt_recovery.get("project_id"),
+        "work_id": attempt_recovery.get("work_id"),
+        "session_id": attempt_recovery.get("session_id"),
+        "harness_id": attempt_recovery.get("harness_id"),
         "actor_id": attempt_actor_id,
         "actor_role": attempt_authority.get("role") if isinstance(attempt_authority, dict) else None,
         "attempt_id": attempt_id,
@@ -2234,6 +3568,7 @@ def main() -> int:
         "recovery_obligation": attempt_recovery.get("recovery_obligation"),
         "resource_reservation": attempt_recovery.get("resource_reservation"),
         "stale_fence_response": attempt_recovery.get("stale_fence_response"),
+        "stale_fence_request": attempt_recovery.get("stale_fence_request"),
         "agent_input_binding": agent_input_binding,
     }
     attempt_stop_complete = (
@@ -2262,13 +3597,18 @@ def main() -> int:
         and attempt_stop_proof_fields["resource_reservation"].get("attempt_id")
         == attempt_stop_proof_fields["attempt_id"]
         and attempt_stop_proof_fields["resource_reservation"].get("state") == "active"
-        and isinstance(attempt_stop_proof_fields["stale_fence_response"], dict)
-        and type(attempt_stop_proof_fields["stale_fence_response"].get("exit_code")) is int
-        and attempt_stop_proof_fields["stale_fence_response"].get("exit_code", 0) != 0
-        and (attempt_stop_proof_fields["stale_fence_response"].get("envelope") or {})
-        .get("error", {})
-        .get("code")
-        == "stale_fence"
+        and stale_fence_request_matches_claim(
+            attempt_stop_proof_fields["stale_fence_request"],
+            project_id=attempt_stop_proof_fields["project_id"],
+            work_id=attempt_stop_proof_fields["work_id"],
+            actor_id=attempt_stop_proof_fields["actor_id"],
+            attempt_id=attempt_stop_proof_fields["attempt_id"],
+            fence=attempt_stop_proof_fields["fence"],
+        )
+        and stale_fence_response_matches_request(
+            attempt_stop_proof_fields["stale_fence_response"],
+            attempt_stop_proof_fields["stale_fence_request"],
+        )
     )
     first_sigterm = stop_recovery.get("sigterm_drain") or {}
     restarted_service_stop = stop_recovery.get("same_database_restart") or {}
@@ -2313,7 +3653,13 @@ def main() -> int:
         else "not_run"
     )
     restart_readback = stop_recovery.get("restart_readback_before_retry") or {}
-    typed_control_complete = False
+    typed_control_complete = (
+        control_budget_document is not None
+        and control_probe is not None
+        and control_probe.get("status") == "pass"
+        and saturation["dispatch_full_responses"] > 0
+        and typed_busy_observed
+    )
     stop_component_complete = (
         attempt_stop_complete
         and first_stop_observed
@@ -2437,6 +3783,10 @@ def main() -> int:
             "status": (
                 "fail"
                 if full_mode and typed_control_failed
+                else "pass"
+                if full_mode and typed_control_complete
+                else "fail"
+                if full_mode and control_budget_document is not None
                 else "not_approved"
                 if full_mode
                 else "not_run"
@@ -2450,17 +3800,37 @@ def main() -> int:
                 "dispatch_full_error_details"
             ],
             "observed_error_codes": saturation["normal_error_codes"],
-            "control_response": saturation["control"],
+            "control_response": (
+                control_probe["control_response"]
+                if control_probe is not None
+                else saturation["control"]
+            ),
+            "control_samples": control_samples,
             "budget_status": budget_status,
             "latency_ms": control_latency_ms,
             "target_ms": budget_target_ms,
+            "max_latency_ms": max_latency_ms,
+            "max_sample_ms": max_sample_target_ms,
             "latency_within_target": control_within_candidate_target,
+            "max_latency_within_target": (
+                None
+                if max_latency_ms is None or max_sample_target_ms is None
+                else max_latency_ms <= max_sample_target_ms
+            ),
+            "approved_budget": control_budget_document,
+            "approval_artifact": control_budget_ref,
             "latency_target_status": "unverified_candidate"
-            if budget_target_ms is not None
+            if budget_target_ms is not None and control_budget_document is None
+            else "approved"
+            if control_budget_document is not None
             else "not_supplied",
             "reason": (
                 "no dispatch-queue-full response with exact service_busy type was observed"
                 if typed_control_failed
+                else None
+                if typed_control_complete
+                else "approved control samples did not satisfy the typed queue and latency acceptance checks"
+                if control_budget_document is not None
                 else "typed queue response was observed, but no independently approved control-latency budget is available"
             ),
         },
@@ -2523,9 +3893,13 @@ def main() -> int:
         "components": components,
         "control_latency_budget": {
             "status": budget_status,
-            "source": args.control_latency_budget_source,
-            "target_ms": args.control_latency_budget_ms,
-            "approval_artifact": {"path": None, "sha256": None},
+            "source": control_budget_document.get("source") if control_budget_document else args.control_latency_budget_source,
+            "target_ms": budget_target_ms,
+            "sample_count": control_budget_document.get("sample_count") if control_budget_document else None,
+            "interval_ms": control_budget_document.get("interval_ms") if control_budget_document else None,
+            "statistic": control_budget_document.get("statistic") if control_budget_document else None,
+            "max_sample_ms": max_sample_target_ms,
+            "approval_artifact": control_budget_ref,
         },
         "identity": identity,
         "report_path": str(args.output.resolve()),
@@ -2565,7 +3939,10 @@ def main() -> int:
             "scope": "supplemental create/claim and expiry-display check in the disposable project; not part of the normal saturation batch",
             "probe": clock,
         },
-        "queue_and_control": saturation,
+        "queue_and_control": {
+            **saturation,
+            "approved_control_probe": control_probe,
+        },
         "service_stop_observation": stop,
         "stop_recovery": stop_recovery,
         "dispatch_smoke_status": dispatch_smoke_status,

@@ -67,6 +67,54 @@ class ForensicAuditTests(unittest.TestCase):
         self.assertEqual(status, "skip")
         self.assertEqual(reason, "no Unix socket")
 
+    def test_stale_fence_evidence_must_bind_the_previously_issued_claim_token(self) -> None:
+        request = {
+            "command": "agent release",
+            "invocation_id": "invocation-1",
+            "project_id": "project-1",
+            "work_id": "task-1",
+            "actor_id": "agent-1",
+            "attempt_id": "attempt-1",
+            "fence": 7,
+            "argv": [
+                "agent", "release", "--project", "project-1", "--work", "task-1",
+                "--actor", "agent-1", "--attempt", "attempt-1", "--fence", "7",
+            ],
+            "previously_issued_by_claim": True,
+            "claim_readback": {"attempt_id": "attempt-1", "fence": 7},
+            "current_attempt_readback": {"attempt_id": "attempt-2", "fence": 8},
+        }
+        expected = {
+            "project_id": "project-1",
+            "work_id": "task-1",
+            "actor_id": "agent-1",
+            "attempt_id": "attempt-2",
+            "fence": 8,
+        }
+        self.assertTrue(RUNNER.stale_fence_request_matches_claim(request, **expected))
+        response = {
+            "invocation_id": "invocation-1",
+            "argv": request["argv"],
+            "exit_code": 2,
+            "envelope": {"error": {"code": "stale_fence"}},
+        }
+        self.assertTrue(RUNNER.stale_fence_response_matches_request(response, request))
+        self.assertFalse(
+            RUNNER.stale_fence_response_matches_request(
+                {**response, "invocation_id": "different-invocation"}, request
+            )
+        )
+        self.assertFalse(
+            RUNNER.stale_fence_request_matches_claim(
+                {**request, "fence": 99}, **expected
+            )
+        )
+        self.assertFalse(
+            RUNNER.stale_fence_request_matches_claim(
+                {**request, "previously_issued_by_claim": False}, **expected
+            )
+        )
+
     def test_nonzero_without_skip_is_a_failure(self) -> None:
         status, reason = RUNNER.classify_output("", "assertion failed", 1, timed_out=False)
         self.assertEqual(status, "fail")
@@ -102,6 +150,10 @@ class ForensicAuditTests(unittest.TestCase):
             "contract_version": "1",
             "source": "measured-control-budget",
             "target_ms": 20,
+            "max_sample_ms": 1000,
+            "sample_count": 4,
+            "interval_ms": 500,
+            "statistic": "p95",
         }
         payload = (json.dumps(document, sort_keys=True) + "\n").encode()
         with tempfile.NamedTemporaryFile(dir=ROOT, suffix=".json", delete=False) as artifact:
@@ -129,17 +181,92 @@ class ForensicAuditTests(unittest.TestCase):
         finally:
             artifact_path.unlink(missing_ok=True)
 
+    def test_typed_control_requires_all_approved_overlapping_samples(self) -> None:
+        budget = {
+            "status": "approved",
+            "source": "synthetic-review-fixture",
+            "target_ms": 20,
+            "max_sample_ms": 1000,
+            "sample_count": 4,
+            "interval_ms": 500,
+            "statistic": "p95",
+        }
+        samples = [
+            {
+                "index": index,
+                "scheduled_after_window_start_ms": index * 500,
+                "started_at_monotonic_ns": 10_000_000 + index * 500_000_000,
+                "sample_window_started_monotonic_ns": 10_000_000,
+                "scheduled_at_monotonic_ns": 10_000_000 + index * 500_000_000,
+                "cadence_lag_ms": 0.0,
+                "actual_interval_ms": None if index == 0 else 500.0,
+                "cadence_tolerance_ms": 25.0,
+                "cadence_within_tolerance": True,
+                "latency_ms": latency,
+                "response_received": True,
+                "normal_clients_active_at_request_start": 3,
+                "normal_clients_active_at_response": 2,
+            }
+            for index, latency in enumerate((2.0, 4.0, 5.0, 8.0))
+        ]
+        component = {
+            "status": "pass",
+            "complete": True,
+            "dispatch_queue_full_observed": True,
+            "typed_service_busy_observed": True,
+            "typed_service_busy_error_details": [
+                {"code": "service_busy", "message": "dispatch queue is full"}
+            ],
+            "control_response": {"response_received": True, "latency_ms": 8.0},
+            "control_samples": samples,
+            "latency_ms": 8.0,
+            "max_latency_ms": 8.0,
+            "target_ms": 20,
+            "max_latency_within_target": True,
+            "latency_within_target": True,
+        }
+        common = {
+            "report": {},
+            "budget": budget,
+            "budget_document": {**budget, "decision_id": "decision-1"},
+            "profile_document": None,
+        }
+        self.assertTrue(RUNNER.v10_component_evidence_complete("typed_control", component, **common))
+        samples[2]["started_at_monotonic_ns"] += 40_000_000
+        samples[2]["cadence_lag_ms"] = 40.0
+        samples[2]["actual_interval_ms"] = 540.0
+        samples[3]["started_at_monotonic_ns"] += 40_000_000
+        samples[3]["cadence_lag_ms"] = 40.0
+        samples[3]["actual_interval_ms"] = 500.0
+        self.assertFalse(RUNNER.v10_component_evidence_complete("typed_control", component, **common))
+        samples[2]["started_at_monotonic_ns"] -= 40_000_000
+        samples[2]["cadence_lag_ms"] = 0.0
+        samples[2]["actual_interval_ms"] = 500.0
+        samples[3]["started_at_monotonic_ns"] -= 40_000_000
+        samples[3]["cadence_lag_ms"] = 0.0
+        samples[2]["normal_clients_active_at_response"] = 0
+        self.assertFalse(RUNNER.v10_component_evidence_complete("typed_control", component, **common))
+        samples[2]["normal_clients_active_at_response"] = 2
+        samples[3]["started_at_monotonic_ns"] = samples[2]["started_at_monotonic_ns"]
+        self.assertFalse(RUNNER.v10_component_evidence_complete("typed_control", component, **common))
+
     def test_deadline_pass_requires_a_nonempty_readback_agent_identity(self) -> None:
         component = {
             "status": "pass",
             "complete": True,
+            "project_id": "project-1",
+            "work_id": "task-1",
+            "session_id": "session-1",
+            "harness_id": "harness-1",
             "actor_id": None,
-            "attempt_id": "attempt-1",
-            "fence": 1,
+            "attempt_id": "attempt-2",
+            "fence": 2,
             "agent_authority_readback": {
                 "actor_id": None,
                 "role": "agent",
                 "authority_granted": True,
+                "authenticated": True,
+                "readback_command": "agent resume",
             },
             "deadline_crossed_while_service_stopped": True,
             "service_restarted_after_deadline": True,
@@ -147,23 +274,57 @@ class ForensicAuditTests(unittest.TestCase):
             "service_exited_at_unix_ms": 9,
             "service_restart_unix_ms": 11,
             "attempt_after_restart": {
-                "attempt_id": "attempt-1",
+                "attempt_id": "attempt-2",
                 "fence": True,
                 "current": True,
+                "currentness_readback": {
+                    "command": "agent resume",
+                    "work_id": "task-1",
+                    "attempt_id": "attempt-2",
+                    "fence": 2,
+                    "context": {
+                        "mode": "resume",
+                        "project_id": "project-1",
+                        "actor_id": "agent-1",
+                        "session_id": "session-1",
+                        "harness_id": "harness-1",
+                    },
+                },
             },
             "attempt_state_after_restart": "expiry_pending",
             "recovery_obligation_readback": True,
             "recovery_obligation": {
                 "obligation_id": "obligation-1",
-                "attempt_id": "attempt-1",
+                "attempt_id": "attempt-2",
                 "state": "unresolved",
             },
             "resource_ownership_active_after_restart": True,
-            "resource_reservation": {"attempt_id": "attempt-1", "state": "active"},
+            "resource_reservation": {"attempt_id": "attempt-2", "state": "active"},
             "stale_fence_rejected": True,
             "stale_fence_response": {
+                "invocation_id": "invocation-1",
+                "argv": [
+                    "agent", "release", "--project", "project-1", "--work", "task-1",
+                    "--actor", "agent-1", "--attempt", "attempt-1", "--fence", "1",
+                ],
                 "exit_code": 2,
                 "envelope": {"error": {"code": "stale_fence"}},
+            },
+            "stale_fence_request": {
+                "command": "agent release",
+                "invocation_id": "invocation-1",
+                "project_id": "project-1",
+                "work_id": "task-1",
+                "actor_id": "agent-1",
+                "attempt_id": "attempt-1",
+                "fence": 1,
+                "argv": [
+                    "agent", "release", "--project", "project-1", "--work", "task-1",
+                    "--actor", "agent-1", "--attempt", "attempt-1", "--fence", "1",
+                ],
+                "previously_issued_by_claim": True,
+                "claim_readback": {"attempt_id": "attempt-1", "fence": 1},
+                "current_attempt_readback": {"attempt_id": "attempt-2", "fence": 2},
             },
         }
         common = {
@@ -180,7 +341,7 @@ class ForensicAuditTests(unittest.TestCase):
         self.assertFalse(
             RUNNER.v10_component_evidence_complete("durable_deadline", component, **common)
         )
-        component["attempt_after_restart"]["fence"] = 1
+        component["attempt_after_restart"]["fence"] = 2
         self.assertTrue(
             RUNNER.v10_component_evidence_complete("durable_deadline", component, **common)
         )

@@ -65,6 +65,95 @@ def json_at(value: Any, *path: str) -> Any:
     return value
 
 
+def stale_fence_request_matches_claim(
+    request: Any,
+    *,
+    project_id: Any,
+    work_id: Any,
+    actor_id: Any,
+    attempt_id: Any,
+    fence: Any,
+) -> bool:
+    if not isinstance(request, dict):
+        return False
+    claim = request.get("claim_readback")
+    current = request.get("current_attempt_readback")
+    stale_attempt_id = request.get("attempt_id")
+    stale_fence = request.get("fence")
+    expected_argv = [
+        "agent", "release", "--project", project_id,
+        "--work", work_id, "--actor", actor_id,
+        "--attempt", stale_attempt_id, "--fence", str(stale_fence),
+    ]
+    return (
+        request.get("command") == "agent release"
+        and isinstance(request.get("invocation_id"), str)
+        and bool(request.get("invocation_id"))
+        and request.get("argv") == expected_argv
+        and request.get("project_id") == project_id
+        and request.get("work_id") == work_id
+        and request.get("actor_id") == actor_id
+        and isinstance(stale_attempt_id, str)
+        and bool(stale_attempt_id)
+        and type(stale_fence) is int
+        and stale_fence > 0
+        and stale_attempt_id != attempt_id
+        and type(fence) is int
+        and fence > stale_fence
+        and request.get("previously_issued_by_claim") is True
+        and isinstance(claim, dict)
+        and claim.get("attempt_id") == stale_attempt_id
+        and type(claim.get("fence")) is int
+        and claim.get("fence") == stale_fence
+        and isinstance(current, dict)
+        and current.get("attempt_id") == attempt_id
+        and type(current.get("fence")) is int
+        and current.get("fence") == fence
+    )
+
+
+def stale_fence_response_matches_request(response: Any, request: Any) -> bool:
+    return (
+        isinstance(response, dict)
+        and isinstance(request, dict)
+        and isinstance(request.get("invocation_id"), str)
+        and bool(request.get("invocation_id"))
+        and response.get("invocation_id") == request.get("invocation_id")
+        and response.get("argv") == request.get("argv")
+        and type(response.get("exit_code")) is int
+        and response.get("exit_code", 0) != 0
+        and json_at(response, "envelope", "error", "code") == "stale_fence"
+    )
+
+
+def canonical_agent_resume_matches(
+    readback: Any,
+    *,
+    project_id: Any,
+    work_id: Any,
+    actor_id: Any,
+    session_id: Any,
+    harness_id: Any,
+    attempt_id: Any,
+    fence: Any,
+) -> bool:
+    if not isinstance(readback, dict) or readback.get("command") != "agent resume":
+        return False
+    context = readback.get("context")
+    return (
+        isinstance(context, dict)
+        and context.get("mode") == "resume"
+        and context.get("project_id") == project_id
+        and context.get("actor_id") == actor_id
+        and context.get("session_id") == session_id
+        and context.get("harness_id") == harness_id
+        and readback.get("work_id") == work_id
+        and readback.get("attempt_id") == attempt_id
+        and type(readback.get("fence")) is int
+        and readback.get("fence") == fence
+    )
+
+
 def approved_json_contract(reference: Any, *, schema: str) -> dict[str, Any] | None:
     if not isinstance(reference, dict):
         return None
@@ -74,8 +163,12 @@ def approved_json_contract(reference: Any, *, schema: str) -> dict[str, Any] | N
         return None
     if Path(path_value).is_absolute() or not isinstance(digest, str):
         return None
-    path = (ROOT / path_value).resolve()
+    supplied_path = ROOT / path_value
     try:
+        metadata = supplied_path.lstat()
+        if not metadata.st_mode or supplied_path.is_symlink() or not supplied_path.is_file():
+            return None
+        path = supplied_path.resolve(strict=True)
         path.relative_to(ROOT.resolve())
         payload = path.read_bytes()
         document = json.loads(payload)
@@ -119,6 +212,7 @@ def v10_component_evidence_complete(
         obligation = component.get("recovery_obligation")
         reservation = component.get("resource_reservation")
         stale = component.get("stale_fence_response")
+        stale_request = component.get("stale_fence_request")
         attempt_id = component.get("attempt_id")
         fence = component.get("fence")
         actor_id = component.get("actor_id")
@@ -133,6 +227,8 @@ def v10_component_evidence_complete(
             and authority.get("actor_id") == actor_id
             and authority.get("role") == "agent"
             and authority.get("authority_granted") is True
+            and authority.get("authenticated") is True
+            and authority.get("readback_command") == "agent resume"
             and component.get("deadline_crossed_while_service_stopped") is True
             and component.get("service_restarted_after_deadline") is True
             and type(component.get("deadline_unix_ms")) is int
@@ -145,6 +241,16 @@ def v10_component_evidence_complete(
             and type(attempt.get("fence")) is int
             and attempt.get("fence") == fence
             and attempt.get("current") is True
+            and canonical_agent_resume_matches(
+                attempt.get("currentness_readback"),
+                project_id=component.get("project_id"),
+                work_id=component.get("work_id"),
+                actor_id=actor_id,
+                session_id=component.get("session_id"),
+                harness_id=component.get("harness_id"),
+                attempt_id=attempt_id,
+                fence=fence,
+            )
             and component.get("attempt_state_after_restart") == "expiry_pending"
             and component.get("recovery_obligation_readback") is True
             and isinstance(obligation, dict)
@@ -157,10 +263,15 @@ def v10_component_evidence_complete(
             and reservation.get("attempt_id") == attempt_id
             and reservation.get("state") == "active"
             and component.get("stale_fence_rejected") is True
-            and isinstance(stale, dict)
-            and type(stale.get("exit_code")) is int
-            and stale.get("exit_code") != 0
-            and json_at(stale, "envelope", "error", "code") == "stale_fence"
+            and stale_fence_request_matches_claim(
+                stale_request,
+                project_id=component.get("project_id"),
+                work_id=component.get("work_id"),
+                actor_id=actor_id,
+                attempt_id=attempt_id,
+                fence=fence,
+            )
+            and stale_fence_response_matches_request(stale, stale_request)
         )
     if name == "full_load":
         if profile_document is None:
@@ -274,8 +385,31 @@ def v10_component_evidence_complete(
             return False
         latency = component.get("latency_ms")
         target = budget.get("target_ms")
+        max_latency = component.get("max_latency_ms")
+        max_sample_ms = budget.get("max_sample_ms")
+        sample_count = budget_document.get("sample_count")
+        interval_ms = budget_document.get("interval_ms")
+        cadence_tolerance_ms = (
+            min(50.0, max(5.0, interval_ms * 0.05))
+            if type(interval_ms) is int and interval_ms > 0
+            else None
+        )
+        statistic = budget_document.get("statistic")
+        samples = component.get("control_samples")
         queue_error = component.get("typed_service_busy_error_details")
         control_response = component.get("control_response")
+        sample_latencies = [
+            sample.get("latency_ms")
+            for sample in samples
+            if isinstance(sample, dict)
+            and finite_json_number(sample.get("latency_ms"))
+        ] if isinstance(samples, list) else []
+        ordered_latencies = sorted(sample_latencies)
+        sample_p95 = (
+            ordered_latencies[math.ceil(0.95 * len(ordered_latencies)) - 1]
+            if ordered_latencies
+            else None
+        )
         return (
             component.get("dispatch_queue_full_observed") is True
             and component.get("typed_service_busy_observed") is True
@@ -291,6 +425,74 @@ def v10_component_evidence_complete(
             and finite_json_number(latency)
             and finite_json_number(control_response.get("latency_ms"))
             and latency == control_response.get("latency_ms")
+            and type(sample_count) is int
+            and sample_count > 0
+            and type(interval_ms) is int
+            and interval_ms > 0
+            and statistic == "p95"
+            and budget_document.get("sample_count") == budget.get("sample_count")
+            and budget_document.get("interval_ms") == budget.get("interval_ms")
+            and budget_document.get("statistic") == budget.get("statistic")
+            and finite_json_number(max_sample_ms)
+            and max_sample_ms > 0
+            and budget_document.get("max_sample_ms") == max_sample_ms
+            and isinstance(samples, list)
+            and len(samples) == sample_count
+            and len(sample_latencies) == sample_count
+            and all(
+                isinstance(sample, dict)
+                and
+                sample.get("index") == index
+                and sample.get("scheduled_after_window_start_ms") == index * interval_ms
+                and type(sample.get("started_at_monotonic_ns")) is int
+                and sample["started_at_monotonic_ns"] > 0
+                and type(sample.get("sample_window_started_monotonic_ns")) is int
+                and type(sample.get("scheduled_at_monotonic_ns")) is int
+                and sample.get("scheduled_at_monotonic_ns")
+                == sample["sample_window_started_monotonic_ns"] + index * interval_ms * 1_000_000
+                and finite_json_number(sample.get("cadence_lag_ms"))
+                and abs(
+                    sample["cadence_lag_ms"]
+                    - (
+                        sample["started_at_monotonic_ns"]
+                        - sample["scheduled_at_monotonic_ns"]
+                    )
+                    / 1_000_000.0
+                ) <= 0.001
+                and abs(sample["cadence_lag_ms"]) <= cadence_tolerance_ms
+                and sample.get("cadence_tolerance_ms") == cadence_tolerance_ms
+                and sample.get("cadence_within_tolerance") is True
+                and (
+                    index == 0
+                    or (
+                        isinstance(samples[index - 1], dict)
+                        and type(samples[index - 1].get("started_at_monotonic_ns")) is int
+                        and sample["started_at_monotonic_ns"]
+                        > samples[index - 1]["started_at_monotonic_ns"]
+                        and finite_json_number(sample.get("actual_interval_ms"))
+                        and abs(
+                            sample["actual_interval_ms"]
+                            - (
+                                sample["started_at_monotonic_ns"]
+                                - samples[index - 1]["started_at_monotonic_ns"]
+                            )
+                            / 1_000_000.0
+                        ) <= 0.001
+                        and abs(sample["actual_interval_ms"] - interval_ms)
+                        <= cadence_tolerance_ms
+                    )
+                )
+                and (index != 0 or sample.get("actual_interval_ms") is None)
+                and sample.get("response_received") is True
+                and type(sample.get("normal_clients_active_at_request_start")) is int
+                and sample["normal_clients_active_at_request_start"] > 0
+                and type(sample.get("normal_clients_active_at_response")) is int
+                and sample["normal_clients_active_at_response"] > 0
+                for index, sample in enumerate(samples)
+            )
+            and latency == sample_p95
+            and finite_json_number(max_latency)
+            and max_latency == max(sample_latencies)
             and finite_json_number(target)
             and budget.get("status") == "approved"
             and budget.get("source") == budget_document.get("source")
@@ -299,6 +501,8 @@ def v10_component_evidence_complete(
             and target > 0
             and component.get("latency_within_target") is (latency <= target)
             and latency <= target
+            and component.get("max_latency_within_target") is (max_latency <= max_sample_ms)
+            and max_latency <= max_sample_ms
         )
     if name == "stop_recovery":
         attempt = component.get("attempt_stop_recovery")
@@ -323,6 +527,7 @@ def v10_component_evidence_complete(
         obligation = attempt.get("recovery_obligation")
         reservation = attempt.get("resource_reservation")
         stale = attempt.get("stale_fence_response")
+        stale_request = attempt.get("stale_fence_request")
         operation_data = readback.get("operation_data")
         operation = operation_data.get("operation") if isinstance(operation_data, dict) else None
         work_data = readback.get("work_data")
@@ -339,6 +544,8 @@ def v10_component_evidence_complete(
             and authority.get("actor_id") == actor_id
             and authority.get("role") == "agent"
             and authority.get("authority_granted") is True
+            and authority.get("authenticated") is True
+            and authority.get("readback_command") == "agent resume"
             and isinstance(attempt.get("attempt_id"), str)
             and bool(attempt.get("attempt_id"))
             and type(attempt.get("fence")) is int
@@ -355,6 +562,16 @@ def v10_component_evidence_complete(
             and disposition.get("fence") == attempt.get("fence")
             and disposition.get("phase") == "expiry_pending"
             and disposition.get("current") is True
+            and canonical_agent_resume_matches(
+                disposition.get("currentness_readback"),
+                project_id=attempt.get("project_id"),
+                work_id=attempt.get("work_id"),
+                actor_id=actor_id,
+                session_id=attempt.get("session_id"),
+                harness_id=attempt.get("harness_id"),
+                attempt_id=attempt.get("attempt_id"),
+                fence=attempt.get("fence"),
+            )
             and isinstance(obligation, dict)
             and isinstance(obligation.get("obligation_id"), str)
             and bool(obligation.get("obligation_id"))
@@ -363,10 +580,15 @@ def v10_component_evidence_complete(
             and isinstance(reservation, dict)
             and reservation.get("attempt_id") == attempt.get("attempt_id")
             and reservation.get("state") == "active"
-            and isinstance(stale, dict)
-            and type(stale.get("exit_code")) is int
-            and stale.get("exit_code") != 0
-            and json_at(stale, "envelope", "error", "code") == "stale_fence"
+            and stale_fence_request_matches_claim(
+                stale_request,
+                project_id=attempt.get("project_id"),
+                work_id=attempt.get("work_id"),
+                actor_id=actor_id,
+                attempt_id=attempt.get("attempt_id"),
+                fence=attempt.get("fence"),
+            )
+            and stale_fence_response_matches_request(stale, stale_request)
             and first_stop.get("signal") == "SIGTERM"
             and type(first_stop.get("exit_code")) is int
             and first_stop.get("exit_code") == 0
