@@ -915,8 +915,9 @@ def client(
     argv = [str(binary), *args]
     with active_process_lock:
         # The stop/recovery probe shares this lock with its SIGTERM admission
-        # boundary. A request either starts before the boundary and is
-        # included in the active-process snapshot, or is not started at all.
+        # boundary. A client either starts before the boundary and its outcome
+        # is collected, or is not started. Only clients still running at the
+        # later shutdown snapshot appear in its active-process count.
         if admission_stopped is not None and admission_stopped.is_set():
             return None
         process = subprocess.Popen(
