@@ -911,8 +911,7 @@ def stale_fence_request_matches_claim(
     stale_attempt_id = request.get("attempt_id")
     stale_fence = request.get("fence")
     expected_argv = [
-        "agent", "release", "--project", project_id,
-        "--work", work_id, "--actor", actor_id,
+        "agent", "release", work_id, "--project", project_id,
         "--attempt", stale_attempt_id, "--fence", str(stale_fence),
     ]
     return (
@@ -1954,7 +1953,7 @@ def aggregate_control_samples(samples: list[dict], budget: dict) -> dict:
     ordered = sorted(latencies)
     p95 = ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)] if ordered else None
     maximum = max(ordered) if ordered else None
-    cadence_tolerance_ms = min(50.0, max(5.0, interval_ms * 0.05)) if valid_budget else None
+    cadence_tolerance_ms = min(50.0, interval_ms * 0.05) if valid_budget else None
 
     def cadence_matches(index: int, sample: dict) -> bool:
         started_ns = sample.get("started_at_monotonic_ns")
@@ -2129,7 +2128,7 @@ def run_multi_sample_control_probe(
 
             sample_window_started_ns = time.monotonic_ns()
             sample_window_started = sample_window_started_ns / 1_000_000_000.0
-            cadence_tolerance_ms = min(50.0, max(5.0, interval_ms * 0.05))
+            cadence_tolerance_ms = min(50.0, interval_ms * 0.05)
             cadence_tolerance_ns = int(cadence_tolerance_ms * 1_000_000)
             interval_ns = interval_ms * 1_000_000
             previous_started_ns = None

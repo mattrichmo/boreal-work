@@ -254,7 +254,7 @@ stale-token gate stays incomplete.
 
 Approved control samples must also meet the actual cadence, not only their
 planned schedule. The harness records monotonic start times and accepts a
-maximum scheduling difference of 5% of the interval, capped at 50 ms and
-floored at 5 ms. If a sample misses its cadence window, it is recorded as
+maximum scheduling difference of 5% of the interval, capped at 50 ms. If a
+sample misses its cadence window, it is recorded as
 missed and later samples are not bunched to catch up. Either condition fails
 the approved control component.

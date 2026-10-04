@@ -77,8 +77,8 @@ class ForensicAuditTests(unittest.TestCase):
             "attempt_id": "attempt-1",
             "fence": 7,
             "argv": [
-                "agent", "release", "--project", "project-1", "--work", "task-1",
-                "--actor", "agent-1", "--attempt", "attempt-1", "--fence", "7",
+                "agent", "release", "task-1", "--project", "project-1",
+                "--attempt", "attempt-1", "--fence", "7",
             ],
             "previously_issued_by_claim": True,
             "claim_readback": {"attempt_id": "attempt-1", "fence": 7},
@@ -304,8 +304,8 @@ class ForensicAuditTests(unittest.TestCase):
             "stale_fence_response": {
                 "invocation_id": "invocation-1",
                 "argv": [
-                    "agent", "release", "--project", "project-1", "--work", "task-1",
-                    "--actor", "agent-1", "--attempt", "attempt-1", "--fence", "1",
+                    "agent", "release", "task-1", "--project", "project-1",
+                    "--attempt", "attempt-1", "--fence", "1",
                 ],
                 "exit_code": 2,
                 "envelope": {"error": {"code": "stale_fence"}},
@@ -319,8 +319,8 @@ class ForensicAuditTests(unittest.TestCase):
                 "attempt_id": "attempt-1",
                 "fence": 1,
                 "argv": [
-                    "agent", "release", "--project", "project-1", "--work", "task-1",
-                    "--actor", "agent-1", "--attempt", "attempt-1", "--fence", "1",
+                    "agent", "release", "task-1", "--project", "project-1",
+                    "--attempt", "attempt-1", "--fence", "1",
                 ],
                 "previously_issued_by_claim": True,
                 "claim_readback": {"attempt_id": "attempt-1", "fence": 1},

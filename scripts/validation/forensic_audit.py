@@ -81,8 +81,7 @@ def stale_fence_request_matches_claim(
     stale_attempt_id = request.get("attempt_id")
     stale_fence = request.get("fence")
     expected_argv = [
-        "agent", "release", "--project", project_id,
-        "--work", work_id, "--actor", actor_id,
+        "agent", "release", work_id, "--project", project_id,
         "--attempt", stale_attempt_id, "--fence", str(stale_fence),
     ]
     return (
@@ -390,7 +389,7 @@ def v10_component_evidence_complete(
         sample_count = budget_document.get("sample_count")
         interval_ms = budget_document.get("interval_ms")
         cadence_tolerance_ms = (
-            min(50.0, max(5.0, interval_ms * 0.05))
+            min(50.0, interval_ms * 0.05)
             if type(interval_ms) is int and interval_ms > 0
             else None
         )
