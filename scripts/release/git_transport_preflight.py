@@ -91,6 +91,9 @@ def run_preflight(remote: str, branch: str) -> int:
                 return 0
         print("REMOTE_REF_NOT_FOUND: command succeeded without the requested ref; no auth conclusion.")
         return 3
+    if result.returncode == 2 and not result.stdout.strip() and not result.stderr.strip():
+        print("REMOTE_REF_NOT_FOUND: no matching branch; no auth conclusion.")
+        return 3
 
     category = classify_failure(result.stderr)
     if category == "network_blocked_before_github":

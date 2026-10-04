@@ -1,6 +1,14 @@
+from contextlib import redirect_stdout
+from io import StringIO
+import subprocess
 import unittest
+from unittest.mock import patch
 
-from git_transport_preflight import classify_failure, _remote_is_plain_https_github
+from git_transport_preflight import (
+    _remote_is_plain_https_github,
+    classify_failure,
+    run_preflight,
+)
 
 
 class GitTransportPreflightTests(unittest.TestCase):
@@ -31,6 +39,41 @@ class GitTransportPreflightTests(unittest.TestCase):
         self.assertTrue(_remote_is_plain_https_github("https://github.com/org/repo.git"))
         self.assertFalse(_remote_is_plain_https_github("https://token@github.com/org/repo.git"))
         self.assertFalse(_remote_is_plain_https_github("https://example.com/org/repo.git"))
+
+    def test_absent_branch_is_not_reported_as_an_auth_failure(self):
+        results = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "https://github.com/org/repo.git\n", ""),
+            subprocess.CompletedProcess([], 2, "", ""),
+        ]
+        output = StringIO()
+        with patch("git_transport_preflight.subprocess.run", side_effect=results):
+            with redirect_stdout(output):
+                status = run_preflight("origin", "reconciliation")
+        self.assertEqual(status, 3)
+        self.assertIn("REMOTE_REF_NOT_FOUND", output.getvalue())
+        self.assertNotIn("credential failure", output.getvalue().lower())
+
+    def test_preflight_routes_proxy_block_to_escalated_transport(self):
+        results = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "https://github.com/org/repo.git\n", ""),
+            subprocess.CompletedProcess(
+                [],
+                128,
+                "",
+                "fatal: unable to access remote: Failed to connect to proxy port 8080",
+            ),
+        ]
+        output = StringIO()
+        with patch("git_transport_preflight.subprocess.run", side_effect=results):
+            with redirect_stdout(output):
+                status = run_preflight("origin", "reconciliation")
+        self.assertEqual(status, 4)
+        self.assertIn("NETWORK_BLOCKED_BEFORE_GITHUB", output.getvalue())
+        self.assertIn('sandbox_permissions: "require_escalated"', output.getvalue())
+        self.assertIn("not evidence of a GitHub credential failure", output.getvalue())
+        self.assertNotIn("invalid token", output.getvalue().lower())
 
 
 if __name__ == "__main__":
