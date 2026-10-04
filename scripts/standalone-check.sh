@@ -54,9 +54,15 @@ run_check() {
   echo "standalone check: FAILED — $label" >&2
 }
 
+run_rust_workspace_tests() {
+  local oracle_manifest="$CHECK_ROOT/production-oracle-manifest.txt"
+  python3 crates/domain/tests/generate_production_oracle_manifest.py --output "$oracle_manifest" || return
+  BOREAL_PRODUCTION_ORACLE_MANIFEST="$oracle_manifest" cargo test --workspace --locked --offline
+}
+
 run_check "contract fixtures" python3 project/spec/validate_contracts.py
 run_check "Rust formatting" cargo fmt --all -- --check
-run_check "Rust workspace tests" cargo test --workspace --locked --offline
+run_check "Rust workspace tests" run_rust_workspace_tests
 run_check "Rust workspace clippy" cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 run_check "TUI typecheck" npm run typecheck --prefix apps/tui
 run_check "TUI tests" npm test --prefix apps/tui

@@ -89,7 +89,7 @@ impl Directive {
         if self.safe_argv[0] != "bwrk" {
             return Err(DirectiveValidationError::UnsafeSafeArg);
         }
-        if !self.safe_argv.iter().any(|arg| *arg == "--json") {
+        if !self.safe_argv.contains(&"--json") {
             return Err(DirectiveValidationError::MissingJsonFlag);
         }
         if self.safe_argv.iter().any(|arg| !is_safe_arg(arg)) {
@@ -211,6 +211,75 @@ pub fn guide_checked(context: GuidanceContext<'_>) -> Result<Directive, Directiv
     Ok(directive)
 }
 
+/// Return a selected work item and its authoritative revision. Paginated reads
+/// must agree on the revision; a changing project is explicitly retried by the caller.
+pub fn guidance_subject(
+    store: &boreal_store::SqliteStore,
+    project: &boreal_domain::ProjectId,
+    actor: &boreal_domain::ActorContext,
+    session: Option<&str>,
+    at: boreal_domain::TimestampMs,
+    work_id: &str,
+) -> Result<(boreal_domain::Revision, crate::StatusWork), String> {
+    let mut offset = 0;
+    let mut revision = None;
+    loop {
+        let snapshot = crate::project_status_from_store_for_session(
+            store,
+            project,
+            actor,
+            session,
+            at,
+            crate::MAX_STATUS_ROWS,
+            offset,
+        )?;
+        if revision.is_some_and(|value| value != snapshot.project_revision) {
+            return Err("project changed while selecting guidance; refresh the snapshot".into());
+        }
+        revision = Some(snapshot.project_revision);
+        if snapshot
+            .diagnostics
+            .iter()
+            .any(|row| row.work_id == work_id)
+        {
+            return Err(
+                "selected work is quarantined; inspect its diagnostics before requesting guidance"
+                    .into(),
+            );
+        }
+        if let Some(item) = snapshot
+            .items
+            .iter()
+            .find(|item| item.work.id.as_str() == work_id)
+        {
+            return Ok((snapshot.project_revision, item.clone()));
+        }
+        match snapshot.next_offset() {
+            Some(next) if next > offset => offset = next,
+            _ => return Err("selected work is not present in this project".into()),
+        }
+    }
+}
+
+/// Guidance selects among already-authorized descriptors; status prose cannot
+/// authorize an action and imported workflow files are never executed.
+pub fn guided_action(item: &crate::StatusWork) -> Option<boreal_domain::actions::ActionKind> {
+    use boreal_domain::actions::ActionKind;
+    let actions = item.actions.as_ref()?;
+    let order = [
+        ActionKind::Claim,
+        ActionKind::AcceptAttempt,
+        ActionKind::StartAttempt,
+        ActionKind::FinishClose,
+        ActionKind::AttachEvidence,
+        ActionKind::Checkpoint,
+        ActionKind::Review,
+        ActionKind::Recover,
+        ActionKind::Inspect,
+    ];
+    order.into_iter().find(|kind| actions.allows(*kind))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,73 +380,4 @@ mod tests {
             Err(DirectiveValidationError::UnsupportedRunner)
         );
     }
-}
-
-/// Return a selected work item and its authoritative revision. Paginated reads
-/// must agree on the revision; a changing project is explicitly retried by the caller.
-pub fn guidance_subject(
-    store: &boreal_store::SqliteStore,
-    project: &boreal_domain::ProjectId,
-    actor: &boreal_domain::ActorContext,
-    session: Option<&str>,
-    at: boreal_domain::TimestampMs,
-    work_id: &str,
-) -> Result<(boreal_domain::Revision, crate::StatusWork), String> {
-    let mut offset = 0;
-    let mut revision = None;
-    loop {
-        let snapshot = crate::project_status_from_store_for_session(
-            store,
-            project,
-            actor,
-            session,
-            at,
-            crate::MAX_STATUS_ROWS,
-            offset,
-        )?;
-        if revision.is_some_and(|value| value != snapshot.project_revision) {
-            return Err("project changed while selecting guidance; refresh the snapshot".into());
-        }
-        revision = Some(snapshot.project_revision);
-        if snapshot
-            .diagnostics
-            .iter()
-            .any(|row| row.work_id == work_id)
-        {
-            return Err(
-                "selected work is quarantined; inspect its diagnostics before requesting guidance"
-                    .into(),
-            );
-        }
-        if let Some(item) = snapshot
-            .items
-            .iter()
-            .find(|item| item.work.id.as_str() == work_id)
-        {
-            return Ok((snapshot.project_revision, item.clone()));
-        }
-        match snapshot.next_offset() {
-            Some(next) if next > offset => offset = next,
-            _ => return Err("selected work is not present in this project".into()),
-        }
-    }
-}
-
-/// Guidance selects among already-authorized descriptors; status prose cannot
-/// authorize an action and imported workflow files are never executed.
-pub fn guided_action(item: &crate::StatusWork) -> Option<boreal_domain::actions::ActionKind> {
-    use boreal_domain::actions::ActionKind;
-    let actions = item.actions.as_ref()?;
-    let order = [
-        ActionKind::Claim,
-        ActionKind::AcceptAttempt,
-        ActionKind::StartAttempt,
-        ActionKind::FinishClose,
-        ActionKind::AttachEvidence,
-        ActionKind::Checkpoint,
-        ActionKind::Review,
-        ActionKind::Recover,
-        ActionKind::Inspect,
-    ];
-    order.into_iter().find(|kind| actions.allows(*kind))
 }

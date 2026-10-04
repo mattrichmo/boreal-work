@@ -124,9 +124,13 @@ impl SqliteStore {
             ));
         }
         validate_summary_request(request)?;
-        let replay_digest = canonical_summary_request(request)?;
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
+            // Normalize caller-generated time under the same write lock as
+            // replay admission, so overlapping retries share one identity.
+            let effective_request = self.summary_request_for_replay(request)?;
+            let request = &effective_request;
+            let replay_digest = canonical_summary_request(request)?;
             if let Some(existing) = self.preflight_operation_replay(
                 &request.project_id,
                 &request.operation_id,

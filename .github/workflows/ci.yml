@@ -19,7 +19,10 @@ jobs:
       - name: Check contracts
         run: python3 project/spec/validate_contracts.py
       - name: Test workspace
-        run: cargo test --workspace --locked
+        run: |
+          manifest="$RUNNER_TEMP/production-oracle-manifest.txt"
+          python3 crates/domain/tests/generate_production_oracle_manifest.py --output "$manifest"
+          BOREAL_PRODUCTION_ORACLE_MANIFEST="$manifest" cargo test --workspace --locked
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -81,3 +84,22 @@ jobs:
           --profile full
           --strict
           --online
+      - name: Upload full validation report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-validation-report-and-logs
+          if-no-files-found: ignore
+          path: |
+            scripts/validation/results/full-suite.latest.json
+            scripts/validation/results/full-suite.latest.md
+            scripts/validation/results/full-suite-*
+      - name: Add full validation report to step summary
+        if: always()
+        run: |
+          report="scripts/validation/results/full-suite.latest.md"
+          if [ -f "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Full validation report was not produced." >> "$GITHUB_STEP_SUMMARY"
+          fi

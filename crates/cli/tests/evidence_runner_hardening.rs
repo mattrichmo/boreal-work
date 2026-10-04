@@ -189,7 +189,7 @@ impl Fixture {
         assert_success(
             &run(
                 &self.root,
-                &vec![
+                &[
                     "init".to_owned(),
                     "--project".to_owned(),
                     PROJECT.to_owned(),

@@ -35,7 +35,7 @@ pub(crate) fn run(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResu
                     parsed
                         .options
                         .positionals
-                        .get(usize::from(parsed.options.project.is_none()) + 0)
+                        .get(usize::from(parsed.options.project.is_none()))
                         .map(String::as_str)
                 })
                 .ok_or_else(|| CliError::invalid("work history requires WORK_ID"))?,

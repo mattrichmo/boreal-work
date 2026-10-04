@@ -725,6 +725,68 @@ fn current_attempt_lifecycle_persists_each_mutation_and_replays_atomically() {
 }
 
 #[test]
+fn expiry_pending_fences_heartbeat_and_renewal_after_clock_rewind() {
+    let store = store();
+    base(&store);
+    attempt(&store, "a1", "w1", "s1", 1);
+    store
+        .execute_batch(
+            "UPDATE attempt
+             SET state = 'expiry_pending', lease_deadline = 'unix-ms:100',
+                 max_attempt_deadline = 'unix-ms:200', stop_requested_at = 'unix-ms:100'
+             WHERE attempt_id = 'a1' AND current = 1",
+        )
+        .expect("fixture enters durable expiry pending state");
+
+    let mut heartbeat = mutation(
+        "a1",
+        "w1",
+        1,
+        "op-expiry-pending-heartbeat",
+        "unix-ms:0",
+        AttemptPhase::ExpiryPending,
+        AttemptMutationKind::Heartbeat {
+            phase: Some("rewound-clock".into()),
+            tool: None,
+            process: None,
+        },
+    );
+    heartbeat.expected_lease_deadline = Some("unix-ms:100".into());
+    heartbeat.expected_hard_deadline = Some("unix-ms:200".into());
+    assert!(matches!(
+        store.apply_attempt_mutation(&heartbeat),
+        Err(StoreError::Conflict(message))
+            if message.contains("expiry recovery is pending")
+    ));
+
+    let mut renewal = mutation(
+        "a1",
+        "w1",
+        1,
+        "op-expiry-pending-renewal",
+        "unix-ms:0",
+        AttemptPhase::ExpiryPending,
+        AttemptMutationKind::RenewLease {
+            lease_deadline: "unix-ms:50".into(),
+        },
+    );
+    renewal.expected_lease_deadline = Some("unix-ms:100".into());
+    renewal.expected_hard_deadline = Some("unix-ms:200".into());
+    assert!(matches!(
+        store.apply_attempt_mutation(&renewal),
+        Err(StoreError::Conflict(message))
+            if message.contains("expiry recovery is pending")
+    ));
+
+    let pending = store.current_attempt("p1", "a1").unwrap();
+    assert_eq!(pending.phase, AttemptPhase::ExpiryPending);
+    assert_eq!(pending.lease_deadline, "unix-ms:100");
+    assert_eq!(pending.hard_deadline, "unix-ms:200");
+    assert_eq!(pending.last_heartbeat_at, None);
+    assert_eq!(pending.stop_requested_at.as_deref(), Some("unix-ms:100"));
+}
+
+#[test]
 fn fail_is_a_terminal_fenced_mutation_and_keeps_the_attempt_in_history() {
     let store = store();
     base(&store);

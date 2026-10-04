@@ -2,9 +2,9 @@
 //! version-bound plans; the store preserves source records and writes only
 //! append-only lineage or summary records.
 use boreal_store::{SqliteStore, V3MutationContext};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use crate::{ApplicationError, OperationResult, sha256_content_digest};
+use crate::{sha256_content_digest, ApplicationError, OperationResult};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaintenancePlan {
@@ -215,6 +215,10 @@ impl<'a> KnowledgeMaintenanceApplication<'a> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserves the public CLI-facing API whose plan and source identity are independently validated"
+    )]
     pub fn apply_compaction(
         &self,
         context: &V3MutationContext,

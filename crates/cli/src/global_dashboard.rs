@@ -314,7 +314,7 @@ fn terminate_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
-    let _ = signal::send_to_process(child.id(), signal::SIGTERM);
+    signal::send_to_process(child.id(), signal::SIGTERM);
     let deadline = Instant::now() + Duration::from_millis(750);
     while Instant::now() < deadline {
         if child.try_wait().ok().flatten().is_some() {
@@ -322,7 +322,7 @@ fn terminate_child(child: &mut Child) {
         }
         thread::sleep(Duration::from_millis(25));
     }
-    let _ = signal::send_to_process(child.id(), signal::SIGKILL);
+    signal::send_to_process(child.id(), signal::SIGKILL);
     let _ = child.wait();
 }
 
@@ -358,7 +358,7 @@ mod signal {
             PENDING.store(0, Ordering::SeqCst);
             let mut previous = [(0, 0); 2];
             for (slot, number) in previous.iter_mut().zip([SIGINT, SIGTERM]) {
-                let handler = unsafe { signal(number, record as usize) };
+                let handler = unsafe { signal(number, record as *const () as usize) };
                 if handler == SIGNAL_ERROR {
                     return Err(io::Error::last_os_error());
                 }

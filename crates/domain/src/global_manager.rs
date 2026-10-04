@@ -166,15 +166,18 @@ pub fn validate_item_parent(
     child: ManagementItemKind,
     parent: Option<ManagementItemKind>,
 ) -> Result<(), GlobalManagerDomainError> {
-    let valid = match (child, parent) {
-        (ManagementItemKind::Milestone, None) => true,
-        (ManagementItemKind::Task, None | Some(ManagementItemKind::Milestone)) => true,
-        (
-            ManagementItemKind::Subtask,
-            Some(ManagementItemKind::Task | ManagementItemKind::Subtask),
-        ) => true,
-        _ => false,
-    };
+    let valid = matches!(
+        (child, parent),
+        (ManagementItemKind::Milestone, None)
+            | (
+                ManagementItemKind::Task,
+                None | Some(ManagementItemKind::Milestone)
+            )
+            | (
+                ManagementItemKind::Subtask,
+                Some(ManagementItemKind::Task | ManagementItemKind::Subtask)
+            )
+    );
     if valid {
         Ok(())
     } else {

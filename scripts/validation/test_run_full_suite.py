@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,6 +44,62 @@ class RunCheckTests(unittest.TestCase):
             self.assertEqual(
                 (log_dir / "passing-check.stderr.log").read_text(encoding="utf-8").strip(),
                 "stderr",
+            )
+
+    def test_oracle_manifest_is_external_and_scoped_to_workspace_cargo(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="boreal-runner-test-") as directory:
+            log_dir = Path(directory)
+            manifest_paths: list[Path] = []
+            seen_environments: list[tuple[str, dict[str, str]]] = []
+
+            def fake_run(
+                command: list[str], **kwargs: dict[str, object]
+            ) -> subprocess.CompletedProcess[str]:
+                environment = kwargs["env"]
+                assert isinstance(environment, dict)
+                if command[0] == sys.executable:
+                    manifest = Path(command[-1])
+                    manifest_paths.append(manifest)
+                    seen_environments.append(("generator", environment))
+                    manifest.write_text("generated oracle manifest\n", encoding="utf-8")
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                if command[0] == "cargo":
+                    seen_environments.append(("cargo", environment))
+                    manifest = Path(environment[RUNNER.ORACLE_MANIFEST_ENV])
+                    self.assertTrue(manifest.is_file())
+                    self.assertNotEqual(manifest, RUNNER.ROOT)
+                    self.assertNotIn(RUNNER.ROOT.resolve(), manifest.resolve().parents)
+                    return subprocess.CompletedProcess(command, 0, "workspace tests passed\n", "")
+
+                seen_environments.append(("unrelated", environment))
+                self.assertNotIn(RUNNER.ORACLE_MANIFEST_ENV, environment)
+                return subprocess.CompletedProcess(command, 0, "unrelated check passed\n", "")
+
+            with (
+                patch.dict(os.environ, {RUNNER.ORACLE_MANIFEST_ENV: "ambient-stale-manifest"}),
+                patch.object(RUNNER.subprocess, "run", side_effect=fake_run),
+            ):
+                result = RUNNER.run_workspace_check(
+                    ["cargo", "test", "--workspace", "--locked"],
+                    log_dir,
+                    timeout_seconds=10,
+                )
+                unrelated = RUNNER.run_check("unrelated-check", ["example"], log_dir)
+
+            self.assertEqual(result["status"], "pass")
+            self.assertTrue(result["oracle_manifest_external"])
+            self.assertEqual(unrelated["status"], "pass")
+            self.assertEqual([name for name, _ in seen_environments], ["generator", "cargo", "unrelated"])
+            self.assertNotIn(RUNNER.ORACLE_MANIFEST_ENV, seen_environments[0][1])
+            self.assertNotIn(RUNNER.ORACLE_MANIFEST_ENV, seen_environments[2][1])
+            self.assertEqual(
+                seen_environments[1][1][RUNNER.ORACLE_MANIFEST_ENV],
+                str(manifest_paths[0].resolve()),
+            )
+            self.assertFalse(
+                manifest_paths[0].exists(),
+                "temporary manifest should be removed after the test",
             )
 
     def test_socket_denial_is_detected_in_stdout_or_stderr(self) -> None:

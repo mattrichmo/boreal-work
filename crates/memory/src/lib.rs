@@ -3040,7 +3040,7 @@ pub fn content_digest(bytes: &[u8]) -> String {
     padded.resize(padded_len - 8, 0);
     padded.extend_from_slice(&bit_length.to_be_bytes());
 
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut words = [0_u32; 64];
         for (index, word) in words[..16].iter_mut().enumerate() {
             let offset = index * 4;
@@ -4032,6 +4032,83 @@ fn required_string(object: &[(String, JsonValue)], key: &str) -> Result<String, 
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn process_state_is_running(state: &str) -> bool {
+        let state = state.trim_start();
+        !state.is_empty() && !state.starts_with('Z')
+    }
+
+    #[cfg(unix)]
+    fn failed_descendant_inspection_is_running(pid: u32, stderr: &str) -> bool {
+        // The child can exit and be reaped after the initial liveness check but
+        // before `ps` inspects it. Treat that race as completed cleanup, while
+        // preserving a hard failure for any process that is still live or
+        // whose state is unknown.
+        if process_is_definitely_dead(pid) {
+            return false;
+        }
+
+        panic!("ps failed while inspecting descendant {pid}: {stderr}");
+    }
+
+    #[cfg(unix)]
+    fn descendant_is_running(pid: u32) -> bool {
+        if process_is_definitely_dead(pid) {
+            return false;
+        }
+
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps must be available to inspect a spawned descendant");
+        if !output.status.success() {
+            return failed_descendant_inspection_is_running(
+                pid,
+                &String::from_utf8_lossy(&output.stderr),
+            );
+        }
+        process_state_is_running(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    #[cfg(unix)]
+    fn assert_descendant_not_running(pid: u32) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while descendant_is_running(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !descendant_is_running(pid),
+            "descendant {pid} is still running after its process group was terminated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zombie_process_state_is_not_running() {
+        assert!(!process_state_is_running("Z"));
+        assert!(!process_state_is_running("Z+"));
+        assert!(process_state_is_running("S"));
+        assert!(process_state_is_running("R+"));
+        assert!(!process_state_is_running(""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_ps_after_descendant_was_reaped_is_not_running() {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+
+        assert!(!failed_descendant_inspection_is_running(pid, ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(expected = "ps failed while inspecting descendant")]
+    fn failed_ps_for_live_descendant_remains_a_failure() {
+        let _ = failed_descendant_inspection_is_running(std::process::id(), "");
+    }
+
     fn draft() -> Draft {
         Draft::new(
             "p1",
@@ -4398,7 +4475,7 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        assert!(process_is_definitely_dead(child_pid));
+        assert_descendant_not_running(child_pid);
         let _ = fs::remove_file(pid_file);
     }
 
@@ -4424,7 +4501,7 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        assert!(process_is_definitely_dead(child_pid));
+        assert_descendant_not_running(child_pid);
         let _ = fs::remove_file(pid_file);
     }
 

@@ -379,6 +379,10 @@ impl SqliteStore {
         let b=c.with_payload(serde_json::json!({"job_id":j.job_id,"run_id":j.run_id,"tick_id":j.tick_id,"work_id":j.work_id,"attempt_id":j.attempt_id,"fence":j.fence,"actor_id":j.actor_id,"session_id":j.session_id,"harness_id":j.harness_id,"state":j.state,"deadline":j.deadline}));
         self.v3_mutation(&b,"orchestration.process.start","orchestration_process_job",&j.job_id,||{let mut q=self.prepare("INSERT INTO orchestration_process_job(job_id,project_id,run_id,tick_id,work_id,attempt_id,fence,actor_id,session_id,harness_id,state,pid,started_at,deadline,ended_at,exit_code,result_digest,error_message,revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'starting',NULL,?11,?12,NULL,NULL,NULL,NULL,1)")?;q.bind_text(1,&j.job_id)?;q.bind_text(2,&j.project_id)?;q.bind_text(3,&j.run_id)?;q.bind_text(4,&j.tick_id)?;q.bind_text(5,&j.work_id)?;q.bind_text(6,&j.attempt_id)?;q.bind_i64(7,j.fence)?;q.bind_text(8,&j.actor_id)?;q.bind_text(9,&j.session_id)?;q.bind_text(10,&j.harness_id)?;q.bind_text(11,&c.now)?;q.bind_text(12,&j.deadline)?;q.run()?;Ok(())})
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "this public store API preserves the established process-transition command fields"
+    )]
     pub fn orchestration_process_transition(
         &self,
         c: &V3MutationContext,

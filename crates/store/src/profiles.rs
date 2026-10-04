@@ -901,30 +901,46 @@ impl<'a> ProfileStore<'a> {
     }
 
     fn pinned_requirements_schema_installed(&self) -> Result<bool, StoreError> {
-        for table in [
-            "boreal_pinned_requirement",
-            "boreal_pinned_requirement_gate",
-        ] {
-            if !self.store.table_exists(table)? {
-                return Ok(false);
-            }
+        let mut statement = self.store.prepare(
+            "SELECT EXISTS (
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'table' AND name = 'boreal_pinned_requirement'
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'table' AND name = 'boreal_pinned_requirement_gate'
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'index' AND name = 'boreal_pinned_requirement_project'
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'trigger'
+                         AND name = 'boreal_pinned_requirement_immutable_update'
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'trigger'
+                         AND name = 'boreal_pinned_requirement_immutable_delete'
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'trigger'
+                         AND name = 'boreal_pinned_requirement_gate_immutable_update'
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'trigger'
+                         AND name = 'boreal_pinned_requirement_gate_immutable_delete'
+                   )",
+        )?;
+        if statement.step()? != SQLITE_ROW {
+            return Err(StoreError::Corrupt(
+                "pinned requirement schema probe returned no row".to_owned(),
+            ));
         }
-        for index in ["boreal_pinned_requirement_project"] {
-            if !self.store.schema_object_exists("index", index)? {
-                return Ok(false);
-            }
-        }
-        for trigger in [
-            "boreal_pinned_requirement_immutable_update",
-            "boreal_pinned_requirement_immutable_delete",
-            "boreal_pinned_requirement_gate_immutable_update",
-            "boreal_pinned_requirement_gate_immutable_delete",
-        ] {
-            if !self.store.schema_object_exists("trigger", trigger)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        statement.column_bool(0)
     }
 
     /// Compatibility registration for existing callers. Validate the complete

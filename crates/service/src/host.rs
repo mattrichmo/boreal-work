@@ -258,6 +258,15 @@ pub trait ServiceHostHooks: Send + Sync + 'static {
     /// hint, not proof that a lifecycle transition committed.
     fn on_deadlines(&self, _keys: &[String]) {}
 
+    /// Whether an elapsed timer key represents work that should create a
+    /// stop intent before deadline reconciliation runs. Existing hooks retain
+    /// the historical behavior by default. Adapters that schedule retry
+    /// aliases can exclude those wakeups while still receiving every key in
+    /// [`Self::on_deadlines`].
+    fn deadline_requests_stop(&self, _key: &str) -> bool {
+        true
+    }
+
     /// Called after an external stop/cancel request or confirmation. The
     /// executor owns process termination; the service never treats a request
     /// as proof that a child has stopped.
@@ -1024,6 +1033,12 @@ impl MaintenanceWorker {
                 let tick = || {
                     let due = timers.due(std::time::Instant::now());
                     for operation_id in &due {
+                        if hooks
+                            .as_ref()
+                            .is_some_and(|hooks| !hooks.deadline_requests_stop(operation_id))
+                        {
+                            continue;
+                        }
                         // A deadline creates a stop intent, never a stop
                         // confirmation. The application/executor must still
                         // observe and confirm the external process outcome.
@@ -1367,6 +1382,7 @@ mod tests {
         ticks: Arc<AtomicUsize>,
         deadlines: Arc<Mutex<Vec<String>>>,
         controls: Arc<Mutex<Vec<crate::ControlRecord>>>,
+        suppress_stop_intents_for: Arc<Mutex<Vec<String>>>,
     }
 
     impl ServiceHostHooks for TestHooks {
@@ -1382,17 +1398,27 @@ mod tests {
             self.deadlines.lock().unwrap().extend(keys.iter().cloned());
         }
 
+        fn deadline_requests_stop(&self, key: &str) -> bool {
+            !self
+                .suppress_stop_intents_for
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|suppressed| suppressed == key)
+        }
+
         fn on_control(&self, record: &crate::ControlRecord) {
             self.controls.lock().unwrap().push(record.clone());
         }
     }
 
     fn socket_path(label: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock is after Unix epoch")
-            .as_nanos();
-        PathBuf::from(format!("/private/tmp/boreal-service-{label}-{nonce}.sock"))
+        static NEXT_SOCKET_ID: AtomicUsize = AtomicUsize::new(0);
+        let socket_id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "boreal-service-{label}-{}-{socket_id}.sock",
+            std::process::id()
+        ))
     }
 
     fn request(id: &str, operation_id: &str) -> JsonRequest {
@@ -2168,6 +2194,63 @@ mod tests {
         running.shutdown();
         running.join().unwrap();
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn deadline_retry_alias_reaches_reconciliation_without_creating_stop_intent() {
+        let path = socket_path("deadline-retry-alias");
+        let canonical_key = "attempt-deadline:1:p1:a1".to_owned();
+        let retry_key = format!("attempt-deadline-retry:1:{canonical_key}");
+        let timers = TimerRegistry::new();
+        timers
+            .schedule(canonical_key.clone(), std::time::Instant::now())
+            .unwrap();
+        timers
+            .schedule(retry_key.clone(), std::time::Instant::now())
+            .unwrap();
+        let hooks = TestHooks::default();
+        hooks
+            .suppress_stop_intents_for
+            .lock()
+            .unwrap()
+            .push(retry_key.clone());
+        let Some(host) = bind_or_skip(
+            &path,
+            CountingHandler::default(),
+            ServiceHostConfig::default(),
+        ) else {
+            return;
+        };
+        let running = host
+            .with_timers(timers)
+            .with_hooks(hooks.clone())
+            .start()
+            .unwrap();
+
+        for _ in 0..100 {
+            if hooks.deadlines.lock().unwrap().len() == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let received = hooks.deadlines.lock().unwrap().clone();
+        assert!(received.contains(&canonical_key));
+        assert!(received.contains(&retry_key));
+        assert!(running.controls().get(&canonical_key).is_some());
+        assert!(running.controls().get(&retry_key).is_none());
+        assert_eq!(
+            hooks
+                .controls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|record| record.operation_id.as_str())
+                .collect::<Vec<_>>(),
+            [canonical_key.as_str()]
+        );
+
+        running.shutdown();
+        running.join().unwrap();
     }
 
     #[test]

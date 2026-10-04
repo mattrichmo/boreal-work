@@ -117,6 +117,10 @@ impl WorkApplication<'_> {
 
     /// Reconcile a live cycle commitment as deferred without changing the
     /// task's lifecycle or implying that its acceptance requirements passed.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserves the public planning command inputs for scope, confirmation, and audit time"
+    )]
     pub fn defer_planning_cycle_assignment(
         &self,
         scope: &PlanningScope,

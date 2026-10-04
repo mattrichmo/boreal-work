@@ -10,12 +10,14 @@ use boreal_domain::{
     GateKind, GateRequirement, GateState, PersistedLifecycle, ProfileId, ProjectId, ReasonCode,
     Reservation, TimestampMs, WorkId, WorkItem, WorkKind,
 };
+use libsqlite3_sys::{
+    sqlite3_compileoption_get, sqlite3_libversion, sqlite3_libversion_number, sqlite3_sourceid,
+};
 use serde_json::{json, Value};
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, NulError};
 use std::fmt;
-use std::fmt::Write as _;
 use std::fs;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
@@ -304,10 +306,16 @@ const SQLITE_NOTADB: c_int = 26;
 const SQLITE_ROW: c_int = 100;
 const SQLITE_DONE: c_int = 101;
 const SQLITE_NULL: c_int = 5;
+const SQLITE_RUNTIME_RELEASE_FLOOR: c_int = 3_051_003;
+const SQLITE_RUNTIME_RELEASE_FLOOR_TEXT: &str = "3.51.3";
 const SQLITE_OPEN_READWRITE: c_int = 0x0000_0002;
 const SQLITE_OPEN_CREATE: c_int = 0x0000_0004;
 const SQLITE_OPEN_READONLY: c_int = 0x0000_0001;
 const SQLITE_OPEN_FULLMUTEX: c_int = 0x0001_0000;
+const SQLITE_BUSY_TIMEOUT_MS: c_int = 250;
+// Keep ordinary reads responsive while allowing bounded admission for SQLite's
+// serialized writer queue.
+const SQLITE_WRITE_LOCK_TIMEOUT_MS: c_int = 2_000;
 
 #[allow(non_camel_case_types)]
 type sqlite3 = c_void;
@@ -317,9 +325,9 @@ type sqlite3_stmt = c_void;
 type sqlite3_backup = c_void;
 type SqliteDestructor = unsafe extern "C" fn(*mut c_void);
 
-// SQLite is a system library on the supported desktop platforms. Keeping this
-// tiny FFI local avoids adding a network-fetched crate to the v2 bootstrap.
-#[link(name = "sqlite3")]
+// SQLite's database calls are kept behind this small FFI. `libsqlite3-sys`
+// supplies the pinned, bundled native library so the process cannot silently
+// link against a host SQLite build with a known WAL-reset corruption bug.
 unsafe extern "C" {
     fn sqlite3_open_v2(
         filename: *const c_char,
@@ -329,9 +337,6 @@ unsafe extern "C" {
     ) -> c_int;
     fn sqlite3_close(database: *mut sqlite3) -> c_int;
     fn sqlite3_errmsg(database: *mut sqlite3) -> *const c_char;
-    fn sqlite3_libversion() -> *const c_char;
-    fn sqlite3_sourceid() -> *const c_char;
-    fn sqlite3_compileoption_get(index: c_int) -> *const c_char;
     fn sqlite3_busy_timeout(database: *mut sqlite3, milliseconds: c_int) -> c_int;
     fn sqlite3_exec(
         database: *mut sqlite3,
@@ -643,10 +648,23 @@ pub struct StatusWorkRecord {
     pub activation_at: Option<TimestampMs>,
     pub current_attempt: Option<AttemptRecord>,
     pub gate_diagnostics: GateDiagnostics,
+    /// Canonical facts selected with the project status query that allow the
+    /// store to assemble a healthy, unattempted decision input without a
+    /// per-work cursor or empty-relation query. Rows with any exceptional
+    /// state still use the full canonical evaluator.
+    pub canonical_seed: Option<CanonicalStatusSeed>,
     /// Canonical facts read alongside the status row for action-context
     /// projections. These are observations only; the application still
     /// evaluates the action policy and mutations re-read them transactionally.
     pub action_facts: StatusActionFacts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanonicalStatusSeed {
+    pub entity_revision: Option<u64>,
+    pub proof_revision: Option<u64>,
+    pub unresolved_recovery: bool,
+    pub has_gate_exception: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -725,6 +743,22 @@ pub struct StatusRecordDiagnostic {
     pub detail: String,
 }
 
+type ActiveHardHolds = (
+    BTreeMap<String, Vec<ReasonCode>>,
+    Vec<StatusRecordDiagnostic>,
+);
+
+#[derive(Clone, Copy)]
+struct ProjectInitReadbackExpectation<'a> {
+    project_id: &'a str,
+    actor_id: &'a str,
+    actor_role: &'a str,
+    display_name: &'a str,
+    request_digest: &'a str,
+    database: &'a identity::DatabaseIdentity,
+    binding: &'a identity::WorkspaceBinding,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusDependencyRecord {
     pub prerequisite_id: WorkId,
@@ -760,6 +794,7 @@ struct StatusGateRow {
 struct StatusGateRead {
     diagnostics: BTreeMap<String, GateDiagnostics>,
     requirement_diagnostics: BTreeMap<String, String>,
+    requirements: BTreeMap<String, PinnedRequirements>,
 }
 
 #[derive(Clone, Debug)]
@@ -1583,6 +1618,18 @@ impl SqliteStore {
     }
 
     fn open_connection(path: impl AsRef<Path>, flags: c_int) -> Result<Self, StoreError> {
+        Self::open_connection_with_runtime_version(path, flags, unsafe {
+            sqlite3_libversion_number()
+        })
+    }
+
+    fn open_connection_with_runtime_version(
+        path: impl AsRef<Path>,
+        flags: c_int,
+        runtime_version_number: c_int,
+    ) -> Result<Self, StoreError> {
+        ensure_sqlite_runtime_release_floor(runtime_version_number)?;
+
         let path = path.as_ref();
         let filename = CString::new(
             path.to_str()
@@ -1613,7 +1660,7 @@ impl SqliteStore {
             validated_work_model_v3_schema_cookie: AtomicI64::new(-1),
             canonical_production: false,
         };
-        unsafe { sqlite3_busy_timeout(store.database, 250) };
+        unsafe { sqlite3_busy_timeout(store.database, SQLITE_BUSY_TIMEOUT_MS) };
         store.execute_batch("PRAGMA foreign_keys = ON;")?;
         if flags & SQLITE_OPEN_READONLY == 0 {
             store.execute_batch("PRAGMA journal_mode = WAL;")?;
@@ -3143,13 +3190,15 @@ impl SqliteStore {
                 }
                 self.validate_project_init_readback(
                     &existing,
-                    project_id,
-                    actor_id,
-                    actor_role,
-                    display_name,
-                    request_digest,
-                    database,
-                    binding,
+                    ProjectInitReadbackExpectation {
+                        project_id,
+                        actor_id,
+                        actor_role,
+                        display_name,
+                        request_digest,
+                        database,
+                        binding,
+                    },
                 )?;
                 self.validate_existing_actor(actor_id, actor_role, credential_ref, display_name)?;
                 let context = identity.context(project_id).map_err(|error| {
@@ -3235,13 +3284,15 @@ impl SqliteStore {
                     })?;
                     self.validate_project_init_readback(
                         &original,
-                        project_id,
-                        actor_id,
-                        actor_role,
-                        display_name,
-                        request_digest,
-                        database,
-                        binding,
+                        ProjectInitReadbackExpectation {
+                            project_id,
+                            actor_id,
+                            actor_role,
+                            display_name,
+                            request_digest,
+                            database,
+                            binding,
+                        },
                     )?;
                     self.validate_existing_actor(
                         actor_id,
@@ -3842,14 +3893,17 @@ impl SqliteStore {
     fn validate_project_init_readback(
         &self,
         record: &OperationRecord,
-        project_id: &str,
-        actor_id: &str,
-        actor_role: &str,
-        display_name: &str,
-        request_digest: &str,
-        database: &identity::DatabaseIdentity,
-        binding: &identity::WorkspaceBinding,
+        expected: ProjectInitReadbackExpectation<'_>,
     ) -> Result<(), StoreError> {
+        let ProjectInitReadbackExpectation {
+            project_id,
+            actor_id,
+            actor_role,
+            display_name,
+            request_digest,
+            database,
+            binding,
+        } = expected;
         if record.project_id != project_id
             || record.command != "project.init"
             || record.actor_id != actor_id
@@ -4592,6 +4646,10 @@ impl SqliteStore {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "retained public entry point for callers that provide a session and revision"
+    )]
     pub fn create_work_operation_for_session(
         &self,
         work: &WorkItem,
@@ -5432,7 +5490,9 @@ impl SqliteStore {
     /// may apply the application projection and pagination afterward.
     pub fn read_project_status(&self, project_id: &str) -> Result<ProjectStatusRead, StoreError> {
         self.execute_batch("BEGIN")?;
-        let result = self.read_project_status_in_transaction(project_id);
+        let result = self
+            .read_project_status_in_transaction(project_id)
+            .map(|(snapshot, _)| snapshot);
         finish_transaction(self, result)
     }
 
@@ -5496,12 +5556,24 @@ impl SqliteStore {
     fn read_project_status_in_transaction(
         &self,
         project_id: &str,
-    ) -> Result<ProjectStatusRead, StoreError> {
-        let revision = self.project_revision(project_id)?;
-        let mut count = self.prepare("SELECT COUNT(*) FROM work_item WHERE project_id = ?1")?;
-        count.bind_text(1, project_id)?;
-        let total = match count.step()? {
-            SQLITE_ROW => count.column_u64(0)?,
+    ) -> Result<(ProjectStatusRead, BTreeMap<String, PinnedRequirements>), StoreError> {
+        let mut project = self.prepare(
+            "SELECT p.project_revision,
+                    (SELECT COUNT(*) FROM work_item w WHERE w.project_id = p.project_id)
+             FROM project p WHERE p.project_id = ?1",
+        )?;
+        project.bind_text(1, project_id)?;
+        let (revision, total) = match project.step()? {
+            SQLITE_ROW => (
+                SnapshotRevision(project.column_u64(0)?),
+                project.column_u64(1)?,
+            ),
+            SQLITE_DONE => {
+                return Err(StoreError::NotFound {
+                    entity: "project",
+                    id: project_id.to_owned(),
+                })
+            }
             _ => return Err(StoreError::Corrupt("missing work total".to_owned())),
         };
 
@@ -5514,37 +5586,83 @@ impl SqliteStore {
         scoped_diagnostics.extend(hold_diagnostics);
         let gate_read =
             self.status_gate_diagnostics_for_project(project_id, &current_attempts, revision.0)?;
-        let gate_diagnostics = gate_read.diagnostics;
-        let requirement_diagnostics = gate_read.requirement_diagnostics;
-        let mut planning_facts = self.status_planning_facts_for_project(project_id)?;
-
-        let mut rows = self.prepare(
-            "SELECT work_id, project_id, kind, parent_id, lifecycle,
-                    dispatch_policy, retry_not_before, priority,
-                    acceptance_profile_id, acceptance_profile_version,
-                    title, description, rowid
-             FROM work_item WHERE project_id = ?1 ORDER BY work_id",
-        )?;
+        let mut gate_diagnostics = gate_read.diagnostics;
+        let mut requirement_diagnostics = gate_read.requirement_diagnostics;
+        let pinned_requirements = gate_read.requirements;
+        let work_model_v3_enabled = self.work_model_v3_enabled()?;
+        let inline_planning = self.canonical_production && work_model_v3_enabled;
+        let mut planning_facts = if inline_planning {
+            BTreeMap::new()
+        } else {
+            self.status_planning_facts_for_project(project_id)?
+        };
+        let activation_projection = if inline_planning {
+            "(SELECT MIN(CASE ca.activation_policy
+                           WHEN 'explicit_not_before' THEN ca.activation_at_utc_ms
+                           WHEN 'at_cycle_start' THEN cycle.scheduled_start_utc_ms
+                           ELSE NULL
+                         END)
+             FROM cycle_assignment_v3 ca
+             JOIN cycle_v3 cycle
+               ON cycle.project_id = ca.project_id
+              AND cycle.cycle_id = ca.cycle_id
+             WHERE ca.project_id = wi.project_id
+               AND ca.work_id = wi.work_id
+               AND ca.state IN ('planned', 'committed'))"
+        } else {
+            "NULL"
+        };
+        let (status_cursor_join, canonical_seed_projection) = if self.canonical_production {
+            (
+                "LEFT JOIN boreal_entity_revision status_cursor
+                   ON status_cursor.project_id = wi.project_id
+                  AND status_cursor.work_id = wi.work_id
+                 LEFT JOIN (
+                     SELECT project_id, work_id
+                     FROM boreal_recovery_obligation
+                     WHERE state = 'unresolved'
+                     GROUP BY project_id, work_id
+                 ) status_recovery
+                   ON status_recovery.project_id = wi.project_id
+                  AND status_recovery.work_id = wi.work_id
+                 LEFT JOIN (
+                     SELECT project_id, work_id, proof_revision
+                     FROM boreal_policy_exception
+                     WHERE kind = 'gate'
+                     GROUP BY project_id, work_id, proof_revision
+                 ) status_exception
+                   ON status_exception.project_id = wi.project_id
+                  AND status_exception.work_id = wi.work_id
+                  AND status_exception.proof_revision = status_cursor.proof_revision",
+                "status_cursor.entity_revision,
+                 status_cursor.proof_revision,
+                 status_recovery.work_id IS NOT NULL,
+                 status_exception.work_id IS NOT NULL",
+            )
+        } else {
+            ("", "NULL, NULL, 0, 0")
+        };
+        let work_query = format!(
+            "SELECT wi.work_id, wi.project_id, wi.kind, wi.parent_id, wi.lifecycle,
+                    wi.dispatch_policy, wi.retry_not_before, wi.priority,
+                    wi.acceptance_profile_id, wi.acceptance_profile_version,
+                    wi.title, wi.description, wi.rowid, {activation_projection},
+                    {canonical_seed_projection}
+             FROM work_item wi {status_cursor_join}
+             WHERE wi.project_id = ?1 ORDER BY wi.work_id"
+        );
+        let mut rows = self.prepare(&work_query)?;
         rows.bind_text(1, project_id)?;
         let mut works = Vec::with_capacity(total as usize);
         let mut ordered_work_ids = Vec::with_capacity(total as usize);
-        let mut record_diagnostics = requirement_diagnostics
-            .iter()
-            .map(|(work_id, detail)| StatusRecordDiagnostic {
-                work_id: work_id.clone(),
-                title: None,
-                code: "acceptance_requirements_corrupt".to_owned(),
-                detail: detail.clone(),
-            })
-            .collect::<Vec<_>>();
-        record_diagnostics.extend(scoped_diagnostics);
+        let mut row_diagnostics = Vec::new();
         while rows.step()? == SQLITE_ROW {
             let work_id = match rows.column_text(0) {
                 Ok(id) => id,
                 Err(error) => {
                     let identity = format!("quarantined-row:{}", rows.column_i64(12)?);
                     ordered_work_ids.push(identity.clone());
-                    record_diagnostics.push(StatusRecordDiagnostic {
+                    row_diagnostics.push(StatusRecordDiagnostic {
                         work_id: identity,
                         title: rows.column_text(10).ok(),
                         code: "invalid_work_identity".to_owned(),
@@ -5554,6 +5672,27 @@ impl SqliteStore {
                 }
             };
             ordered_work_ids.push(work_id.clone());
+            if self.canonical_production
+                && !pinned_requirements.contains_key(&work_id)
+                && !requirement_diagnostics.contains_key(&work_id)
+            {
+                requirement_diagnostics.insert(
+                    work_id.clone(),
+                    "missing pinned requirement revision".to_owned(),
+                );
+                let attempt = current_attempts.get(&work_id);
+                gate_diagnostics
+                    .entry(work_id.clone())
+                    .or_insert_with(|| GateDiagnostics {
+                        project_id: project_id.to_owned(),
+                        work_id: work_id.clone(),
+                        attempt_id: attempt.map(|value| value.attempt_id.clone()),
+                        fence: attempt.map(|value| value.fence),
+                        revision: revision.0,
+                        gates: Vec::new(),
+                        missing: vec!["requirements_missing".to_owned()],
+                    });
+            }
             let current_attempt = current_attempts.get(&work_id).cloned();
             let diagnostics =
                 gate_diagnostics
@@ -5582,13 +5721,31 @@ impl SqliteStore {
                 .collect();
             let title = rows.column_text(10).ok();
             let work = (|| {
-                let (schedule, activation_at) = planning_facts
-                    .remove(&work_id)
-                    .unwrap_or(Ok((None, None)))?;
+                let (schedule, activation_at) = if inline_planning {
+                    let activation = rows.column_optional_signed_i64(13)?;
+                    let activation = activation
+                        .map(|value| {
+                            u64::try_from(value).map(TimestampMs).map_err(|_| {
+                                StoreError::Corrupt(format!(
+                                    "negative planning activation timestamp for work {work_id}: {value}"
+                                ))
+                            })
+                        })
+                        .transpose()?;
+                    (None, activation)
+                } else {
+                    planning_facts
+                        .remove(&work_id)
+                        .unwrap_or(Ok((None, None)))?
+                };
                 let mut hard_holds = active_holds.get(&work_id).cloned().unwrap_or_default();
-                if record_diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.work_id == work_id)
+                if requirement_diagnostics.contains_key(&work_id)
+                    || scoped_diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.work_id == work_id)
+                    || row_diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.work_id == work_id)
                 {
                     hard_holds.push(ReasonCode::HardHold("integrity_quarantined".to_owned()));
                 }
@@ -5615,6 +5772,37 @@ impl SqliteStore {
             })();
             match work {
                 Ok((work, schedule, activation_at, retry_not_before)) => {
+                    let canonical_seed = if self.canonical_production {
+                        // Cursor values are also read by the per-row canonical
+                        // evaluator below. Keep malformed seed values out of
+                        // the project-wide row decoder so that evaluator can
+                        // quarantine only this work item and retain siblings.
+                        match (
+                            rows.column_optional_i64(14),
+                            rows.column_optional_i64(15),
+                            rows.column_bool(16),
+                            rows.column_bool(17),
+                        ) {
+                            (
+                                Ok(entity_revision),
+                                Ok(proof_revision),
+                                Ok(unresolved_recovery),
+                                Ok(has_gate_exception),
+                            ) => Some(CanonicalStatusSeed {
+                                entity_revision,
+                                proof_revision,
+                                unresolved_recovery,
+                                has_gate_exception,
+                            }),
+                            // A seed is an optimization for the canonical
+                            // per-row evaluator. If any projected value is
+                            // malformed, let that evaluator report the row's
+                            // own corruption rather than aborting its siblings.
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     works.push(StatusWorkRecord {
                         work,
                         retry_not_before,
@@ -5622,10 +5810,11 @@ impl SqliteStore {
                         activation_at,
                         current_attempt,
                         gate_diagnostics: diagnostics,
+                        canonical_seed,
                         action_facts: StatusActionFacts::unavailable(),
                     })
                 }
-                Err(error) => record_diagnostics.push(StatusRecordDiagnostic {
+                Err(error) => row_diagnostics.push(StatusRecordDiagnostic {
                     work_id,
                     title,
                     code: "corrupt_record".to_owned(),
@@ -5633,6 +5822,18 @@ impl SqliteStore {
                 }),
             }
         }
+
+        let mut record_diagnostics = requirement_diagnostics
+            .iter()
+            .map(|(work_id, detail)| StatusRecordDiagnostic {
+                work_id: work_id.clone(),
+                title: None,
+                code: "acceptance_requirements_corrupt".to_owned(),
+                detail: detail.clone(),
+            })
+            .collect::<Vec<_>>();
+        record_diagnostics.extend(scoped_diagnostics);
+        record_diagnostics.extend(row_diagnostics);
 
         let mut dependencies = Vec::new();
         let mut edges = self.prepare(
@@ -5683,13 +5884,13 @@ impl SqliteStore {
             diagnostics: record_diagnostics,
             dependencies,
         };
-        let v3_nodes = if self.work_model_v3_enabled()? {
+        let v3_nodes = if work_model_v3_enabled {
             Some(self.work_nodes_v3(project_id)?)
         } else {
             None
         };
         status_evaluation::diagnose_status_integrity(&mut snapshot, v3_nodes.as_deref());
-        Ok(snapshot)
+        Ok((snapshot, pinned_requirements))
     }
 
     /// Atomically reserves one eligible task, records its operation and audit
@@ -6134,13 +6335,7 @@ impl SqliteStore {
     fn active_hard_holds_for_project(
         &self,
         project_id: &str,
-    ) -> Result<
-        (
-            BTreeMap<String, Vec<ReasonCode>>,
-            Vec<StatusRecordDiagnostic>,
-        ),
-        StoreError,
-    > {
+    ) -> Result<ActiveHardHolds, StoreError> {
         let mut statement = self.prepare(
             "SELECT wh.work_id, wh.reason_code
              FROM work_hold wh JOIN work_item wi ON wi.work_id = wh.work_id
@@ -6223,8 +6418,8 @@ impl SqliteStore {
         };
         let mut statement = self.prepare(gate_query)?;
         statement.bind_text(1, project_id)?;
+        let mut requirements = BTreeMap::<String, PinnedRequirements>::new();
         if pinned_schema_installed {
-            let mut requirements = BTreeMap::<String, PinnedRequirements>::new();
             while statement.step()? == SQLITE_ROW {
                 let work_id = statement
                     .column_text(0)
@@ -6372,22 +6567,6 @@ impl SqliteStore {
                     Err(error) => {
                         requirement_diagnostics.insert(work_id, error.to_string());
                     }
-                }
-            }
-
-            let mut work_ids = self
-                .prepare("SELECT work_id FROM work_item WHERE project_id = ?1 ORDER BY work_id")?;
-            work_ids.bind_text(1, project_id)?;
-            while work_ids.step()? == SQLITE_ROW {
-                let work_id = work_ids
-                    .column_text(0)
-                    .unwrap_or_else(|_| "unreadable-work".to_owned());
-                if self.canonical_production
-                    && !requirements.contains_key(&work_id)
-                    && !requirement_diagnostics.contains_key(&work_id)
-                {
-                    requirement_diagnostics
-                        .insert(work_id, "missing pinned requirement revision".to_owned());
                 }
             }
 
@@ -6612,8 +6791,11 @@ impl SqliteStore {
         gate_rows.retain(|row| !requirement_diagnostics.contains_key(&row.work_id));
 
         let mut receipts = BTreeMap::<(String, String, u64, String), StatusReceiptFact>::new();
-        let mut statement = self.prepare(
-            "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
+        let mut reviews = BTreeMap::<(String, String, u64, String), bool>::new();
+        let mut summaries = BTreeMap::<String, SummaryRecord>::new();
+        if !current_attempts.is_empty() {
+            let mut statement = self.prepare(
+                "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
                     r.receipt_id, r.result, r.rejection_code
              FROM receipt r
              JOIN work_item wi ON wi.work_id = r.work_id
@@ -6624,40 +6806,39 @@ impl SqliteStore {
              WHERE wi.project_id = ?1 AND r.gate_id IS NOT NULL
              ORDER BY r.work_id, r.attempt_id, r.fence, r.gate_id,
                       r.rowid DESC",
-        )?;
-        statement.bind_text(1, project_id)?;
-        while statement.step()? == SQLITE_ROW {
-            let work_id = statement
-                .column_text(0)
-                .unwrap_or_else(|_| "unreadable-work".to_owned());
-            let decoded = (|| -> Result<_, StoreError> {
-                Ok((
-                    (
-                        work_id.clone(),
-                        statement.column_text(1)?,
-                        statement.column_u64(2)?,
-                        statement.column_text(3)?,
-                    ),
-                    StatusReceiptFact {
-                        receipt_id: statement.column_text(4)?,
-                        result: parse_receipt_outcome(&statement.column_text(5)?)?,
-                        rejection_code: statement.column_optional_text(6)?,
-                    },
-                ))
-            })();
-            match decoded {
-                Ok((key, fact)) => {
-                    receipts.entry(key).or_insert(fact);
-                }
-                Err(error) => {
-                    requirement_diagnostics.insert(work_id, error.to_string());
+            )?;
+            statement.bind_text(1, project_id)?;
+            while statement.step()? == SQLITE_ROW {
+                let work_id = statement
+                    .column_text(0)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
+                let decoded = (|| -> Result<_, StoreError> {
+                    Ok((
+                        (
+                            work_id.clone(),
+                            statement.column_text(1)?,
+                            statement.column_u64(2)?,
+                            statement.column_text(3)?,
+                        ),
+                        StatusReceiptFact {
+                            receipt_id: statement.column_text(4)?,
+                            result: parse_receipt_outcome(&statement.column_text(5)?)?,
+                            rejection_code: statement.column_optional_text(6)?,
+                        },
+                    ))
+                })();
+                match decoded {
+                    Ok((key, fact)) => {
+                        receipts.entry(key).or_insert(fact);
+                    }
+                    Err(error) => {
+                        requirement_diagnostics.insert(work_id, error.to_string());
+                    }
                 }
             }
-        }
 
-        let mut reviews = BTreeMap::<(String, String, u64, String), bool>::new();
-        let mut statement = self.prepare(
-            "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
+            let mut statement = self.prepare(
+                "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
                     r.decision
              FROM review r
              JOIN work_item wi ON wi.work_id = r.work_id
@@ -6668,36 +6849,36 @@ impl SqliteStore {
              WHERE wi.project_id = ?1 AND r.gate_id IS NOT NULL
              ORDER BY r.work_id, r.attempt_id, r.fence, r.gate_id,
                       r.rowid DESC",
-        )?;
-        statement.bind_text(1, project_id)?;
-        while statement.step()? == SQLITE_ROW {
-            let work_id = statement
-                .column_text(0)
-                .unwrap_or_else(|_| "unreadable-work".to_owned());
-            let decoded = (|| -> Result<_, StoreError> {
-                Ok((
-                    (
-                        work_id.clone(),
-                        statement.column_text(1)?,
-                        statement.column_u64(2)?,
-                        statement.column_text(3)?,
-                    ),
-                    parse_review_decision(&statement.column_text(4)?)? == ReviewDecision::Accepted,
-                ))
-            })();
-            match decoded {
-                Ok((key, fact)) => {
-                    reviews.entry(key).or_insert(fact);
-                }
-                Err(error) => {
-                    requirement_diagnostics.insert(work_id, error.to_string());
+            )?;
+            statement.bind_text(1, project_id)?;
+            while statement.step()? == SQLITE_ROW {
+                let work_id = statement
+                    .column_text(0)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
+                let decoded = (|| -> Result<_, StoreError> {
+                    Ok((
+                        (
+                            work_id.clone(),
+                            statement.column_text(1)?,
+                            statement.column_u64(2)?,
+                            statement.column_text(3)?,
+                        ),
+                        parse_review_decision(&statement.column_text(4)?)?
+                            == ReviewDecision::Accepted,
+                    ))
+                })();
+                match decoded {
+                    Ok((key, fact)) => {
+                        reviews.entry(key).or_insert(fact);
+                    }
+                    Err(error) => {
+                        requirement_diagnostics.insert(work_id, error.to_string());
+                    }
                 }
             }
-        }
 
-        let mut summaries = BTreeMap::<String, SummaryRecord>::new();
-        let mut statement = self.prepare(
-            "SELECT s.summary_id, wi.project_id, s.work_id, s.attempt_id,
+            let mut statement = self.prepare(
+                "SELECT s.summary_id, wi.project_id, s.work_id, s.attempt_id,
                     s.fence, s.subject_ref, s.source_version_id,
                     s.config_identity, s.profile_id, s.profile_version,
                     s.body_digest, s.body_size, s.current, s.created_at
@@ -6709,18 +6890,19 @@ impl SqliteStore {
                            AND (a.current = 1 OR a.state = 'completed')
              WHERE wi.project_id = ?1 AND s.current = 1
              ORDER BY s.work_id, s.created_at DESC, s.summary_id DESC",
-        )?;
-        statement.bind_text(1, project_id)?;
-        while statement.step()? == SQLITE_ROW {
-            let work_id = statement
-                .column_text(2)
-                .unwrap_or_else(|_| "unreadable-work".to_owned());
-            match summary_from_statement(&statement) {
-                Ok(summary) => {
-                    summaries.entry(work_id).or_insert(summary);
-                }
-                Err(error) => {
-                    requirement_diagnostics.insert(work_id, error.to_string());
+            )?;
+            statement.bind_text(1, project_id)?;
+            while statement.step()? == SQLITE_ROW {
+                let work_id = statement
+                    .column_text(2)
+                    .unwrap_or_else(|_| "unreadable-work".to_owned());
+                match summary_from_statement(&statement) {
+                    Ok(summary) => {
+                        summaries.entry(work_id).or_insert(summary);
+                    }
+                    Err(error) => {
+                        requirement_diagnostics.insert(work_id, error.to_string());
+                    }
                 }
             }
         }
@@ -6877,6 +7059,7 @@ impl SqliteStore {
         Ok(StatusGateRead {
             diagnostics,
             requirement_diagnostics,
+            requirements,
         })
     }
 
@@ -6934,9 +7117,62 @@ impl SqliteStore {
         request: impl Borrow<AttemptMutationRequest>,
     ) -> Result<AttemptMutationResult, StoreError> {
         let request = request.borrow();
+        self.apply_attempt_mutation_with_recover_descriptor(request, None)
+    }
+
+    /// Submit the versioned Recover action as a descriptor-bound expiry. The
+    /// adapter cannot choose an arbitrary attempt identity: every descriptor
+    /// field is checked again against canonical status/action facts while the
+    /// same write transaction applies expiry and records its durable receipt.
+    pub fn submit_recover_action(
+        &self,
+        input: &recovery::RecoverActionInput,
+    ) -> Result<AttemptMutationResult, StoreError> {
+        let attempt = input.descriptor.attempt.as_ref().ok_or_else(|| {
+            StoreError::Conflict(
+                "recover descriptor is incomplete: the current attempt and fence are absent"
+                    .to_owned(),
+            )
+        })?;
+        let request = AttemptMutationRequest {
+            project_id: input.descriptor.target.project_id.clone(),
+            work_id: input.descriptor.target.work_id.clone(),
+            attempt_id: attempt.attempt_id.clone(),
+            actor_id: input.actor_id.clone(),
+            harness_id: None,
+            session_id: Some(input.session_id.clone()),
+            fence: attempt.fence,
+            operation_id: input.operation_id.clone(),
+            request_digest: input.request_digest.clone(),
+            at: input.at.clone(),
+            expected_project_revision: Some(input.descriptor.expected_project_revision),
+            expected_work_revision: None,
+            expected_attempt_revision: Some(attempt.fence),
+            expected_phase: None,
+            expected_lease_deadline: None,
+            expected_hard_deadline: None,
+            mutation: AttemptMutationKind::Expire {
+                stop_confirmed: input.confirmed,
+            },
+            reason: Some(format!(
+                "recovery_disposition:{}",
+                recovery::recover_action_disposition_name(input.disposition)
+            )),
+        };
+        self.apply_attempt_mutation_with_recover_descriptor(&request, Some(input))
+    }
+
+    fn apply_attempt_mutation_with_recover_descriptor(
+        &self,
+        request: &AttemptMutationRequest,
+        recover_action: Option<&recovery::RecoverActionInput>,
+    ) -> Result<AttemptMutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             let command = format!("attempt.{}", mutation_name(&request.mutation));
+            if let Some(input) = recover_action {
+                validate_recover_action_envelope(self, input, request)?;
+            }
             if let Some(existing) = self.preflight_operation_replay(
                 &request.project_id,
                 &request.operation_id,
@@ -6970,13 +7206,24 @@ impl SqliteStore {
                     });
                 }
             }
-            let current = self
-                .attempt_record(&request.attempt_id, false)?
-                .ok_or_else(|| StoreError::NotFound {
-                    entity: "attempt",
-                    id: request.attempt_id.clone(),
-                })?;
-            self.validate_attempt_subject(request, &current)?;
+            let current = if recover_action.is_some() {
+                self.current_attempt_for_work(&request.project_id, &request.work_id)?
+                    .ok_or_else(|| StoreError::NotFound {
+                        entity: "current_attempt",
+                        id: format!("{}/{}", request.project_id, request.work_id),
+                    })?
+            } else {
+                self.attempt_record(&request.attempt_id, false)?
+                    .ok_or_else(|| StoreError::NotFound {
+                        entity: "attempt",
+                        id: request.attempt_id.clone(),
+                    })?
+            };
+            if recover_action.is_some() {
+                validate_recover_attempt_subject(request, &current)?;
+            } else {
+                self.validate_attempt_subject(request, &current)?;
+            }
             if self.canonical_production {
                 self.principal_authority(&request.project_id, &request.actor_id)?;
                 self.validate_project_session(
@@ -7002,7 +7249,7 @@ impl SqliteStore {
                     | AttemptMutationKind::RenewLease { .. } => None,
                 };
                 if let Some(action) = action {
-                    self.authorize_work_action_in_transaction(
+                    let descriptor = self.authorize_work_action_in_transaction(
                         &request.project_id,
                         &request.work_id,
                         &request.actor_id,
@@ -7010,7 +7257,15 @@ impl SqliteStore {
                         status_evaluation::canonical_status_timestamp(&request.at)?,
                         action,
                     )?;
+                    if let Some(input) = recover_action {
+                        validate_recover_action_descriptor(&input.descriptor, &descriptor)?;
+                    }
                 }
+            } else if recover_action.is_some() {
+                return Err(StoreError::Conflict(
+                    "descriptor-bound recovery requires canonical production action facts"
+                        .to_owned(),
+                ));
             }
 
             if current.fence != request.fence {
@@ -7055,6 +7310,17 @@ impl SqliteStore {
                         current.hard_deadline
                     )));
                 }
+            }
+
+            if current.phase == AttemptPhase::ExpiryPending
+                && !matches!(
+                    request.mutation,
+                    AttemptMutationKind::Expire { .. } | AttemptMutationKind::Cancel { .. }
+                )
+            {
+                return Err(StoreError::Conflict(
+                    "attempt expiry recovery is pending; execution writes are fenced".to_owned(),
+                ));
             }
 
             let permits_expired_time = matches!(
@@ -7964,7 +8230,15 @@ impl SqliteStore {
         self.query_metrics
             .batch_calls
             .fetch_add(1, Ordering::Relaxed);
+        let wait_for_writer = sql
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .eq_ignore_ascii_case("BEGIN IMMEDIATE");
         let sql = CString::new(sql)?;
+        if wait_for_writer {
+            unsafe { sqlite3_busy_timeout(self.database, SQLITE_WRITE_LOCK_TIMEOUT_MS) };
+        }
         let mut error = ptr::null_mut();
         let result = unsafe {
             sqlite3_exec(
@@ -7975,6 +8249,9 @@ impl SqliteStore {
                 &mut error,
             )
         };
+        if wait_for_writer {
+            unsafe { sqlite3_busy_timeout(self.database, SQLITE_BUSY_TIMEOUT_MS) };
+        }
         if result == SQLITE_OK {
             return Ok(());
         }
@@ -9383,10 +9660,15 @@ impl SqliteStore {
     ) -> Result<SummaryInsertResult, StoreError> {
         let request = request.borrow();
         validate_summary_request(request)?;
-        let replay_digest = canonical_summary_request(request)?;
 
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
+            // Read replay identity only after the write lock is held. The
+            // timestamp is generated by the caller, so a concurrent retry
+            // must bind to the first committed timestamp before hashing.
+            let effective_request = self.summary_request_for_replay(request)?;
+            let request = &effective_request;
+            let replay_digest = canonical_summary_request(request)?;
             if let Some(existing) = self.preflight_operation_replay(
                 &request.project_id,
                 &request.operation_id,
@@ -10155,6 +10437,19 @@ impl SqliteStore {
             && attempt.session_id == request.session_id
             && attempt.source_version_id == request.source_version_id
             && attempt.config_identity == request.config_identity)
+    }
+
+    fn summary_request_for_replay(
+        &self,
+        request: &SummaryInsertRequest,
+    ) -> Result<SummaryInsertRequest, StoreError> {
+        let mut effective = request.clone();
+        if let Some(existing) = self.operation(&request.operation_id)? {
+            if existing.project_id == request.project_id && existing.command == "summary.insert" {
+                effective.created_at = existing.created_at;
+            }
+        }
+        Ok(effective)
     }
 
     fn replay_summary_operation(
@@ -11975,6 +12270,30 @@ pub fn sqlite_runtime_identity() -> SqliteRuntimeIdentity {
     }
 }
 
+fn ensure_sqlite_runtime_release_floor(version_number: c_int) -> Result<(), StoreError> {
+    if version_number >= SQLITE_RUNTIME_RELEASE_FLOOR {
+        return Ok(());
+    }
+
+    Err(StoreError::Unavailable(format!(
+        "SQLite runtime {} (version code {version_number}) is below the required release floor {}; refusing database access because the floor contains the WAL-reset corruption fix",
+        sqlite_version_number_text(version_number),
+        SQLITE_RUNTIME_RELEASE_FLOOR_TEXT,
+    )))
+}
+
+fn sqlite_version_number_text(version_number: c_int) -> String {
+    if version_number < 0 {
+        return format!("unknown ({version_number})");
+    }
+    format!(
+        "{}.{}.{}",
+        version_number / 1_000_000,
+        (version_number / 1_000) % 1_000,
+        version_number % 1_000,
+    )
+}
+
 unsafe fn sqlite_text_pointer(pointer: *const c_char) -> String {
     if pointer.is_null() {
         String::new()
@@ -13139,6 +13458,218 @@ fn profile_version_for_work(
     )
 }
 
+fn validate_recover_action_envelope(
+    store: &SqliteStore,
+    input: &recovery::RecoverActionInput,
+    request: &AttemptMutationRequest,
+) -> Result<(), StoreError> {
+    let descriptor = &input.descriptor;
+    if !store.canonical_production {
+        return Err(StoreError::Conflict(
+            "descriptor-bound recovery requires canonical production action facts".to_owned(),
+        ));
+    }
+    if descriptor.action != "recover"
+        || descriptor.target.project_id != request.project_id
+        || descriptor.target.work_id != request.work_id
+        || descriptor.expected_project_revision != request.expected_project_revision.unwrap_or(0)
+        || descriptor.attempt.as_ref().is_none_or(|attempt| {
+            attempt.attempt_id != request.attempt_id || attempt.fence != request.fence
+        })
+        || input.actor_id != request.actor_id
+        || input.session_id != request.session_id.as_deref().unwrap_or_default()
+        || input.operation_id != request.operation_id
+        || input.request_digest != request.request_digest
+        || !input.confirmed
+        || !matches!(
+            request.mutation,
+            AttemptMutationKind::Expire {
+                stop_confirmed: true
+            }
+        )
+    {
+        return Err(StoreError::Conflict(
+            "recover action input does not match its command identity or confirmation".to_owned(),
+        ));
+    }
+    for (value, field) in [
+        (&input.actor_id, "actor"),
+        (&input.session_id, "session"),
+        (&input.operation_id, "operation"),
+        (&input.request_digest, "request digest"),
+        (&descriptor.target.project_id, "project"),
+        (&descriptor.target.work_id, "work"),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Invalid(format!(
+                "recover action {field} must not be empty"
+            )));
+        }
+    }
+    if descriptor.target.entity_revision.is_none()
+        || descriptor.expected_entity_revision.is_none()
+        || descriptor.attempt.is_none()
+        || descriptor.confirmation.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(StoreError::Conflict(
+            "recover descriptor is incomplete: entity revision, current attempt/fence, and confirmation are required".to_owned(),
+        ));
+    }
+    if descriptor.read_only || !descriptor.recovery {
+        return Err(StoreError::Conflict(
+            "recover descriptor has incompatible action flags".to_owned(),
+        ));
+    }
+    if !matches!(
+        request.mutation,
+        AttemptMutationKind::Expire {
+            stop_confirmed: true
+        }
+    ) {
+        return Err(StoreError::Conflict(
+            "Recover only submits the confirmed attempt-expiry transition".to_owned(),
+        ));
+    }
+
+    identity::IdentityStore::new(store)
+        .validate_context(&input.context)
+        .map_err(|error| StoreError::Conflict(format!("recover identity: {error}")))?;
+    if input.context.project_id != request.project_id {
+        return Err(StoreError::WrongSubject {
+            expected: input.context.project_id.clone(),
+            actual: request.project_id.clone(),
+        });
+    }
+    if input.disposition == recovery::RecoverActionDisposition::ReviewedSafeRecovery {
+        let (role, _) = store.principal_authority(&request.project_id, &request.actor_id)?;
+        if role != boreal_domain::ActorRole::Operator {
+            return Err(StoreError::Conflict(
+                "role_denied: reviewed safe recovery requires project operator authority"
+                    .to_owned(),
+            ));
+        }
+    }
+    store.validate_project_session(&request.project_id, &request.actor_id, &input.session_id)?;
+    Ok(())
+}
+
+fn validate_recover_action_descriptor(
+    input: &recovery::RecoverActionDescriptorInput,
+    current: &boreal_domain::actions::ActionDescriptor,
+) -> Result<(), StoreError> {
+    use boreal_domain::actions::{ActionInputKind, ActionKind};
+
+    let expected_attempt =
+        current
+            .attempt
+            .as_ref()
+            .map(|attempt| recovery::RecoverActionAttemptInput {
+                attempt_id: attempt.attempt_id.as_str().to_owned(),
+                fence: attempt.fence.get(),
+            });
+    if input.action != "recover" || current.action != ActionKind::Recover {
+        return Err(StoreError::Conflict(
+            "server action descriptor is not Recover".to_owned(),
+        ));
+    }
+    if expected_attempt.is_none() || input.attempt.is_none() {
+        return Err(StoreError::Conflict(
+            "recover descriptor is incomplete or stale: no current attempt/fence is authorized"
+                .to_owned(),
+        ));
+    }
+    let expected_roles = current
+        .required_roles
+        .iter()
+        .map(|role| match role {
+            boreal_domain::ActorRole::Agent => "agent",
+            boreal_domain::ActorRole::Reviewer => "reviewer",
+            boreal_domain::ActorRole::Operator => "operator",
+            boreal_domain::ActorRole::Publisher => "publisher",
+        })
+        .collect::<Vec<_>>();
+    let expected_inputs = current
+        .required_inputs
+        .iter()
+        .map(|input| match input {
+            ActionInputKind::ExpectedProjectRevision => "expected_project_revision",
+            ActionInputKind::ExpectedEntityRevision => "expected_entity_revision",
+            ActionInputKind::ExpectedProofRevision => "expected_proof_revision",
+            ActionInputKind::AttemptId => "attempt_id",
+            ActionInputKind::Fence => "fence",
+            ActionInputKind::SessionId => "session_id",
+            ActionInputKind::OperationId => "operation_id",
+            ActionInputKind::Confirmation => "confirmation",
+            ActionInputKind::Reason => "reason",
+            ActionInputKind::Comment => "comment",
+            ActionInputKind::Evidence => "evidence",
+            ActionInputKind::Summary => "summary",
+            ActionInputKind::ReviewDecision => "review_decision",
+            ActionInputKind::RecoveryDisposition => "recovery_disposition",
+        })
+        .collect::<Vec<_>>();
+    let exact = input.target.project_id == current.target.project_id.as_str()
+        && input.target.work_id == current.target.work_id.as_str()
+        && input.target.entity_revision == Some(current.target.revision.get())
+        && input.expected_project_revision == current.expected_project_revision.0
+        && input.expected_entity_revision == Some(current.expected_entity_revision.get())
+        && input.expected_proof_revision
+            == current
+                .expected_proof_revision
+                .map(|revision| revision.get())
+        && input.attempt == expected_attempt
+        && input
+            .required_roles
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            == expected_roles
+        && input
+            .required_inputs
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            == expected_inputs
+        && input.confirmation.as_deref() == current.confirmation
+        && input.read_only == current.read_only
+        && input.recovery == current.recovery;
+    if !exact {
+        return Err(StoreError::Conflict(
+            "recover action descriptor is stale or does not match the authorized target".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recover_attempt_subject(
+    request: &AttemptMutationRequest,
+    current: &AttemptRecord,
+) -> Result<(), StoreError> {
+    if current.project_id != request.project_id || current.work_id != request.work_id {
+        return Err(StoreError::WrongSubject {
+            expected: format!("{}/{}", request.project_id, request.work_id),
+            actual: format!("{}/{}", current.project_id, current.work_id),
+        });
+    }
+    if !current.current {
+        return Err(StoreError::NotCurrent {
+            attempt_id: current.attempt_id.clone(),
+        });
+    }
+    if current.attempt_id != request.attempt_id {
+        return Err(StoreError::Conflict(
+            "recover descriptor attempt no longer matches the current work attempt".to_owned(),
+        ));
+    }
+    if current.fence != request.fence {
+        return Err(StoreError::StaleFence {
+            expected: request.fence,
+            actual: current.fence,
+        });
+    }
+    Ok(())
+}
+
 fn recovery_obligation_for_attempt_mutation(
     request: &AttemptMutationRequest,
 ) -> Option<recovery::RecoveryObligationInput> {
@@ -13370,5 +13901,68 @@ impl SqliteStore {
     /// different database or derive authority from this pathname.
     pub fn database_location(&self) -> Option<&Path> {
         self.database_path.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod sqlite_release_floor_tests {
+    use super::{
+        ensure_sqlite_runtime_release_floor, sqlite_version_number_text, SqliteStore,
+        SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE,
+    };
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn release_floor_accepts_exact_minimum_and_rejects_older_versions() {
+        assert!(ensure_sqlite_runtime_release_floor(3_051_003).is_ok());
+        assert!(ensure_sqlite_runtime_release_floor(3_052_000).is_ok());
+
+        for (version, expected) in [(3_051_002, "3.51.2"), (3_046_001, "3.46.1")] {
+            let error = ensure_sqlite_runtime_release_floor(version)
+                .expect_err("a runtime below the release floor must fail closed");
+            let message = error.to_string();
+            assert!(message.contains(expected), "{message}");
+            assert!(
+                message.contains("required release floor 3.51.3"),
+                "{message}"
+            );
+            assert!(message.contains("WAL-reset corruption fix"), "{message}");
+        }
+
+        assert_eq!(sqlite_version_number_text(3_051_003), "3.51.3");
+        assert_eq!(sqlite_version_number_text(-1), "unknown (-1)");
+    }
+
+    #[test]
+    fn below_floor_rejection_precedes_database_creation() {
+        let path = unique_path();
+        assert!(!path.exists());
+
+        let error = match SqliteStore::open_connection_with_runtime_version(
+            &path,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+            3_046_001,
+        ) {
+            Ok(_) => panic!("an old SQLite runtime must not open a database"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("3.46.1"));
+        assert!(
+            !path.exists(),
+            "floor rejection must happen before sqlite3_open_v2"
+        );
+    }
+
+    fn unique_path() -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "boreal-sqlite-release-floor-{}-{timestamp}.sqlite",
+            std::process::id()
+        ))
     }
 }

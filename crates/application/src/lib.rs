@@ -84,7 +84,8 @@ pub use runtime::{
     AcceptAttemptRequest, AttemptAdapterError, AttemptCommand, AttemptCommandKind,
     AttemptLifecycleAdapter, AttemptMutation, AttemptPolicy, AttemptPolicyError, AttemptRequest,
     AttemptSnapshot, CancelAttemptRequest, EndAttemptRequest, ExpireAttemptRequest,
-    HeartbeatAttemptRequest, LivenessMetadata, RenewLeaseAttemptRequest, StopConfirmation,
+    HeartbeatAttemptRequest, LivenessMetadata, RecoverActionRequest, RenewLeaseAttemptRequest,
+    StopConfirmation,
 };
 
 pub const API_VERSION: &str = "v2";

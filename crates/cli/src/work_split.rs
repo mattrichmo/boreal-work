@@ -1,6 +1,6 @@
 //! CLI adapter for atomic sibling-task decomposition.
 use super::*;
-use boreal_application::{WorkSplitInput, canonical_request_digest, sha256_content_digest};
+use boreal_application::{canonical_request_digest, sha256_content_digest, WorkSplitInput};
 use boreal_store::{V3MutationContext, WorkSplitRecord};
 
 pub(crate) fn supported(path: &[String]) -> bool {

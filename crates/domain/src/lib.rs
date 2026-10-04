@@ -319,16 +319,11 @@ impl BlockingDependency {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DependencyPolicy {
     /// Only an accepted closed result satisfies the edge.
+    #[default]
     ClosedOnly,
-}
-
-impl Default for DependencyPolicy {
-    fn default() -> Self {
-        Self::ClosedOnly
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

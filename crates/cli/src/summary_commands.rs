@@ -494,9 +494,6 @@ fn backfill_json(r: &boreal_store::LegacySummaryBackfillRecord) -> Value {
 fn summary_json(s: &boreal_store::SummaryRecord) -> Value {
     json!({"summary_id": s.summary_id, "project_id": s.project_id, "work_id": s.work_id, "attempt_id": s.attempt_id, "fence": s.fence, "subject_ref": s.subject_ref, "source_version_id": s.source_version_id, "config_identity": s.config_identity, "profile_id": s.profile_id, "profile_version": s.profile_version, "body_digest": s.body_digest, "body_size": s.body_size, "current": s.current, "created_at": s.created_at})
 }
-fn payload_json(s: &SummaryPayload) -> Value {
-    json!({"summary_id": s.summary_id, "work_id": s.work_id.as_str(), "attempt_id": s.attempt_id.as_str(), "fence": s.fence.get(), "source_snapshot_hash": s.source_snapshot_hash.as_str(), "config_identity": s.config_identity.as_str(), "profile_id": s.profile_id.as_str(), "profile_version": s.profile_version, "body_digest": s.body_digest, "body_size": s.body_size})
-}
 fn extra<'a>(parsed: &'a ParsedCommand, key: &str) -> Option<&'a str> {
     parsed
         .options

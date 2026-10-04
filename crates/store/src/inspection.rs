@@ -10,31 +10,70 @@ impl SqliteStore {
         }
         if self.canonical_production {
             self.verify_production_schema_current()?;
-            for (name,version,sql) in [
-                ("agent_tools",1,AGENT_TOOLS_SCHEMA),
-                ("knowledge_parity",1,KNOWLEDGE_PARITY_SCHEMA),
-                ("work_split",1,WORK_SPLIT_SCHEMA),
-                ("knowledge_maintenance",1,knowledge_maintenance::KNOWLEDGE_MAINTENANCE_SCHEMA),
-                ("orchestration",ORCHESTRATION_SCHEMA_VERSION as u64,ORCHESTRATION_SCHEMA_SQL),
-                ("orchestration_runtime",orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_VERSION as u64,orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_SQL),
+            for (name, version, sql) in [
+                ("agent_tools", 1, AGENT_TOOLS_SCHEMA),
+                ("knowledge_parity", 1, KNOWLEDGE_PARITY_SCHEMA),
+                ("work_split", 1, WORK_SPLIT_SCHEMA),
+                (
+                    "knowledge_maintenance",
+                    1,
+                    knowledge_maintenance::KNOWLEDGE_MAINTENANCE_SCHEMA,
+                ),
+                (
+                    "orchestration",
+                    ORCHESTRATION_SCHEMA_VERSION as u64,
+                    ORCHESTRATION_SCHEMA_SQL,
+                ),
+                (
+                    "orchestration_runtime",
+                    orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_VERSION as u64,
+                    orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_SQL,
+                ),
             ] {
-                let mut row=self.prepare("SELECT version,sql FROM boreal_feature_schema WHERE feature=?1")?;
-                row.bind_text(1,name)?;
-                if row.step()?!=SQLITE_ROW || row.column_u64(0)?!=version || row.column_text(1)?!=sql {
+                let mut row =
+                    self.prepare("SELECT version,sql FROM boreal_feature_schema WHERE feature=?1")?;
+                row.bind_text(1, name)?;
+                if row.step()? != SQLITE_ROW
+                    || row.column_u64(0)? != version
+                    || row.column_text(1)? != sql
+                {
                     return Err(StoreError::Corrupt(format!("feature {name} does not match this binary's installed schema contract; use an explicit migration")));
                 }
                 // Verify installed objects as well as their declaration ledger.
                 // Tables/indices/triggers from these static feature contracts
                 // all use the CREATE ... IF NOT EXISTS form.
-                let tokens=sql.split_whitespace().collect::<Vec<_>>();
+                let tokens = sql.split_whitespace().collect::<Vec<_>>();
                 for window in tokens.windows(7) {
-                    let start=if window[0].eq_ignore_ascii_case("CREATE"){0}else{continue};
-                    let (kind,next)=if window[start+1].eq_ignore_ascii_case("UNIQUE") {("index",2)}else{(window[start+1],1)};
-                    if !["table","index","trigger"].iter().any(|k|kind.eq_ignore_ascii_case(k)) || !window[next+1].eq_ignore_ascii_case("IF") || !window[next+2].eq_ignore_ascii_case("NOT") || !window[next+3].eq_ignore_ascii_case("EXISTS") {continue;}
-                    let object=window[next+4].split('(').next().unwrap_or("");
-                    let mut check=self.prepare("SELECT 1 FROM sqlite_master WHERE lower(type)=lower(?1) AND name=?2")?;
-                    check.bind_text(1,kind)?;check.bind_text(2,object)?;
-                    if check.step()?!=SQLITE_ROW {return Err(StoreError::Corrupt(format!("feature {name} is missing {kind} {object}")));}
+                    let start = if window[0].eq_ignore_ascii_case("CREATE") {
+                        0
+                    } else {
+                        continue;
+                    };
+                    let (kind, next) = if window[start + 1].eq_ignore_ascii_case("UNIQUE") {
+                        ("index", 2)
+                    } else {
+                        (window[start + 1], 1)
+                    };
+                    if !["table", "index", "trigger"]
+                        .iter()
+                        .any(|k| kind.eq_ignore_ascii_case(k))
+                        || !window[next + 1].eq_ignore_ascii_case("IF")
+                        || !window[next + 2].eq_ignore_ascii_case("NOT")
+                        || !window[next + 3].eq_ignore_ascii_case("EXISTS")
+                    {
+                        continue;
+                    }
+                    let object = window[next + 4].split('(').next().unwrap_or("");
+                    let mut check = self.prepare(
+                        "SELECT 1 FROM sqlite_master WHERE lower(type)=lower(?1) AND name=?2",
+                    )?;
+                    check.bind_text(1, kind)?;
+                    check.bind_text(2, object)?;
+                    if check.step()? != SQLITE_ROW {
+                        return Err(StoreError::Corrupt(format!(
+                            "feature {name} is missing {kind} {object}"
+                        )));
+                    }
                 }
             }
         }

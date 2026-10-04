@@ -23,8 +23,7 @@ use boreal_domain::{ProjectId, SessionId, TimestampMs, WorkId};
 use boreal_store::{
     AttemptRecord, ContainerDispositionV3Input, CycleAssignmentV3Input, CycleSeriesV3Input,
     CycleTemplateV3Input, CycleV3Input, IntakeBucketV3Input, IntakeItemV3Input, IntakeItemV3Record,
-    IntakePromotionV3Input, MutationResult, SessionRecord, SessionState, V3MutationContext,
-    WorkNodeV3Input,
+    IntakePromotionV3Input, MutationResult, SessionRecord, V3MutationContext, WorkNodeV3Input,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -189,8 +188,7 @@ impl WorkApplication<'_> {
         while offset < total || (total == 0 && offset == 0) {
             let limit = total
                 .saturating_sub(offset)
-                .min(crate::status::MAX_STATUS_ROWS)
-                .max(1);
+                .clamp(1, crate::status::MAX_STATUS_ROWS);
             let page = crate::status::project_status(
                 project_id,
                 &snapshot.actor,
@@ -434,12 +432,7 @@ impl WorkApplication<'_> {
                     }
                 }
             };
-            let gate_gaps = item
-                .gates
-                .missing
-                .iter()
-                .map(|gate| gate.clone().into())
-                .collect();
+            let gate_gaps = item.gates.missing.to_vec();
             let overdue = source_input
                 .and_then(|input| input.schedule)
                 .and_then(|schedule| schedule.due_at)
@@ -582,8 +575,7 @@ impl WorkApplication<'_> {
         loop {
             let limit = total
                 .saturating_sub(offset)
-                .min(crate::status::MAX_STATUS_ROWS)
-                .max(1);
+                .clamp(1, crate::status::MAX_STATUS_ROWS);
             let page = crate::status::project_status(
                 project_id,
                 &snapshot.actor,
@@ -720,7 +712,7 @@ impl WorkApplication<'_> {
                 }
             });
             if let Some(item) = projected_item {
-                task.gate_gaps = item.gates.missing.iter().cloned().map(Into::into).collect();
+                task.gate_gaps = item.gates.missing.to_vec();
                 task.overdue = source
                     .and_then(|row| row.schedule)
                     .and_then(|schedule| schedule.due_at)
@@ -1615,7 +1607,7 @@ pub struct OperatorRecoveryAssessment {
 }
 
 fn ensure_mutation_scope(
-    store: &boreal_store::SqliteStore,
+    _store: &boreal_store::SqliteStore,
     scope: &PlanningScope,
 ) -> Result<(), ApplicationError> {
     scope.validate().map_err(ApplicationError::from)?;

@@ -24,8 +24,10 @@ failed or could not be observed in the current environment.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -48,12 +50,14 @@ class HarnessError(RuntimeError):
     """A scenario failed or could not establish its production boundary."""
 
 
-def short_socket(label: str) -> Path:
-    """Return a unique macOS-safe endpoint (macOS caps sockaddr_un paths)."""
+def short_socket(root: Path, label: str) -> Path:
+    """Return a unique short endpoint inside its selected project root."""
     global _SOCKET_COUNTER
     _SOCKET_COUNTER += 1
-    safe = "".join(character for character in label if character.isalnum() or character == "-")[:22]
-    return Path(f"/tmp/boreal-c4a-{os.getpid()}-{_SOCKET_COUNTER}-{safe}.sock")
+    # Local project context rejects sockets outside the selected workspace.
+    # Keep the basename tiny as macOS still caps sockaddr_un path lengths.
+    del label
+    return root / ".boreal" / f"s{_SOCKET_COUNTER}.sock"
 
 
 def op(value: str) -> str:
@@ -91,6 +95,156 @@ class Call:
             "stdout_tail": self.stdout[-1200:],
             "stderr_tail": self.stderr[-1200:],
         }
+
+
+@dataclass
+class AbortBarrier:
+    """Pause one debug failpoint thread while the live service reads its row."""
+
+    ready_fd: int
+    release_fd: int
+    ready_path: Path
+    release_path: Path
+    library_path: Path
+    preload_variable: str
+
+    @classmethod
+    def create(cls, root: Path) -> "AbortBarrier":
+        if sys.platform.startswith("linux"):
+            suffix = ".so"
+            linker_args = ["-shared", "-fPIC"]
+            preload_variable = "LD_PRELOAD"
+        elif sys.platform == "darwin":
+            suffix = ".dylib"
+            linker_args = ["-dynamiclib", "-fPIC"]
+            preload_variable = "DYLD_INSERT_LIBRARIES"
+        else:
+            raise HarnessError(f"V02 transient-state barrier is unsupported on {sys.platform}")
+
+        directory = root / ".boreal" / "validation-abort-barrier"
+        directory.mkdir(parents=True, exist_ok=True)
+        source_path = directory / "hold_abort.c"
+        library_path = directory / f"hold_abort{suffix}"
+        ready_path = directory / "ready.fifo"
+        release_path = directory / "release.fifo"
+        source_path.write_text(
+            """#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+
+static int ready_fd = -1;
+static int release_fd = -1;
+
+static void hold_sigabrt(int signal_number) {
+    (void)signal_number;
+    const char ready = 'R';
+    (void)write(ready_fd, &ready, 1);
+    for (;;) {
+        char release;
+        ssize_t count = read(release_fd, &release, 1);
+        if (count == 1) return;
+        if (count == 0) return; /* No supervisor remains; resume the real abort. */
+        if (count < 0 && errno != EAGAIN && errno != EINTR) _exit(127);
+        struct timespec pause = {0, 1000000};
+        (void)nanosleep(&pause, NULL);
+    }
+}
+
+__attribute__((constructor)) static void install_abort_handler(void) {
+    const char *ready_path = getenv("BOREAL_ABORT_READY_FIFO");
+    const char *release_path = getenv("BOREAL_ABORT_RELEASE_FIFO");
+    if (!ready_path || !release_path) return;
+    ready_fd = open(ready_path, O_WRONLY | O_NONBLOCK);
+    release_fd = open(release_path, O_RDONLY | O_NONBLOCK);
+    if (ready_fd < 0 || release_fd < 0) return;
+    struct sigaction action = {0};
+    action.sa_handler = hold_sigabrt;
+    sigemptyset(&action.sa_mask);
+    (void)sigaction(SIGABRT, &action, NULL);
+}
+""",
+            encoding="utf-8",
+        )
+        for path in (ready_path, release_path):
+            os.mkfifo(path, 0o600)
+        ready_fd = os.open(ready_path, os.O_RDWR | os.O_NONBLOCK)
+        release_fd = os.open(release_path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            compile_result = subprocess.run(
+                ["cc", *linker_args, "-o", str(library_path), str(source_path)],
+                text=True,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+            if compile_result.returncode != 0:
+                raise HarnessError(
+                    "V02 SIGABRT barrier compilation failed: "
+                    f"{compile_result.stderr[-1200:]}"
+                )
+        except BaseException:
+            os.close(ready_fd)
+            os.close(release_fd)
+            raise
+        return cls(
+            ready_fd=ready_fd,
+            release_fd=release_fd,
+            ready_path=ready_path,
+            release_path=release_path,
+            library_path=library_path,
+            preload_variable=preload_variable,
+        )
+
+    def service_environment(self) -> dict[str, str]:
+        existing = os.environ.get(self.preload_variable)
+        preload = str(self.library_path)
+        if existing:
+            preload = f"{preload}{os.pathsep}{existing}"
+        result = {
+            self.preload_variable: preload,
+            "BOREAL_ABORT_READY_FIFO": str(self.ready_path),
+            "BOREAL_ABORT_RELEASE_FIFO": str(self.release_path),
+        }
+        if sys.platform == "darwin":
+            result["DYLD_FORCE_FLAT_NAMESPACE"] = "1"
+        return result
+
+    def wait_until_held(
+        self,
+        service: subprocess.Popen[str],
+        request: subprocess.Popen[str],
+        *,
+        timeout: float = 10.0,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            readable, _, _ = select.select([self.ready_fd], [], [], min(remaining, 0.1))
+            if readable and os.read(self.ready_fd, 1) == b"R":
+                return
+            if service.poll() is not None:
+                raise HarnessError(
+                    f"service exited before holding the debug failpoint: code={service.returncode}"
+                )
+            if request.poll() is not None:
+                raise HarnessError(
+                    f"evidence request ended before holding the debug failpoint: code={request.returncode}"
+                )
+        raise HarnessError(f"service did not reach the debug failpoint within {timeout:.1f}s")
+
+    def release(self) -> None:
+        try:
+            os.write(self.release_fd, b"G")
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        os.close(self.ready_fd)
+        os.close(self.release_fd)
 
 
 def parse_envelope(stdout: str) -> dict[str, Any] | None:
@@ -151,6 +305,47 @@ def stat_is_socket(path: Path) -> bool:
     return path.exists() and path.stat().st_mode & 0o170000 == 0o140000
 
 
+def wait_for_service_ready(
+    binary: Path,
+    db: Path,
+    socket_path: Path,
+    process: subprocess.Popen[str],
+    *,
+    cwd: Path,
+    project: str,
+    timeout: float = 10.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            output = process.stdout.read() if process.stdout is not None else ""
+            raise HarnessError(
+                f"service exited before readiness: code={process.returncode} output={output[-1600:]}"
+            )
+        if socket_path.exists() and stat_is_socket(socket_path):
+            status = run_cli(
+                binary,
+                [
+                    "status",
+                    project,
+                    "--db",
+                    str(db),
+                    "--socket",
+                    str(socket_path),
+                    "--json",
+                ],
+                cwd=cwd,
+                timeout=1.0,
+            )
+            recovery = status.data().get("recovery")
+            if status.exit_code == 0 and isinstance(recovery, dict) and recovery.get("service_state") == "ready":
+                return
+            last = status.compact()
+        time.sleep(0.02)
+    raise HarnessError(f"service status readiness failed: {last!r}")
+
+
 def start_service(
     binary: Path,
     db: Path,
@@ -176,6 +371,10 @@ def start_service(
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    if max_requests is not None:
+        # The authenticated status probe below consumes one ordinary service
+        # request, so retain the caller's requested application-call budget.
+        args.extend(["--max-requests", str(max_requests + 1)])
     process = subprocess.Popen(
         args,
         cwd=cwd,
@@ -184,7 +383,15 @@ def start_service(
         stderr=subprocess.STDOUT,
         text=True,
     )
-    wait_for_socket(socket_path, process)
+    metadata = json.loads((cwd / ".boreal" / "project.json").read_text())
+    wait_for_service_ready(
+        binary,
+        db,
+        socket_path,
+        process,
+        cwd=cwd,
+        project=metadata["project_id"],
+    )
     return process
 
 
@@ -213,6 +420,30 @@ def service_call(
     session: str = "c4-a-session",
     timeout: float = 30.0,
 ) -> Call:
+    argv = service_request_args(
+        binary,
+        db,
+        socket_path,
+        args,
+        operation=operation,
+        actor=actor,
+        harness=harness,
+        session=session,
+    )
+    return run_cli(binary, argv[1:], cwd=cwd, timeout=timeout)
+
+
+def service_request_args(
+    binary: Path,
+    db: Path,
+    socket_path: Path,
+    args: Iterable[str],
+    *,
+    operation: str,
+    actor: str = "agent-1",
+    harness: str = "cli",
+    session: str = "c4-a-session",
+) -> list[str]:
     command = list(args)
     command.extend(
         [
@@ -231,7 +462,7 @@ def service_call(
             "--json",
         ]
     )
-    return run_cli(binary, command, cwd=cwd, timeout=timeout)
+    return [str(binary), *command]
 
 
 def assert_success(call: Call, label: str, outcome: str | None = None) -> dict[str, Any]:
@@ -248,8 +479,14 @@ def assert_error(call: Call, codes: set[str], label: str) -> None:
 
 
 def prepare_project(binary: Path, root: Path, project: str, work: str) -> tuple[Path, Path]:
-    db = root / "boreal.sqlite"
-    gates = root / "gates"
+    # The production project context confines its database to the selected
+    # project root.  Use the temporary fixture directory itself as that root;
+    # `init --project ... --project-root ...` keeps the project identity and
+    # workspace boundary explicit without relying on cwd-derived paths.
+    db = root / ".boreal" / "boreal.sqlite"
+    # evidence run resolves its declaration directory beside the canonical
+    # project database (`<project>/.boreal/gates`).
+    gates = db.parent / "gates"
     gates.mkdir(parents=True, exist_ok=True)
     for gate in ("checkpoint.json", "verification.json", "summary.json"):
         (gates / gate).write_bytes((GATE_SOURCE / gate).read_bytes())
@@ -257,7 +494,10 @@ def prepare_project(binary: Path, root: Path, project: str, work: str) -> tuple[
         binary,
         [
             "init",
+            "--project",
             project,
+            "--project-root",
+            str(root),
             "--db",
             str(db),
             "--operation-id",
@@ -267,6 +507,91 @@ def prepare_project(binary: Path, root: Path, project: str, work: str) -> tuple[
         cwd=root,
     )
     assert_success(initialized, f"{project} init")
+    status = run_cli(
+        binary,
+        ["status", project, "--db", str(db), "--json"],
+        cwd=root,
+    )
+    status_data = assert_success(status, f"{project} initial status")
+    revision = status_data.get("revision")
+    if not isinstance(revision, int):
+        revision = (status.envelope or {}).get("revision")
+    if not isinstance(revision, int):
+        raise HarnessError(f"{project} initial status omitted its revision: {status.compact()}")
+    enrollment = run_cli(
+        binary,
+        [
+            "auth",
+            "key",
+            "--actor",
+            "agent-1",
+            "--actor-role",
+            "agent",
+            "--db",
+            str(db),
+            "--operation-id",
+            op(f"{project}-agent-key"),
+            "--json",
+        ],
+        cwd=root,
+    )
+    enrollment_data = assert_success(enrollment, f"{project} agent key")
+    enrollment_path = enrollment_data.get("enrollment_path")
+    if not isinstance(enrollment_path, str):
+        raise HarnessError(f"{project} agent key omitted its private enrollment path: {enrollment.compact()}")
+    granted = run_cli(
+        binary,
+        [
+            "auth",
+            "grant",
+            "--actor",
+            "operator",
+            "--input",
+            enrollment_path,
+            "--expected-revision",
+            str(revision),
+            "--reason",
+            "Isolated production service validation agent",
+            "--yes",
+            "--db",
+            str(db),
+            "--operation-id",
+            op(f"{project}-agent-grant"),
+            "--json",
+        ],
+        cwd=root,
+    )
+    assert_success(granted, f"{project} agent grant")
+    revision = (granted.envelope or {}).get("revision")
+    if not isinstance(revision, int):
+        raise HarnessError(f"{project} agent grant omitted its revision: {granted.compact()}")
+    session = run_cli(
+        binary,
+        [
+            "session",
+            "start",
+            "--project",
+            project,
+            "--actor",
+            "operator",
+            "--harness",
+            "cli",
+            "--session",
+            "session-operator",
+            "--expected-revision",
+            str(revision),
+            "--db",
+            str(db),
+            "--operation-id",
+            op(f"{project}-session-start"),
+            "--json",
+        ],
+        cwd=root,
+    )
+    assert_success(session, f"{project} operator session start")
+    revision = (session.envelope or {}).get("revision")
+    if not isinstance(revision, int):
+        raise HarnessError(f"{project} session start omitted its revision: {session.compact()}")
     created = run_cli(
         binary,
         [
@@ -277,6 +602,12 @@ def prepare_project(binary: Path, root: Path, project: str, work: str) -> tuple[
             "C4-A validation work",
             "--kind",
             "task",
+            "--actor",
+            "operator",
+            "--session",
+            "session-operator",
+            "--expected-revision",
+            str(revision),
             "--db",
             str(db),
             "--operation-id",
@@ -299,8 +630,9 @@ def service_once(
     max_requests: int = 1,
     extra_env: dict[str, str] | None = None,
     session: str = "c4-a-session",
+    actor: str = "agent-1",
 ) -> Call:
-    socket_path = short_socket(operation)
+    socket_path = short_socket(root, operation)
     process = start_service(
         binary,
         db,
@@ -316,6 +648,7 @@ def service_once(
         args,
         cwd=root,
         operation=operation,
+        actor=actor,
         session=session,
     )
     if process.poll() is None and max_requests is not None:
@@ -346,6 +679,170 @@ def operation_show_direct(binary: Path, root: Path, db: Path, project: str, oper
     )
 
 
+def add_workspace_snapshot(
+    binary: Path,
+    root: Path,
+    db: Path,
+    project: str,
+) -> tuple[str, int]:
+    source_added = run_cli(
+        binary,
+        [
+            "source",
+            "add",
+            project,
+            "--input",
+            ".",
+            "--origin",
+            "c4-a-evidence-fixture",
+            "--actor",
+            "operator",
+            "--db",
+            str(db),
+            "--operation-id",
+            op(f"{project}-source-add"),
+            "--json",
+        ],
+        cwd=root,
+    )
+    source_data = assert_success(source_added, f"{project} workspace snapshot add").get("source") or {}
+    source_id = source_data.get("source_version_id")
+    if not isinstance(source_id, str):
+        raise HarnessError(f"source add omitted its workspace snapshot identity: {source_added.compact()}")
+    source_show = run_cli(
+        binary,
+        ["source", "show", project, source_id, "--db", str(db), "--json"],
+        cwd=root,
+    )
+    source_record = assert_success(source_show, f"{project} workspace snapshot readback").get("source") or {}
+    if (
+        source_record.get("source_version_id") != source_id
+        or source_record.get("media_type") != "application/vnd.boreal.workspace-snapshot.v1"
+        or source_record.get("availability") != "available"
+    ):
+        raise HarnessError(f"source show did not read back an available workspace snapshot: {source_show.compact()}")
+    registration = (source_added.data().get("registration") or {}).get("revision")
+    if not isinstance(registration, int):
+        registration = (source_added.envelope or {}).get("revision")
+    if not isinstance(registration, int):
+        raise HarnessError(f"source add omitted its registration revision: {source_added.compact()}")
+    return source_id, registration
+
+
+def failpoint_readback_via_live_service(
+    binary: Path,
+    root: Path,
+    db: Path,
+    *,
+    project: str,
+    work: str,
+    gate: str,
+    attempt: str,
+    fence: int,
+    operation: str,
+    session: str,
+    failpoint: str,
+    expected_state: str,
+) -> tuple[Call, Call, int]:
+    barrier = AbortBarrier.create(root)
+    socket_path = short_socket(root, f"{project}-live-readback")
+    service: subprocess.Popen[str] | None = None
+    evidence_process: subprocess.Popen[str] | None = None
+    request_args: list[str] = []
+    readback: Call | None = None
+    evidence: Call | None = None
+    service_exit: int | None = None
+    try:
+        service = start_service(
+            binary,
+            db,
+            socket_path,
+            cwd=root,
+            extra_env={
+                "BOREAL_VALIDATION_FAILPOINT": failpoint,
+                **barrier.service_environment(),
+            },
+        )
+        request_args = service_request_args(
+            binary,
+            db,
+            socket_path,
+            [
+                "evidence",
+                "run",
+                "--project",
+                project,
+                "--work",
+                work,
+                "--gate",
+                gate,
+                "--attempt",
+                attempt,
+                "--fence",
+                str(fence),
+            ],
+            operation=operation,
+            session=session,
+        )
+        evidence_process = subprocess.Popen(
+            request_args,
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        barrier.wait_until_held(service, evidence_process)
+        readback = service_call(
+            binary,
+            db,
+            socket_path,
+            ["operation", "show", project, op(operation)],
+            cwd=root,
+            operation=f"{project}-live-readback",
+            session=session,
+        )
+        observed_state = operation_state(readback)
+        if observed_state != expected_state:
+            raise HarnessError(
+                f"V02 {expected_state} live service readback returned {observed_state!r}: "
+                f"{readback.compact()}"
+            )
+    finally:
+        # Releasing the handler lets the real debug failpoint abort the service
+        # after the state has been read through its supported socket route.
+        barrier.release()
+        if service is not None and service.poll() is None:
+            try:
+                service.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                stop_process(service)
+                raise HarnessError("V02 debug failpoint did not terminate the service after release")
+        elif service is not None:
+            service.communicate()
+        if service is not None:
+            service_exit = service.returncode
+        if evidence_process is not None:
+            try:
+                stdout, stderr = evidence_process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                evidence_process.kill()
+                stdout, stderr = evidence_process.communicate(timeout=5)
+                raise HarnessError("V02 evidence socket client did not finish after service abort")
+            evidence = Call(
+                args=request_args,
+                exit_code=evidence_process.returncode,
+                envelope=parse_envelope(stdout),
+                stdout=stdout,
+                stderr=stderr,
+            )
+        barrier.close()
+    if service_exit != -signal.SIGABRT:
+        raise HarnessError(f"V02 debug failpoint service exit was {service_exit}, expected SIGABRT")
+    if readback is None or evidence is None:
+        raise HarnessError("V02 debug failpoint did not produce both request and readback observations")
+    return evidence, readback, service_exit
+
+
 def operation_state(call: Call) -> str | None:
     return call.data().get("execution", {}).get("state") if isinstance(call.data().get("execution"), dict) else None
 
@@ -361,40 +858,68 @@ def evidence_setup(
     slow_gate: bool = False,
 ) -> tuple[Path, Path, str, int]:
     db, gates = prepare_project(binary, root, project, work)
-    source_input = root / "evidence-source.txt"
-    source_input.write_text("C4-A evidence source fixture\n")
-    source_added = run_cli(
+    verifier = root / "validation-verifier"
+    verifier_bytes = (
+        b"#!/bin/sh\nsleep 2\nprintf c4-a-validation-marker\n"
+        if slow_gate
+        else b"#!/bin/sh\nprintf c4-a-validation-marker\n"
+    )
+    verifier.write_bytes(verifier_bytes)
+    verifier.chmod(0o755)
+    source_id, source_revision = add_workspace_snapshot(
+        binary,
+        root,
+        db,
+        project,
+    )
+    config_identity = "config-c4-a-fixture"
+    gate_file = gates / f"{gate}.json"
+    declaration = json.loads(gate_file.read_text())
+    declaration.update(
+        {
+            "executable": "./validation-verifier",
+            "verifier_digest": f"sha256:{hashlib.sha256(verifier_bytes).hexdigest()}",
+            "argv": ["./validation-verifier"],
+            "cwd": ".",
+            "source_snapshot_hash": source_id,
+            "config_identity": config_identity,
+            "environment_fingerprint": "declared-environment-fingerprint",
+            "observables": ["c4-a-validation-marker"],
+            "max_runtime_ms": 30_000,
+        }
+    )
+    gate_file.write_text(json.dumps(declaration, indent=2) + "\n")
+    published = run_cli(
         binary,
         [
-            "source",
-            "add",
+            "gate",
+            "policy",
+            "publish",
+            "--project",
             project,
+            "--gate",
+            gate,
             "--input",
-            str(source_input),
-            "--origin",
-            "c4-a-evidence-fixture",
+            f".boreal/gates/{gate}.json",
+            "--expected-revision",
+            str(source_revision),
+            "--yes",
+            "--actor",
+            "operator",
+            "--harness",
+            "cli",
+            "--session",
+            "session-operator",
             "--db",
             str(db),
             "--operation-id",
-            op(f"{project}-source-add"),
+            op(f"{project}-gate-policy"),
             "--json",
         ],
         cwd=root,
     )
-    source_id = (assert_success(source_added, f"{project} source add").get("source") or {}).get(
-        "source_version_id"
-    )
-    if not isinstance(source_id, str):
-        raise HarnessError(f"source add did not return a source version identity: {source_added.compact()}")
-    config_identity = "config-c4-a-fixture"
-    for gate_file in gates.glob("*.json"):
-        declaration = json.loads(gate_file.read_text())
-        declaration["source_snapshot_hash"] = source_id
-        declaration["config_identity"] = config_identity
-        gate_file.write_text(json.dumps(declaration, indent=2) + "\n")
-    if slow_gate:
-        write_slow_gate(gates)
-    socket_path = short_socket("setup")
+    assert_success(published, f"{project} gate policy publish", "changed")
+    socket_path = short_socket(root, "setup")
     process = start_service(binary, db, socket_path, cwd=root, max_requests=2)
     claimed = service_call(
         binary,
@@ -433,13 +958,22 @@ def evidence_setup(
     fence = data.get("fence") or claim_data.get("fence")
     if not isinstance(attempt_id, str) or not isinstance(fence, int):
         raise HarnessError(f"agent start did not return attempt identity: {started.compact()}")
-    return db, root / "gates", attempt_id, fence
+    return db, db.parent / "gates", attempt_id, fence
 
 
 def run_v01(binary: Path, parent: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="boreal-v01-", dir=parent) as directory:
         root = Path(directory)
         db, _ = prepare_project(binary, root, "v01-project", "seed")
+        status = run_cli(
+            binary,
+            ["status", "v01-project", "--db", str(db), "--json"],
+            cwd=root,
+        )
+        assert_success(status, "V01 initial status")
+        expected_revision = (status.envelope or {}).get("revision")
+        if not isinstance(expected_revision, int):
+            raise HarnessError(f"V01 initial status omitted its revision: {status.compact()}")
         create_args = [
             "work",
             "create",
@@ -448,10 +982,28 @@ def run_v01(binary: Path, parent: Path) -> dict[str, Any]:
             "Restart identity",
             "--kind",
             "task",
+            "--expected-revision",
+            str(expected_revision),
         ]
-        first = service_once(binary, root, db, create_args, operation="v01-create")
+        first = service_once(
+            binary,
+            root,
+            db,
+            create_args,
+            operation="v01-create",
+            session="session-operator",
+            actor="operator",
+        )
         assert_success(first, "V01 first create", "changed")
-        replay = service_once(binary, root, db, create_args, operation="v01-create")
+        replay = service_once(
+            binary,
+            root,
+            db,
+            create_args,
+            operation="v01-create",
+            session="session-operator",
+            actor="operator",
+        )
         assert_success(replay, "V01 replay after restart", "unchanged")
         changed = service_once(
             binary,
@@ -465,8 +1017,12 @@ def run_v01(binary: Path, parent: Path) -> dict[str, Any]:
                 "Changed payload",
                 "--kind",
                 "task",
+                "--expected-revision",
+                str(expected_revision),
             ],
             operation="v01-create",
+            session="session-operator",
+            actor="operator",
         )
         assert_error(changed, {"operation_conflict", "claim_conflict"}, "V01 changed payload")
         readback = operation_show_direct(binary, root, db, "v01-project", "v01-create")
@@ -494,14 +1050,6 @@ def run_v01(binary: Path, parent: Path) -> dict[str, Any]:
         }
 
 
-def write_slow_gate(gates: Path) -> None:
-    declaration = json.loads((gates / "verification.json").read_text())
-    declaration["executable"] = "sleep"
-    declaration["argv"] = ["sleep", "2"]
-    declaration["observables"] = []
-    (gates / "verification.json").write_text(json.dumps(declaration, indent=2) + "\n")
-
-
 def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
     observations: dict[str, Any] = {}
 
@@ -510,82 +1058,50 @@ def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
         db, _, attempt, fence = evidence_setup(
             binary, root, project="v02-admitted", work="task", session="session-admitted"
         )
-        socket_path = short_socket("admitted")
-        service = start_service(
+        evidence, readback, service_exit = failpoint_readback_via_live_service(
             binary,
+            root,
             db,
-            socket_path,
-            cwd=root,
-            extra_env={"BOREAL_VALIDATION_FAILPOINT": "after_evidence_admission"},
-        )
-        evidence = service_call(
-            binary,
-            db,
-            socket_path,
-            [
-                "evidence",
-                "run",
-                "--project",
-                "v02-admitted",
-                "--work",
-                "task",
-                "--gate",
-                "verification",
-                "--attempt",
-                attempt,
-                "--fence",
-                str(fence),
-            ],
-            cwd=root,
+            project="v02-admitted",
+            work="task",
+            gate="verification",
+            attempt=attempt,
+            fence=fence,
             operation="v02-admitted-op",
             session="session-admitted",
+            failpoint="after_evidence_admission",
+            expected_state="admitted",
         )
-        service.wait(timeout=10)
-        readback = operation_show_direct(binary, root, db, "v02-admitted", "v02-admitted-op")
-        if operation_state(readback) != "admitted":
-            raise HarnessError(f"V02 admitted state was not readable: {readback.compact()}")
-        observations["admitted"] = {"evidence": evidence.compact(), "readback": readback.compact()}
+        observations["admitted"] = {
+            "evidence": evidence.compact(),
+            "readback": readback.compact(),
+            "service_exit": service_exit,
+        }
 
     with tempfile.TemporaryDirectory(prefix="boreal-v02-exited-", dir=parent) as directory:
         root = Path(directory)
         db, _, attempt, fence = evidence_setup(
             binary, root, project="v02-exited", work="task", session="session-exited"
         )
-        socket_path = short_socket("exited")
-        service = start_service(
+        evidence, readback, service_exit = failpoint_readback_via_live_service(
             binary,
+            root,
             db,
-            socket_path,
-            cwd=root,
-            extra_env={"BOREAL_VALIDATION_FAILPOINT": "after_evidence_exit"},
-        )
-        evidence = service_call(
-            binary,
-            db,
-            socket_path,
-            [
-                "evidence",
-                "run",
-                "--project",
-                "v02-exited",
-                "--work",
-                "task",
-                "--gate",
-                "verification",
-                "--attempt",
-                attempt,
-                "--fence",
-                str(fence),
-            ],
-            cwd=root,
+            project="v02-exited",
+            work="task",
+            gate="verification",
+            attempt=attempt,
+            fence=fence,
             operation="v02-exited-op",
             session="session-exited",
+            failpoint="after_evidence_exit",
+            expected_state="exited",
         )
-        service.wait(timeout=10)
-        readback = operation_show_direct(binary, root, db, "v02-exited", "v02-exited-op")
-        if operation_state(readback) != "exited":
-            raise HarnessError(f"V02 exited state was not readable: {readback.compact()}")
-        observations["exited"] = {"evidence": evidence.compact(), "readback": readback.compact()}
+        observations["exited"] = {
+            "evidence": evidence.compact(),
+            "readback": readback.compact(),
+            "service_exit": service_exit,
+        }
 
     with tempfile.TemporaryDirectory(prefix="boreal-v02-running-", dir=parent) as directory:
         root = Path(directory)
@@ -597,7 +1113,7 @@ def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
             session="session-running",
             slow_gate=True,
         )
-        socket_path = short_socket("running")
+        socket_path = short_socket(root, "running")
         service = start_service(binary, db, socket_path, cwd=root)
         evidence_args = [
             str(binary),
@@ -681,7 +1197,7 @@ def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
         db, _, attempt, fence = evidence_setup(
             binary, root, project="v02-unknown", work="task", session="session-unknown"
         )
-        socket_path = short_socket("unknown")
+        socket_path = short_socket(root, "unknown")
         crashed = start_service(
             binary,
             db,
@@ -712,7 +1228,7 @@ def run_v02(binary: Path, parent: Path) -> dict[str, Any]:
             session="session-unknown",
         )
         crashed.wait(timeout=10)
-        recovered_socket = short_socket("recovered")
+        recovered_socket = short_socket(root, "recovered")
         recovered = start_service(binary, db, recovered_socket, cwd=root, max_requests=1)
         readback = service_call(
             binary,
@@ -735,13 +1251,25 @@ def run_v05(binary: Path, parent: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="boreal-v05-", dir=parent) as directory:
         root = Path(directory)
         db, _ = prepare_project(binary, root, "v05-project", "task")
-        socket_path = short_socket("v05")
+        source_id, _ = add_workspace_snapshot(binary, root, db, "v05-project")
+        config_identity = "config-c4-a-v05-fixture"
+        socket_path = short_socket(root, "v05")
         service = start_service(binary, db, socket_path, cwd=root, max_requests=3)
         started = service_call(
             binary,
             db,
             socket_path,
-            ["agent", "start", "task", "--project", "v05-project"],
+            [
+                "agent",
+                "start",
+                "task",
+                "--project",
+                "v05-project",
+                "--source-version",
+                source_id,
+                "--config-identity",
+                config_identity,
+            ],
             cwd=root,
             operation="v05-start",
             session="same-session",
@@ -816,6 +1344,25 @@ os._exit(0)
 
 
 def process_alive(pid: int) -> bool:
+    # kill(pid, 0) reports Linux zombies as present even though they have
+    # already exited and cannot own children, hold pipes, or respond to
+    # signals.  V08 deliberately detaches the service by exiting its parent,
+    # so the orphan may briefly remain a zombie until PID 1 reaps it.  Treat
+    # that state as exited while retaining the portable kill(0) fallback for
+    # other Unix platforms or environments without a readable /proc entry.
+    if sys.platform.startswith("linux") and Path("/proc").is_dir():
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        except FileNotFoundError:
+            return False
+        except OSError:
+            pass
+        else:
+            # The comm field is parenthesized and may itself contain spaces
+            # or ')', so split only after its final closing parenthesis.
+            fields = stat.rsplit(")", 1)[-1].split()
+            if fields and fields[0] in {"Z", "X"}:
+                return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -829,7 +1376,7 @@ def run_v08(binary: Path, parent: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="boreal-v08-", dir=parent) as directory:
         root = Path(directory)
         db, _ = prepare_project(binary, root, "v08-project", "task")
-        socket_path = short_socket("v08")
+        socket_path = short_socket(root, "v08")
         pid_path = root / "service.pid"
         helper = subprocess.Popen(
             [sys.executable, "-c", PARENT_CODE, str(binary), str(db), str(socket_path), str(pid_path)],
@@ -880,9 +1427,6 @@ def direct_mutation_cases(root: Path, project: str, db: Path) -> list[list[str]]
     common = ["--db", str(db), "--json"]
     attempt = ["--attempt", "missing-attempt", "--fence", "1"]
     return [
-        ["init", project, "--yes"],
-        ["setup", project, "--yes"],
-        ["install", project, "--yes"],
         ["work", "create", project, "direct-new", "Direct new", "--kind", "task"],
         ["work", "edit", project, "task", "--title", "edited", "--expected-revision", "0"],
         ["dep", "add", project, "task", "direct-new", "--expected-revision", "0"],
@@ -915,13 +1459,9 @@ def run_v09(binary: Path, parent: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="boreal-v09-", dir=parent) as directory:
         root = Path(directory)
         db, _ = prepare_project(binary, root, "v09-project", "task")
-        socket_path = short_socket("v09")
+        socket_path = short_socket(root, "v09")
         service = start_service(binary, db, socket_path, cwd=root)
         records = []
-        unavailable_routes = {
-            ("intake", "bucket"),
-            ("intake", "capture"),
-        }
         try:
             for index, command in enumerate(direct_mutation_cases(root, "v09-project", db)):
                 operation = op(f"v09-direct-{index}")
@@ -941,11 +1481,11 @@ def run_v09(binary: Path, parent: Path) -> dict[str, Any]:
                 ]
                 call = run_cli(binary, full, cwd=root)
                 route = " ".join(command[:3])
-                expected_error = (
-                    "unknown_command_namespace"
-                    if tuple(command[:2]) in unavailable_routes
-                    else "service_busy"
-                )
+                # Every direct database route first tries to acquire the
+                # database-identity election. This includes routes that are
+                # not exposed over the service socket: their direct-mode
+                # invocation is rejected by the live owner before dispatch.
+                expected_error = "service_busy"
                 records.append(
                     {
                         "route": route,
@@ -954,7 +1494,9 @@ def run_v09(binary: Path, parent: Path) -> dict[str, Any]:
                     }
                 )
                 if call.error_code != expected_error:
-                    raise HarnessError(f"V09 direct mutation bypassed election: {records[-1]}")
+                    raise HarnessError(
+                        f"V09 direct mutation did not return the ownership rejection: {records[-1]}"
+                    )
         finally:
             stop_process(service)
         return {
@@ -1032,7 +1574,8 @@ def main() -> int:
             "V04, V06, V07, V10, V11, and V12 remain outside this C4-A lane.",
             "The V02 admitted/exited observations use the debug-only production failpoints already exposed by the validation build; they do not claim optimized-build crash coverage.",
             "V08 proves the service process lifetime and inherited pipe boundary, not every external executor descendant shape.",
-            "V09 enumerates every currently available database-mutating CLI route reported by the checked-in command registry; machine update/upgrade routes are intentionally excluded because they do not mutate the project database.",
+        "V09 enumerates every currently available database-mutating CLI route reported by the checked-in command registry; machine update/upgrade routes are intentionally excluded because they do not mutate the project database.",
+        "Local bootstrap/setup/install commands are excluded from V09 because they are workspace-bound setup flows rather than direct database mutation routes; project bootstrap is intentionally local-only.",
         ],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

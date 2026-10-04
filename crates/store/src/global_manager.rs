@@ -132,7 +132,7 @@ impl GlobalManagerStore {
             let schema_id = identity.column_text(0)?;
             let version = identity.column_i64(1)?;
             drop(identity);
-            if schema_id != "boreal.global" || version > 2 || version < 1 {
+            if schema_id != "boreal.global" || !(1..=2).contains(&version) {
                 return Err(StoreError::Invalid(
                     "database is not a supported Boreal global database; it was left unchanged"
                         .into(),
@@ -204,7 +204,7 @@ impl GlobalManagerStore {
                 "global revision history size returned no row".into(),
             ));
         }
-        Ok(query.column_u64(0)?)
+        query.column_u64(0)
     }
 
     /// Returns state and revision from one SQLite statement snapshot.

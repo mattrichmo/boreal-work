@@ -25,6 +25,24 @@ pub struct CycleChangeRequest {
     pub confirmed: bool,
 }
 
+struct AssignmentEvent<'a> {
+    assignment: &'a CycleAssignmentV3Input,
+    prior_state: Option<&'a str>,
+    next_state: &'a str,
+    predecessor_id: Option<&'a str>,
+    successor_id: Option<&'a str>,
+    reason: &'a str,
+}
+
+struct CycleEvent<'a> {
+    cycle_id: &'a str,
+    kind: &'a str,
+    prior_state: Option<&'a str>,
+    next_state: &'a str,
+    reason: &'a str,
+    payload: Value,
+}
+
 /// One transactional planning/status view used by the application rollup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CycleBoardSnapshotV3 {
@@ -76,13 +94,14 @@ impl SqliteStore {
                     "container rollup requires a non-claimable container work item".into(),
                 ));
             }
-            let mut status = self.read_project_status_in_transaction(project)?;
-            let actor = self.project_actor_context(project, actor_id)?;
-            self.populate_status_action_facts_for_session(
+            let (mut status, pinned_requirements) =
+                self.read_project_status_in_transaction(project)?;
+            let actor = self.populate_status_action_facts_for_session(
                 &mut status,
                 actor_id,
                 session_id,
                 as_of,
+                &pinned_requirements,
             )?;
             let mut descendants = BTreeSet::new();
             let mut frontier = BTreeSet::from([container_id.to_owned()]);
@@ -190,7 +209,17 @@ impl SqliteStore {
             row.bind_text(10,&c.scheduled_start_local)?; row.bind_signed_i64(11,c.scheduled_start_utc_offset_minutes)?;
             row.bind_text(12,&c.timezone)?; row.bind_text(13,&c.tzdb_identity)?; row.bind_text(14,&c.fold_policy)?;
             row.bind_text(15,&context.now)?; row.run()?;
-            self.append_cycle_event(context,&c.cycle_id,"created",None,"planned",reason,json!({"timezone":c.timezone,"tzdb_identity":c.tzdb_identity}))
+            self.append_cycle_event(
+                context,
+                CycleEvent {
+                    cycle_id: &c.cycle_id,
+                    kind: "created",
+                    prior_state: None,
+                    next_state: "planned",
+                    reason,
+                    payload: json!({"timezone":c.timezone,"tzdb_identity":c.tzdb_identity}),
+                },
+            )
         })
     }
 
@@ -231,8 +260,17 @@ impl SqliteStore {
                     };
                     let mut row=self.prepare("UPDATE cycle_v3 SET lifecycle=?3,updated_at=?4 WHERE project_id=?1 AND cycle_id=?2")?;
                     row.bind_text(1,&context.project_id)?;row.bind_text(2,&request.cycle_id)?;row.bind_text(3,next)?;row.bind_text(4,&context.now)?;row.run()?;
-                    self.append_cycle_event(context,&request.cycle_id,&request.change,Some(&stored.lifecycle),next,&request.reason,
-                        json!({"at":context.now,"live_assignments":unresolved}))?;
+                    self.append_cycle_event(
+                        context,
+                        CycleEvent {
+                            cycle_id: &request.cycle_id,
+                            kind: &request.change,
+                            prior_state: Some(&stored.lifecycle),
+                            next_state: next,
+                            reason: &request.reason,
+                            payload: json!({"at":context.now,"live_assignments":unresolved}),
+                        },
+                    )?;
                 }
                 "assign" => {
                     if cycle.lifecycle.is_terminal(){return Err(StoreError::Invalid("terminal cycle cannot receive work".into()));}
@@ -279,17 +317,19 @@ impl SqliteStore {
                     )?;
                     self.append_cycle_event(
                         context,
-                        &request.cycle_id,
-                        "assignment_deferred",
-                        Some(&stored.lifecycle),
-                        &stored.lifecycle,
-                        &request.reason,
-                        json!({
-                            "disposition": "deferred",
-                            "assignment_id": assignment.assignment_id,
-                            "work_id": assignment.work_id,
-                            "task_outcome_changed": false
-                        }),
+                        CycleEvent {
+                            cycle_id: &request.cycle_id,
+                            kind: "assignment_deferred",
+                            prior_state: Some(&stored.lifecycle),
+                            next_state: &stored.lifecycle,
+                            reason: &request.reason,
+                            payload: json!({
+                                "disposition": "deferred",
+                                "assignment_id": assignment.assignment_id,
+                                "work_id": assignment.work_id,
+                                "task_outcome_changed": false
+                            }),
+                        },
                     )?;
                 }
                 "commit" | "remove" | "carry_over" => {
@@ -315,8 +355,17 @@ impl SqliteStore {
                         self.insert_assignment(context,&successor_row,&request.reason)?;
                         self.set_assignment_state(context,assignment,next,assignment.predecessor_id.as_deref(),Some(successor),&request.reason)?;
                     }else{self.set_assignment_state(context,assignment,next,assignment.predecessor_id.as_deref(),assignment.successor_id.as_deref(),&request.reason)?;}
-                    self.append_cycle_event(context,&request.cycle_id,&request.change,Some(&stored.lifecycle),&stored.lifecycle,&request.reason,
-                        json!({"assignment_id":id,"next_state":next,"successor_cycle_id":request.successor_cycle_id}))?;
+                    self.append_cycle_event(
+                        context,
+                        CycleEvent {
+                            cycle_id: &request.cycle_id,
+                            kind: &request.change,
+                            prior_state: Some(&stored.lifecycle),
+                            next_state: &stored.lifecycle,
+                            reason: &request.reason,
+                            payload: json!({"assignment_id":id,"next_state":next,"successor_cycle_id":request.successor_cycle_id}),
+                        },
+                    )?;
                 }
                 "map_legacy" => {
                     let legacy=required(&request.work_id,"work_id")?;
@@ -325,8 +374,17 @@ impl SqliteStore {
                     let mut row=self.prepare("INSERT INTO boreal_legacy_sprint_cycle(project_id,sprint_work_id,cycle_id,operation_id,reason,created_at) VALUES(?1,?2,?3,?4,?5,?6)")?;
                     row.bind_text(1,&context.project_id)?;row.bind_text(2,legacy)?;row.bind_text(3,&request.cycle_id)?;
                     row.bind_text(4,&context.operation_id)?;row.bind_text(5,&request.reason)?;row.bind_text(6,&context.now)?;row.run()?;
-                    self.append_cycle_event(context,&request.cycle_id,"map_legacy",Some(&stored.lifecycle),&stored.lifecycle,&request.reason,
-                        json!({"legacy_sprint_id":legacy,"historical_work_preserved":true,"acceptance_created":false}))?;
+                    self.append_cycle_event(
+                        context,
+                        CycleEvent {
+                            cycle_id: &request.cycle_id,
+                            kind: "map_legacy",
+                            prior_state: Some(&stored.lifecycle),
+                            next_state: &stored.lifecycle,
+                            reason: &request.reason,
+                            payload: json!({"legacy_sprint_id":legacy,"historical_work_preserved":true,"acceptance_created":false}),
+                        },
+                    )?;
                 }
                 _=>return Err(StoreError::Invalid("unknown cycle change".into())),
             }
@@ -351,12 +409,14 @@ impl SqliteStore {
         row.run()?;
         self.append_assignment_event(
             context,
-            a,
-            None,
-            "planned",
-            a.predecessor_id.as_deref(),
-            None,
-            reason,
+            AssignmentEvent {
+                assignment: a,
+                prior_state: None,
+                next_state: "planned",
+                predecessor_id: a.predecessor_id.as_deref(),
+                successor_id: None,
+                reason,
+            },
         )
     }
 
@@ -383,65 +443,60 @@ impl SqliteStore {
         }
         self.append_assignment_event(
             context,
-            a,
-            Some(&a.state),
-            next,
-            predecessor,
-            successor,
-            reason,
+            AssignmentEvent {
+                assignment: a,
+                prior_state: Some(&a.state),
+                next_state: next,
+                predecessor_id: predecessor,
+                successor_id: successor,
+                reason,
+            },
         )
     }
     fn append_assignment_event(
         &self,
         c: &V3MutationContext,
-        a: &CycleAssignmentV3Input,
-        prior: Option<&str>,
-        next: &str,
-        predecessor: Option<&str>,
-        successor: Option<&str>,
-        reason: &str,
+        event: AssignmentEvent<'_>,
     ) -> Result<(), StoreError> {
         let mut row=self.prepare("INSERT INTO boreal_assignment_event(event_id,operation_id,project_id,assignment_id,cycle_id,work_id,prior_state,next_state,predecessor_id,successor_id,actor_id,reason,created_at)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)")?;
         row.bind_text(
             1,
-            &format!("{}:assignment:{}", c.operation_id, a.assignment_id),
+            &format!(
+                "{}:assignment:{}",
+                c.operation_id, event.assignment.assignment_id
+            ),
         )?;
         row.bind_text(2, &c.operation_id)?;
         row.bind_text(3, &c.project_id)?;
-        row.bind_text(4, &a.assignment_id)?;
-        row.bind_text(5, &a.cycle_id)?;
-        row.bind_text(6, &a.work_id)?;
-        row.bind_optional_text(7, prior)?;
-        row.bind_text(8, next)?;
-        row.bind_optional_text(9, predecessor)?;
-        row.bind_optional_text(10, successor)?;
+        row.bind_text(4, &event.assignment.assignment_id)?;
+        row.bind_text(5, &event.assignment.cycle_id)?;
+        row.bind_text(6, &event.assignment.work_id)?;
+        row.bind_optional_text(7, event.prior_state)?;
+        row.bind_text(8, event.next_state)?;
+        row.bind_optional_text(9, event.predecessor_id)?;
+        row.bind_optional_text(10, event.successor_id)?;
         row.bind_text(11, &c.actor_id)?;
-        row.bind_text(12, reason)?;
+        row.bind_text(12, event.reason)?;
         row.bind_text(13, &c.now)?;
         row.run()
     }
     fn append_cycle_event(
         &self,
         c: &V3MutationContext,
-        cycle: &str,
-        kind: &str,
-        prior: Option<&str>,
-        next: &str,
-        reason: &str,
-        payload: Value,
+        event: CycleEvent<'_>,
     ) -> Result<(), StoreError> {
         let mut row=self.prepare("INSERT INTO boreal_cycle_event(event_id,operation_id,project_id,cycle_id,kind,prior_state,next_state,actor_id,reason,payload_json,created_at)
             VALUES(?1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)")?;
         row.bind_text(1, &c.operation_id)?;
         row.bind_text(2, &c.project_id)?;
-        row.bind_text(3, cycle)?;
-        row.bind_text(4, kind)?;
-        row.bind_optional_text(5, prior)?;
-        row.bind_text(6, next)?;
+        row.bind_text(3, event.cycle_id)?;
+        row.bind_text(4, event.kind)?;
+        row.bind_optional_text(5, event.prior_state)?;
+        row.bind_text(6, event.next_state)?;
         row.bind_text(7, &c.actor_id)?;
-        row.bind_text(8, reason)?;
-        row.bind_text(9, &payload.to_string())?;
+        row.bind_text(8, event.reason)?;
+        row.bind_text(9, &event.payload.to_string())?;
         row.bind_text(10, &c.now)?;
         row.run()
     }
@@ -568,13 +623,14 @@ impl SqliteStore {
                     cursor = next_id;
                 }
             }
-            let mut status = self.read_project_status_in_transaction(project)?;
-            let actor = self.project_actor_context(project, actor_id)?;
-            self.populate_status_action_facts_for_session(
+            let (mut status, pinned_requirements) =
+                self.read_project_status_in_transaction(project)?;
+            let actor = self.populate_status_action_facts_for_session(
                 &mut status,
                 actor_id,
                 session_id,
                 as_of,
+                &pinned_requirements,
             )?;
             let mut accepted_outcomes = BTreeMap::new();
             let mut assignment_reasons = BTreeMap::new();

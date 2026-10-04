@@ -378,7 +378,7 @@ mod tests {
     fn embedded_package_is_versioned_and_resolves_all_assets() {
         let registry = WorkflowRegistry::embedded().unwrap();
         assert_eq!(registry.package_id(), "boreal.core-workflows");
-        assert_eq!(registry.package_version(), "1.1.0");
+        assert_eq!(registry.package_version(), "1.2.0");
         assert_eq!(registry.assets().len(), 10);
         let claim = registry.get("boreal.workflow.claim.v1").unwrap();
         assert!(claim

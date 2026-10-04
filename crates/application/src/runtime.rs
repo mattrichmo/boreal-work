@@ -14,13 +14,15 @@ use boreal_domain::{
 use boreal_store::{
     identity::{IdentityContext, IdentityError, IdentityStore},
     recovery::{
-        IdentityBoundRecoveryResolutionInput, RecoveryObligationRecord, RecoveryResolutionInput,
-        ResourceReservationRecord,
+        DeadlineReconciliationInput, IdentityBoundRecoveryResolutionInput,
+        RecoverActionDescriptorInput, RecoverActionDisposition, RecoverActionInput,
+        RecoveryObligationRecord, RecoveryResolutionInput, ResourceReservationRecord,
     },
-    SqliteStore, StoreError,
+    AttemptMutationResult as StoreAttemptMutationResult, SqliteStore, StoreError,
 };
+use serde_json::json;
 
-use crate::{ApplicationError, OperationResult, WorkApplication};
+use crate::{canonical_request_digest, ApplicationError, OperationResult, WorkApplication};
 
 pub const DEFAULT_HARD_ATTEMPT_TIME_LIMIT_MS: u64 = DEFAULT_HARD_TIME_LIMIT_MS;
 pub const DEFAULT_RENEWABLE_LEASE_TTL_MS: u64 = DEFAULT_LEASE_TTL_MS;
@@ -324,6 +326,22 @@ pub struct RecoveryResolveRequest {
     pub at: String,
     pub expected_project_revision: Option<u64>,
     pub session_id: Option<String>,
+}
+
+/// A submission of the current server-issued Recover descriptor. The
+/// application computes the operation digest and maps the typed disposition
+/// to the canonical store transaction; callers cannot provide a store digest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionRequest {
+    pub project_id: ProjectId,
+    pub work_id: WorkId,
+    pub actor_id: ActorId,
+    pub session_id: SessionId,
+    pub operation_id: OperationId,
+    pub descriptor: RecoverActionDescriptorInput,
+    pub confirmed: bool,
+    pub disposition: StopConfirmation,
+    pub at: TimestampMs,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -665,6 +683,18 @@ impl AttemptPolicy {
             return Err(AttemptPolicyError::StaleFence);
         }
 
+        if snapshot.phase == AttemptPhase::ExpiryPending
+            && !matches!(
+                kind,
+                AttemptCommandKind::Expire { .. }
+                    | AttemptCommandKind::Cancel {
+                        confirmation: Some(_)
+                    }
+            )
+        {
+            return Err(AttemptPolicyError::ExpiryPending);
+        }
+
         let expiry = snapshot.effective_expiry(request.at);
         if !matches!(
             kind,
@@ -772,6 +802,7 @@ pub enum AttemptPolicyError {
     LeaseExpired,
     HardDeadlineElapsed,
     NotExpired,
+    ExpiryPending,
     TerminalAttempt,
     StopConfirmationRequired,
     IllegalTransition { phase: AttemptPhase },
@@ -796,6 +827,7 @@ impl std::fmt::Display for AttemptPolicyError {
             Self::LeaseExpired => formatter.write_str("lease_expired"),
             Self::HardDeadlineElapsed => formatter.write_str("hard_deadline_elapsed"),
             Self::NotExpired => formatter.write_str("attempt has not expired"),
+            Self::ExpiryPending => formatter.write_str("attempt expiry recovery is pending"),
             Self::TerminalAttempt => formatter.write_str("attempt is terminal"),
             Self::StopConfirmationRequired => formatter.write_str("stop confirmation is required"),
             Self::IllegalTransition { phase } => {
@@ -855,6 +887,72 @@ impl WorkApplication<'_> {
         )
     }
 
+    /// Persist a due deadline as an expiry-pending stop request. The service
+    /// timer is only a wake-up hint: this use case rereads the current attempt
+    /// and the store rechecks its fence and exact deadline under the write
+    /// transaction. It never claims that the harness stopped or releases a
+    /// physical resource.
+    pub fn reconcile_attempt_deadline(
+        &self,
+        project_id: &ProjectId,
+        attempt_id: &AttemptId,
+        fence: Fence,
+        at: TimestampMs,
+    ) -> Result<bool, ApplicationError> {
+        let current = match self
+            .store
+            .current_attempt(project_id.as_str(), attempt_id.as_str())
+        {
+            Ok(current) => current,
+            Err(StoreError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if current.fence != fence.get()
+            || current.phase.is_terminal()
+            || current.phase == AttemptPhase::ExpiryPending
+        {
+            return Ok(false);
+        }
+
+        let request_digest = canonical_request_digest(
+            "attempt.deadline.reconcile/v1",
+            json!({
+                "project_id": project_id.as_str(),
+                "attempt_id": attempt_id.as_str(),
+                "fence": fence.get(),
+                "lease_deadline": current.lease_deadline,
+                "hard_deadline": current.hard_deadline,
+            }),
+        );
+        let operation_id = format!(
+            "deadline-reconcile-{}",
+            request_digest
+                .strip_prefix("sha256:")
+                .unwrap_or(&request_digest)
+        );
+        let identity = IdentityStore::new(self.store)
+            .context(project_id.as_str())
+            .map_err(|error| {
+                ApplicationError::Store(StoreError::Conflict(format!(
+                    "deadline reconciliation identity: {error}"
+                )))
+            })?;
+        self.store
+            .reconcile_attempt_deadline(
+                &identity,
+                DeadlineReconciliationInput {
+                    attempt_id: attempt_id.as_str(),
+                    fence: fence.get(),
+                    expected_lease_deadline: &current.lease_deadline,
+                    expected_hard_deadline: &current.hard_deadline,
+                    operation_id: &operation_id,
+                    request_digest: &request_digest,
+                    at: &format!("unix-ms:{}", at.as_millis()),
+                },
+            )
+            .map_err(ApplicationError::from)
+    }
+
     pub fn submit<A: AttemptLifecycleAdapter>(
         &self,
         adapter: &A,
@@ -905,6 +1003,102 @@ impl WorkApplication<'_> {
             None,
             request.reason,
         )
+    }
+
+    /// Apply the trusted Recover descriptor as the canonical expired-attempt
+    /// transition. The store re-reads action facts, principal/session, current
+    /// attempt and fence under the same transaction that writes expiry,
+    /// operation history and the recovery obligation.
+    pub fn recover_attempt_action(
+        &self,
+        request: RecoverActionRequest,
+    ) -> Result<OperationResult<AttemptMutation>, ApplicationError> {
+        let disposition = match request.disposition {
+            StopConfirmation::AdapterAcknowledged => RecoverActionDisposition::AdapterAcknowledged,
+            StopConfirmation::ReviewedSafeRecovery => {
+                RecoverActionDisposition::ReviewedSafeRecovery
+            }
+        };
+        let disposition_name = match disposition {
+            RecoverActionDisposition::AdapterAcknowledged => "adapter_acknowledged",
+            RecoverActionDisposition::ReviewedSafeRecovery => "reviewed_safe_recovery",
+        };
+        let descriptor = &request.descriptor;
+        let request_digest = canonical_request_digest(
+            "attempt.recover/v1",
+            json!({
+            "actor_id": request.actor_id.as_str(),
+                "session_id": request.session_id.as_str(),
+                "descriptor": {
+                    "action": descriptor.action,
+                    "target": {
+                        "project_id": descriptor.target.project_id,
+                        "work_id": descriptor.target.work_id,
+                        "entity_revision": descriptor.target.entity_revision,
+                    },
+                    "expected_project_revision": descriptor.expected_project_revision,
+                    "expected_entity_revision": descriptor.expected_entity_revision,
+                    "expected_proof_revision": descriptor.expected_proof_revision,
+                    "attempt": descriptor.attempt.as_ref().map(|attempt| json!({
+                        "attempt_id": attempt.attempt_id,
+                        "fence": attempt.fence,
+                    })),
+                    "required_roles": descriptor.required_roles,
+                    "required_inputs": descriptor.required_inputs,
+                    "confirmation": descriptor.confirmation,
+                    "read_only": descriptor.read_only,
+                    "recovery": descriptor.recovery,
+                },
+                "confirmed": request.confirmed,
+                "disposition": disposition_name,
+            }),
+        );
+        let identity = IdentityStore::new(self.store)
+            .context(request.project_id.as_str())
+            .map_err(|error| {
+                ApplicationError::Store(StoreError::Conflict(format!("recovery identity: {error}")))
+            })?;
+        let stored = self.store.submit_recover_action(&RecoverActionInput {
+            context: identity,
+            actor_id: request.actor_id.as_str().to_owned(),
+            session_id: request.session_id.as_str().to_owned(),
+            operation_id: request.operation_id.as_str().to_owned(),
+            request_digest: request_digest.clone(),
+            descriptor: request.descriptor.clone(),
+            confirmed: request.confirmed,
+            disposition,
+            at: format!("unix-ms:{}", request.at.as_millis()),
+        })?;
+
+        if !stored.replayed {
+            let attempt_identity = request.descriptor.attempt.as_ref().ok_or_else(|| {
+                ApplicationError::Invalid(
+                    "recover descriptor is incomplete: the current attempt and fence are absent"
+                        .to_owned(),
+                )
+            })?;
+            let attempt = AttemptRequest::new(
+                request.project_id.clone(),
+                request.work_id.clone(),
+                AttemptId::new(attempt_identity.attempt_id.clone()),
+                request.actor_id.clone(),
+                None,
+                Some(request.session_id.clone()),
+                Fence::new(attempt_identity.fence),
+                request.operation_id.clone(),
+                request_digest,
+                request.at,
+            );
+            self.request_terminal_resource_readback(
+                &attempt,
+                AttemptCommandKind::Expire {
+                    confirmation: request.disposition,
+                },
+            )?;
+        }
+
+        let mutation = attempt_mutation_from_store(stored)?;
+        Ok(operation_result(mutation))
     }
 
     pub fn cancel<A: AttemptLifecycleAdapter>(
@@ -1149,9 +1343,37 @@ fn operation_result(result: AttemptMutation) -> OperationResult<AttemptMutation>
     }
 }
 
+fn attempt_mutation_from_store(
+    result: StoreAttemptMutationResult,
+) -> Result<AttemptMutation, ApplicationError> {
+    let parse_deadline = |value: &str| {
+        value
+            .strip_prefix("unix-ms:")
+            .ok_or_else(|| {
+                ApplicationError::Invalid(format!("unsupported attempt deadline: {value}"))
+            })?
+            .parse::<u64>()
+            .map(TimestampMs::from_millis)
+            .map_err(|_| ApplicationError::Invalid(format!("invalid attempt deadline: {value}")))
+    };
+    Ok(AttemptMutation {
+        operation_id: OperationId::new(result.operation_id),
+        request_digest: result.request_digest,
+        attempt_id: AttemptId::new(result.attempt_id),
+        fence: Fence::new(result.fence),
+        phase: result.phase,
+        lease_deadline: parse_deadline(&result.lease_deadline)?,
+        hard_deadline: parse_deadline(&result.hard_deadline)?,
+        revision: result.revision,
+        changed: result.changed && !result.replayed,
+        replayed: result.replayed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SqliteAttemptAdapter;
     use boreal_domain::{
         AcceptanceProfile, ActorRole, AttemptPhase, DispatchPolicy, Fence, PersistedLifecycle,
         WorkItem, WorkKind,
@@ -1159,7 +1381,7 @@ mod tests {
     use boreal_store::{
         identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
         principals::PrincipalGrantRequest,
-        SqliteStore,
+        OperationOutcome, SqliteStore,
     };
     use std::cell::RefCell;
 
@@ -1403,6 +1625,170 @@ mod tests {
                 "unix-ms:2",
             )
             .expect("project identity binds")
+    }
+
+    #[test]
+    fn deadline_reconciliation_is_exact_durable_and_keeps_resource_owned() {
+        let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema");
+        let project = ProjectId::new("runtime-deadline-project");
+        store
+            .create_project(project.as_str(), "unix-ms:1")
+            .expect("project creates");
+        test_identity(&store, project.as_str());
+        bootstrap_operator(&store, project.as_str(), "deadline-operator");
+        grant_agent(
+            &store,
+            project.as_str(),
+            "deadline-operator",
+            "deadline-agent",
+        );
+        let app = WorkApplication::new(&store);
+        app.register_session_as(
+            &project,
+            "deadline-operator",
+            "runtime-harness",
+            "deadline-operator-session",
+            "unix-ms:3",
+            "op-deadline-operator-session",
+        )
+        .expect("operator session registers");
+        app.register_session_as(
+            &project,
+            "deadline-agent",
+            "runtime-harness",
+            "deadline-agent-session",
+            "unix-ms:3",
+            "op-deadline-agent-session",
+        )
+        .expect("agent session registers");
+        app.create_work_as_session_checked(
+            &WorkItem {
+                id: WorkId::new("runtime-deadline-work"),
+                project_id: project.clone(),
+                kind: WorkKind::Task,
+                parent_id: None,
+                title: "runtime deadline work".to_owned(),
+                description: String::new(),
+                lifecycle: PersistedLifecycle::Open,
+                priority: 0,
+                dispatch_policy: DispatchPolicy::Automatic,
+                hard_holds: Vec::new(),
+                acceptance_profile: AcceptanceProfile::focused(),
+            },
+            "deadline-operator",
+            "deadline-operator-session",
+            Some(store.project_revision(project.as_str()).unwrap().0),
+            "unix-ms:4",
+            "op-runtime-deadline-work",
+        )
+        .expect("work creates");
+        app.claim(
+            &project,
+            "runtime-deadline-work",
+            "deadline-agent",
+            "runtime-harness",
+            Some("deadline-agent-session"),
+            "runtime-deadline-attempt",
+            "op-runtime-deadline-claim",
+            "sha256:op-runtime-deadline-claim",
+            None,
+            "unix-ms:1000",
+            "unix-ms:1100",
+            "unix-ms:1200",
+        )
+        .expect("attempt claims");
+
+        let attempt_id = AttemptId::new("runtime-deadline-attempt");
+        let fence = Fence::new(1);
+        assert!(!app
+            .reconcile_attempt_deadline(&project, &attempt_id, fence, TimestampMs(1099))
+            .expect("early wake is a no-op"));
+        assert_eq!(
+            store
+                .current_attempt(project.as_str(), attempt_id.as_str())
+                .unwrap()
+                .phase,
+            AttemptPhase::Claimed
+        );
+
+        assert!(app
+            .reconcile_attempt_deadline(&project, &attempt_id, fence, TimestampMs(1100))
+            .expect("deadline equality is expired"));
+        let pending = store
+            .current_attempt(project.as_str(), attempt_id.as_str())
+            .expect("expiry-pending attempt remains current");
+        assert_eq!(pending.phase, AttemptPhase::ExpiryPending);
+        assert!(pending.current);
+        assert_eq!(pending.stop_requested_at.as_deref(), Some("unix-ms:1100"));
+        assert_eq!(pending.stop_acknowledged_at, None);
+        let rollback_request = AttemptRequest::new(
+            project.clone(),
+            WorkId::new("runtime-deadline-work"),
+            attempt_id.clone(),
+            ActorId::new("deadline-agent"),
+            Some(HarnessId::new("runtime-harness")),
+            Some(SessionId::new("deadline-agent-session")),
+            fence,
+            OperationId::new("op-deadline-after-clock-rewind"),
+            "sha256:deadline-after-clock-rewind",
+            TimestampMs(1000),
+        );
+        let pending_snapshot = SqliteAttemptAdapter::new(&store)
+            .current_attempt(&project, &attempt_id)
+            .expect("expiry-pending snapshot reloads");
+        assert_eq!(
+            AttemptPolicy::default().validate(
+                &pending_snapshot,
+                &rollback_request,
+                AttemptCommandKind::Heartbeat,
+            ),
+            Err(AttemptPolicyError::ExpiryPending)
+        );
+        assert_eq!(
+            store
+                .resource_reservation(project.as_str(), "resource:runtime-deadline-attempt")
+                .unwrap()
+                .unwrap()
+                .state,
+            "active"
+        );
+
+        let digest = canonical_request_digest(
+            "attempt.deadline.reconcile/v1",
+            json!({
+                "project_id": project.as_str(),
+                "attempt_id": attempt_id.as_str(),
+                "fence": fence.get(),
+                "lease_deadline": "unix-ms:1100",
+                "hard_deadline": "unix-ms:1200",
+            }),
+        );
+        let operation_id = format!(
+            "deadline-reconcile-{}",
+            digest.strip_prefix("sha256:").unwrap()
+        );
+        let operation = store
+            .operation(&operation_id)
+            .unwrap()
+            .expect("deadline reconciliation operation is durable");
+        assert_eq!(operation.command, "attempt.deadline.reconcile");
+        assert_eq!(operation.outcome, OperationOutcome::Changed);
+        let audit = store
+            .audit_event(&operation_id)
+            .unwrap()
+            .expect("deadline reconciliation audit is durable");
+        assert_eq!(audit.event_type, "attempt.expiry_pending");
+
+        assert!(!app
+            .reconcile_attempt_deadline(&project, &attempt_id, fence, TimestampMs(1300))
+            .expect("replayed wake is idempotent"));
+        assert_eq!(
+            store
+                .current_attempt(project.as_str(), attempt_id.as_str())
+                .unwrap()
+                .phase,
+            AttemptPhase::ExpiryPending
+        );
     }
 
     #[test]

@@ -1628,6 +1628,15 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "record an operator decision and reconcile an original recovery obligation",
     },
     CommandSpec {
+        path: "recovery recover",
+        syntax: "bwrk recovery recover --project PROJECT --input PATH --expected-revision N --yes [--session ID] [--operation-id ID] [--socket PATH] [--json]",
+        action: "mutate",
+        output: "attempt_recovery",
+        direct: true,
+        service: true,
+        summary: "apply the server-issued Recover descriptor to an exact eligible attempt and retain durable recovery history",
+    },
+    CommandSpec {
         path: "maintenance show",
         syntax: "bwrk maintenance show --project PROJECT OPERATION_ID [--input RESTORE_PACKAGE_DIR] [--socket PATH] [--json]",
         action: "read",
@@ -2798,6 +2807,7 @@ fn path_matches(path: &str, filter: Option<&str>) -> bool {
     filter.is_none_or(|value| path == value || path.starts_with(&format!("{value} ")))
 }
 
+#[cfg(test)]
 fn registry_result(filter: Option<&str>) -> Result<CliResult, CliError> {
     registry_page(filter, 25, 0)
 }
@@ -2945,7 +2955,7 @@ fn version_result() -> Result<CliResult, CliError> {
             "sqlite_runtime_release_floor": {
                 "libversion_at_least": "3.51.3",
                 "reason": "SQLite WAL-reset fix required by the release policy",
-                "enforced": false,
+                "enforced": true,
             },
         })),
         None,
@@ -2993,125 +3003,6 @@ fn gap_json(gap: &GapSpec) -> Value {
             "inspect": format!("bwrk commands {}", gap.path),
         },
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parsed(path: &[&str], positionals: &[&str]) -> ParsedCommand {
-        ParsedCommand {
-            path: path.iter().map(|value| (*value).to_owned()).collect(),
-            options: CliOptions {
-                service_workspace: None,
-                extra: Default::default(),
-                db: String::new(),
-                socket: None,
-                project: None,
-                actor: String::new(),
-                actor_explicit: false,
-                actor_role: None,
-                harness: String::new(),
-                session: String::new(),
-                session_explicit: false,
-                operation_id: None,
-                expected_revision: None,
-                attempt: None,
-                fence: None,
-                work: None,
-                gate: None,
-                receipt: None,
-                summary: None,
-                reason: None,
-                lease_ttl_ms: None,
-                time_limit_ms: None,
-                json: true,
-                close: false,
-                release: false,
-                machine: false,
-                include_expiry: false,
-                limit: None,
-                offset: None,
-                max_requests: None,
-                dispatch_workers: None,
-                dispatch_capacity: None,
-                kind: None,
-                parent: None,
-                description: None,
-                title: None,
-                priority: None,
-                dispatch: None,
-                hold: None,
-                bucket: None,
-                input: None,
-                origin: None,
-                media_type: None,
-                source_version: None,
-                config_identity: None,
-                setup: SetupCliOptions::default(),
-                positionals: positionals
-                    .iter()
-                    .map(|value| (*value).to_owned())
-                    .collect(),
-            },
-        }
-    }
-
-    #[test]
-    fn deep_help_path_is_resolved_by_registry_when_parser_passes_it_through() {
-        let result = result(&parsed(&["help", "dep"], &["add"])).unwrap();
-        let data = result.data.unwrap();
-        assert_eq!(data["path"], "dep add");
-        assert_eq!(data["kind"], "command");
-        assert_eq!(data["entry"]["path"], "dep add");
-    }
-
-    #[test]
-    fn namespace_help_returns_available_and_unavailable_children() {
-        let help = result(&parsed(&["help", "work"], &[])).unwrap();
-        let data = help.data.unwrap();
-        assert_eq!(data["kind"], "namespace");
-        assert!(data["matches"]["available"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["path"] == "work create"));
-
-        let help = result(&parsed(&["help", "dep"], &[])).unwrap();
-        let data = help.data.unwrap();
-        assert_eq!(data["kind"], "namespace");
-        let available = data["matches"]["available"]
-            .as_array()
-            .expect("available dependency routes");
-        assert!(available.iter().any(|entry| entry["path"] == "dep waive"));
-        assert_eq!(available.len(), 5);
-        assert_eq!(data["matches"]["unavailable"].as_array().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn source_and_durable_memory_routes_are_advertised_truthfully() {
-        let source = registry_result(Some("source show")).unwrap();
-        let source_data = source.data.unwrap();
-        let route = source_data["available"][0].clone();
-        assert_eq!(route["path"], "source show");
-        assert_eq!(route["availability"], "available");
-        assert_eq!(route["adapters"]["direct"], true);
-        assert_eq!(route["adapters"]["service"], false);
-
-        let memory = registry_result(Some("memory")).unwrap();
-        let memory_data = memory.data.unwrap();
-        assert_eq!(memory_data["available"].as_array().unwrap().len(), 7);
-        assert!(memory_data["unavailable_routes"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn version_rejects_a_nested_discovery_path() {
-        let error = result(&parsed(&["version", "extra"], &[])).unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidArgument);
-    }
 }
 
 fn flag_metadata(command: &CommandSpec) -> Vec<Value> {
@@ -3201,6 +3092,52 @@ fn input_schema(path: &str) -> Value {
         }
         "summary backfill" => {
             json!({"type":"object","description":"Historical import only; requires summary_id or id (or --subject). Preserves the supplied legacy JSON record and never establishes live acceptance proof.","properties":{"summary_id":{"type":"string"},"id":{"type":"string"},"work_id":{"type":"string"},"body":{},"title":{},"metadata":{}}})
+        }
+        "recovery recover" => {
+            json!({
+                "type": "object",
+                "required": ["descriptor", "disposition"],
+                "properties": {
+                    "descriptor": {
+                        "type": "object",
+                        "required": [
+                            "action", "target", "expected_project_revision",
+                            "expected_entity_revision", "expected_proof_revision", "attempt",
+                            "required_roles", "required_inputs", "confirmation", "read_only", "recovery"
+                        ],
+                        "properties": {
+                            "action": {"const": "recover"},
+                            "target": {
+                                "type": "object",
+                                "required": ["project_id", "work_id", "entity_revision"],
+                                "properties": {
+                                    "project_id": {"type": "string", "minLength": 1},
+                                    "work_id": {"type": "string", "minLength": 1},
+                                    "entity_revision": {"type": "integer", "minimum": 0}
+                                }
+                            },
+                            "expected_project_revision": {"type": "integer", "minimum": 0},
+                            "expected_entity_revision": {"type": "integer", "minimum": 0},
+                            "expected_proof_revision": {"type": ["integer", "null"], "minimum": 0},
+                            "attempt": {
+                                "type": "object",
+                                "required": ["attempt_id", "fence"],
+                                "properties": {
+                                    "attempt_id": {"type": "string", "minLength": 1},
+                                    "fence": {"type": "integer", "minimum": 1}
+                                }
+                            },
+                            "required_roles": {"type": "array", "items": {"type": "string"}},
+                            "required_inputs": {"type": "array", "items": {"type": "string"}},
+                            "confirmation": {"type": "string", "minLength": 1},
+                            "read_only": {"const": false},
+                            "recovery": {"const": true}
+                        }
+                    },
+                    "disposition": {"enum": ["adapter_acknowledged", "reviewed_safe_recovery"]}
+                },
+                "description": "Copy the current server-issued Recover descriptor exactly. Pass its expected_project_revision again as --expected-revision; --yes confirms the descriptor confirmation. Disposition records the typed recovery choice; it does not replace recovery.resolve."
+            })
         }
         "template validate" | "template run" => {
             json!({
@@ -3573,4 +3510,131 @@ pub(crate) fn is_mutating_path(path: &[String]) -> bool {
         .iter()
         .find(|c| c.path == path.join(" "))
         .is_none_or(|c| c.action != "read")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(path: &[&str], positionals: &[&str]) -> ParsedCommand {
+        ParsedCommand {
+            path: path.iter().map(|value| (*value).to_owned()).collect(),
+            options: CliOptions {
+                service_workspace: None,
+                extra: Default::default(),
+                db: String::new(),
+                socket: None,
+                project: None,
+                actor: String::new(),
+                actor_explicit: false,
+                actor_role: None,
+                harness: String::new(),
+                session: String::new(),
+                session_explicit: false,
+                operation_id: None,
+                expected_revision: None,
+                attempt: None,
+                fence: None,
+                work: None,
+                gate: None,
+                receipt: None,
+                summary: None,
+                reason: None,
+                lease_ttl_ms: None,
+                time_limit_ms: None,
+                json: true,
+                close: false,
+                release: false,
+                machine: false,
+                include_expiry: false,
+                limit: None,
+                offset: None,
+                max_requests: None,
+                dispatch_workers: None,
+                dispatch_capacity: None,
+                kind: None,
+                parent: None,
+                description: None,
+                title: None,
+                priority: None,
+                dispatch: None,
+                hold: None,
+                bucket: None,
+                input: None,
+                origin: None,
+                media_type: None,
+                source_version: None,
+                config_identity: None,
+                setup: SetupCliOptions::default(),
+                positionals: positionals
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn deep_help_path_is_resolved_by_registry_when_parser_passes_it_through() {
+        let result = result(&parsed(&["help", "dep"], &["add"])).unwrap();
+        let data = result.data.unwrap();
+        assert_eq!(data["path"], "dep add");
+        assert_eq!(data["kind"], "command");
+        assert_eq!(data["entry"]["path"], "dep add");
+    }
+
+    #[test]
+    fn namespace_help_returns_available_and_unavailable_children() {
+        let help = result(&parsed(&["help", "work"], &[])).unwrap();
+        let data = help.data.unwrap();
+        assert_eq!(data["kind"], "namespace");
+        assert!(data["matches"]["available"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "work create"));
+
+        let help = result(&parsed(&["help", "dep"], &[])).unwrap();
+        let data = help.data.unwrap();
+        assert_eq!(data["kind"], "namespace");
+        let available = data["matches"]["available"]
+            .as_array()
+            .expect("available dependency routes");
+        assert!(available.iter().any(|entry| entry["path"] == "dep waive"));
+        assert_eq!(available.len(), 5);
+        assert_eq!(data["matches"]["unavailable"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn source_and_durable_memory_routes_are_advertised_truthfully() {
+        let source = registry_result(Some("source show")).unwrap();
+        let source_data = source.data.unwrap();
+        let route = source_data["available"][0].clone();
+        assert_eq!(route["path"], "source show");
+        assert_eq!(route["availability"], "available");
+        assert_eq!(route["adapters"]["direct"], true);
+        assert_eq!(route["adapters"]["service"], false);
+
+        let memory = registry_result(Some("memory")).unwrap();
+        let memory_data = memory.data.unwrap();
+        assert_eq!(memory_data["available"].as_array().unwrap().len(), 8);
+        assert!(memory_data["unavailable_routes"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn version_reports_the_sqlite_release_floor_as_enforced() {
+        let version = version_result().unwrap();
+        let floor = &version.data.unwrap()["sqlite_runtime_release_floor"];
+        assert_eq!(floor["libversion_at_least"], "3.51.3");
+        assert_eq!(floor["enforced"], true);
+    }
+
+    #[test]
+    fn version_rejects_a_nested_discovery_path() {
+        let error = result(&parsed(&["version", "extra"], &[])).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+    }
 }

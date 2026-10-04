@@ -186,6 +186,26 @@ impl SqliteStore {
         })
     }
 
+    /// Resolves the authenticated actor and its delegation root together so
+    /// a status snapshot can reuse the validated root across its work rows.
+    pub(crate) fn project_actor_context_with_authority_root(
+        &self,
+        project_id: &str,
+        actor_id: &str,
+    ) -> Result<(ActorContext, String), StoreError> {
+        if !self.canonical_production {
+            return Ok((self.actor_context(actor_id)?, actor_id.to_owned()));
+        }
+        let (role, root) = self.principal_authority(project_id, actor_id)?;
+        Ok((
+            ActorContext {
+                actor_id: ActorId::new(actor_id),
+                role,
+            },
+            root,
+        ))
+    }
+
     pub fn validate_project_session(
         &self,
         project_id: &str,
@@ -196,6 +216,20 @@ impl SqliteStore {
             return Ok(());
         }
         self.principal_authority(project_id, actor_id)?;
+        self.validate_project_session_binding(project_id, actor_id, session_id)
+    }
+
+    /// Checks only the binding after the caller has independently validated
+    /// the principal chain in the same transaction.
+    pub(crate) fn validate_project_session_binding(
+        &self,
+        project_id: &str,
+        actor_id: &str,
+        session_id: &str,
+    ) -> Result<(), StoreError> {
+        if !self.canonical_production {
+            return Ok(());
+        }
         let mut row = self.prepare("SELECT 1 FROM boreal_session_binding b JOIN session s ON s.session_id=b.session_id AND s.actor_id=b.actor_id WHERE b.project_id=?1 AND b.actor_id=?2 AND b.session_id=?3 AND s.state='active'")?;
         row.bind_text(1, project_id)?;
         row.bind_text(2, actor_id)?;

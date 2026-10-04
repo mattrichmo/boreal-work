@@ -183,6 +183,10 @@ mod unix {
     use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
     const SERVICE_REQUEST_ID: &str = "cli-service-request";
+    const MAX_DEADLINE_RETRIES: u8 = 5;
+    const DEADLINE_RETRY_DELAY: Duration = Duration::from_secs(1);
+    const DEADLINE_RETRY_CAP: Duration = Duration::from_secs(60);
+    const DEADLINE_RETRY_PREFIX: &str = "attempt-deadline-retry:";
     // The v2 audit vocabulary has no installation subject. The update target
     // remains the immutable subject id while the operation subject type keeps
     // registration inside the store's current identity vocabulary.
@@ -836,58 +840,172 @@ mod unix {
         }
     }
 
-    /// The host owns timer delivery and stop intent; this adapter deliberately
-    /// does not perform lifecycle transitions from a callback. A deadline
-    /// creates a stop request in the service host, while the application/store
-    /// still require an executor acknowledgement before expiry is terminal.
-    #[derive(Clone, Debug, Default)]
-    struct ProductionServiceHooks;
+    #[derive(Clone, Debug)]
+    pub(super) struct ProductionServiceHooks {
+        pub(super) database: PathBuf,
+        pub(super) timers: TimerRegistry,
+        pub(super) deadline_retry_delay: Duration,
+        pub(super) deadline_retry_cap: Duration,
+    }
 
-    impl ServiceHostHooks for ProductionServiceHooks {}
+    impl ServiceHostHooks for ProductionServiceHooks {
+        fn deadline_requests_stop(&self, key: &str) -> bool {
+            let Some((base_key, retries)) = deadline_retry_subject(key) else {
+                return false;
+            };
+            retries == 0 && parse_attempt_deadline_key(&base_key).is_some()
+        }
 
-    fn schedule_current_attempt_deadlines(database: &Path, timers: &TimerRegistry) {
-        let Ok(store) = SqliteStore::open(database, super::super::PRODUCTION_SCHEMA) else {
-            return;
-        };
-        let Ok(projects) = store.list_project_ids() else {
-            return;
-        };
+        fn on_deadlines(&self, keys: &[String]) {
+            let deadlines = keys
+                .iter()
+                .filter_map(|key| {
+                    let Some((base_key, retries)) = deadline_retry_subject(key) else {
+                        eprintln!("deadline reconciliation ignored malformed timer key");
+                        return None;
+                    };
+                    if parse_attempt_deadline_key(&base_key).is_none() {
+                        eprintln!("deadline reconciliation ignored malformed timer key");
+                        return None;
+                    }
+                    Some((base_key, retries))
+                })
+                .collect::<Vec<_>>();
+            if deadlines.is_empty() {
+                return;
+            }
+
+            let store = match SqliteStore::open(&self.database, super::super::PRODUCTION_SCHEMA) {
+                Ok(store) => store,
+                Err(error) => {
+                    eprintln!(
+                        "deadline reconciliation could not open the canonical store: {error}"
+                    );
+                    for (key, retries) in &deadlines {
+                        self.retry_deadline(key, *retries);
+                    }
+                    return;
+                }
+            };
+            let app = WorkApplication::new(&store);
+            for (key, retries) in deadlines {
+                let Some((project, attempt, fence)) = parse_attempt_deadline_key(&key) else {
+                    continue;
+                };
+                match app.reconcile_attempt_deadline(
+                    &ProjectId::new(project),
+                    &AttemptId::new(attempt),
+                    Fence::new(fence),
+                    TimestampMs::from_millis(now_ms_u64()),
+                ) {
+                    Ok(_) => self.cancel_deadline_retries(&key),
+                    Err(error) => {
+                        eprintln!("deadline reconciliation failed for timer key: {error}");
+                        self.retry_deadline(&key, retries);
+                    }
+                }
+            }
+        }
+    }
+
+    impl ProductionServiceHooks {
+        fn retry_deadline(&self, key: &str, retries: u8) {
+            let (retry, delay) = if retries >= MAX_DEADLINE_RETRIES {
+                eprintln!(
+                    "deadline reconciliation exhausted {MAX_DEADLINE_RETRIES} short retries; continuing at the capped interval"
+                );
+                (MAX_DEADLINE_RETRIES, self.deadline_retry_cap)
+            } else {
+                (retries + 1, self.deadline_retry_delay)
+            };
+            let retry_key = deadline_retry_key(key, retry);
+            if let Err(error) = self.timers.schedule(retry_key, Instant::now() + delay) {
+                eprintln!("deadline reconciliation retry could not be scheduled: {error:?}");
+            }
+        }
+
+        fn cancel_deadline_retries(&self, key: &str) {
+            for retry in 1..=MAX_DEADLINE_RETRIES {
+                self.timers.cancel(&deadline_retry_key(key, retry));
+            }
+        }
+    }
+
+    pub(super) fn schedule_current_attempt_deadlines(
+        database: &Path,
+        timers: &TimerRegistry,
+    ) -> Result<(), CliError> {
+        let store = SqliteStore::open(database, super::super::PRODUCTION_SCHEMA)
+            .map_err(|error| deadline_hydration_error("open canonical store", error))?;
+        let projects = store
+            .list_project_ids()
+            .map_err(|error| deadline_hydration_error("list project ids", error))?;
         for project in projects {
             let mut offset = 0_u64;
             loop {
-                let Ok(page) = store.list_work(&project, 1_000, offset) else {
-                    break;
-                };
+                let page = store
+                    .list_work(&project, 1_000, offset)
+                    .map_err(|error| deadline_hydration_error("list project work", error))?;
                 for work in &page.items {
-                    let Ok(Some(attempt)) = store.current_attempt_for_work(&project, &work.work_id)
-                    else {
-                        continue;
+                    let attempt = match store.current_attempt_for_work(&project, &work.work_id) {
+                        Ok(Some(attempt)) => attempt,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            return Err(deadline_hydration_error("read current attempt", error));
+                        }
                     };
                     if attempt.phase.is_terminal() {
                         continue;
                     }
-                    let Some(deadline_ms) = [
-                        super::super::parse_stamp_ms(&attempt.lease_deadline),
-                        super::super::parse_stamp_ms(&attempt.hard_deadline),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .min() else {
-                        continue;
-                    };
+                    let lease_deadline = super::super::parse_stamp_ms(&attempt.lease_deadline)
+                        .ok_or_else(|| {
+                            deadline_hydration_error(
+                                "parse current attempt lease deadline",
+                                format!("invalid timestamp {:?}", attempt.lease_deadline),
+                            )
+                        })?;
+                    let hard_deadline = super::super::parse_stamp_ms(&attempt.hard_deadline)
+                        .ok_or_else(|| {
+                            deadline_hydration_error(
+                                "parse current attempt hard deadline",
+                                format!("invalid timestamp {:?}", attempt.hard_deadline),
+                            )
+                        })?;
+                    let deadline_ms = lease_deadline.min(hard_deadline);
                     let delay_ms = deadline_ms.saturating_sub(super::super::now_ms_u64());
-                    let key = format!(
-                        "attempt-deadline:{project}:{}:{}",
-                        attempt.attempt_id, attempt.fence
-                    );
-                    let _ = timers.schedule(key, Instant::now() + Duration::from_millis(delay_ms));
+                    let key = attempt_deadline_key(&project, &attempt.attempt_id, attempt.fence);
+                    let deadline = Instant::now()
+                        .checked_add(Duration::from_millis(delay_ms))
+                        .ok_or_else(|| {
+                            deadline_hydration_error(
+                                "compute timer deadline",
+                                "deadline exceeds the supported monotonic clock range",
+                            )
+                        })?;
+                    timers.schedule(key, deadline).map_err(|error| {
+                        deadline_hydration_error("schedule attempt deadline", format!("{error:?}"))
+                    })?;
                 }
                 if page.items.len() < 1_000 {
                     break;
                 }
-                offset = offset.saturating_add(page.items.len() as u64);
+                offset = offset.checked_add(page.items.len() as u64).ok_or_else(|| {
+                    deadline_hydration_error(
+                        "advance project work page",
+                        "work page offset overflowed",
+                    )
+                })?;
             }
         }
+        Ok(())
+    }
+
+    fn deadline_hydration_error(action: &str, error: impl std::fmt::Display) -> CliError {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            format!("service deadline hydration failed while {action}: {error}"),
+        )
     }
 
     pub(super) fn schedule_deadline_from_response(
@@ -989,7 +1107,46 @@ mod unix {
     }
 
     pub(super) fn attempt_deadline_key(project: &str, attempt_id: &str, fence: u64) -> String {
-        format!("attempt-deadline:{project}:{attempt_id}:{fence}")
+        format!(
+            "attempt-deadline:{}:{project}:{}:{attempt_id}:{fence}",
+            project.len(),
+            attempt_id.len()
+        )
+    }
+
+    pub(super) fn parse_attempt_deadline_key(key: &str) -> Option<(String, String, u64)> {
+        let encoded = key.strip_prefix("attempt-deadline:")?;
+        let (project, remaining) = take_length_prefixed_component(encoded)?;
+        let (attempt, remaining) = take_length_prefixed_component(remaining)?;
+        let fence = remaining.parse().ok()?;
+        if fence == 0 {
+            return None;
+        }
+        Some((project.to_owned(), attempt.to_owned(), fence))
+    }
+
+    fn deadline_retry_key(key: &str, retry: u8) -> String {
+        format!("{DEADLINE_RETRY_PREFIX}{retry}:{key}")
+    }
+
+    fn deadline_retry_subject(key: &str) -> Option<(String, u8)> {
+        let Some(encoded) = key.strip_prefix(DEADLINE_RETRY_PREFIX) else {
+            return Some((key.to_owned(), 0));
+        };
+        let (retries, base_key) = encoded.split_once(':')?;
+        let retries = retries.parse::<u8>().ok()?;
+        if retries == 0 || retries > MAX_DEADLINE_RETRIES {
+            return None;
+        }
+        Some((base_key.to_owned(), retries))
+    }
+
+    fn take_length_prefixed_component(input: &str) -> Option<(&str, &str)> {
+        let (length, value) = input.split_once(':')?;
+        let length = length.parse::<usize>().ok()?;
+        let component = value.get(..length)?;
+        let remaining = value.get(length..)?.strip_prefix(':')?;
+        Some((component, remaining))
     }
 
     pub(crate) fn run_service(
@@ -1124,8 +1281,13 @@ mod unix {
             sha256_content_digest(socket.to_string_lossy().as_bytes())
         );
         let timers = TimerRegistry::new();
-        schedule_current_attempt_deadlines(&canonical_db, &timers);
-        let hooks = ProductionServiceHooks;
+        schedule_current_attempt_deadlines(&canonical_db, &timers)?;
+        let hooks = ProductionServiceHooks {
+            database: canonical_db.clone(),
+            timers: timers.clone(),
+            deadline_retry_delay: DEADLINE_RETRY_DELAY,
+            deadline_retry_cap: DEADLINE_RETRY_CAP,
+        };
         ServiceHost::bind(
             socket,
             ConcurrentServiceCommandHandler {
@@ -1315,11 +1477,7 @@ mod unix {
             }
             Err(error) => {
                 if let TransportError::RemoteProtocol(error) = error {
-                    return Err(CliError::with(
-                        ErrorCode::ProtocolMismatch,
-                        ApplicationOutcome::Failed,
-                        error.to_string(),
-                    ));
+                    return Err(remote_protocol_cli_error(error));
                 }
                 // Once the request has been handed to `request`, a write,
                 // timeout, EOF, or correlation failure cannot prove that the
@@ -1472,6 +1630,22 @@ mod unix {
             && error.message().contains("phase Unknown")
     }
 
+    pub(super) fn remote_protocol_cli_error(error: boreal_service::ProtocolError) -> CliError {
+        if error.code() == boreal_service::ProtocolErrorCode::Busy {
+            CliError::with(
+                ErrorCode::ServiceBusy,
+                ApplicationOutcome::Busy,
+                error.to_string(),
+            )
+        } else {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                error.to_string(),
+            )
+        }
+    }
+
     #[cfg(unix)]
     mod signal {
         use std::{
@@ -1505,7 +1679,7 @@ mod unix {
                 PENDING.store(0, Ordering::SeqCst);
                 let mut previous = [(0, 0); 2];
                 for (slot, signal_number) in previous.iter_mut().zip([SIGINT, SIGTERM]) {
-                    let handler = unsafe { signal(signal_number, record as usize) };
+                    let handler = unsafe { signal(signal_number, record as *const () as usize) };
                     if handler == SIGNAL_ERROR {
                         for (installed, old_handler) in previous.iter().copied() {
                             if installed != 0 {
@@ -1574,7 +1748,10 @@ mod unix {
             "session_id": parsed.options.session,
             "operation_id": operation,
         });
-        if super::parity_supported(&parsed.path) {
+        // Work creation has its own versioned service DTO below. Keep it out
+        // of the generic feature envelope so the service validates the typed
+        // fields, acceptance profile version and expected revision directly.
+        if super::parity_supported(&parsed.path) && parsed.path != ["work", "create"] {
             data["command"] = json!("cli_feature_v1");
             let mut forwarded = parsed.clone();
             forwarded.options.socket = None;
@@ -1780,7 +1957,7 @@ mod unix {
                     .hold
                     .clone()
                     .map_or(Value::Null, Value::String);
-                data["profile"] = json!("focused");
+                data["profile"] = json!(super::super::acceptance_profile_option(parsed));
                 data["profile_version"] = json!("1");
                 data["expected_revision"] = parsed
                     .options
@@ -2300,9 +2477,14 @@ mod unix {
                     make_envelope(&request.operation_id, outcome, revision, value, None)
                 }
                 Err(error) => {
-                    let wire_error = error.protocol_error.clone().unwrap_or_else(|| {
-                        WireError::new(error.code, error.message.clone(), is_retryable(error.code))
-                    });
+                    let wire_error =
+                        error.protocol_error.as_deref().cloned().unwrap_or_else(|| {
+                            WireError::new(
+                                error.code,
+                                error.message.clone(),
+                                is_retryable(error.code),
+                            )
+                        });
                     make_envelope(
                         &request.operation_id,
                         error.outcome,
@@ -2750,8 +2932,8 @@ mod unix {
                     "source_add operation identity does not match the service envelope",
                 ));
             }
-            if request.input.as_bytes().len() > 4096
-                || request.origin.as_bytes().len() > 4096
+            if request.input.len() > 4096
+                || request.origin.len() > 4096
                 || request
                     .media_type
                     .as_deref()
@@ -4629,30 +4811,33 @@ mod unix {
             let summary = summary_payload(&receipt, &summary_body, operation);
             let app = WorkApplication::new(&self.store);
             let journal = app.authenticated_operation_journal(&identity);
-            let parent_request_digest = super::super::finish_close_request_digest(
-                &project,
-                &work_id,
-                attempt.as_str(),
-                fence.get(),
-                &actor,
-                &session,
-                optional_u64(data, "expected_revision")?,
-                &receipt,
-                &summary_body,
-            );
+            let expected_revision = optional_u64(data, "expected_revision")?;
+            let parent_request_digest =
+                super::super::finish_close_request_digest(super::super::FinishCloseDigestInput {
+                    project: &project,
+                    work_id: &work_id,
+                    attempt: attempt.as_str(),
+                    fence: fence.get(),
+                    actor: &actor,
+                    session: &session,
+                    expected_revision,
+                    receipt: &receipt,
+                    summary_body: &summary_body,
+                });
             let result_operation = super::super::finish_result_operation_id(operation);
-            super::super::ensure_finish_parent_intent(
-                &journal,
+            let finish_context = super::super::FinishCloseJournalContext {
+                journal: &journal,
                 operation,
-                &project,
-                &actor,
-                &session,
-                attempt.as_str(),
-                fence.get(),
-                optional_u64(data, "expected_revision")?,
-                &parent_request_digest,
-                &result_operation,
-            )?;
+                project: &project,
+                actor: &actor,
+                session: &session,
+                attempt: attempt.as_str(),
+                fence: fence.get(),
+                expected_revision,
+                request_digest: &parent_request_digest,
+                result_operation: &result_operation,
+            };
+            super::super::ensure_finish_parent_intent(&finish_context)?;
             if let Some(readback) =
                 super::super::finish_result_readback(&journal, operation, &result_operation)?
             {
@@ -4751,20 +4936,7 @@ mod unix {
                     })).collect::<Vec<_>>(),
                 })),
             });
-            super::super::append_finish_result_operation(
-                &journal,
-                operation,
-                &result_operation,
-                &project,
-                &actor,
-                &session,
-                attempt.as_str(),
-                fence.get(),
-                optional_u64(data, "expected_revision")?,
-                outcome,
-                &parent_request_digest,
-                &close_data,
-            )?;
+            super::super::append_finish_result_operation(&finish_context, outcome, &close_data)?;
             Ok((outcome, Some(finalized.revision), Some(close_data)))
         }
 
@@ -4804,6 +4976,14 @@ mod unix {
             let coverage: Value =
                 serde_json::from_str(&durable.coverage_json).map_err(|_| invalid())?;
             let coverage_kind = format!("{:?}", receipt.coverage.kind);
+            let subject_gate_id = subject
+                .get("gate_id")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            let canonical_subject_gate = self
+                .store
+                .gate_id_for_work(project.as_str(), work_id, subject_gate_id)
+                .map_err(|_| invalid())?;
 
             if !witnessed_receipt_subject_matches(
                 &durable,
@@ -4822,7 +5002,17 @@ mod unix {
                 || subject.get("attempt_id").and_then(Value::as_str)
                     != Some(receipt.attempt_id.as_str())
                 || subject.get("fence").and_then(Value::as_u64) != Some(receipt.fence.get())
-                || subject.get("gate_id").and_then(Value::as_str) != Some(receipt.gate_id.as_str())
+                || !witnessed_gate_reference_matches(
+                    receipt.gate_id.as_str(),
+                    &canonical_gate,
+                    work_id,
+                )
+                || !witnessed_gate_reference_matches(
+                    subject_gate_id,
+                    &canonical_subject_gate,
+                    work_id,
+                )
+                || canonical_subject_gate != canonical_gate
                 || coverage.get("kind").and_then(Value::as_str) != Some(coverage_kind.as_str())
                 || coverage.get("profile_id").and_then(Value::as_str)
                     != Some(receipt.coverage.profile_id.as_str())
@@ -4918,6 +5108,18 @@ mod unix {
                 ReceiptResult::Failed => durable.result == ReceiptOutcome::Failed,
                 ReceiptResult::Stale => durable.result == ReceiptOutcome::Stale,
             }
+    }
+
+    pub(super) fn witnessed_gate_reference_matches(
+        requested_gate_id: &str,
+        canonical_gate_id: &str,
+        work_id: &str,
+    ) -> bool {
+        requested_gate_id == canonical_gate_id
+            || canonical_gate_id
+                .strip_prefix(work_id)
+                .and_then(|suffix| suffix.strip_prefix(':'))
+                .is_some_and(|profile_gate_id| requested_gate_id == profile_gate_id)
     }
 
     pub(super) fn make_envelope(
@@ -5134,7 +5336,7 @@ mod unix {
         // The identity is intentionally bound here; its availability is the
         // persisted fact used to gate a start.
         let source = store
-            .source_version(project.as_str(), &source_version_id)
+            .source_version(project.as_str(), source_version_id)
             .map_err(map_store_error)?;
         if !source.is_some_and(|source| source.availability == "available") {
             return Err(CliError::invalid(format!(
@@ -5452,14 +5654,16 @@ mod unix {
 #[cfg(unix)]
 #[allow(dead_code, unused_imports)]
 mod tests {
-    use super::unix::{bind_service_host, request_data, ServiceCommandHandler};
+    use super::unix::{
+        bind_service_host, request_data, schedule_current_attempt_deadlines, ServiceCommandHandler,
+    };
     use super::*;
     use boreal_protocol::Envelope;
     use boreal_service::{
         ApplicationCommandHandler, ApplicationRequest, ApplicationResponse, BusyOutcome,
         ElectionError, JsonRequest, ServiceHost, ServiceHostConfig, ServiceHostError,
-        ServiceHostExit, TimerRegistry, TransportConfig, TransportError, UnixSocketClient,
-        APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
+        ServiceHostExit, ServiceHostHooks, TimerRegistry, TransportConfig, TransportError,
+        UnixSocketClient, APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
     };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -5715,17 +5919,21 @@ mod tests {
         (catalog, captured.source.source_version_id)
     }
 
+    struct ServiceTestGatePolicy<'a> {
+        source_version_id: &'a str,
+        gate_id: &'a str,
+        kind: &'a str,
+        executable: &'a str,
+        argv: &'a [&'a str],
+        config_identity: &'a str,
+        max_runtime_ms: u64,
+    }
+
     fn publish_service_test_gate_policy(
         store: &SqliteStore,
         project: &str,
         operation_id: &str,
-        source_version_id: &str,
-        gate_id: &str,
-        kind: &str,
-        executable: &str,
-        argv: &[&str],
-        config_identity: &str,
-        max_runtime_ms: u64,
+        policy: ServiceTestGatePolicy<'_>,
     ) {
         let database = store
             .database_location()
@@ -5734,25 +5942,25 @@ mod tests {
         let catalog = boreal_source::SourceCatalog::with_persistent_filesystem(&catalog_root)
             .expect("persistent service test source catalog opens");
         let path = std::env::split_paths(&env::var_os("PATH").expect("test PATH is set"))
-            .map(|directory| directory.join(executable))
+            .map(|directory| directory.join(policy.executable))
             .find(|candidate| fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file()))
-            .unwrap_or_else(|| panic!("test verifier {executable} is on PATH"));
+            .unwrap_or_else(|| panic!("test verifier {} is on PATH", policy.executable));
         let verifier_digest = super::super::sha256_content_digest(
             &fs::read(path).expect("test verifier executable reads"),
         );
         let declaration = json!({
-            "gate_id": gate_id,
+            "gate_id": policy.gate_id,
             "policy_revision": 1,
-            "kind": kind,
-            "executable": executable,
+            "kind": policy.kind,
+            "executable": policy.executable,
             "verifier_digest": verifier_digest,
-            "argv": argv,
+            "argv": policy.argv,
             "cwd": ".",
-            "source_snapshot_hash": source_version_id,
-            "config_identity": config_identity,
+            "source_snapshot_hash": policy.source_version_id,
+            "config_identity": policy.config_identity,
             "environment_fingerprint": "computed-at-run-time",
             "observables": [],
-            "max_runtime_ms": max_runtime_ms,
+            "max_runtime_ms": policy.max_runtime_ms,
         });
         boreal_application::KnowledgeApplication::new(&catalog)
             .capture_source_with_store(
@@ -5760,7 +5968,7 @@ mod tests {
                 boreal_application::SourceCaptureInput {
                     operation_id: operation_id.to_owned(),
                     project_id: project.to_owned(),
-                    origin: format!("gate-policy:{gate_id}:1"),
+                    origin: format!("gate-policy:{}:1", policy.gate_id),
                     media_type: "application/vnd.boreal.gate-policy+json".to_owned(),
                     bytes: serde_json::to_vec(&declaration).expect("test gate policy serializes"),
                 },
@@ -5801,13 +6009,15 @@ mod tests {
             &store,
             "service-project",
             "op_witnessed_finish_policy",
-            &source_version_id,
-            "verification",
-            "verification",
-            "true",
-            &["true"],
-            "config-witnessed-finish",
-            1_000,
+            ServiceTestGatePolicy {
+                source_version_id: &source_version_id,
+                gate_id: "verification",
+                kind: "verification",
+                executable: "true",
+                argv: &["true"],
+                config_identity: "config-witnessed-finish",
+                max_runtime_ms: 1_000,
+            },
         );
         let revision = store.project_revision("service-project").unwrap().0;
         let mut handler = make_handler_at(store, gate_root);
@@ -5864,10 +6074,31 @@ mod tests {
         let receipt_path = evidence.2.as_ref().expect("evidence data")["receipt_path"]
             .as_str()
             .expect("evidence receipt path");
-        let receipt: Value = serde_json::from_str(
+        let receipt_sidecar: Value = serde_json::from_str(
             &fs::read_to_string(receipt_path).expect("witnessed receipt is readable"),
         )
         .expect("witnessed receipt is JSON");
+        let durable_receipt = handler
+            .store
+            .receipt(
+                receipt_sidecar["receipt_id"]
+                    .as_str()
+                    .expect("sidecar has a receipt id"),
+            )
+            .expect("durable receipt read succeeds")
+            .expect("witnessed receipt is durable");
+        let durable_subject: Value = serde_json::from_str(&durable_receipt.subject_json)
+            .expect("durable receipt subject is valid JSON");
+        assert_eq!(
+            durable_subject["gate_id"], "service-work:verification",
+            "the durable subject uses the canonical work-scoped gate ID",
+        );
+        let receipt = super::super::receipt_record_json(&durable_receipt)
+            .expect("durable receipt maps to the public DTO");
+        assert_eq!(
+            receipt["subject"]["gate_id"], "verification",
+            "the local DTO exposes the profile-facing gate ID",
+        );
         let finish = json!({
             "command": "finish_close",
             "project_id": "service-project",
@@ -6173,6 +6404,16 @@ mod tests {
         assert_eq!(data["receipt"]["schema_version"], "boreal.receipt.v1");
         assert!(data["receipt"]["receipt_id"].as_str().is_some());
         assert_eq!(data["receipt"]["subject"]["work_id"], "service-work");
+        assert_eq!(data["receipt"]["subject"]["gate_id"], "verification");
+        assert_eq!(data["receipt"]["coverage"]["kind"], "verification");
+        let receipt_dto: boreal_protocol::models::ReceiptDto =
+            serde_json::from_value(data["receipt"].clone())
+                .expect("durable receipt readback uses the ReceiptDto wire contract");
+        let receipt = super::super::receipt_from_dto(receipt_dto)
+            .expect("durable receipt readback satisfies the ReceiptDto ingress contract");
+        assert_eq!(receipt.gate_id.as_str(), "verification");
+        assert_eq!(receipt.coverage.kind, boreal_domain::GateKind::Verification);
+        assert_eq!(data["receipt"], data["execution"]["receipt"]);
         assert!(data["execution"]["receipt"].is_object());
         let _ = fs::remove_dir_all(root);
     }
@@ -6205,7 +6446,11 @@ mod tests {
             )
             .expect("attempt claim succeeds");
         drop(handler);
-        let socket = PathBuf::from(format!("/private/tmp/bw-hooks-{}.sock", now_ms_u64()));
+        let socket = std::env::temp_dir().join(format!(
+            "bw-hooks-{}-{}.sock",
+            std::process::id(),
+            now_ms_u64()
+        ));
         let host = match bind_service_host(&db, &socket, ServiceHostConfig::default()) {
             Ok(host) => host,
             Err(error) if socket_unavailable_in_sandbox(&error.message) => {
@@ -6274,6 +6519,282 @@ mod tests {
     }
 
     #[test]
+    fn production_deadline_timer_rehydrates_and_persists_expiry_pending_across_restarts() {
+        let root = temp_path("deadline-restart");
+        fs::create_dir_all(&root).expect("test root creates");
+        let database = root.join(".boreal/boreal.sqlite");
+        let store = seed_project_store(&root);
+        register_fixture_session(
+            &store,
+            "service-project",
+            "agent-1",
+            "deadline-agent-session",
+            "op_service_deadline_agent_session",
+        );
+        let app = WorkApplication::new(&store);
+        let now = now_ms_u64();
+        let claimed_at = now.saturating_sub(5_000);
+        let lease_deadline = now.saturating_sub(1_000);
+        let hard_deadline = now.saturating_add(60_000);
+        let attempt = app
+            .claim(
+                &ProjectId::new("service-project"),
+                "service-work",
+                "agent-1",
+                "cli",
+                Some("deadline-agent-session"),
+                "attempt-deadline-restart",
+                "op_service_deadline_claim",
+                "sha256:service-deadline-claim",
+                None,
+                &stamp(claimed_at),
+                &stamp(lease_deadline),
+                &stamp(hard_deadline),
+            )
+            .expect("overdue attempt fixture claims")
+            .value;
+        drop(store);
+
+        let timer_key = super::unix::attempt_deadline_key(
+            "service-project",
+            "attempt-deadline-restart",
+            attempt.fence,
+        );
+        assert_eq!(
+            super::unix::parse_attempt_deadline_key(&timer_key),
+            Some((
+                "service-project".to_owned(),
+                "attempt-deadline-restart".to_owned(),
+                attempt.fence,
+            ))
+        );
+        let hooks = super::unix::ProductionServiceHooks {
+            database: database.clone(),
+            timers: TimerRegistry::new(),
+            deadline_retry_delay: Duration::from_millis(10),
+            deadline_retry_cap: Duration::from_millis(20),
+        };
+        for restart in 0..2 {
+            let timers = TimerRegistry::new();
+            schedule_current_attempt_deadlines(&database, &timers)
+                .expect("startup deadline hydration completes");
+            let due = timers.due(Instant::now());
+            assert!(
+                due.contains(&timer_key),
+                "restart {restart} rehydrates deadline; due={due:?}, timer_count={}, key={timer_key}",
+                timers.len()
+            );
+            ServiceHostHooks::on_deadlines(&hooks, &due);
+            let reopened = SqliteStore::open(&database, super::super::PRODUCTION_SCHEMA)
+                .expect("database reopens after service restart");
+            let pending = reopened
+                .current_attempt("service-project", "attempt-deadline-restart")
+                .expect("pending attempt remains current across restart");
+            assert_eq!(pending.phase, AttemptPhase::ExpiryPending);
+            assert_eq!(pending.stop_acknowledged_at, None);
+            assert_eq!(
+                reopened
+                    .resource_reservation("service-project", "resource:attempt-deadline-restart")
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "active"
+            );
+            if restart == 1 {
+                let digest = canonical_request_digest(
+                    "attempt.deadline.reconcile/v1",
+                    json!({
+                        "project_id": "service-project",
+                        "attempt_id": "attempt-deadline-restart",
+                        "fence": attempt.fence,
+                        "lease_deadline": stamp(lease_deadline),
+                        "hard_deadline": stamp(hard_deadline),
+                    }),
+                );
+                let operation_id = format!(
+                    "deadline-reconcile-{}",
+                    digest.strip_prefix("sha256:").unwrap()
+                );
+                assert_eq!(
+                    reopened
+                        .operation(&operation_id)
+                        .unwrap()
+                        .expect("durable operation survives restart")
+                        .command,
+                    "attempt.deadline.reconcile"
+                );
+                assert_eq!(
+                    reopened
+                        .audit_event(&operation_id)
+                        .unwrap()
+                        .expect("durable audit survives restart")
+                        .event_type,
+                    "attempt.expiry_pending"
+                );
+            }
+            drop(reopened);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_deadline_hydration_fails_closed_when_store_is_unavailable() {
+        let root = temp_path("deadline-hydration-error");
+        let database = root.join("missing/boreal.sqlite");
+        let timers = TimerRegistry::new();
+
+        let error = super::unix::schedule_current_attempt_deadlines(&database, &timers)
+            .expect_err("service startup must reject incomplete deadline hydration");
+
+        assert_eq!(error.code, ErrorCode::ServiceUnavailable);
+        assert_eq!(error.outcome, ApplicationOutcome::Failed);
+        assert!(error.message.contains("deadline hydration failed"));
+        assert!(error.message.contains("open canonical store"));
+        assert!(timers.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_deadline_retry_reschedules_transient_open_failure() {
+        let root = temp_path("deadline-retry");
+        fs::create_dir_all(&root).expect("test root creates");
+        let store = seed_project_store(&root);
+        register_fixture_session(
+            &store,
+            "service-project",
+            "agent-1",
+            "deadline-retry-agent-session",
+            "op_service_deadline_retry_agent_session",
+        );
+        let app = WorkApplication::new(&store);
+        let now = now_ms_u64();
+        let claimed_at = now.saturating_sub(5_000);
+        let lease_deadline = now.saturating_sub(1_000);
+        let hard_deadline = now.saturating_add(60_000);
+        let attempt = app
+            .claim(
+                &ProjectId::new("service-project"),
+                "service-work",
+                "agent-1",
+                "cli",
+                Some("deadline-retry-agent-session"),
+                "attempt-deadline-retry",
+                "op_service_deadline_retry_claim",
+                "sha256:service-deadline-retry-claim",
+                None,
+                &stamp(claimed_at),
+                &stamp(lease_deadline),
+                &stamp(hard_deadline),
+            )
+            .expect("overdue attempt fixture claims")
+            .value;
+        drop(store);
+
+        let database = root.join(".boreal/boreal.sqlite");
+        let unavailable_database = root.join("temporarily-unavailable/boreal.sqlite");
+        let timer_key = super::unix::attempt_deadline_key(
+            "service-project",
+            "attempt-deadline-retry",
+            attempt.fence,
+        );
+        let timers = TimerRegistry::new();
+        timers
+            .schedule(timer_key.clone(), Instant::now())
+            .expect("initial deadline schedules");
+        let first_due = timers.due(Instant::now());
+        assert_eq!(first_due, vec![timer_key.clone()]);
+        let mut hooks = super::unix::ProductionServiceHooks {
+            database: unavailable_database,
+            timers: timers.clone(),
+            deadline_retry_delay: Duration::from_millis(10),
+            deadline_retry_cap: Duration::from_millis(25),
+        };
+
+        ServiceHostHooks::on_deadlines(&hooks, &first_due);
+        assert_eq!(timers.len(), 1, "the failed callback schedules one retry");
+
+        for retry in 1..=5 {
+            let retry_at = timers.next_deadline().expect("retry deadline exists");
+            assert!(retry_at > Instant::now(), "retry is deferred");
+            let retry_due = timers.due(retry_at);
+            assert_eq!(retry_due.len(), 1);
+            assert!(
+                retry_due[0].starts_with(&format!("attempt-deadline-retry:{retry}:")),
+                "retry {retry} keeps the same deadline identity"
+            );
+            ServiceHostHooks::on_deadlines(&hooks, &retry_due);
+        }
+        assert_eq!(timers.len(), 1, "capped retries keep one live timer");
+        let capped_retry_at = timers
+            .next_deadline()
+            .expect("capped retry deadline remains scheduled");
+        assert!(
+            capped_retry_at > Instant::now(),
+            "capped retry is rate-limited"
+        );
+        hooks.database = database.clone();
+        let capped_retry_due = timers.due(capped_retry_at);
+        assert_eq!(capped_retry_due.len(), 1);
+        assert!(capped_retry_due[0].starts_with("attempt-deadline-retry:5:"));
+        ServiceHostHooks::on_deadlines(&hooks, &capped_retry_due);
+
+        let reopened = SqliteStore::open(&database, super::super::PRODUCTION_SCHEMA)
+            .expect("canonical database reopens after retry");
+        let pending = reopened
+            .current_attempt("service-project", "attempt-deadline-retry")
+            .expect("retry persists expiry-pending attempt");
+        assert_eq!(pending.phase, AttemptPhase::ExpiryPending);
+        assert!(pending.current);
+        assert_eq!(pending.stop_acknowledged_at, None);
+        assert_eq!(timers.len(), 0, "successful retry clears pending aliases");
+        assert_eq!(
+            reopened
+                .resource_reservation("service-project", "resource:attempt-deadline-retry")
+                .unwrap()
+                .unwrap()
+                .state,
+            "active"
+        );
+
+        drop(reopened);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_deadline_stop_filter_accepts_only_canonical_keys() {
+        let hooks = super::unix::ProductionServiceHooks {
+            database: PathBuf::new(),
+            timers: TimerRegistry::new(),
+            deadline_retry_delay: Duration::from_millis(10),
+            deadline_retry_cap: Duration::from_millis(20),
+        };
+        let canonical = super::unix::attempt_deadline_key("p1", "a1", 1);
+        let retry_alias = format!("attempt-deadline-retry:1:{canonical}");
+
+        assert!(ServiceHostHooks::deadline_requests_stop(&hooks, &canonical));
+        assert!(!ServiceHostHooks::deadline_requests_stop(
+            &hooks,
+            &retry_alias
+        ));
+        assert!(!ServiceHostHooks::deadline_requests_stop(
+            &hooks,
+            "attempt-deadline:malformed"
+        ));
+    }
+
+    #[test]
+    fn remote_busy_protocol_error_maps_to_typed_service_busy_cli_outcome() {
+        let error = boreal_service::ProtocolError::new(
+            boreal_service::ProtocolErrorCode::Busy,
+            "dispatch queue full",
+        );
+        let cli_error = super::unix::remote_protocol_cli_error(error);
+        assert_eq!(cli_error.code, ErrorCode::ServiceBusy);
+        assert_eq!(cli_error.outcome, ApplicationOutcome::Busy);
+        assert!(cli_error.message.contains("dispatch queue full"));
+    }
+
+    #[test]
     fn cli_creation_routes_build_authoritative_service_dtos() {
         let init = super::super::parse(&[
             "init".to_owned(),
@@ -6321,6 +6842,25 @@ mod tests {
         assert_eq!(create_data["dispatch"], "automatic");
         assert_eq!(create_data["profile"], "focused");
         assert!(create_data.get("created_at").is_none());
+
+        let reviewed_create = super::super::parse(&[
+            "work".to_owned(),
+            "create".to_owned(),
+            "dto-project".to_owned(),
+            "dto-reviewed".to_owned(),
+            "Reviewed DTO work".to_owned(),
+            "--acceptance".to_owned(),
+            "reviewed".to_owned(),
+            "--socket".to_owned(),
+            "service.sock".to_owned(),
+            "--actor".to_owned(),
+            "creator".to_owned(),
+        ])
+        .expect("reviewed work create parses");
+        let reviewed_data = request_data(&reviewed_create, "op-create-reviewed-work-dto")
+            .expect("reviewed work creation DTO builds");
+        assert_eq!(reviewed_data["command"], "create_work");
+        assert_eq!(reviewed_data["profile"], "reviewed");
     }
 
     #[test]
@@ -6812,13 +7352,15 @@ mod tests {
             &store,
             "service-project",
             "op_production_concurrent_policy",
-            &source_version_id,
-            "verification",
-            "verification",
-            "sleep",
-            &["sleep", "1"],
-            "config-production-concurrent",
-            2_000,
+            ServiceTestGatePolicy {
+                source_version_id: &source_version_id,
+                gate_id: "verification",
+                kind: "verification",
+                executable: "sleep",
+                argv: &["sleep", "1"],
+                config_identity: "config-production-concurrent",
+                max_runtime_ms: 2_000,
+            },
         );
         let revision = store.project_revision("service-project").unwrap().0;
 
@@ -7978,6 +8520,26 @@ mod tests {
         let (mut handler, finish, root, _) = witnessed_finish_fixture("witnessed-finish-forgery");
         let mut cases = Vec::new();
 
+        let canonical_gate = "service-work:verification";
+        for wildcard_alias in ["verif%", "verificat_on"] {
+            assert_eq!(
+                handler
+                    .store
+                    .gate_id_for_work("service-project", "service-work", wildcard_alias)
+                    .expect("LIKE resolver demonstrates wildcard alias"),
+                canonical_gate,
+                "fixture must exercise SQL LIKE alias {wildcard_alias}",
+            );
+            assert!(
+                !super::unix::witnessed_gate_reference_matches(
+                    wildcard_alias,
+                    canonical_gate,
+                    "service-work",
+                ),
+                "wildcard alias {wildcard_alias} must not be accepted as an exact durable or submitted gate reference",
+            );
+        }
+
         let mut forged = finish.clone();
         forged["receipt"]["receipt_id"] = json!("receipt-missing-witnessed");
         cases.push(("missing receipt", forged));
@@ -7991,6 +8553,16 @@ mod tests {
             ),
             ("fence", "/receipt/subject/fence", json!(2)),
             ("gate", "/receipt/subject/gate_id", json!("summary")),
+            (
+                "gate percent wildcard alias",
+                "/receipt/subject/gate_id",
+                json!("verif%"),
+            ),
+            (
+                "gate underscore wildcard alias",
+                "/receipt/subject/gate_id",
+                json!("verificat_on"),
+            ),
             (
                 "operation",
                 "/receipt/operation_id",
@@ -8050,13 +8622,15 @@ mod tests {
             &store,
             "service-project",
             "op_evidence_failure_policy",
-            &source_version_id,
-            "verification",
-            "verification",
-            "false",
-            &["false"],
-            "config-evidence-failure",
-            30,
+            ServiceTestGatePolicy {
+                source_version_id: &source_version_id,
+                gate_id: "verification",
+                kind: "verification",
+                executable: "false",
+                argv: &["false"],
+                config_identity: "config-evidence-failure",
+                max_runtime_ms: 30,
+            },
         );
         let revision = store.project_revision("service-project").unwrap().0;
 
