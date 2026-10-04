@@ -864,7 +864,8 @@ def client(
     active_processes: dict[int, subprocess.Popen[str]] | None = None,
     active_process_lock: threading.Lock | None = None,
     active_process_max: list[int] | None = None,
-) -> dict:
+    admission_stopped: threading.Event | None = None,
+) -> dict | None:
     if args[:1] == ["status"]:
         command = [args[0], project, *args[1:]]
     elif args[:2] in (
@@ -890,6 +891,11 @@ def client(
 
     argv = [str(binary), *args]
     with active_process_lock:
+        # The stop/recovery probe shares this lock with its SIGTERM admission
+        # boundary. A request either starts before the boundary and is
+        # included in the active-process snapshot, or is not started at all.
+        if admission_stopped is not None and admission_stopped.is_set():
+            return None
         process = subprocess.Popen(
             argv,
             cwd=cwd,
@@ -1384,13 +1390,14 @@ def run_stop_recovery_probe(
     service = start_service(binary, database, socket_path, root, env)
     workload_lock = threading.Lock()
     release = threading.Event()
+    stop_admission = threading.Event()
     active: set[int] = set()
     active_client_processes: dict[int, subprocess.Popen[str]] = {}
     max_active_client_processes = [0]
     requests_started = 0
     completed_requests = 0
 
-    def one_request(index: int, iteration: int) -> dict:
+    def one_request(index: int, iteration: int) -> dict | None:
         nonlocal requests_started, completed_requests
         request_kind = "status" if iteration % 2 == 0 else "work_show"
         args = ["status", "--limit", "8", "--offset", "0"] if request_kind == "status" else [
@@ -1401,6 +1408,7 @@ def run_stop_recovery_probe(
             requests_started += 1
         started_at = time.perf_counter()
         started_at_monotonic_ns = time.monotonic_ns()
+        counted_request = True
         try:
             response = client(
                 binary,
@@ -1412,7 +1420,14 @@ def run_stop_recovery_probe(
                 active_processes=active_client_processes,
                 active_process_lock=workload_lock,
                 active_process_max=max_active_client_processes,
+                admission_stopped=stop_admission,
             )
+            if response is None:
+                with workload_lock:
+                    active.discard(index)
+                    requests_started -= 1
+                counted_request = False
+                return None
             return {
                 "worker": index,
                 "iteration": iteration,
@@ -1441,11 +1456,20 @@ def run_stop_recovery_probe(
         finally:
             with workload_lock:
                 active.discard(index)
-                completed_requests += 1
+                if counted_request:
+                    completed_requests += 1
 
     def one_worker(index: int) -> list[dict]:
         release.wait(timeout=10.0)
-        return [one_request(index, iteration) for iteration in range(requests_per_worker)]
+        results = []
+        for iteration in range(requests_per_worker):
+            if stop_admission.is_set():
+                break
+            result = one_request(index, iteration)
+            if result is None:
+                break
+            results.append(result)
+        return results
 
     try:
         wait_for_socket(socket_path, service)
@@ -1495,8 +1519,12 @@ def run_stop_recovery_probe(
                 cwd=root,
                 timeout=15.0,
             )
+            # Prevent each worker from starting its remaining iterations once
+            # shutdown begins. The client checks this event under the same
+            # lock that registers subprocesses, so the shutdown snapshot still
+            # includes every request admitted before this boundary.
             with workload_lock:
-                pending_at_stop = max(0, requests_started - completed_requests)
+                stop_admission.set()
             stop = stop_service(
                 service,
                 socket_path,
@@ -1504,6 +1532,7 @@ def run_stop_recovery_probe(
                 active_process_lock=workload_lock,
             )
             active_at_stop = stop.get("active_client_processes_at_request", 0)
+            pending_at_stop = active_at_stop
             workload = [item for future in futures for item in future.result(timeout=30.0)]
 
         # Restart on the same SQLite file before retrying or interpreting an

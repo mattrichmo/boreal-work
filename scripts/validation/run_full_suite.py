@@ -541,6 +541,7 @@ def main() -> int:
                     "unittest",
                     "scripts/validation/test_forensic_audit.py",
                     "scripts/validation/test_production_host_agent_input.py",
+                    "scripts/validation/test_production_host_stop_admission.py",
                 ],
                 log_dir,
                 timeout_seconds=args.timeout_seconds,
