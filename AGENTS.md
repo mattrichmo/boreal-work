@@ -37,3 +37,14 @@ and port the behavior behind the v2 boundary.
 Do not launch `/Applications/Google Chrome.app` for automated screenshots,
 CDP, Playwright, Puppeteer, or browser smoke tests. Use Playwright-managed
 Chromium and do not use `--channel=chrome`.
+
+## GitHub transport
+
+Before diagnosing a GitHub push failure as an authentication problem, verify
+that Git can reach the configured HTTPS remote. In network-restricted execution
+contexts, a failure to connect to the managed proxy is a transport restriction,
+not evidence that GitHub rejected credentials. Use the read-only procedure in
+[`docs/development/git-transport.md`](docs/development/git-transport.md). Do not
+rotate tokens, run `gh auth login`, change proxy settings, or use GitHub API
+commits when the required raw Git author and committer identity must be
+preserved.
