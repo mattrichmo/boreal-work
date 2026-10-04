@@ -1545,8 +1545,9 @@ def run_stop_recovery_probe(
             )
             # Prevent each worker from starting its remaining iterations once
             # shutdown begins. The client checks this event under the same
-            # lock that registers subprocesses, so the shutdown snapshot still
-            # includes every request admitted before this boundary.
+            # lock that registers subprocesses. stop_service later snapshots
+            # clients still running then; worker futures retain outcomes for
+            # clients that finish before that snapshot.
             with workload_lock:
                 stop_admission.set()
             stop = stop_service(
