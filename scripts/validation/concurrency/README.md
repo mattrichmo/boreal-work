@@ -104,12 +104,13 @@ uniquely identified work-create mutation, sends SIGTERM, waits for the service
 to exit, and starts the service again against the same temporary SQLite
 database. It then reads the exact operation result and exact created work ID
 through public service routes. At the SIGTERM boundary, the probe stops workers
-from admitting later loop iterations. Every client process already admitted is
-included in the shutdown snapshot and its actual response remains in the
-report; requests that would only start after shutdown are not launched against
-the removed socket. The report preserves client progress before SIGTERM,
-queue-full errors, active-client count, service exit/socket cleanup, mutation
-envelope, exact operation result subject, and post-restart readback.
+from admitting later loop iterations. The shutdown snapshot counts clients
+still running when SIGTERM is sent; outcomes from every launched client are
+collected separately, including clients that finish before that snapshot.
+Requests that would only start after shutdown are not launched against the
+removed socket. The report preserves client progress before SIGTERM, queue-full
+errors, active-client count, service exit/socket cleanup, mutation envelope,
+exact operation result subject, and post-restart readback.
 
 The full-mode report is written to `results/forensic-v10.latest.json`. The
 current probe does not create or enroll an Agent credential. The environment

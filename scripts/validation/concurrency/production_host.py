@@ -730,6 +730,29 @@ def parse_envelope(completed: subprocess.CompletedProcess[str]) -> dict:
     return envelope
 
 
+def captured_output_tail(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        output = value.decode("utf-8", errors="replace")
+    else:
+        output = str(value)
+    return output[-1000:]
+
+
+def client_error_details(error: BaseException) -> dict[str, str]:
+    details = {"message": str(error)}
+    stdout = getattr(error, "stdout", None) or getattr(error, "output", None)
+    for field, value in (
+        ("stdout_tail", stdout),
+        ("stderr_tail", getattr(error, "stderr", None)),
+    ):
+        tail = captured_output_tail(value)
+        if tail is not None:
+            details[field] = tail
+    return details
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -1451,7 +1474,7 @@ def run_stop_recovery_probe(
                 "completed_at_monotonic_ns": time.monotonic_ns(),
                 "exit_code": None,
                 "outcome": "unavailable",
-                "error": {"message": str(error)},
+                "error": client_error_details(error),
             }
         finally:
             with workload_lock:
@@ -1651,6 +1674,21 @@ def run_stop_recovery_probe(
             {"code": code, "message": message, "count": count}
             for (code, message), count in sorted(error_groups.items())
         ]
+        captured_client_outputs = [
+            {
+                "worker": item["worker"],
+                "iteration": item["iteration"],
+                "request_kind": item["request_kind"],
+                **{
+                    field: item["error"][field]
+                    for field in ("stdout_tail", "stderr_tail")
+                    if field in item.get("error", {})
+                },
+            }
+            for item in workload
+            if isinstance(item.get("error"), dict)
+            and ("stdout_tail" in item["error"] or "stderr_tail" in item["error"])
+        ]
         progress_windows: dict[int, dict[str, object]] = {}
         for item in workload:
             worker_progress = progress_windows.setdefault(
@@ -1747,6 +1785,7 @@ def run_stop_recovery_probe(
             ],
             "service_shutdown_summary": service_summary,
             "error_details": workload_summary_errors,
+            "captured_client_outputs": captured_client_outputs,
         }
         drain_and_readback_observed = (
             graceful_drain
