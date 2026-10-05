@@ -96,6 +96,12 @@ pub struct KnowledgeClaimReviewRecord {
     pub created_at: String,
 }
 
+/// A revision and the selected claims with their review history.
+pub type KnowledgeClaimPageWithReviews = (
+    u64,
+    Vec<(KnowledgeClaimRecord, Vec<KnowledgeClaimReviewRecord>)>,
+);
+
 impl SqliteStore {
     pub fn ensure_knowledge_parity_schema(&self) -> Result<(), StoreError> {
         self.install_feature_schema("knowledge_parity", 1, KNOWLEDGE_PARITY_SCHEMA)
@@ -284,7 +290,8 @@ impl SqliteStore {
         let bound = context.with_payload(payload);
         self.fact_mutation(&bound,"knowledge.decision.create","decision",&row.decision_id,&[ActorRole::Agent,ActorRole::Operator],||{
             if let Some(source)=&row.source_version_id { if self.source_version(&row.project_id,source)?.is_none(){return Err(StoreError::Invalid("decision source is not registered in this project".into()));} }
-            if let Some(parent)=&row.supersedes_id { let prior=self.knowledge_decision(&row.project_id,parent)?.ok_or_else(||StoreError::Invalid("superseded decision does not exist in this project".into()))?; if self.knowledge_decision_superseded(&row.project_id,parent)? { return Err(StoreError::Conflict("decision already has a successor".into())); } if prior.decision_id==row.decision_id{return Err(StoreError::Invalid("decision cannot supersede itself".into()));} }
+            if let Some(parent)=&row.supersedes_id { let prior=self.knowledge_decision(&row.project_id,parent)?.ok_or_else(||StoreError::Invalid("superseded decision does not exist in this project".into()))?; if self.knowledge_decision_superseded(&row.project_id,parent)? { return Err(StoreError::Conflict("decision already has a successor".into())); }
+                if prior.decision_id==row.decision_id{return Err(StoreError::Invalid("decision cannot supersede itself".into()));} }
             let mut q=self.prepare("INSERT INTO boreal_decision_v1(project_id,decision_id,title,body,rationale,source_version_id,supersedes_id,actor_id,operation_id,project_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)")?;
             q.bind_text(1,&row.project_id)?;q.bind_text(2,&row.decision_id)?;q.bind_text(3,&row.title)?;q.bind_text(4,&row.body)?;q.bind_text(5,&row.rationale)?;q.bind_optional_text(6,row.source_version_id.as_deref())?;q.bind_optional_text(7,row.supersedes_id.as_deref())?;q.bind_text(8,&context.actor_id)?;q.bind_text(9,&context.operation_id)?;q.bind_i64(10,self.project_revision(&context.project_id)?.0+1)?;q.bind_text(11,&context.now)?;q.run()
         })
@@ -412,7 +419,9 @@ impl SqliteStore {
             ));
         }
         let bound=context.with_payload(json!({"claim_id":row.claim_id,"statement":row.statement,"content_digest":row.content_digest,"source_version_id":row.source_version_id,"citation_location":row.citation_location,"supersedes_id":row.supersedes_id}));
-        self.fact_mutation(&bound,"knowledge.claim.create","knowledge_claim",&row.claim_id,&[ActorRole::Agent,ActorRole::Operator],||{let source=self.source_version(&row.project_id,&row.source_version_id)?.ok_or_else(||StoreError::Invalid("claim citation source is not registered in this project".into()))?;if source.availability!="available"{return Err(StoreError::Conflict("claim citation source is unavailable".into()))} if let Some(parent)=&row.supersedes_id{if self.knowledge_claim(&row.project_id,parent)?.is_none(){return Err(StoreError::Invalid("superseded claim does not exist in this project".into()))}if self.knowledge_claim_superseded(&row.project_id,parent)?{return Err(StoreError::Conflict("claim already has a successor".into()))}} let mut q=self.prepare("INSERT INTO boreal_knowledge_claim_v1(project_id,claim_id,statement,content_digest,source_version_id,citation_location,supersedes_id,actor_id,operation_id,project_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)")?;q.bind_text(1,&row.project_id)?;q.bind_text(2,&row.claim_id)?;q.bind_text(3,&row.statement)?;q.bind_text(4,&row.content_digest)?;q.bind_text(5,&row.source_version_id)?;q.bind_text(6,&row.citation_location)?;q.bind_optional_text(7,row.supersedes_id.as_deref())?;q.bind_text(8,&context.actor_id)?;q.bind_text(9,&context.operation_id)?;q.bind_i64(10,self.project_revision(&context.project_id)?.0+1)?;q.bind_text(11,&context.now)?;q.run()})
+        self.fact_mutation(&bound,"knowledge.claim.create","knowledge_claim",&row.claim_id,&[ActorRole::Agent,ActorRole::Operator],||{let source=self.source_version(&row.project_id,&row.source_version_id)?.ok_or_else(||StoreError::Invalid("claim citation source is not registered in this project".into()))?;if source.availability!="available"{return Err(StoreError::Conflict("claim citation source is unavailable".into()))}
+                if let Some(parent)=&row.supersedes_id{if self.knowledge_claim(&row.project_id,parent)?.is_none(){return Err(StoreError::Invalid("superseded claim does not exist in this project".into()))}
+                    if self.knowledge_claim_superseded(&row.project_id,parent)?{return Err(StoreError::Conflict("claim already has a successor".into()))}} let mut q=self.prepare("INSERT INTO boreal_knowledge_claim_v1(project_id,claim_id,statement,content_digest,source_version_id,citation_location,supersedes_id,actor_id,operation_id,project_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)")?;q.bind_text(1,&row.project_id)?;q.bind_text(2,&row.claim_id)?;q.bind_text(3,&row.statement)?;q.bind_text(4,&row.content_digest)?;q.bind_text(5,&row.source_version_id)?;q.bind_text(6,&row.citation_location)?;q.bind_optional_text(7,row.supersedes_id.as_deref())?;q.bind_text(8,&context.actor_id)?;q.bind_text(9,&context.operation_id)?;q.bind_i64(10,self.project_revision(&context.project_id)?.0+1)?;q.bind_text(11,&context.now)?;q.run()})
     }
     pub fn knowledge_claim(
         &self,
@@ -465,13 +474,7 @@ impl SqliteStore {
         project: &str,
         limit: u64,
         offset: u64,
-    ) -> Result<
-        (
-            u64,
-            Vec<(KnowledgeClaimRecord, Vec<KnowledgeClaimReviewRecord>)>,
-        ),
-        StoreError,
-    > {
+    ) -> Result<KnowledgeClaimPageWithReviews, StoreError> {
         self.execute_batch("BEGIN")?;
         let result = (|| {
             let revision = self.project_revision(project)?.0;

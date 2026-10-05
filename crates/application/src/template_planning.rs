@@ -258,6 +258,10 @@ impl WorkTemplate {
 
 /// Instantiates a prevalidated dry-run plan using one canonical batch
 /// transaction, preserving all-or-nothing work, dependency, and label writes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "preserves the existing public dry-run-to-instantiate API used by the CLI"
+)]
 pub fn instantiate_template(
     app: &crate::WorkApplication<'_>,
     project_id: &ProjectId,

@@ -36,19 +36,31 @@ The installer replaces only the executable, packaged TUI, and release metadata
 under the selected prefix. It keeps the previous files until the replacement
 has completed and restores them if the replacement fails.
 
-## Release checklist
+For the single offline pre-push path and its exact-commit receipt, see
+[Local pre-push validation](LOCAL_PRE_PUSH.md). That receipt covers local
+checks only; it keeps the Mac release matrix and approval-gated production
+oracles marked `not_run`.
 
-1. Confirm the working tree is clean and the product P4/P5 release gates have
-   accepted evidence.
-2. Set the workspace version and create an annotated `vX.Y.Z` tag.
-3. Let GitHub Actions build the supported macOS/Linux target matrix.
-4. Publish the archives, per-archive release manifests, `SHA256SUMS`, and
-   release notes to GitHub Releases.
-5. Confirm `mattrichmo/homebrew-tap` exists and this repository has the
-   `HOMEBREW_TAP_TOKEN` Actions secret; the release workflow renders and
-   publishes `Formula/boreal.rb` automatically.
-6. Run the clean-prefix install smoke test and verify `bwrk dashboard` on each
-   supported platform with Node.js installed.
+## Manual release checklist
+
+1. Confirm the working tree is clean, the exact-commit local validation
+   receipt passes, and product release gates have accepted evidence.
+2. Verify the required macOS arm64, macOS x86_64, and Linux host checks on the
+   supported platforms. A local-only receipt does not fill the Mac rows.
+3. Set the workspace version and explicitly invoke the local release builder
+   for each qualified target. Keep the archive, manifest, and checksum outputs
+   for review.
+4. Run `verify_release_package.py`, the clean-prefix installer rehearsal, and
+   the per-platform `bwrk dashboard` smoke test.
+5. Render and review a Homebrew formula locally if distribution needs it.
+6. Request separate publication authorization before creating a release,
+   publishing a formula, or uploading any artifact.
+
+The repository CI and release workflow files have been removed from this
+candidate. This does not independently verify repository or organization
+Actions settings; confirm both automatic-execution settings through a
+supported administrator readback before publication. No workflow performs
+builds or publication automatically in this candidate.
 
 The release manifest records both the semantic package version and the API,
 schema, workflow, directive, memory, binary, TUI, and toolchain identities.

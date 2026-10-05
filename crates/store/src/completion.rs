@@ -258,12 +258,14 @@ impl SqliteStore {
                 at_ms,
                 request.kind.action(),
             )?;
-            let mut snapshot = self.read_project_status_in_transaction(&request.project_id)?;
+            let (mut snapshot, pinned_requirements) =
+                self.read_project_status_in_transaction(&request.project_id)?;
             self.populate_status_action_facts_for_session(
                 &mut snapshot,
                 &request.actor_id,
                 Some(&request.session_id),
                 at_ms,
+                &pinned_requirements,
             )?;
             let facts = snapshot
                 .works

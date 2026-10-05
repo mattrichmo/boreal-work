@@ -383,9 +383,7 @@ fn tick(
     let (work, tick_run_revision) = if let Some(work) = pinned {
         (work, run.revision)
     } else {
-        let work = requested
-            .or_else(|| selector["work"].as_str().map(str::to_owned))
-            .or_else(|| None);
+        let work = requested.or_else(|| selector["work"].as_str().map(str::to_owned));
         let work = match work {
             Some(work) => Some(work),
             None => {
@@ -454,7 +452,16 @@ fn tick(
             let (policy, digest, _policy_revision) =
                 dispatch_policy.expect("preflight policy exists");
             Some(super::orchestration_runtime::dispatch_claim(
-                parsed, operation, store, id, &work, claim, policy, &digest,
+                parsed,
+                store,
+                super::orchestration_runtime::DispatchClaimInput {
+                    operation,
+                    run_id: id,
+                    work_id: &work,
+                    claim,
+                    policy,
+                    policy_digest: &digest,
+                },
             )?)
         } else {
             None

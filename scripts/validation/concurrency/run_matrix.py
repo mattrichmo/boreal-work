@@ -17,7 +17,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 V2_ROOT = HERE.parents[2]
 MANIFEST = HERE / "Cargo.toml"
-BINARY = HERE / "target" / "release" / "boreal-v2-concurrency-probe"
+TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", HERE / "target"))
+if not TARGET_DIR.is_absolute():
+    TARGET_DIR = V2_ROOT / TARGET_DIR
+BINARY = TARGET_DIR / "release" / "boreal-v2-concurrency-probe"
 
 
 def sha256_file(path: Path) -> str:

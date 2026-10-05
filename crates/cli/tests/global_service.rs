@@ -173,9 +173,20 @@ fn global_service_survives_abandoned_connections_and_answers_next_snapshot() {
     drop(idle);
     assert_healthy_snapshot("after-idle-timeout");
     let operation_id = "op_global_disconnect_once";
-    let inner = json!({"api_version":"2","schema_version":"boreal.global.request.v1","operation_id":operation_id,"command":"todo add","payload":{"title":"One committed action"}}).to_string();
-    let encoded =
-        serde_json::to_vec(&json!({"request_id":"disconnect-write","payload":inner})).unwrap();
+    // The transport envelope embeds payload as raw JSON, so preserve it as an
+    // object instead of stringifying the inner request into a JSON string.
+    let inner = json!({
+        "api_version": "2",
+        "schema_version": "boreal.global.request.v1",
+        "operation_id": operation_id,
+        "command": "todo add",
+        "payload": {"title": "One committed action"},
+    });
+    let encoded = serde_json::to_vec(&json!({
+        "request_id": "disconnect-write",
+        "payload": inner,
+    }))
+    .unwrap();
     let mut raw = UnixStream::connect(&socket).unwrap();
     raw.write_all(&(encoded.len() as u32).to_be_bytes())
         .unwrap();

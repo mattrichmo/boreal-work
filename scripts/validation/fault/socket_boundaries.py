@@ -142,8 +142,17 @@ def run_cell(binary: Path, parent: Path, mode: str) -> dict[str, Any]:
     with __import__("tempfile").TemporaryDirectory(prefix=f"boreal-v03-{mode}-", dir=parent) as directory:
         root = Path(directory)
         db, _ = F.prepare_project(binary, root, f"v03-{mode}", "seed")
-        backend = F.short_socket(f"v03-backend-{mode}")
-        proxy_path = F.short_socket(f"v03-proxy-{mode}")
+        status = F.run_cli(
+            binary,
+            ["status", f"v03-{mode}", "--db", str(db), "--json"],
+            cwd=root,
+        )
+        status_data = F.assert_success(status, f"{mode} initial status")
+        expected_revision = status_data.get("revision", (status.envelope or {}).get("revision"))
+        if not isinstance(expected_revision, int):
+            raise ProxyError(f"{mode} initial status omitted its revision: {status.compact()}")
+        backend = F.short_socket(root, f"v03-backend-{mode}")
+        proxy_path = F.short_socket(root, f"v03-proxy-{mode}")
         service = F.start_service(binary, db, backend, cwd=root)
         proxy = FaultProxy(proxy_path, backend, mode)
         proxy.start()
@@ -160,9 +169,13 @@ def run_cell(binary: Path, parent: Path, mode: str) -> dict[str, Any]:
                 "Fault boundary task",
                 "--kind",
                 "task",
+                "--expected-revision",
+                str(expected_revision),
             ],
             cwd=root,
             operation=operation,
+            actor="operator",
+            session="session-operator",
         )
         proxy.join()
         service_output = F.stop_process(service)

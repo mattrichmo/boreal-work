@@ -623,7 +623,7 @@ fn malformed_observations_are_retained_per_edge_and_fail_closed() {
             None,
         )
     };
-    let stale_evaluation = evaluate_dependencies(&graph, &[stale.clone()], revision(2))
+    let stale_evaluation = evaluate_dependencies(&graph, std::slice::from_ref(&stale), revision(2))
         .expect("stale edge observations remain readable");
     assert!(matches!(
         &stale_evaluation.edges[0].satisfaction,
@@ -643,8 +643,9 @@ fn malformed_observations_are_retained_per_edge_and_fail_closed() {
             None,
         )
     };
-    let unknown_evaluation = evaluate_dependencies(&graph, &[unknown.clone()], revision(1))
-        .expect("unknown observations remain in aggregate diagnostics");
+    let unknown_evaluation =
+        evaluate_dependencies(&graph, std::slice::from_ref(&unknown), revision(1))
+            .expect("unknown observations remain in aggregate diagnostics");
     assert!(!unknown_evaluation.satisfied());
     assert_eq!(unknown_evaluation.diagnostics[0].raw, unknown);
 }

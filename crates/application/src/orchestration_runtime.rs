@@ -214,6 +214,10 @@ impl<'a> OrchestrationRuntimeApplication<'a> {
         self.store.orchestration_process_register(c, job)?;
         Ok(())
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserves the public process transition API used by launch and recovery callers"
+    )]
     pub fn transition_process(
         &self,
         c: &V3MutationContext,

@@ -6,7 +6,6 @@
 
 use super::*;
 use boreal_store::identity::IdentityStore;
-use serde::Deserialize;
 use std::{
     io::IsTerminal,
     process::{Child, ExitStatus},
@@ -24,19 +23,10 @@ const SERVICE_EXIT_GRACE: Duration = Duration::from_secs(2);
 // The TUI drains in-flight work for up to ten seconds before restoring its
 // terminal. Leave a small margin so the launcher does not SIGKILL it first.
 const TUI_EXIT_GRACE: Duration = Duration::from_secs(12);
-const DEFAULT_DATABASE: &str = ".boreal/boreal.sqlite";
 static DASHBOARD_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug, Deserialize)]
-struct ProjectMetadata {
-    project_id: String,
-    project_root: PathBuf,
-    database: PathBuf,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DashboardContext {
-    metadata_path: Option<PathBuf>,
     project_root: Option<PathBuf>,
     project_id: String,
     database: PathBuf,
@@ -81,12 +71,11 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
     let local = super::project_context::resolve(parsed)?;
     let project_root = local.root.clone();
     let context = DashboardContext {
-        metadata_path: Some(local.root.join(".boreal/project.json")),
         project_root: Some(local.root),
         project_id: local.project_id,
         database: local.database,
     };
-    let database = existing_database_path(&context, parsed)?;
+    let database = existing_database_path(&context)?;
     let store = SqliteStore::open(&database, super::PRODUCTION_SCHEMA).map_err(map_store_error)?;
     let project_ids = store.list_project_ids().map_err(map_store_error)?;
     let project = resolve_project_id(
@@ -132,10 +121,7 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
     }
 }
 
-fn existing_database_path(
-    context: &DashboardContext,
-    parsed: &ParsedCommand,
-) -> Result<PathBuf, CliError> {
+fn existing_database_path(context: &DashboardContext) -> Result<PathBuf, CliError> {
     let path = &context.database;
     if !path.is_file() {
         return Err(CliError::with(
@@ -167,161 +153,6 @@ fn existing_database_path(
     }
 
     Ok(database)
-}
-
-fn resolve_dashboard_context(
-    parsed: &ParsedCommand,
-    current_dir: &Path,
-) -> Result<DashboardContext, CliError> {
-    let metadata_path = nearest_project_metadata(current_dir);
-    let (metadata, project_root) = match metadata_path.as_ref() {
-        Some(path) => {
-            let encoded = fs::read_to_string(path).map_err(|error| {
-                CliError::with(
-                    ErrorCode::InvalidArgument,
-                    ApplicationOutcome::Rejected,
-                    format!("cannot read project metadata {}: {error}", path.display()),
-                )
-            })?;
-            let metadata = serde_json::from_str::<ProjectMetadata>(&encoded).map_err(|error| {
-                CliError::with(
-                    ErrorCode::InvalidArgument,
-                    ApplicationOutcome::Rejected,
-                    format!("invalid project metadata {}: {error}", path.display()),
-                )
-            })?;
-            if metadata.project_id.trim().is_empty() {
-                return Err(CliError::invalid(format!(
-                    "project metadata {} has an empty project identifier; run `bwrk init` to repair it",
-                    path.display()
-                )));
-            }
-            if metadata.project_root.as_os_str().is_empty() {
-                return Err(CliError::invalid(format!(
-                    "project metadata {} has an empty project root; run `bwrk init` to repair it",
-                    path.display()
-                )));
-            }
-            if metadata.database.as_os_str().is_empty() {
-                return Err(CliError::invalid(format!(
-                    "project metadata {} has an empty database path; run `bwrk init` to repair it",
-                    path.display()
-                )));
-            }
-            let metadata_root = path.parent().and_then(Path::parent).ok_or_else(|| {
-                CliError::invalid(format!(
-                    "project metadata path is malformed: {}",
-                    path.display()
-                ))
-            })?;
-            let project_root = fs::canonicalize(resolve_context_path(
-                &metadata.project_root,
-                metadata_root,
-            ))
-            .map_err(|error| {
-                CliError::with(
-                    ErrorCode::NotFound,
-                    ApplicationOutcome::Failed,
-                    format!(
-                        "project folder from {} is unavailable; run `bwrk init` to repair this project context: {error}",
-                        path.display()
-                    ),
-                )
-            })?;
-            let current_dir = fs::canonicalize(current_dir).map_err(|error| {
-                CliError::with(
-                    ErrorCode::ServiceUnavailable,
-                    ApplicationOutcome::Failed,
-                    format!("cannot resolve the working directory: {error}"),
-                )
-            })?;
-            let metadata_root = fs::canonicalize(metadata_root).map_err(|error| {
-                CliError::with(
-                    ErrorCode::InvalidArgument,
-                    ApplicationOutcome::Rejected,
-                    format!("project metadata directory is unavailable: {error}"),
-                )
-            })?;
-            if metadata_root != project_root || !current_dir.starts_with(&project_root) {
-                return Err(CliError::invalid(format!(
-                    "project metadata {} is not bound to the current project; run `bwrk init` in this project",
-                    path.display()
-                )));
-            }
-            if parsed.options.db == DEFAULT_DATABASE && parsed.options.project.is_none() {
-                let metadata_database = resolve_context_path(&metadata.database, &project_root);
-                if !metadata_database.starts_with(&project_root) {
-                    return Err(CliError::invalid(format!(
-                        "project metadata {} points outside this project to {}; pass --db PATH --project PROJECT explicitly or run `bwrk init` to repair it",
-                        path.display(),
-                        metadata_database.display()
-                    )));
-                }
-            }
-            if parsed.options.db != DEFAULT_DATABASE && parsed.options.project.is_none() {
-                return Err(CliError::invalid(
-                    "an explicit --db requires an explicit --project; do not use ambient project metadata to select a project",
-                ));
-            }
-            (Some(metadata), Some(project_root))
-        }
-        None if parsed.options.db == DEFAULT_DATABASE => {
-            return Err(CliError::with(
-                ErrorCode::NotFound,
-                ApplicationOutcome::Failed,
-                "this folder is not initialized for Boreal; run `bwrk init` before starting the dashboard",
-            ));
-        }
-        None => (None, None),
-    };
-
-    let database = if parsed.options.db == DEFAULT_DATABASE {
-        let project_root = project_root
-            .as_ref()
-            .expect("default database requires project metadata");
-        if parsed.options.project.is_some() {
-            project_root.join(DEFAULT_DATABASE)
-        } else {
-            let metadata = metadata
-                .as_ref()
-                .expect("default database requires metadata");
-            resolve_context_path(&metadata.database, project_root)
-        }
-    } else {
-        absolute_from_current(Path::new(&parsed.options.db), current_dir)
-    };
-
-    Ok(DashboardContext {
-        metadata_path,
-        project_root,
-        project_id: metadata
-            .map(|value| value.project_id.trim().to_owned())
-            .unwrap_or_default(),
-        database,
-    })
-}
-
-fn nearest_project_metadata(current_dir: &Path) -> Option<PathBuf> {
-    current_dir
-        .ancestors()
-        .map(|root| root.join(".boreal/project.json"))
-        .find(|candidate| candidate.is_file())
-}
-
-fn resolve_context_path(path: &Path, project_root: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_owned()
-    } else {
-        project_root.join(path)
-    }
-}
-
-fn absolute_from_current(path: &Path, current_dir: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_owned()
-    } else {
-        current_dir.join(path)
-    }
 }
 
 fn resolve_project_id(
@@ -1397,7 +1228,7 @@ mod signal {
         pub(super) fn install() -> io::Result<Self> {
             let mut previous = [(0, 0); 3];
             for (slot, signal_number) in previous.iter_mut().zip([SIGHUP, SIGINT, SIGTERM]) {
-                let handler = unsafe { signal(signal_number, record as usize) };
+                let handler = unsafe { signal(signal_number, record as *const () as usize) };
                 if handler == SIGNAL_ERROR {
                     for (installed, old_handler) in previous.iter().copied() {
                         if installed != 0 {
@@ -1488,19 +1319,11 @@ mod tests {
         assert!(!canonical_database.starts_with(&canonical_root));
 
         let context = DashboardContext {
-            metadata_path: Some(canonical_root.join(".boreal/project.json")),
             project_root: Some(canonical_root),
             project_id: "project-a".to_owned(),
             database: lexical_database,
         };
-        let error = existing_database_path(
-            &context,
-            &ParsedCommand {
-                path: vec!["dashboard".to_owned()],
-                options: CliOptions::default(),
-            },
-        )
-        .unwrap_err();
+        let error = existing_database_path(&context).unwrap_err();
 
         assert!(
             error
@@ -1592,7 +1415,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn socket_guard_refuses_to_remove_a_non_socket_endpoint() {
-        let mut guard = SocketGuard::allocate("test").unwrap();
+        let suffix = DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory = (0_u32..)
+            .find_map(|attempt| {
+                let candidate = env::temp_dir().join(format!(
+                    "boreal-dashboard-socket-guard-{}-{suffix}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => Some(candidate),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(error) => panic!("cannot create socket guard fixture: {error}"),
+                }
+            })
+            .expect("socket guard fixture directory name space exhausted");
+        let mut guard = SocketGuard {
+            path: directory.join("service.sock"),
+            directory,
+            cleaned: false,
+        };
         let path = guard.path().to_owned();
         fs::write(&path, "fixture").unwrap();
         let error = guard.cleanup().unwrap_err();
@@ -1600,6 +1441,7 @@ mod tests {
             .message
             .contains("refusing to remove a non-socket endpoint"));
         assert!(path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"fixture");
         fs::remove_file(path).unwrap();
         guard.cleanup().unwrap();
     }

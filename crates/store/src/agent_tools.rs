@@ -127,7 +127,7 @@ impl SqliteStore {
                 "history page limit must be 1..1000".into(),
             ));
         }
-        let mut count=self.prepare("SELECT COUNT(*) FROM operation o LEFT JOIN audit_event a ON a.operation_id=o.operation_id WHERE o.project_id=?1 AND ((a.subject_type='work' AND a.subject_id=?2) OR o.attempt_id IN (SELECT attempt_id FROM attempt WHERE project_id=?1 AND work_id=?2))")?;
+        let mut count=self.prepare("SELECT COUNT(*) FROM operation o LEFT JOIN audit_event a ON a.operation_id=o.operation_id WHERE o.project_id=?1 AND ((a.subject_type='work' AND a.subject_id=?2) OR o.attempt_id IN (SELECT t.attempt_id FROM attempt t JOIN work_item w ON w.work_id=t.work_id WHERE w.project_id=o.project_id AND w.work_id=?2))")?;
         count.bind_text(1, project)?;
         count.bind_text(2, work)?;
         if count.step()? != SQLITE_ROW {
@@ -137,7 +137,7 @@ impl SqliteStore {
         }
         let total = count.column_u64(0)?;
         drop(count);
-        let mut rows=self.prepare("SELECT o.operation_id FROM operation o LEFT JOIN audit_event a ON a.operation_id=o.operation_id WHERE o.project_id=?1 AND ((a.subject_type='work' AND a.subject_id=?2) OR o.attempt_id IN (SELECT attempt_id FROM attempt WHERE project_id=?1 AND work_id=?2)) ORDER BY o.revision DESC,o.operation_id LIMIT ?3 OFFSET ?4")?;
+        let mut rows=self.prepare("SELECT o.operation_id FROM operation o LEFT JOIN audit_event a ON a.operation_id=o.operation_id WHERE o.project_id=?1 AND ((a.subject_type='work' AND a.subject_id=?2) OR o.attempt_id IN (SELECT t.attempt_id FROM attempt t JOIN work_item w ON w.work_id=t.work_id WHERE w.project_id=o.project_id AND w.work_id=?2)) ORDER BY o.revision DESC,o.operation_id LIMIT ?3 OFFSET ?4")?;
         rows.bind_text(1, project)?;
         rows.bind_text(2, work)?;
         rows.bind_i64(3, limit)?;

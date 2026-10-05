@@ -12,6 +12,7 @@ use super::{
     AuditEventRecord, OperationOutcome, OperationReadback, OperationRecord, SqliteStore,
     StoreError,
 };
+use serde_json::json;
 
 const SQLITE_ROW: i32 = 100;
 
@@ -24,6 +25,17 @@ const RECOVERY_REASONS: &[&str] = &[
 ];
 const RECOVERY_STATES: &[&str] = &["unresolved", "resolved", "superseded"];
 const RESOURCE_STATES: &[&str] = &["active", "release_pending", "unknown", "released"];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeadlineReconciliationInput<'a> {
+    pub attempt_id: &'a str,
+    pub fence: u64,
+    pub expected_lease_deadline: &'a str,
+    pub expected_hard_deadline: &'a str,
+    pub operation_id: &'a str,
+    pub request_digest: &'a str,
+    pub at: &'a str,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryObligationInput {
@@ -114,6 +126,71 @@ pub struct RecoveryResolutionResult {
     pub obligation: RecoveryObligationRecord,
     pub operation: OperationReadback,
     pub replayed: bool,
+}
+
+/// Typed stop/recovery choice bound to a server-issued `Recover` descriptor.
+/// Both choices permit the same fenced expiry transition; the selected value
+/// is retained in the operation audit reason for later review.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoverActionDisposition {
+    AdapterAcknowledged,
+    ReviewedSafeRecovery,
+}
+
+pub(crate) const fn recover_action_disposition_name(
+    disposition: RecoverActionDisposition,
+) -> &'static str {
+    match disposition {
+        RecoverActionDisposition::AdapterAcknowledged => "adapter_acknowledged",
+        RecoverActionDisposition::ReviewedSafeRecovery => "reviewed_safe_recovery",
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionTargetInput {
+    pub project_id: String,
+    pub work_id: String,
+    pub entity_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionAttemptInput {
+    pub attempt_id: String,
+    pub fence: u64,
+}
+
+/// The descriptor fields emitted by the canonical action read model. The
+/// store compares these values with a freshly authorized descriptor while the
+/// attempt expiry transaction holds its write lock; this value is never a
+/// bearer token by itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionDescriptorInput {
+    pub action: String,
+    pub target: RecoverActionTargetInput,
+    pub expected_project_revision: u64,
+    pub expected_entity_revision: Option<u64>,
+    pub expected_proof_revision: Option<u64>,
+    pub attempt: Option<RecoverActionAttemptInput>,
+    pub required_roles: Vec<String>,
+    pub required_inputs: Vec<String>,
+    pub confirmation: Option<String>,
+    pub read_only: bool,
+    pub recovery: bool,
+}
+
+/// One request to execute the descriptor-bound attempt-expiry action.
+/// `recovery.resolve` remains a separate obligation-resolution operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverActionInput {
+    pub context: IdentityContext,
+    pub actor_id: String,
+    pub session_id: String,
+    pub operation_id: String,
+    pub request_digest: String,
+    pub descriptor: RecoverActionDescriptorInput,
+    pub confirmed: bool,
+    pub disposition: RecoverActionDisposition,
+    pub at: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -250,6 +327,194 @@ pub fn ensure_recovery_schema(store: &SqliteStore) -> Result<(), StoreError> {
 }
 
 impl SqliteStore {
+    /// Persist a due attempt deadline as an unresolved stop/recovery state.
+    /// This operation is deliberately separate from terminal expiry: it
+    /// revokes execution authority and records a durable stop request, while
+    /// retaining the current attempt and resource reservation until a real
+    /// stop acknowledgement or reviewed recovery is supplied.
+    pub fn reconcile_attempt_deadline(
+        &self,
+        context: &IdentityContext,
+        request: DeadlineReconciliationInput<'_>,
+    ) -> Result<bool, StoreError> {
+        let DeadlineReconciliationInput {
+            attempt_id,
+            fence,
+            expected_lease_deadline,
+            expected_hard_deadline,
+            operation_id,
+            request_digest,
+            at,
+        } = request;
+        for (value, field) in [
+            (attempt_id, "attempt id"),
+            (expected_lease_deadline, "expected lease deadline"),
+            (expected_hard_deadline, "expected hard deadline"),
+            (operation_id, "deadline reconciliation operation id"),
+            (request_digest, "deadline reconciliation request digest"),
+            (at, "deadline reconciliation timestamp"),
+        ] {
+            require_text(value, field)?;
+        }
+        if fence == 0 {
+            return Err(StoreError::Invalid(
+                "deadline reconciliation fence must be positive".to_owned(),
+            ));
+        }
+
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            IdentityStore::new(self)
+                .validate_context(context)
+                .map_err(|error| StoreError::Conflict(format!("recovery identity: {error}")))?;
+            let attempt =
+                self.attempt_record(attempt_id, false)?
+                    .ok_or_else(|| StoreError::NotFound {
+                        entity: "attempt",
+                        id: attempt_id.to_owned(),
+                    })?;
+            if attempt.project_id != context.project_id {
+                return Err(StoreError::WrongSubject {
+                    expected: context.project_id.clone(),
+                    actual: attempt.project_id,
+                });
+            }
+            if attempt.fence != fence {
+                return Ok(false);
+            }
+            if attempt.lease_deadline != expected_lease_deadline
+                || attempt.hard_deadline != expected_hard_deadline
+            {
+                return Ok(false);
+            }
+
+            let operation_identity = OperationIdentity {
+                operation_id: operation_id.to_owned(),
+                project_id: context.project_id.clone(),
+                command: "attempt.deadline.reconcile".to_owned(),
+                actor_id: attempt.actor_id.clone(),
+                session_id: None,
+                expected_revision: None,
+                attempt_id: Some(attempt_id.to_owned()),
+                fence: Some(fence),
+                request_digest: request_digest.to_owned(),
+                subject: Some(("attempt".to_owned(), attempt_id.to_owned())),
+            };
+            if OperationJournal::new(self)
+                .replay_in_context(context, &operation_identity)?
+                .is_some()
+            {
+                return Ok(false);
+            }
+
+            if !attempt.current
+                || attempt.phase.is_terminal()
+                || attempt.phase == boreal_domain::AttemptPhase::ExpiryPending
+            {
+                return Ok(false);
+            }
+            let lease_elapsed =
+                super::timestamp_cmp(at, &attempt.lease_deadline) != std::cmp::Ordering::Less;
+            let hard_elapsed =
+                super::timestamp_cmp(at, &attempt.hard_deadline) != std::cmp::Ordering::Less;
+            if !lease_elapsed && !hard_elapsed {
+                return Ok(false);
+            }
+
+            let reason = match (lease_elapsed, hard_elapsed) {
+                (true, false) => "lease_elapsed",
+                (false, true) => "hard_budget_elapsed",
+                (true, true)
+                    if super::timestamp_cmp(&attempt.lease_deadline, &attempt.hard_deadline)
+                        == std::cmp::Ordering::Less =>
+                {
+                    "lease_elapsed"
+                }
+                (true, true) => "hard_budget_elapsed",
+                (false, false) => unreachable!(),
+            };
+
+            let mut update = self.prepare(
+                "UPDATE attempt
+                 SET state = 'expiry_pending', review_required_after_expiry = 1,
+                     stop_requested_at = COALESCE(stop_requested_at, ?1)
+                 WHERE attempt_id = ?2 AND current = 1 AND fence = ?3
+                   AND state IN ('claimed','accepted','running','verifying')",
+            )?;
+            update.bind_text(1, at)?;
+            update.bind_text(2, attempt_id)?;
+            update.bind_i64(3, fence)?;
+            update.run()?;
+            if update.changes()? != 1 {
+                return Ok(false);
+            }
+
+            let result_json = serde_json::to_string(&json!({
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "phase": "expiry_pending",
+                "reason": reason,
+                "lease_deadline": attempt.lease_deadline,
+                "hard_deadline": attempt.hard_deadline,
+                "stop_requested_at": at,
+            }))
+            .map_err(|error| {
+                StoreError::Corrupt(format!("cannot serialize deadline result: {error}"))
+            })?;
+            let operation = OperationRecord {
+                operation_id: operation_id.to_owned(),
+                project_id: context.project_id.clone(),
+                command: "attempt.deadline.reconcile".to_owned(),
+                actor_id: attempt.actor_id.clone(),
+                session_id: None,
+                expected_revision: None,
+                attempt_id: Some(attempt_id.to_owned()),
+                fence: Some(fence),
+                request_digest: request_digest.to_owned(),
+                outcome: OperationOutcome::Changed,
+                result_json,
+                revision: 0,
+                created_at: at.to_owned(),
+                completed_at: Some(at.to_owned()),
+            };
+            let audit = AuditEventRecord {
+                project_id: context.project_id.clone(),
+                revision: 0,
+                operation_id: operation_id.to_owned(),
+                event_type: "attempt.expiry_pending".to_owned(),
+                subject_type: "attempt".to_owned(),
+                subject_id: attempt_id.to_owned(),
+                actor_id: attempt.actor_id,
+                session_id: None,
+                fence: Some(fence),
+                as_of: at.to_owned(),
+                payload_json: serde_json::to_string(&json!({
+                    "reason": reason,
+                    "lease_deadline": attempt.lease_deadline,
+                    "hard_deadline": attempt.hard_deadline,
+                    "stop_requested": true,
+                    "resource_disposition": "unresolved",
+                    "source": "service_deadline_reconciler",
+                }))
+                .map_err(|error| {
+                    StoreError::Corrupt(format!("cannot serialize deadline audit: {error}"))
+                })?,
+            };
+            self.append_identity_operation_audit_in_transaction(context, operation, audit)?;
+            Ok(true)
+        })();
+        match result {
+            Ok(changed) => {
+                self.execute_batch("COMMIT")?;
+                Ok(changed)
+            }
+            Err(error) => {
+                let _ = self.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     /// Registers the additive recovery tables and database-level ownership
     /// constraints. The coordinator should invoke this in schema setup, not
     /// lazily after a lifecycle mutation has already been admitted.

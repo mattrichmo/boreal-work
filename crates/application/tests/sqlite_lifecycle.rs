@@ -8,7 +8,7 @@ use boreal_domain::{
     HarnessId, OperationId, PersistedLifecycle, ProfileId, ProjectId, ReceiptResult,
     SourceVersionId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
-use boreal_store::{SqliteStore, SummaryInsertRequest};
+use boreal_store::SqliteStore;
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
 
@@ -357,35 +357,49 @@ fn accepted_receipts_drive_durable_proof_gated_closeout() {
             config_identity: ConfigIdentity::new("config-1"),
             profile_id: ProfileId::new("focused"),
             profile_version: "1".to_owned(),
-            body_digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-                .to_owned(),
+            body_digest: boreal_application::sha256_content_digest(b"x"),
             body_size: 1,
         }),
         close_intent: Some(intent.clone()),
     };
-    store
-        .insert_summary(SummaryInsertRequest {
-            project_id: "p-close".to_owned(),
-            actor_id: "agent-1".to_owned(),
-            session_id: None,
-            expected_project_revision: None,
-            summary_id: "summary-close".to_owned(),
-            work_id: "w-close".to_owned(),
-            attempt_id: "a-close".to_owned(),
-            fence: 1,
-            source_version_id: "source-1".to_owned(),
-            config_identity: "config-1".to_owned(),
-            profile_id: "focused".to_owned(),
-            profile_version: 1,
-            body_digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-                .to_owned(),
-            body_size: 1,
-            operation_id: "op-summary-close".to_owned(),
-            created_at: "unix-ms:5".to_owned(),
-        })
+    let summary = closeout.summary.as_ref().unwrap();
+    let first_insert = app
+        .record_summary(
+            "agent-1",
+            None,
+            summary,
+            "op-summary-close",
+            None,
+            TimestampMs(5),
+        )
         .unwrap();
+    let replay = app
+        .record_summary(
+            "agent-1",
+            None,
+            summary,
+            "op-summary-close",
+            None,
+            TimestampMs(6),
+        )
+        .unwrap();
+    let replay_with_body = app
+        .record_summary_with_body(
+            "p-close",
+            "agent-1",
+            None,
+            summary,
+            "x",
+            "op-summary-close",
+            None,
+            TimestampMs(7),
+        )
+        .unwrap();
+    assert!(!first_insert.replayed);
+    assert!(replay.replayed);
+    assert!(replay_with_body.replayed);
     let finalized = app
-        .finalize_close_checked("agent-1", None, &closeout, None, TimestampMs(6))
+        .finalize_close_checked("agent-1", None, &closeout, None, TimestampMs(8))
         .unwrap();
     assert_eq!(
         finalized.close_intent.state,

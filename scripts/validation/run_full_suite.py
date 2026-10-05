@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,10 +18,52 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[2]
+ORACLE_MANIFEST_ENV = "BOREAL_PRODUCTION_ORACLE_MANIFEST"
+ORACLE_MANIFEST_GENERATOR = ROOT / "crates/domain/tests/generate_production_oracle_manifest.py"
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def output_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
+def child_environment(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    """Keep a caller-provided oracle manifest scoped to the workspace test."""
+    environment = os.environ.copy()
+    environment.pop(ORACLE_MANIFEST_ENV, None)
+    if overrides:
+        environment.update(overrides)
+    return environment
+
+
+def external_temporary_directory() -> tempfile.TemporaryDirectory:
+    """Create a temporary directory outside the checkout, even with a local TMPDIR."""
+    checkout = ROOT.resolve()
+    candidates = (Path(tempfile.gettempdir()), ROOT.parent)
+    attempted: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in attempted:
+            continue
+        attempted.add(resolved)
+        if resolved == checkout or checkout in resolved.parents:
+            continue
+        try:
+            return tempfile.TemporaryDirectory(
+                prefix="boreal-full-suite-oracle-",
+                dir=str(resolved),
+            )
+        except OSError:
+            continue
+    raise OSError(f"no writable temporary directory outside the checkout {checkout}")
 
 
 def run_check(
@@ -28,6 +72,7 @@ def run_check(
     log_dir: Path,
     *,
     timeout_seconds: float = 900.0,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     timed_out = False
@@ -39,14 +84,15 @@ def run_check(
             capture_output=True,
             check=False,
             timeout=timeout_seconds,
+            env=child_environment(env),
         )
     except subprocess.TimeoutExpired as error:
         timed_out = True
         completed = subprocess.CompletedProcess(
             command,
             124,
-            error.stdout or "",
-            error.stderr or "",
+            output_text(error.stdout),
+            output_text(error.stderr),
         )
     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
     stdout_path = log_dir / f"{label}.stdout.log"
@@ -98,6 +144,119 @@ def run_check(
         "stdout_log": str(stdout_path),
         "stderr_log": str(stderr_path),
     }
+
+
+def run_workspace_check(
+    command: list[str],
+    log_dir: Path,
+    *,
+    timeout_seconds: float = 900.0,
+) -> dict[str, Any]:
+    """Generate the source-bound oracle input externally for the workspace test."""
+    started = time.perf_counter()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = log_dir / "cargo-workspace.stdout.log"
+    stderr_path = log_dir / "cargo-workspace.stderr.log"
+    try:
+        with external_temporary_directory() as temporary:
+            manifest = Path(temporary) / "production-oracle-manifest.txt"
+            generator_command = [
+                sys.executable,
+                str(ORACLE_MANIFEST_GENERATOR),
+                "--output",
+                str(manifest),
+            ]
+            try:
+                generated = subprocess.run(
+                    generator_command,
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout_seconds,
+                    env=child_environment(),
+                )
+            except subprocess.TimeoutExpired as error:
+                stdout_path.write_text(output_text(error.stdout), encoding="utf-8")
+                stderr_path.write_text(output_text(error.stderr), encoding="utf-8")
+                return {
+                    "label": "cargo-workspace",
+                    "command": command,
+                    "setup_command": generator_command,
+                    "exit_code": 124,
+                    "status": "fail",
+                    "reason": f"oracle manifest generation timed out after {timeout_seconds:g}s",
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                    "timeout_seconds": timeout_seconds,
+                    "stdout_log": str(stdout_path),
+                    "stderr_log": str(stderr_path),
+                }
+            if generated.returncode != 0 or not manifest.is_file():
+                stdout_path.write_text(generated.stdout or "", encoding="utf-8")
+                details = generated.stderr or ""
+                if generated.returncode == 0:
+                    details += "\nmanifest generator exited successfully without creating its output\n"
+                stderr_path.write_text(details, encoding="utf-8")
+                return {
+                    "label": "cargo-workspace",
+                    "command": command,
+                    "setup_command": generator_command,
+                    "exit_code": generated.returncode or 2,
+                    "status": "fail",
+                    "reason": "external production oracle manifest generation failed",
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                    "timeout_seconds": timeout_seconds,
+                    "stdout_log": str(stdout_path),
+                    "stderr_log": str(stderr_path),
+                }
+            try:
+                external_manifest = manifest.resolve()
+                external_manifest.relative_to(ROOT.resolve())
+            except ValueError:
+                pass
+            else:
+                stdout_path.write_text(generated.stdout or "", encoding="utf-8")
+                stderr_path.write_text(
+                    "generated oracle manifest is inside the checkout; refusing to run\n",
+                    encoding="utf-8",
+                )
+                return {
+                    "label": "cargo-workspace",
+                    "command": command,
+                    "setup_command": generator_command,
+                    "exit_code": 2,
+                    "status": "fail",
+                    "reason": "oracle manifest must be generated outside the checkout",
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                    "timeout_seconds": timeout_seconds,
+                    "stdout_log": str(stdout_path),
+                    "stderr_log": str(stderr_path),
+                }
+            result = run_check(
+                "cargo-workspace",
+                command,
+                log_dir,
+                timeout_seconds=timeout_seconds,
+                env={ORACLE_MANIFEST_ENV: str(external_manifest)},
+            )
+            result["setup_command"] = generator_command
+            result["oracle_manifest_external"] = True
+            result["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
+            return result
+    except OSError as error:
+        stdout_path.write_text("", encoding="utf-8")
+        stderr_path.write_text(f"{error}\n", encoding="utf-8")
+        return {
+            "label": "cargo-workspace",
+            "command": command,
+            "exit_code": 2,
+            "status": "fail",
+            "reason": "could not generate the external production oracle manifest",
+            "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+            "timeout_seconds": timeout_seconds,
+            "stdout_log": str(stdout_path),
+            "stderr_log": str(stderr_path),
+        }
 
 
 def markdown(report: dict[str, Any]) -> str:
@@ -288,8 +447,7 @@ def main() -> int:
     checks: list[dict[str, Any]] = []
     cargo_network_args = [] if args.online else ["--offline"]
     checks.append(
-        run_check(
-            "cargo-workspace",
+        run_workspace_check(
             ["cargo", "test", "--workspace", "--locked", *cargo_network_args],
             log_dir,
             timeout_seconds=args.timeout_seconds,
@@ -374,6 +532,21 @@ def main() -> int:
             "scripts/validation/spec_conformance.py",
             *(["--online"] if args.online else []),
         ]
+        checks.append(
+            run_check(
+                "validation-harness-unit-tests",
+                [
+                    "python3",
+                    "-m",
+                    "unittest",
+                    "scripts/validation/test_forensic_audit.py",
+                    "scripts/validation/test_production_host_agent_input.py",
+                    "scripts/validation/test_production_host_stop_admission.py",
+                ],
+                log_dir,
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
         checks.append(
             run_check(
                 "forensic-audit",

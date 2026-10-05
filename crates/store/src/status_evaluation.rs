@@ -259,29 +259,18 @@ impl SqliteStore {
     ) -> Result<(ProjectStatusRead, ActorContext), StoreError> {
         self.execute_batch("BEGIN")?;
         let result = (|| {
-            let actor = self.project_actor_context(project_id, actor_id)?;
-            let mut snapshot = self.read_project_status_in_transaction(project_id)?;
-            self.populate_status_action_facts_for_session(
+            let (mut snapshot, pinned_requirements) =
+                self.read_project_status_in_transaction(project_id)?;
+            let actor = self.populate_status_action_facts_for_session(
                 &mut snapshot,
                 actor_id,
                 session_id,
                 as_of,
+                &pinned_requirements,
             )?;
             Ok((snapshot, actor))
         })();
         finish_transaction(self, result)
-    }
-
-    /// Attach the non-derived facts needed by the action projection while the
-    /// status snapshot's read transaction is still open. Missing facts remain
-    /// explicit; this method never invents a proof, session, or revision.
-    pub(crate) fn populate_status_action_facts(
-        &self,
-        snapshot: &mut ProjectStatusRead,
-        actor_id: &str,
-        as_of: TimestampMs,
-    ) -> Result<(), StoreError> {
-        self.populate_status_action_facts_for_session(snapshot, actor_id, None, as_of)
     }
 
     pub(crate) fn populate_status_action_facts_for_session(
@@ -290,7 +279,8 @@ impl SqliteStore {
         actor_id: &str,
         requested_session: Option<&str>,
         as_of: TimestampMs,
-    ) -> Result<(), StoreError> {
+        pinned_requirements: &BTreeMap<String, PinnedRequirements>,
+    ) -> Result<ActorContext, StoreError> {
         // Schema-v2 compatibility projections do not have the authenticated
         // project/session boundary required by the paired action contract.
         // Mark their action facts as an explicit compatibility origin so the
@@ -300,35 +290,109 @@ impl SqliteStore {
             for row in &mut snapshot.works {
                 row.action_facts = StatusActionFacts::legacy_compatibility();
             }
-            return Ok(());
+            return self.project_actor_context(snapshot.project_id.as_str(), actor_id);
         }
-        let actor = self.project_actor_context(snapshot.project_id.as_str(), actor_id)?;
+        let (actor, authority_root) =
+            self.project_actor_context_with_authority_root(snapshot.project_id.as_str(), actor_id)?;
         // Invalid/ended sessions remove mutation authority, not read access to healthy siblings.
         let session_id = requested_session
             .filter(|session| {
-                self.validate_project_session(snapshot.project_id.as_str(), actor_id, session)
-                    .is_ok()
+                self.validate_project_session_binding(
+                    snapshot.project_id.as_str(),
+                    actor_id,
+                    session,
+                )
+                .is_ok()
             })
             .map(str::to_owned);
         snapshot.caller_session_id = session_id.clone();
         for row in &mut snapshot.works {
-            row.action_facts.integrity = if snapshot
-                .diagnostics
-                .iter()
-                .any(|d| d.work_id == row.work.id.as_str())
-            {
-                StatusIntegrity::Quarantined
-            } else {
-                StatusIntegrity::Valid
+            let work_id = row.work.id.as_str();
+            row.action_facts.integrity =
+                if snapshot.diagnostics.iter().any(|d| d.work_id == work_id) {
+                    StatusIntegrity::Quarantined
+                } else {
+                    StatusIntegrity::Valid
+                };
+            if !pinned_requirements.contains_key(work_id) {
+                let missing_pin_was_diagnosed = snapshot.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.work_id == work_id
+                        && diagnostic.code == "acceptance_requirements_corrupt"
+                        && diagnostic.detail == "missing pinned requirement revision"
+                });
+                if missing_pin_was_diagnosed {
+                    let detail = format!(
+                        "missing pinned requirement revision for {}/{}",
+                        snapshot.project_id, work_id
+                    );
+                    row.action_facts = StatusActionFacts::unavailable();
+                    row.work
+                        .hard_holds
+                        .push(ReasonCode::HardHold("integrity_quarantined".into()));
+                    snapshot.diagnostics.push(StatusRecordDiagnostic {
+                        work_id: work_id.to_owned(),
+                        title: Some(row.work.title.clone()),
+                        code: "decision_facts_corrupt".into(),
+                        detail,
+                    });
+                    continue;
+                }
+            }
+            let pinned = pinned_requirements.get(work_id);
+            let status_cursor = match (row.canonical_seed, pinned) {
+                (Some(seed), Some(pin)) => super::status_facts::validate_pinned_status_cursor(
+                    snapshot.project_id.as_str(),
+                    work_id,
+                    seed,
+                    pin,
+                ),
+                _ => Ok(None),
             };
-            match self.canonical_decision_inputs(
-                snapshot.project_id.as_str(),
-                Revision(snapshot.revision.0),
-                row,
-                &actor,
-                session_id.as_deref(),
-                as_of,
-            ) {
+            let inputs = status_cursor.and_then(|cursor| {
+                let has_dependency = snapshot
+                    .dependencies
+                    .iter()
+                    .any(|edge| edge.dependent_id.as_str() == work_id);
+                let can_build_from_status_seed = session_id.is_some()
+                    && row.work.kind == WorkKind::Task
+                    && row.work.lifecycle == PersistedLifecycle::Open
+                    && row.current_attempt.is_none()
+                    && row.work.hard_holds.is_empty()
+                    && row.action_facts.integrity == StatusIntegrity::Valid
+                    && !row.gate_diagnostics.gates.is_empty()
+                    && !has_dependency
+                    && !row
+                        .canonical_seed
+                        .is_some_and(|seed| seed.unresolved_recovery || seed.has_gate_exception);
+                if can_build_from_status_seed {
+                    if let (Some(cursor), Some(pin)) = (cursor, pinned) {
+                        return Self::canonical_decision_inputs_from_status_seed(
+                            snapshot.project_id.as_str(),
+                            Revision(snapshot.revision.0),
+                            row,
+                            pin,
+                            cursor,
+                            has_dependency,
+                            &actor,
+                            &authority_root,
+                            session_id.as_deref(),
+                            as_of,
+                        );
+                    }
+                }
+                self.canonical_decision_inputs(
+                    snapshot.project_id.as_str(),
+                    Revision(snapshot.revision.0),
+                    row,
+                    super::status_facts::CanonicalDecisionContext {
+                        actor: &actor,
+                        authority_root: &authority_root,
+                        session_id: session_id.as_deref(),
+                        as_of,
+                    },
+                )
+            });
+            match inputs {
                 Ok(inputs) => {
                     let proof = inputs.requirements.as_present().map(|r| &r.proof);
                     let mut missing_facts = Vec::new();
@@ -368,7 +432,7 @@ impl SqliteStore {
                 }
             }
         }
-        Ok(())
+        Ok(actor)
     }
 
     /// Caller must hold the write transaction. This does not open a nested
@@ -430,9 +494,15 @@ impl SqliteStore {
         session_id: Option<&str>,
         as_of: TimestampMs,
     ) -> Result<WorkPolicyProjection, StoreError> {
-        let actor = self.project_actor_context(project_id, actor_id)?;
-        let mut snapshot = self.read_project_status_in_transaction(project_id)?;
-        self.populate_status_action_facts_for_session(&mut snapshot, actor_id, session_id, as_of)?;
+        let (mut snapshot, pinned_requirements) =
+            self.read_project_status_in_transaction(project_id)?;
+        let actor = self.populate_status_action_facts_for_session(
+            &mut snapshot,
+            actor_id,
+            session_id,
+            as_of,
+            &pinned_requirements,
+        )?;
         let row = snapshot
             .works
             .iter()
@@ -802,5 +872,105 @@ mod hierarchy_tests {
         assert!(issues.contains_key("invalid-child"));
         assert!(!issues.contains_key("direct"));
         assert!(!issues.contains_key("healthy"));
+    }
+}
+
+#[cfg(test)]
+mod canonical_cursor_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_cursor_quarantines_only_its_work_row() {
+        let store = SqliteStore::open(":memory:", PRODUCTION_SCHEMA_SQL)
+            .expect("canonical production schema should open");
+        store
+            .create_project("cursor-isolation-project", "unix-ms:1")
+            .expect("project should be created");
+        store
+            .ensure_actor(
+                "operator",
+                "operator",
+                "operator-credential",
+                "Operator",
+                "unix-ms:1",
+            )
+            .expect("operator actor should be created");
+        for (work_id, title) in [
+            ("corrupt-cursor", "Corrupt cursor"),
+            ("healthy-sibling", "Healthy sibling"),
+        ] {
+            let work = WorkItem::new(
+                ProjectId::new("cursor-isolation-project"),
+                WorkId::new(work_id),
+                WorkKind::Task,
+                None,
+                title,
+            )
+            .open();
+            store
+                .create_work(&work, "unix-ms:2")
+                .expect("work and pinned requirements should be created");
+        }
+
+        // Status reads resolve the caller's project authority. This fixture
+        // writes the minimal self-rooted principal directly so it does not
+        // need a filesystem workspace binding or a credential/session flow.
+        store
+            .execute_batch(
+                "INSERT INTO operation
+                    (operation_id, project_id, command, actor_id, session_id, expected_revision,
+                     attempt_id, fence, request_digest, outcome, result_json, revision, created_at, completed_at)
+                 VALUES ('project-init', 'cursor-isolation-project', 'project.init', 'operator',
+                         NULL, NULL, NULL, NULL, 'project-init-digest', 'changed', '{}', 0,
+                         'unix-ms:1', 'unix-ms:1');
+                 INSERT INTO boreal_principal
+                    (project_id, actor_id, role, authority_root, delegated_by, operation_id, created_at)
+                 VALUES ('cursor-isolation-project', 'operator', 'operator', 'operator', NULL,
+                         'project-init', 'unix-ms:1');",
+            )
+            .expect("project operation and principal should be installed");
+        store
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE boreal_entity_revision
+                    SET proof_revision = -1
+                  WHERE project_id = 'cursor-isolation-project'
+                    AND work_id = 'corrupt-cursor';
+                 PRAGMA ignore_check_constraints = OFF;",
+            )
+            .expect("fixture should corrupt exactly one cursor value");
+
+        let (snapshot, _) = store
+            .read_project_status_for_actor("cursor-isolation-project", "operator", TimestampMs(3))
+            .expect("one malformed cursor must not abort the project snapshot");
+
+        assert_eq!(snapshot.works.len(), 2, "both work rows remain readable");
+        let corrupt = snapshot
+            .works
+            .iter()
+            .find(|row| row.work.id.as_str() == "corrupt-cursor")
+            .expect("corrupt work remains visible for diagnosis");
+        assert_eq!(corrupt.action_facts.integrity, StatusIntegrity::Quarantined);
+        assert!(corrupt.action_facts.canonical_inputs.is_none());
+        assert!(
+            snapshot.diagnostics.iter().any(|diagnostic| {
+                diagnostic.work_id == "corrupt-cursor"
+                    && diagnostic.code == "decision_facts_corrupt"
+                    && diagnostic.detail == "SQLite returned negative integer: -1"
+            }),
+            "unexpected diagnostics: {:?}",
+            snapshot.diagnostics
+        );
+
+        let healthy = snapshot
+            .works
+            .iter()
+            .find(|row| row.work.id.as_str() == "healthy-sibling")
+            .expect("healthy sibling remains readable");
+        assert_eq!(healthy.action_facts.integrity, StatusIntegrity::Valid);
+        assert!(healthy.action_facts.canonical_inputs.is_some());
+        assert!(!snapshot.diagnostics.iter().any(|diagnostic| {
+            diagnostic.work_id == "healthy-sibling" && diagnostic.code == "decision_facts_corrupt"
+        }));
     }
 }

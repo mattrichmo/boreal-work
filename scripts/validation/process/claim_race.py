@@ -35,6 +35,74 @@ def invoke(binary: Path, args: list[str], *, cwd: Path) -> dict:
     return {"exit_code": completed.returncode, "envelope": envelope, "stderr": completed.stderr}
 
 
+def require_success(label: str, result: dict) -> dict:
+    envelope = result["envelope"]
+    if result["exit_code"] != 0 or envelope.get("outcome") not in {"changed", "unchanged"}:
+        raise RuntimeError(f"{label} failed: {result}")
+    return envelope
+
+
+def current_revision(binary: Path, *, project: str, database: Path, cwd: Path) -> int:
+    result = invoke(binary, ["status", project, "--db", str(database), "--json"], cwd=cwd)
+    envelope = require_success("status readback", result)
+    revision = envelope.get("revision")
+    if not isinstance(revision, int):
+        raise RuntimeError(f"status readback did not return an integer revision: {envelope}")
+    return revision
+
+
+def enroll_agent(
+    binary: Path,
+    *,
+    project: str,
+    database: Path,
+    cwd: Path,
+    actor: str,
+    session: str,
+    harness: str,
+) -> None:
+    key = require_success(
+        f"auth key for {actor}",
+        invoke(
+            binary,
+            ["auth", "key", "--actor", actor, "--actor-role", "agent", "--db", str(database), "--json"],
+            cwd=cwd,
+        ),
+    )
+    enrollment = (key.get("data") or {}).get("enrollment_path")
+    if not isinstance(enrollment, str):
+        raise RuntimeError(f"auth key for {actor} returned no enrollment path: {key}")
+
+    revision = current_revision(binary, project=project, database=database, cwd=cwd)
+    require_success(
+        f"auth grant for {actor}",
+        invoke(
+            binary,
+            [
+                "auth", "grant", "--actor", "operator", "--input", enrollment,
+                "--expected-revision", str(revision), "--reason",
+                "Authorize an isolated process-race fixture agent", "--yes",
+                "--db", str(database), "--json",
+            ],
+            cwd=cwd,
+        ),
+    )
+
+    revision = current_revision(binary, project=project, database=database, cwd=cwd)
+    require_success(
+        f"session start for {actor}",
+        invoke(
+            binary,
+            [
+                "session", "start", "--project", project, "--actor", actor,
+                "--session", session, "--harness", harness,
+                "--expected-revision", str(revision), "--db", str(database), "--json",
+            ],
+            cwd=cwd,
+        ),
+    )
+
+
 def race(
     command: list[str],
     *,
@@ -51,8 +119,10 @@ def race(
         if unique_claim_identity:
             operation_index = child_command.index("--operation-id") + 1
             session_index = child_command.index("--session") + 1
+            actor_index = child_command.index("--actor") + 1
             child_command[operation_index] = f"race-claim-op-{worker}"
-            child_command[session_index] = f"race-session-{worker}"
+            child_command[session_index] = f"race-session-{worker:02d}"
+            child_command[actor_index] = f"race-agent-{worker:02d}"
         children.append(
             subprocess.Popen(
                 [sys.executable, "-c", CHILD_CODE],
@@ -135,6 +205,11 @@ def summarize(results: list[dict]) -> dict:
             for envelope in envelopes
             if envelope.get("error")
         ),
+        "error_details": sorted(
+            json.dumps(envelope.get("error"), sort_keys=True)
+            for envelope in envelopes
+            if envelope.get("error")
+        ),
         "replayed": sum(
             bool((envelope.get("data") or {}).get("replayed")) for envelope in envelopes
         ),
@@ -155,14 +230,14 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="boreal-process-race-") as directory:
         root = Path(directory)
-        database = root / "boreal.sqlite"
+        project = "process-race-project"
+        project_root = root / project
+        database = project_root / ".boreal" / "boreal.sqlite"
         initialized = invoke(
             binary,
             [
                 "init",
-                "process-race-project",
-                "--actor",
-                "suite-agent",
+                project,
                 "--db",
                 str(database),
                 "--operation-id",
@@ -173,41 +248,82 @@ def main() -> int:
         )
         if initialized["exit_code"] != 0:
             raise RuntimeError(f"init failed: {initialized}")
+        for worker in range(args.workers):
+            enroll_agent(
+                binary,
+                project=project,
+                database=database,
+                cwd=project_root,
+                actor=f"race-agent-{worker:02d}",
+                session=f"race-session-{worker:02d}",
+                harness="race-harness",
+            )
+
+        revision = current_revision(binary, project=project, database=database, cwd=project_root)
         created = invoke(
             binary,
             [
                 "work",
                 "create",
-                "process-race-project",
+                project,
                 "claim-race-task",
                 "Claim race task",
                 "--kind",
                 "task",
                 "--actor",
-                "suite-agent",
+                "race-agent-00",
+                "--session",
+                "race-session-00",
+                "--expected-revision",
+                str(revision),
                 "--db",
                 str(database),
                 "--operation-id",
                 "race-create-claim-task",
                 "--json",
             ],
-            cwd=root,
+            cwd=project_root,
         )
         if created["exit_code"] != 0:
             raise RuntimeError(f"task creation failed: {created}")
+
+        source_input = project_root / ".boreal" / "claim-race-source.md"
+        source_input.write_text("claim race source fixture\n", encoding="utf-8")
+        source = require_success(
+            "source add",
+            invoke(
+                binary,
+                [
+                    "source", "add", project, "--input", str(source_input),
+                    "--origin", "claim-race", "--actor", "race-agent-00",
+                    "--session", "race-session-00", "--harness", "race-harness",
+                    "--expected-revision",
+                    str(current_revision(binary, project=project, database=database, cwd=project_root)),
+                    "--db", str(database), "--operation-id", "race-source-add", "--json",
+                ],
+                cwd=project_root,
+            ),
+        )
+        source_version = (source.get("data") or {}).get("source", {}).get("source_version_id")
+        if not isinstance(source_version, str):
+            raise RuntimeError(f"source add returned no source version ID: {source}")
 
         claim_base = [
             str(binary),
             "work",
             "claim",
-            "process-race-project",
+            project,
             "claim-race-task",
             "--actor",
-            "suite-agent",
+            "race-agent-00",
             "--harness",
             "race-harness",
             "--session",
-            "race-session",
+            "race-session-00",
+            "--source-version",
+            source_version,
+            "--config-identity",
+            "sha256:claim-race-config-v1",
             "--lease-ttl",
             "30s",
             "--time-limit",
@@ -221,7 +337,7 @@ def main() -> int:
         claim_results = race(
             claim_base,
             workers=args.workers,
-            root=root,
+            root=project_root,
             unique_claim_identity=True,
         )
         claim_summary = summarize(claim_results)
@@ -235,20 +351,24 @@ def main() -> int:
                 [
                     "work",
                     "create",
-                    "process-race-project",
+                    project,
                     work_id,
                     work_id,
                     "--kind",
                     "task",
                     "--actor",
-                    "suite-agent",
+                    "race-agent-00",
+                    "--session",
+                    "race-session-00",
+                    "--expected-revision",
+                    str(current_revision(binary, project=project, database=database, cwd=project_root)),
                     "--db",
                     str(database),
                     "--operation-id",
                     f"race-create-{work_id}",
                     "--json",
                 ],
-                cwd=root,
+                cwd=project_root,
             )
             if created["exit_code"] != 0:
                 raise RuntimeError(f"dependency race task creation failed: {created}")
@@ -257,16 +377,19 @@ def main() -> int:
             ("dependency-race-a", "dependency-race-b"),
             ("dependency-race-b", "dependency-race-a"),
         ):
+            revision = current_revision(binary, project=project, database=database, cwd=project_root)
             dependency_commands.append(
                 [
                     str(binary),
                     "dep",
                     "add",
-                    "process-race-project",
+                    project,
                     blocker,
                     blocked,
                     "--actor",
-                    "suite-agent",
+                    "operator",
+                    "--expected-revision",
+                    str(revision),
                     "--db",
                     str(database),
                     "--operation-id",
@@ -274,7 +397,7 @@ def main() -> int:
                     "--json",
                 ]
             )
-        dependency_results = race_commands(dependency_commands, root=root)
+        dependency_results = race_commands(dependency_commands, root=project_root)
         dependency_summary = summarize(dependency_results)
         if dependency_summary["outcomes"].count("changed") != 1:
             raise RuntimeError(f"expected one opposite-edge winner: {dependency_summary}")
@@ -283,12 +406,14 @@ def main() -> int:
             [
                 "dep",
                 "tree",
-                "process-race-project",
+                project,
+                "--actor",
+                "operator",
                 "--db",
                 str(database),
                 "--json",
             ],
-            cwd=root,
+            cwd=project_root,
         )
         tree_data = tree["envelope"].get("data") or {}
         if tree["exit_code"] != 0 or len(tree_data.get("edges", [])) != 1:
@@ -298,20 +423,24 @@ def main() -> int:
             str(binary),
             "work",
             "create",
-            "process-race-project",
+            project,
             "replay-race-task",
             "Replay race task",
             "--kind",
             "task",
             "--actor",
-            "suite-agent",
+            "race-agent-00",
+            "--session",
+            "race-session-00",
+            "--expected-revision",
+            str(current_revision(binary, project=project, database=database, cwd=project_root)),
             "--db",
             str(database),
             "--operation-id",
             "race-replay-op",
             "--json",
         ]
-        replay_results = race(create_base, workers=args.workers, root=root)
+        replay_results = race(create_base, workers=args.workers, root=project_root)
         replay_summary = summarize(replay_results)
         if replay_summary["outcomes"].count("changed") != 1:
             raise RuntimeError(f"expected exactly one replay winner: {replay_summary}")

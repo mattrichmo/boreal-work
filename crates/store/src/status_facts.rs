@@ -4,16 +4,54 @@ use super::*;
 use boreal_domain::decision_inputs as facts;
 use boreal_domain::{ActorContext, Revision, TimestampMs};
 
+pub(crate) struct CanonicalDecisionContext<'a> {
+    pub(crate) actor: &'a ActorContext,
+    pub(crate) authority_root: &'a str,
+    pub(crate) session_id: Option<&'a str>,
+    pub(crate) as_of: TimestampMs,
+}
+
+pub(crate) fn validate_pinned_status_cursor(
+    project_id: &str,
+    work_id: &str,
+    seed: CanonicalStatusSeed,
+    pin: &PinnedRequirements,
+) -> Result<Option<(u64, u64)>, StoreError> {
+    if pin.project_id != project_id || pin.work_id != work_id {
+        return Err(StoreError::Corrupt(
+            "pinned requirement subject differs from status row".to_owned(),
+        ));
+    }
+    match (seed.entity_revision, seed.proof_revision) {
+        (Some(entity_revision), Some(proof_revision)) => {
+            if pin.proof_revision != proof_revision {
+                return Err(StoreError::Corrupt(
+                    "pinned requirement and proof cursor disagree".to_owned(),
+                ));
+            }
+            Ok(Some((entity_revision, proof_revision)))
+        }
+        (None, None) => Ok(None),
+        _ => Err(StoreError::Corrupt(
+            "canonical revision cursor is incomplete".to_owned(),
+        )),
+    }
+}
+
 impl SqliteStore {
     pub(crate) fn canonical_decision_inputs(
         &self,
         project_id: &str,
         revision: Revision,
         row: &StatusWorkRecord,
-        actor: &ActorContext,
-        session_id: Option<&str>,
-        as_of: TimestampMs,
+        context: CanonicalDecisionContext<'_>,
     ) -> Result<facts::DecisionInputs, StoreError> {
+        let CanonicalDecisionContext {
+            actor,
+            authority_root,
+            session_id,
+            as_of,
+        } = context;
         let work_id = row.work.id.as_str();
         let mut cursor = self.prepare(
             "SELECT entity_revision, proof_revision FROM boreal_entity_revision
@@ -337,8 +375,7 @@ impl SqliteStore {
         // resolved actor identity is the authority root. Never apply this
         // fallback to a canonical production database.
         let authority_root = if self.is_canonical_production() {
-            self.principal_authority(project_id, actor.actor_id.as_str())?
-                .1
+            authority_root.to_owned()
         } else {
             actor.actor_id.as_str().to_owned()
         };
@@ -406,5 +443,232 @@ impl SqliteStore {
                 Repair,
             ]),
         })
+    }
+
+    /// Assembles the canonical decision envelope from facts already validated
+    /// by the project status projection. This path is deliberately limited to
+    /// healthy, unattempted rows; callers must prove the row has no recovery,
+    /// exception, dependency, hold, or diagnostic before reaching it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn canonical_decision_inputs_from_status_seed(
+        project_id: &str,
+        revision: Revision,
+        row: &StatusWorkRecord,
+        pin: &PinnedRequirements,
+        (entity_revision, proof_revision): (u64, u64),
+        has_dependency: bool,
+        actor: &ActorContext,
+        authority_root: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
+    ) -> Result<facts::DecisionInputs, StoreError> {
+        let work_id = row.work.id.as_str();
+        let seed = row
+            .canonical_seed
+            .ok_or_else(|| StoreError::Corrupt("canonical status seed is missing".to_owned()))?;
+        if row.work.kind != WorkKind::Task
+            || row.work.lifecycle != PersistedLifecycle::Open
+            || row.current_attempt.is_some()
+            || !row.work.hard_holds.is_empty()
+            || row.action_facts.integrity != StatusIntegrity::Valid
+            || row.gate_diagnostics.gates.is_empty()
+            || has_dependency
+            || seed.entity_revision != Some(entity_revision)
+            || seed.proof_revision != Some(proof_revision)
+            || seed.unresolved_recovery
+            || seed.has_gate_exception
+            || session_id.is_none()
+        {
+            return Err(StoreError::Corrupt(
+                "canonical status seed does not describe healthy open work".to_owned(),
+            ));
+        }
+        if pin.project_id != project_id
+            || pin.work_id != work_id
+            || pin.proof_revision != proof_revision
+        {
+            return Err(StoreError::Corrupt(
+                "pinned requirement and proof cursor disagree".to_owned(),
+            ));
+        }
+        let subject = facts::EntityIdentity::new(
+            project_id.into(),
+            work_id.into(),
+            facts::EntityRevision::new(entity_revision),
+        );
+        let fact_subject = facts::FactSubject::work(project_id.into(), work_id.into());
+        let scope = facts::IntegrityScope::work(project_id.into(), work_id.into());
+        let profile = facts::ProfileIdentity::new(
+            pin.profile.profile_id.clone().into(),
+            pin.profile.version.to_string(),
+            pin.profile.policy_digest.clone().into(),
+        );
+        let proof = facts::ProofIdentity::planning(
+            subject.clone(),
+            facts::ProofRevision::new(proof_revision),
+            profile,
+            "boreal.acceptance/1",
+        );
+        let mut requirements = Vec::with_capacity(pin.declarations.len());
+        for declaration in &pin.declarations {
+            let observed = row
+                .gate_diagnostics
+                .gates
+                .iter()
+                .find(|gate| {
+                    gate.gate_id == declaration.gate_id
+                        || gate.gate_id == format!("{work_id}:{}", declaration.gate_id)
+                })
+                .ok_or_else(|| {
+                    StoreError::Corrupt(format!(
+                        "requirement observation missing: {}",
+                        declaration.gate_id
+                    ))
+                })?;
+            requirements.push(facts::PinnedRequirement {
+                exception: None,
+                id: declaration.requirement_id.clone().into(),
+                gate_id: observed.gate_id.clone().into(),
+                kind: parse_gate_kind(&declaration.kind)?,
+                required: declaration.required,
+                state: observed.state,
+                verifier_policy: facts::VerifierPolicy {
+                    id: declaration.verifier_policy.clone().into(),
+                    version: pin.profile.version.to_string(),
+                },
+            });
+        }
+        let review_policy = if requirements
+            .iter()
+            .any(|gate| gate.required && gate.kind == GateKind::Review)
+        {
+            facts::ReviewRequirementPolicy::Independent
+        } else {
+            facts::ReviewRequirementPolicy::NotRequired
+        };
+        let holds = row
+            .work
+            .hard_holds
+            .iter()
+            .enumerate()
+            .map(|(index, reason)| facts::HoldInput {
+                id: format!("{work_id}:hold:{index}").into(),
+                scope: scope.clone(),
+                code: reason.stable_code().into(),
+                entity_revision: subject.revision,
+                active: true,
+            })
+            .collect();
+        use facts::PermittedAction::*;
+        Ok(facts::DecisionInputs {
+            subject: subject.clone(),
+            snapshot_revision: revision,
+            clock: facts::EvaluationClock::at(as_of).with_status_timing(facts::StatusTimingInput {
+                schedule: row.schedule,
+                cycle_activation_at: row.activation_at,
+                retry_not_before: row.status_retry_not_before()?,
+            }),
+            availability: facts::Availability::Live,
+            dispatch_policy: row.work.dispatch_policy,
+            lifecycle: facts::Fact::present(facts::LifecycleInput {
+                identity: subject,
+                lifecycle: row.work.lifecycle,
+                terminal_decision: None,
+            }),
+            authority: facts::Fact::present(facts::ActorAuthorityInput {
+                authority_root: authority_root.into(),
+                project_id: project_id.into(),
+                role: actor.role,
+                principal: facts::PrincipalBinding::Authenticated {
+                    actor_id: actor.actor_id.clone(),
+                },
+                session_id: session_id.map(Into::into),
+            }),
+            requirements: facts::Fact::present(facts::PinnedRequirementsInput {
+                proof,
+                requirements,
+                review_policy,
+            }),
+            dependencies: facts::Fact::present(facts::DependencyOutcomesInput {
+                edges: Vec::new(),
+            }),
+            holds: facts::Fact::present(facts::HoldsInput { holds }),
+            execution: facts::Fact::optional_absent(
+                facts::FactKind::Execution,
+                fact_subject.clone(),
+            ),
+            submission: facts::Fact::optional_absent(
+                facts::FactKind::Submission,
+                fact_subject.clone(),
+            ),
+            review: facts::Fact::optional_absent(facts::FactKind::Review, fact_subject.clone()),
+            recovery: facts::Fact::optional_absent(facts::FactKind::Recovery, fact_subject),
+            integrity: facts::IntegrityInput {
+                scope: scope.clone(),
+                level: facts::IntegrityLevel::Valid,
+                diagnostics: Vec::new(),
+            },
+            permitted_actions: facts::PermittedActionsInput::allowing([
+                Inspect,
+                Claim,
+                AcceptAttempt,
+                ResumeAttempt,
+                AttachEvidence,
+                Submit,
+                Review,
+                Finish,
+                Release,
+                Recover,
+                ResolveHold,
+                Repair,
+            ]),
+        })
+    }
+}
+
+#[cfg(test)]
+mod status_seed_tests {
+    use super::*;
+
+    #[test]
+    fn status_seed_rejects_a_pinned_proof_revision_mismatch() {
+        let pin = PinnedRequirements {
+            project_id: "project".to_owned(),
+            work_id: "work-1".to_owned(),
+            proof_revision: 2,
+            subject_kind: RequirementSubjectKind::Task,
+            profile: profiles::ProfileIdentity {
+                profile_id: "focused".to_owned(),
+                version: 1,
+                policy_digest: "sha256:test".to_owned(),
+            },
+            provenance: profiles::RequirementProvenance {
+                profile_id: "focused".to_owned(),
+                profile_version: 1,
+                profile_digest: "sha256:test".to_owned(),
+                resolved_at: "unix-ms:1".to_owned(),
+                source: "profile:focused/1".to_owned(),
+            },
+            declarations: Vec::new(),
+            resolved_digest: "sha256:resolved".to_owned(),
+        };
+
+        let result = validate_pinned_status_cursor(
+            "project",
+            "work-1",
+            CanonicalStatusSeed {
+                entity_revision: Some(3),
+                proof_revision: Some(1),
+                unresolved_recovery: false,
+                has_gate_exception: false,
+            },
+            &pin,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StoreError::Corrupt(detail))
+                if detail == "pinned requirement and proof cursor disagree"
+        ));
     }
 }

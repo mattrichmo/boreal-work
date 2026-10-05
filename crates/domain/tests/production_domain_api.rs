@@ -195,26 +195,9 @@ fn context_parts(
 
 fn evaluate_parts<'a>(
     facts: &DecisionInputs,
-    work: &'a WorkItem,
-    prerequisites: &'a [WorkItem],
-    current_attempt: Option<&'a boreal_domain::Attempt>,
-    gates: &'a [GateRequirement],
-    actor: &'a ActorContext,
-    as_of: TimestampMs,
-    revision: Revision,
+    context: StatusContext<'a>,
 ) -> Result<DecisionActionView, DecisionApiError> {
-    evaluate_decision_actions(
-        StatusContext::new(
-            work,
-            prerequisites,
-            current_attempt,
-            gates,
-            actor,
-            as_of,
-            revision,
-        ),
-        facts,
-    )
+    evaluate_decision_actions(context, facts)
 }
 
 fn running_facts() -> DecisionInputs {
@@ -578,13 +561,15 @@ fn paired_api_rejects_mismatched_subject_revision_clock_lifecycle_and_actor() {
     assert!(matches!(
         evaluate_parts(
             &facts,
-            &wrong_subject,
-            &prerequisites,
-            None,
-            &gates,
-            &actor,
-            evaluated_at,
-            revision,
+            StatusContext::new(
+                &wrong_subject,
+                &prerequisites,
+                None,
+                &gates,
+                &actor,
+                evaluated_at,
+                revision,
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::Subject
@@ -594,13 +579,15 @@ fn paired_api_rejects_mismatched_subject_revision_clock_lifecycle_and_actor() {
     assert!(matches!(
         evaluate_parts(
             &facts,
-            &work,
-            &prerequisites,
-            None,
-            &gates,
-            &actor,
-            evaluated_at,
-            Revision(43),
+            StatusContext::new(
+                &work,
+                &prerequisites,
+                None,
+                &gates,
+                &actor,
+                evaluated_at,
+                Revision(43),
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::ProjectRevision
@@ -610,13 +597,15 @@ fn paired_api_rejects_mismatched_subject_revision_clock_lifecycle_and_actor() {
     assert!(matches!(
         evaluate_parts(
             &facts,
-            &work,
-            &prerequisites,
-            None,
-            &gates,
-            &actor,
-            TimestampMs::from_millis(1_001),
-            revision,
+            StatusContext::new(
+                &work,
+                &prerequisites,
+                None,
+                &gates,
+                &actor,
+                TimestampMs::from_millis(1_001),
+                revision,
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::Clock
@@ -628,13 +617,15 @@ fn paired_api_rejects_mismatched_subject_revision_clock_lifecycle_and_actor() {
     assert!(matches!(
         evaluate_parts(
             &facts,
-            &wrong_lifecycle,
-            &prerequisites,
-            None,
-            &gates,
-            &actor,
-            evaluated_at,
-            revision,
+            StatusContext::new(
+                &wrong_lifecycle,
+                &prerequisites,
+                None,
+                &gates,
+                &actor,
+                evaluated_at,
+                revision,
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::Lifecycle
@@ -646,13 +637,15 @@ fn paired_api_rejects_mismatched_subject_revision_clock_lifecycle_and_actor() {
     assert!(matches!(
         evaluate_parts(
             &facts,
-            &wrong_dispatch_policy,
-            &prerequisites,
-            None,
-            &gates,
-            &actor,
-            evaluated_at,
-            revision,
+            StatusContext::new(
+                &wrong_dispatch_policy,
+                &prerequisites,
+                None,
+                &gates,
+                &actor,
+                evaluated_at,
+                revision,
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::DispatchPolicy
@@ -666,13 +659,15 @@ fn paired_api_rejects_mismatched_subject_revision_clock_lifecycle_and_actor() {
     assert!(matches!(
         evaluate_parts(
             &facts,
-            &work,
-            &prerequisites,
-            None,
-            &gates,
-            &wrong_actor,
-            evaluated_at,
-            revision,
+            StatusContext::new(
+                &work,
+                &prerequisites,
+                None,
+                &gates,
+                &wrong_actor,
+                evaluated_at,
+                revision,
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::Actor
@@ -739,13 +734,15 @@ fn paired_api_rejects_mismatched_profile_gates_dependencies_and_execution() {
     assert!(matches!(
         evaluate_parts(
             &facts,
-            &wrong_profile,
-            &prerequisites,
-            None,
-            &gates,
-            &actor,
-            evaluated_at,
-            revision,
+            StatusContext::new(
+                &wrong_profile,
+                &prerequisites,
+                None,
+                &gates,
+                &actor,
+                evaluated_at,
+                revision,
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::AcceptanceProfile
@@ -755,13 +752,15 @@ fn paired_api_rejects_mismatched_profile_gates_dependencies_and_execution() {
     assert!(matches!(
         evaluate_parts(
             &facts,
-            &work,
-            &prerequisites,
-            None,
-            &[],
-            &actor,
-            evaluated_at,
-            revision,
+            StatusContext::new(
+                &work,
+                &prerequisites,
+                None,
+                &[],
+                &actor,
+                evaluated_at,
+                revision,
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::GateRequirements
@@ -779,13 +778,15 @@ fn paired_api_rejects_mismatched_profile_gates_dependencies_and_execution() {
     assert!(matches!(
         evaluate_parts(
             &facts,
-            &work,
-            &[extra_prerequisite],
-            None,
-            &gates,
-            &actor,
-            evaluated_at,
-            revision,
+            StatusContext::new(
+                &work,
+                &[extra_prerequisite],
+                None,
+                &gates,
+                &actor,
+                evaluated_at,
+                revision,
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::Dependencies
@@ -805,13 +806,51 @@ fn paired_api_rejects_mismatched_profile_gates_dependencies_and_execution() {
     assert!(matches!(
         evaluate_parts(
             &facts,
+            StatusContext::new(
+                &work,
+                &prerequisites,
+                Some(&unexpected_attempt),
+                &gates,
+                &actor,
+                evaluated_at,
+                revision,
+            ),
+        ),
+        Err(DecisionApiError::ContextMismatch(
+            DecisionContextMismatch::Execution
+        ))
+    ));
+
+    let mut completed_attempt = unexpected_attempt;
+    completed_attempt.phase = AttemptPhase::Completed;
+    assert!(evaluate_parts(
+        &facts,
+        StatusContext::new(
             &work,
             &prerequisites,
-            Some(&unexpected_attempt),
+            Some(&completed_attempt),
             &gates,
             &actor,
             evaluated_at,
             revision,
+        ),
+    )
+    .is_ok());
+
+    let mut terminal_attempt_for_other_work = completed_attempt;
+    terminal_attempt_for_other_work.work_id = WorkId::new("other-work");
+    assert!(matches!(
+        evaluate_parts(
+            &facts,
+            StatusContext::new(
+                &work,
+                &prerequisites,
+                Some(&terminal_attempt_for_other_work),
+                &gates,
+                &actor,
+                evaluated_at,
+                revision,
+            ),
         ),
         Err(DecisionApiError::ContextMismatch(
             DecisionContextMismatch::Execution

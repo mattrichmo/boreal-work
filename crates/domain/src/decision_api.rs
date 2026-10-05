@@ -210,6 +210,15 @@ fn same_current_attempt(
     facts: &DecisionInputs,
     work_id: &crate::WorkId,
 ) -> bool {
+    // A retained terminal attempt is still history for its original work
+    // item. Do not let filtering it out hide a cross-work context mismatch.
+    if attempt.is_some_and(|attempt| attempt.work_id != *work_id) {
+        return false;
+    }
+    // Status snapshots may retain the most recent terminal attempt for
+    // history, while canonical execution facts correctly mark it absent.
+    // Only a live attempt participates in the execution-context comparison.
+    let attempt = attempt.filter(|attempt| !attempt.phase.is_terminal());
     match (attempt, facts.execution.as_present()) {
         (None, None) => true,
         (Some(attempt), Some(execution)) => {

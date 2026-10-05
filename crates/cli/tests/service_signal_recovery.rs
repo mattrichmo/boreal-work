@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -540,6 +540,17 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
         assert_success(initialized, "service test init");
     }
 
+    let project_metadata: Value = serde_json::from_slice(
+        &fs::read(root.join(".boreal/project.json")).expect("project metadata reads"),
+    )
+    .expect("project metadata parses");
+    let project = project_metadata["project_id"]
+        .as_str()
+        .expect("project metadata has its project id");
+    let actor = project_metadata["operator_actor"]
+        .as_str()
+        .expect("project metadata has its operator actor");
+
     let mut child = Command::new(binary())
         .current_dir(root)
         .args(["service", "run", "--db"])
@@ -552,8 +563,13 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
         .spawn()
         .expect("service launches");
 
-    for _ in 0..300 {
-        if socket.exists() && UnixStream::connect(socket).is_ok() {
+    let startup_deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < startup_deadline {
+        // Binding the socket happens before the host acquires database
+        // ownership. A versioned status response proves the service is ready.
+        if socket.exists()
+            && service_status_is_ready(root, database, socket, project, actor, startup_deadline)
+        {
             return Some(child);
         }
         if child.try_wait().expect("service status reads").is_some() {
@@ -568,11 +584,81 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
             }
             panic!("service exited before becoming ready: {combined}");
         }
-        thread::sleep(Duration::from_millis(10));
+        let remaining = startup_deadline.saturating_duration_since(Instant::now());
+        thread::sleep(remaining.min(Duration::from_millis(10)));
     }
 
-    terminate_if_running(&mut child, SIGKILL);
-    panic!("service did not create its socket within the startup timeout");
+    // The service can exit between a status check and kill. Ignore kill
+    // errors here, then always wait so either path reaps the child.
+    let _ = child.kill();
+    let output = child
+        .wait_with_output()
+        .expect("service output reads after startup timeout");
+    panic!(
+        "service did not become ready within the startup timeout: {}",
+        text(&output)
+    );
+}
+
+fn service_status_is_ready(
+    root: &Path,
+    database: &Path,
+    socket: &Path,
+    project: &str,
+    actor: &str,
+    startup_deadline: Instant,
+) -> bool {
+    // Set the per-probe deadline before spawn so process creation time counts
+    // against both the probe cap and the total startup deadline.
+    let probe_deadline = (Instant::now() + Duration::from_millis(250)).min(startup_deadline);
+    if Instant::now() >= probe_deadline {
+        return false;
+    }
+    let Ok(mut probe) = Command::new(binary())
+        .current_dir(root)
+        .args(["status", project, "--actor", actor, "--db"])
+        .arg(database)
+        .args(["--socket"])
+        .arg(socket)
+        .args(["--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        return false;
+    };
+    let output = loop {
+        match probe.try_wait() {
+            Ok(Some(_)) if Instant::now() < probe_deadline => {
+                let Ok(output) = probe.wait_with_output() else {
+                    return false;
+                };
+                break output;
+            }
+            Ok(None) if Instant::now() < probe_deadline => {
+                let remaining = probe_deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(10)));
+            }
+            _ => {
+                let _ = probe.kill();
+                let _ = probe.wait();
+                return false;
+            }
+        }
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(envelope) = serde_json::from_slice::<Value>(&output.stdout) else {
+        return false;
+    };
+    envelope["api_version"] == "2"
+        && envelope["schema_version"] == "boreal.protocol.envelope.v1"
+        && envelope["outcome"] == "unchanged"
+        && envelope["error"].is_null()
+        && envelope["data"]["command"] == "status"
+        && envelope["data"]["project_id"] == project
+        && envelope["data"]["recovery"]["service_state"] == "ready"
 }
 
 fn stop_service(mut child: Child, socket: &Path, signal: c_int) -> Output {

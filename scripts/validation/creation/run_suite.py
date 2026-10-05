@@ -71,6 +71,11 @@ class Suite:
         self.route_registry: dict[str, Any] = {}
         self.scenario_matrix = json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
         self.ids: dict[str, str] = {}
+        self.worker_actor = f"creation-agent-{self.run_root.name}"
+        self.worker_session = f"creation-session-{self.run_root.name}"
+        self.worker_harness = "creation-suite-harness"
+        self.fixture_sessions: dict[str, tuple[str, str]] = {}
+        self.creation_revisions: dict[str, int] = {}
         self._prepare()
 
     def _prepare(self) -> None:
@@ -83,6 +88,90 @@ class Suite:
         self.operation_number += 1
         safe = "".join(character if character.isalnum() else "-" for character in label)
         return f"op_creation_{self.operation_number:04d}_{safe}"
+
+    def current_revision(self, label: str) -> int:
+        envelope = self.expect_success(
+            self.call(
+                ["status", self.project],
+                label=label,
+                operation=self.operation(label),
+            )
+        )
+        revision = envelope.get("revision")
+        if not isinstance(revision, int):
+            raise CheckFailure(f"{label} did not return an integer project revision")
+        return revision
+
+    def start_fixture_session(self, session_id: str, harness_id: str) -> dict[str, Any]:
+        revision = self.current_revision(f"fixture-session:{session_id}:revision")
+        self.expect_success(
+            self.call(
+                [
+                    "session", "start", "--project", self.project,
+                    "--actor", self.worker_actor, "--session", session_id,
+                    "--harness", harness_id, "--expected-revision", str(revision),
+                ],
+                label=f"fixture-session:{session_id}:start",
+                operation=self.operation(f"fixture-session-{session_id}"),
+            ),
+            "changed",
+        )
+        session = self.expect_success(
+            self.call(
+                [
+                    "session", "show", "--project", self.project,
+                    "--actor", self.worker_actor, "--session", session_id,
+                ],
+                label=f"fixture-session:{session_id}:readback",
+                operation=self.operation(f"fixture-session-{session_id}-readback"),
+            )
+        ).get("data") or {}
+        if (
+            session.get("actor_id") != self.worker_actor
+            or session.get("session_id") != session_id
+            or session.get("harness_id") != harness_id
+            or session.get("state") != "active"
+        ):
+            raise CheckFailure(f"fixture session readback did not match: {json_text(session)}")
+        self.fixture_sessions[session_id] = (self.worker_actor, harness_id)
+        return session
+
+    def register_fixture_agent(self) -> dict[str, Any]:
+        key = self.expect_success(
+            self.call(
+                ["auth", "key", "--actor", self.worker_actor, "--actor-role", "agent"],
+                label="fixture-agent:key",
+                operation=self.operation("fixture-agent-key"),
+            ),
+            "unchanged",
+        )
+        enrollment = (key.get("data") or {}).get("enrollment_path")
+        if not isinstance(enrollment, str):
+            raise CheckFailure("fixture agent key did not return an enrollment path")
+
+        revision = self.current_revision("fixture-agent:grant-revision")
+        self.expect_success(
+            self.call(
+                [
+                    "auth", "grant", "--actor", "operator", "--input", enrollment,
+                    "--expected-revision", str(revision),
+                    "--reason", "Authorize the isolated creation-suite test agent", "--yes",
+                ],
+                label="fixture-agent:grant",
+                operation=self.operation("fixture-agent-grant"),
+            ),
+            "changed",
+        )
+
+        sessions = [
+            (self.worker_session, self.worker_harness),
+            ("suite-session-a", "suite-harness"),
+            ("suite-session-b", "suite-harness-2"),
+            ("close-session", "close-harness"),
+            ("service-session", "service-harness"),
+        ]
+        readbacks = [self.start_fixture_session(session, harness) for session, harness in sessions]
+        return {"session_id": readbacks[0].get("session_id"), "registered": len(readbacks)}
 
     def _record_command(self, record: dict[str, Any]) -> None:
         with self.command_log.open("a", encoding="utf-8") as stream:
@@ -235,7 +324,13 @@ class Suite:
         hold: str | None = None,
         operation: str | None = None,
     ) -> dict[str, Any]:
-        args = ["work", "create", self.project, work_id, title, "--kind", kind, "--actor", "suite-agent"]
+        expected_revision = self.current_revision(f"create:{work_id}:revision")
+        args = [
+            "work", "create", self.project, work_id, title, "--kind", kind,
+            "--actor", self.worker_actor, "--session", self.worker_session,
+            "--expected-revision", str(expected_revision),
+        ]
+        self.creation_revisions[work_id] = expected_revision
         if parent is not None:
             args.extend(["--parent", parent])
         if priority is not None:
@@ -287,12 +382,13 @@ class Suite:
     def bootstrap(self) -> dict[str, Any]:
         init = self.expect_success(
             self.call(
-                ["init", self.project, "--actor", "suite-agent"],
+                ["init", "--project", self.project],
                 label="init",
                 operation=self.operation("init"),
             ),
             "changed",
         )
+        fixture_session = self.register_fixture_agent()
         registry = self.call(
             ["commands"], label="command-registry", operation=self.operation("registry"), include_db=False
         )
@@ -301,6 +397,7 @@ class Suite:
             "revision": init.get("revision"),
             "available_routes": self.route_registry.get("data", {}).get("count"),
             "unavailable_routes": self.route_registry.get("data", {}).get("unavailable_count"),
+            "fixture_agent_session": fixture_session.get("session_id"),
         }
 
     def hierarchy(self) -> dict[str, Any]:
@@ -318,7 +415,11 @@ class Suite:
                 "--kind",
                 "milestone",
                 "--actor",
-                "suite-agent",
+                self.worker_actor,
+                "--session",
+                self.worker_session,
+                "--expected-revision",
+                str(self.creation_revisions["m1"]),
             ],
             label="replay:create-m1",
             operation="op-hierarchy-m1",
@@ -327,14 +428,23 @@ class Suite:
         replay_failure: str | None = None
         if replay_envelope.get("outcome") != "unchanged":
             replay_failure = f"idempotent create did not replay unchanged: {json_text(replay_envelope)}"
+        revision = self.current_revision("hierarchy:duplicate-revision")
         duplicate = self.call(
-            ["work", "create", self.project, "m1", "Different title", "--kind", "milestone"],
+            [
+                "work", "create", self.project, "m1", "Different title", "--kind", "milestone",
+                "--actor", self.worker_actor, "--session", self.worker_session,
+                "--expected-revision", str(revision),
+            ],
             label="reject:duplicate-work-id",
             operation="op-hierarchy-duplicate",
         )
         self.expect_rejected(duplicate)
         invalid = self.call(
-            ["work", "create", self.project, "root-sprint", "Invalid root sprint", "--kind", "sprint"],
+            [
+                "work", "create", self.project, "root-sprint", "Invalid root sprint", "--kind", "sprint",
+                "--actor", self.worker_actor, "--session", self.worker_session,
+                "--expected-revision", str(revision),
+            ],
             label="reject:root-sprint",
             operation="op-hierarchy-root-sprint",
         )
@@ -369,7 +479,7 @@ class Suite:
                     self.project,
                     "t1",
                     "--actor",
-                    "suite-agent",
+                    "operator",
                     "--title",
                     "Edited task",
                     "--description",
@@ -391,7 +501,7 @@ class Suite:
                 self.project,
                 "t1",
                 "--actor",
-                "suite-agent",
+                "operator",
                 "--title",
                 "stale edit",
                 "--expected-revision",
@@ -411,7 +521,7 @@ class Suite:
                     self.project,
                     "t1",
                     "--actor",
-                    "suite-agent",
+                    "operator",
                     "--reason",
                     "manual-review",
                     "--expected-revision",
@@ -436,9 +546,13 @@ class Suite:
         for work_id in chain_ids:
             self.create_work(work_id, f"Chain task {work_id}", "task", "s1")
         for prerequisite, dependent in zip(chain_ids, chain_ids[1:]):
+            revision = self.current_revision(f"dep-add:{prerequisite}->{dependent}:revision")
             self.expect_success(
                 self.call(
-                    ["dep", "add", self.project, prerequisite, dependent, "--actor", "suite-agent"],
+                    [
+                        "dep", "add", self.project, prerequisite, dependent,
+                        "--actor", "operator", "--expected-revision", str(revision),
+                    ],
                     label=f"dep-add:{prerequisite}->{dependent}",
                     operation=self.operation(f"dep-{prerequisite}-{dependent}"),
                 ),
@@ -450,8 +564,12 @@ class Suite:
         edges = tree.get("data", {}).get("edges", [])
         if len(edges) != self.chain_length - 1:
             raise CheckFailure(f"chain edge count {len(edges)} != {self.chain_length - 1}")
+        revision = self.current_revision("dep-cycle:revision")
         cycle = self.call(
-            ["dep", "add", self.project, chain_ids[-1], chain_ids[0], "--actor", "suite-agent"],
+            [
+                "dep", "add", self.project, chain_ids[-1], chain_ids[0],
+                "--actor", "operator", "--expected-revision", str(revision),
+            ],
             label="reject:dependency-cycle",
             operation=self.operation("cycle"),
         )
@@ -494,14 +612,20 @@ class Suite:
         self.create_work("run-task", "Lifecycle task", "task", "s1")
         guide = self.expect_success(
             self.call(
-                ["agent", "guide", "--project", self.project, "--work", "run-task"],
+                [
+                    "agent", "guide", "--project", self.project, "--work", "run-task",
+                    "--actor", self.worker_actor, "--session", self.worker_session,
+                ],
                 label="agent-guide:before-claim",
                 operation=self.operation("guide"),
             )
         )
         nxt = self.expect_success(
             self.call(
-                ["next", "--project", self.project, "--work", "run-task"],
+                [
+                    "next", "--project", self.project, "--work", "run-task",
+                    "--actor", self.worker_actor, "--session", self.worker_session,
+                ],
                 label="agent-next:before-claim",
                 operation=self.operation("next"),
             )
@@ -514,7 +638,7 @@ class Suite:
                     self.project,
                     "run-task",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "suite-harness",
                     "--session",
@@ -539,7 +663,7 @@ class Suite:
             self.project,
             "run-task",
             "--actor",
-            "suite-agent",
+            self.worker_actor,
             "--harness",
             "suite-harness",
             "--session",
@@ -558,7 +682,7 @@ class Suite:
                     self.project,
                     "run-task",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "suite-harness",
                     "--session",
@@ -581,7 +705,7 @@ class Suite:
                     self.project,
                     "run-task",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "suite-harness",
                     "--session",
@@ -605,7 +729,7 @@ class Suite:
                 self.project,
                 "run-task",
                 "--actor",
-                "suite-agent",
+                self.worker_actor,
                 "--harness",
                 "suite-harness",
                 "--session",
@@ -627,7 +751,7 @@ class Suite:
                     self.project,
                     "run-task",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "suite-harness",
                     "--session",
@@ -652,7 +776,7 @@ class Suite:
                     self.project,
                     "run-task",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "suite-harness-2",
                     "--session",
@@ -674,7 +798,7 @@ class Suite:
                 self.project,
                 "run-task",
                 "--actor",
-                "suite-agent",
+                self.worker_actor,
                 "--harness",
                 "suite-harness",
                 "--session",
@@ -698,7 +822,7 @@ class Suite:
                     self.project,
                     "run-task",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "suite-harness-2",
                     "--session",
@@ -725,6 +849,7 @@ class Suite:
             self.require_route(path)
         source_input = self.run_root / "source-fixture.md"
         source_input.write_text("creation-suite source fixture\n", encoding="utf-8")
+        revision = self.current_revision("source-add:revision")
         source = self.expect_success(
             self.call(
                 [
@@ -736,7 +861,13 @@ class Suite:
                     "--origin",
                     "creation-suite",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
+                    "--session",
+                    self.worker_session,
+                    "--harness",
+                    self.worker_harness,
+                    "--expected-revision",
+                    str(revision),
                 ],
                 label="source-add",
                 operation=self.operation("source"),
@@ -756,7 +887,7 @@ class Suite:
                     self.project,
                     "close-task",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "close-harness",
                     "--session",
@@ -786,7 +917,7 @@ class Suite:
                     "--project",
                     self.project,
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "close-harness",
                     "--session",
@@ -817,7 +948,7 @@ class Suite:
                         "--gate",
                         gate,
                         "--actor",
-                        "suite-agent",
+                        self.worker_actor,
                         "--harness",
                         "close-harness",
                         "--session",
@@ -849,7 +980,7 @@ class Suite:
                     "--gate",
                     "verification",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "close-harness",
                     "--session",
@@ -875,7 +1006,7 @@ class Suite:
                     "--gate",
                     "verification",
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "close-harness",
                     "--session",
@@ -902,7 +1033,7 @@ class Suite:
                     "--project",
                     self.project,
                     "--actor",
-                    "suite-agent",
+                    self.worker_actor,
                     "--harness",
                     "close-harness",
                     "--session",
@@ -972,7 +1103,7 @@ class Suite:
                         self.project,
                         "service-task",
                         "--actor",
-                        "suite-agent",
+                        self.worker_actor,
                         "--harness",
                         "service-harness",
                         "--session",
@@ -1082,7 +1213,16 @@ def main() -> int:
     if not binary.is_file() or not os.access(binary, os.X_OK):
         parser.error(f"Boreal binary is not executable: {binary}")
     project_root = args.project_root.resolve()
-    run_root = args.run_root.resolve() if args.run_root else Path(tempfile.mkdtemp(prefix="creation-suite-", dir=project_root / ".boreal"))
+    if args.run_root:
+        run_root = args.run_root.resolve()
+    else:
+        if not project_root.is_dir():
+            parser.error(f"project root is not a directory: {project_root}")
+        state_parent = project_root / ".boreal"
+        state_parent.mkdir(exist_ok=True)
+        if not state_parent.resolve().is_relative_to(project_root):
+            parser.error(f"project state directory escapes the selected project root: {state_parent}")
+        run_root = Path(tempfile.mkdtemp(prefix="creation-suite-", dir=state_parent))
     suite = Suite(binary, project_root, run_root, args.chain_length)
     suite.scenario("bootstrap.registry", "workspace", suite.bootstrap)
     suite.scenario("hierarchy.create-and-validate", "creation", suite.hierarchy)

@@ -32,6 +32,17 @@ impl From<StoreError> for OrchestrationError {
 pub struct OrchestrationApplication<'a> {
     store: &'a SqliteStore,
 }
+
+struct TickFinish<'a> {
+    context: &'a V3MutationContext,
+    run_id: &'a str,
+    expected_revision: u64,
+    tick_id: &'a str,
+    work_id: &'a str,
+    outcome: &'a str,
+    detail: &'a str,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TickClaimError {
     Rejected(String),
@@ -186,25 +197,32 @@ impl<'a> OrchestrationApplication<'a> {
             .orchestration_tick_select(context, tick_id, id, expected, work)?;
         self.show(&context.project_id, id)
     }
-    fn finish_tick(
-        &self,
-        context: &V3MutationContext,
-        id: &str,
-        expected: u64,
-        tick_id: &str,
-        work: &str,
-        outcome: &str,
-        detail: &str,
-    ) -> Result<(), OrchestrationError> {
+    fn finish_tick(&self, request: TickFinish<'_>) -> Result<(), OrchestrationError> {
+        let TickFinish {
+            context,
+            run_id,
+            expected_revision,
+            tick_id,
+            work_id,
+            outcome,
+            detail,
+        } = request;
         let mut c = context.clone();
         c.operation_id = format!("{}:finish", context.operation_id);
         c.expected_revision = Some(self.store.project_revision(&context.project_id)?.0);
         c.request_digest = canonical_request_digest(
             "orchestration.tick.finish",
-            serde_json::json!({"base":context.request_digest,"run_id":id,"work":work,"outcome":outcome,"detail":detail}),
+            serde_json::json!({"base":context.request_digest,"run_id":run_id,"work":work_id,"outcome":outcome,"detail":detail}),
         );
-        self.store
-            .orchestration_tick_finish(&c, tick_id, id, expected, work, outcome, detail)?;
+        self.store.orchestration_tick_finish(
+            &c,
+            tick_id,
+            run_id,
+            expected_revision,
+            work_id,
+            outcome,
+            detail,
+        )?;
         Ok(())
     }
     /// A single scheduler tick asks the canonical claim adapter for work. A
@@ -279,20 +297,29 @@ impl<'a> OrchestrationApplication<'a> {
                 return Err(OrchestrationError::ClaimUnknown(error))
             }
             Err(TickClaimError::Rejected(error)) => {
-                self.finish_tick(context, id, expected, tick_id, work, "rejected", &error)?;
+                self.finish_tick(TickFinish {
+                    context,
+                    run_id: id,
+                    expected_revision: expected,
+                    tick_id,
+                    work_id: work,
+                    outcome: "rejected",
+                    detail: &error,
+                })?;
                 return Err(OrchestrationError::Claim(error));
             }
         };
         let observation = serde_json::json!({"outcome":"claimed","claim":claim_result});
-        self.finish_tick(
+        let detail = observation.to_string();
+        self.finish_tick(TickFinish {
             context,
-            id,
-            expected,
+            run_id: id,
+            expected_revision: expected,
             tick_id,
-            work,
-            "claimed",
-            &observation.to_string(),
-        )?;
+            work_id: work,
+            outcome: "claimed",
+            detail: &detail,
+        })?;
         Ok(
             serde_json::json!({"run_id":id,"outcome":"claimed","claim":claim_result,"claim_count":run.claim_count+1,"max_claims":run.max_claims,"dispatch":"harness_pull_required"}),
         )

@@ -1,11 +1,13 @@
 /*
- * Optional macOS-only clock interposer for the production-host validator.
+ * Process-local realtime clock interposer for the production-host validator.
  *
  * The validator changes the signed millisecond offset in the file named by
- * BOREAL_FAKE_CLOCK_FILE.  Only CLOCK_REALTIME/gettimeofday/time are shifted;
- * monotonic time remains real so the service's process-local timer behavior
- * is still observable rather than being replaced by a sleep-free mock.
+ * BOREAL_FAKE_CLOCK_FILE. Only CLOCK_REALTIME/gettimeofday/time are shifted;
+ * monotonic time remains real so timer scheduling is not replaced by a mock.
+ * macOS loads the interposers with DYLD_INSERT_LIBRARIES; Linux uses
+ * LD_PRELOAD. Other platforms do not load this library.
  */
+#define _GNU_SOURCE
 #define _DARWIN_C_SOURCE
 
 #include <fcntl.h>
@@ -15,6 +17,10 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#if !defined(__APPLE__)
+#include <dlfcn.h>
+#include <errno.h>
+#endif
 
 static int64_t offset_ms(void) {
     const char *path = getenv("BOREAL_FAKE_CLOCK_FILE");
@@ -60,12 +66,24 @@ static int boreal_clock_gettime(clockid_t clock_id, struct timespec *value) {
     if (value == NULL) {
         return -1;
     }
+#if defined(__APPLE__)
     uint64_t nanos = clock_gettime_nsec_np(clock_id);
     if (nanos == UINT64_MAX) {
         return -1;
     }
     value->tv_sec = (time_t)(nanos / 1000000000ULL);
     value->tv_nsec = (long)(nanos % 1000000000ULL);
+#else
+    typedef int (*clock_gettime_fn)(clockid_t, struct timespec *);
+    static clock_gettime_fn real_clock_gettime = NULL;
+    if (real_clock_gettime == NULL) {
+        real_clock_gettime = (clock_gettime_fn)dlsym(RTLD_NEXT, "clock_gettime");
+    }
+    if (real_clock_gettime == NULL || real_clock_gettime(clock_id, value) != 0) {
+        errno = ENOSYS;
+        return -1;
+    }
+#endif
     if (clock_id == CLOCK_REALTIME) add_offset(value);
     return 0;
 }
@@ -96,6 +114,7 @@ static time_t boreal_time(time_t *value) {
     return result;
 }
 
+#if defined(__APPLE__)
 __attribute__((used)) static struct {
     const void *replacement;
     const void *replacee;
@@ -104,3 +123,22 @@ __attribute__((used)) static struct {
     {(const void *)boreal_gettimeofday, (const void *)gettimeofday},
     {(const void *)boreal_time, (const void *)time},
 };
+#else
+__attribute__((visibility("default"))) int clock_gettime(
+    clockid_t clock_id,
+    struct timespec *value
+) {
+    return boreal_clock_gettime(clock_id, value);
+}
+
+__attribute__((visibility("default"))) int gettimeofday(
+    struct timeval *value,
+    void *timezone_value
+) {
+    return boreal_gettimeofday(value, timezone_value);
+}
+
+__attribute__((visibility("default"))) time_t time(time_t *value) {
+    return boreal_time(value);
+}
+#endif

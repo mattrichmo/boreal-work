@@ -71,26 +71,6 @@ pub(super) fn payload(parsed: &ParsedCommand) -> Result<Value, CliError> {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn memory_publish_positional_targets_review_not_draft() {
-        assert_eq!(positional_target_field("publish"), Some("review_id"));
-        assert_eq!(positional_target_field("review"), Some("draft_id"));
-    }
-
-    #[test]
-    fn positional_target_is_injected_or_must_match_input() {
-        let mut change = json!({});
-        bind_positional_target(&mut change, "draft_id", "draft-7").unwrap();
-        assert_eq!(change["draft_id"], "draft-7");
-
-        bind_positional_target(&mut change, "draft_id", "draft-7").unwrap();
-        assert!(bind_positional_target(&mut change, "draft_id", "draft-8").is_err());
-    }
-}
 pub(super) fn run(
     parsed: &ParsedCommand,
     operation: &str,
@@ -325,5 +305,26 @@ pub(super) fn apply(
             response.outcome = ApplicationOutcome::Unchanged;
             response
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_publish_positional_targets_review_not_draft() {
+        assert_eq!(positional_target_field("publish"), Some("review_id"));
+        assert_eq!(positional_target_field("review"), Some("draft_id"));
+    }
+
+    #[test]
+    fn positional_target_is_injected_or_must_match_input() {
+        let mut change = json!({});
+        bind_positional_target(&mut change, "draft_id", "draft-7").unwrap();
+        assert_eq!(change["draft_id"], "draft-7");
+
+        bind_positional_target(&mut change, "draft_id", "draft-7").unwrap();
+        assert!(bind_positional_target(&mut change, "draft_id", "draft-8").is_err());
     }
 }

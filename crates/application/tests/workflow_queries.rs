@@ -6,7 +6,7 @@ fn embedded_workflow_package_is_bounded_and_resolves_audit() {
 
     assert_eq!(registry.schema_version(), "boreal.workflow_package.v1");
     assert_eq!(registry.package_id(), "boreal.core-workflows");
-    assert_eq!(registry.package_version(), "1.1.0");
+    assert_eq!(registry.package_version(), "1.2.0");
     assert_eq!(registry.assets().len(), 10);
     let audit = registry
         .get("boreal.workflow.audit.v1")

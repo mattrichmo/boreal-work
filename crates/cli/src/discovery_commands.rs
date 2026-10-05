@@ -321,7 +321,13 @@ pub(crate) fn run(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResu
     Ok(result)
 }
 fn prime(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliError> {
-    let status = status_result(parsed, store)?;
+    // Prime combines status with a guide and project-authored instructions, so
+    // its implicit status page must leave room for those other brief sections.
+    // Keep explicit pagination intact; callers can request a larger page when
+    // it fits the inline protocol bound.
+    let mut status_request = parsed.clone();
+    status_request.options.limit = Some(status_request.options.limit.unwrap_or(1));
+    let status = status_result(&status_request, store)?;
     let guide = guide_result(parsed, &WorkApplication::new(store), store)?;
     if status.revision.is_some() && guide.revision.is_some() && status.revision != guide.revision {
         return Err(CliError::with(

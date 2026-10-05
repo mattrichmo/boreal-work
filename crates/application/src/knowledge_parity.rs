@@ -17,6 +17,8 @@ use crate::{
     canonical_request_digest, sha256_content_digest, ApplicationError, IntakePromotionRequest,
 };
 
+type ClaimWithReviews = (KnowledgeClaimRecord, Vec<KnowledgeClaimReviewRecord>);
+
 pub struct KnowledgeParityApplication<'a> {
     store: &'a SqliteStore,
 }
@@ -132,13 +134,7 @@ impl<'a> KnowledgeParityApplication<'a> {
         project: &str,
         limit: u64,
         offset: u64,
-    ) -> Result<
-        (
-            u64,
-            Vec<(KnowledgeClaimRecord, Vec<KnowledgeClaimReviewRecord>)>,
-        ),
-        ApplicationError,
-    > {
+    ) -> Result<(u64, Vec<ClaimWithReviews>), ApplicationError> {
         self.store
             .knowledge_claim_page_full(project, limit, offset)
             .map_err(ApplicationError::from)
@@ -664,7 +660,10 @@ impl<'a> KnowledgeParityApplication<'a> {
             ));
         }
         if work.parent_id.is_none()
-            && !matches!(work.kind, boreal_domain::WorkKind::Milestone | boreal_domain::WorkKind::Task)
+            && !matches!(
+                work.kind,
+                boreal_domain::WorkKind::Milestone | boreal_domain::WorkKind::Task
+            )
         {
             return Err(ApplicationError::Invalid(
                 "sprints require a parent; root work must be a milestone or task".into(),
