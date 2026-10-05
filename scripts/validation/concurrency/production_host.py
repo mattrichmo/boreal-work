@@ -3056,6 +3056,168 @@ def run_stop_recovery_probe(
             stop_service(service, socket_path)
 
 
+SATURATION_ASSERTION_FIELDS = (
+    "dispatch_full_response_observed_before_control",
+    "normal_client_active_when_control_started",
+    "control_response_received",
+    "normal_client_active_when_control_responded",
+    "control_overlapped_normal_client_interval",
+)
+
+
+def _finite_number(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def normalize_saturation_report(value: object) -> dict:
+    """Make incomplete saturation data reportable while forcing a failed gate."""
+    control_defaults = {
+        "outcome": None,
+        "exit_code": None,
+        "error": None,
+        "request_started_after_smoke_start_ms": None,
+        "response_completed_after_smoke_start_ms": None,
+        "latency_ms": None,
+        "normal_clients_active_at_request_start": 0,
+        "normal_clients_active_at_response": 0,
+        "overlapping_normal_client_count": 0,
+        "overlapped_normal_clients": False,
+        "dispatch_full_responses_before_request": 0,
+        "response_received": False,
+    }
+    assertion_defaults = {name: False for name in SATURATION_ASSERTION_FIELDS}
+    assertion_defaults["passed"] = False
+    defaults = {
+        "normal_requests": 0,
+        "normal_client_concurrency_limit": 0,
+        "normal_max_in_flight_client_processes": 0,
+        "normal_elapsed_ms": 0.0,
+        "normal_outcomes": {},
+        "normal_error_codes": [],
+        "dispatch_full_responses": 0,
+        "dispatch_full_error_details": [],
+        "dispatch_full_responses_before_control": 0,
+        "control": control_defaults,
+        "assertions": assertion_defaults,
+        "production_boundary": "unavailable",
+        "saturation_scope": "unavailable",
+    }
+    issues: list[str] = []
+    raw = value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        issues.append("saturation_result_missing_or_not_an_object")
+    required_fields = (
+        "normal_requests",
+        "normal_client_concurrency_limit",
+        "normal_max_in_flight_client_processes",
+        "normal_elapsed_ms",
+        "normal_outcomes",
+        "normal_error_codes",
+        "dispatch_full_responses",
+        "dispatch_full_error_details",
+        "dispatch_full_responses_before_control",
+        "control",
+        "assertions",
+    )
+    issues.extend(f"{name}_missing" for name in required_fields if name not in raw)
+    result = {**defaults, **raw}
+
+    for key in (
+        "normal_requests",
+        "normal_client_concurrency_limit",
+        "normal_max_in_flight_client_processes",
+        "dispatch_full_responses",
+        "dispatch_full_responses_before_control",
+    ):
+        number = result.get(key)
+        if type(number) is not int or number < 0:
+            issues.append(f"{key}_missing_or_invalid")
+            result[key] = defaults[key]
+    elapsed = result.get("normal_elapsed_ms")
+    if not _finite_number(elapsed) or elapsed < 0:
+        issues.append("normal_elapsed_ms_missing_or_invalid")
+        result["normal_elapsed_ms"] = 0.0
+    if not isinstance(result.get("normal_outcomes"), dict):
+        issues.append("normal_outcomes_missing_or_invalid")
+        result["normal_outcomes"] = {}
+    error_codes = result.get("normal_error_codes")
+    if not isinstance(error_codes, list) or any(not isinstance(code, str) for code in error_codes):
+        issues.append("normal_error_codes_missing_or_invalid")
+        result["normal_error_codes"] = []
+
+    raw_details = result.get("dispatch_full_error_details")
+    if not isinstance(raw_details, list):
+        issues.append("dispatch_full_error_details_missing_or_invalid")
+        details = []
+    else:
+        details = []
+        for item in raw_details:
+            if (
+                not isinstance(item, dict)
+                or (item.get("code") is not None and not isinstance(item.get("code"), str))
+                or not isinstance(item.get("message"), str)
+                or type(item.get("count")) is not int
+                or item.get("count", 0) < 1
+            ):
+                issues.append("dispatch_full_error_detail_entry_missing_or_invalid")
+                continue
+            details.append(item)
+    result["dispatch_full_error_details"] = details
+
+    raw_control = result.get("control")
+    if not isinstance(raw_control, dict):
+        issues.append("control_result_missing_or_invalid")
+        raw_control = {}
+    control = {**control_defaults, **raw_control}
+    latency = control.get("latency_ms")
+    if latency is not None and (not _finite_number(latency) or latency < 0):
+        issues.append("control_latency_ms_invalid")
+        control["latency_ms"] = None
+    result["control"] = control
+
+    raw_assertions = result.get("assertions")
+    if not isinstance(raw_assertions, dict):
+        issues.append("saturation_assertions_missing_or_invalid")
+        raw_assertions = {}
+    assertions = {**assertion_defaults, **raw_assertions}
+    for name in (*SATURATION_ASSERTION_FIELDS, "passed"):
+        if name not in raw_assertions:
+            issues.append(f"saturation_assertion_{name}_missing")
+        if type(assertions.get(name)) is not bool:
+            issues.append(f"saturation_assertion_{name}_missing_or_invalid")
+            assertions[name] = False
+    if assertions["passed"] and not all(assertions[name] for name in SATURATION_ASSERTION_FIELDS):
+        issues.append("saturation_pass_flag_conflicts_with_failed_assertion")
+        assertions["passed"] = False
+    if issues:
+        assertions["passed"] = False
+    result["assertions"] = assertions
+    result["report_integrity"] = {
+        "status": "pass" if not issues else "fail",
+        "issues": issues,
+    }
+    return result
+
+
+def _typed_dispatch_busy_details(items: object) -> list[dict]:
+    if not isinstance(items, list):
+        return []
+    return [
+        item
+        for item in items
+        if isinstance(item, dict)
+        and item.get("code") == "service_busy"
+        and isinstance(item.get("message"), str)
+        and "dispatch queue is full" in item["message"].lower()
+    ]
+
+
+def _within_target(measured: object, target: object) -> bool | None:
+    if not _finite_number(measured) or not _finite_number(target):
+        return None
+    return measured <= target
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin", type=Path, default=ROOT / "target" / "debug" / "bwrk")
@@ -3384,18 +3546,15 @@ def main() -> int:
             }
 
     identity = validation_identity(binary)
-    typed_queue_busy_details = [
-        item
-        for item in saturation["dispatch_full_error_details"]
-        if item["code"] == "service_busy"
-        and "dispatch queue is full" in item["message"].lower()
-    ]
+    saturation = normalize_saturation_report(saturation)
+    typed_queue_busy_details = _typed_dispatch_busy_details(
+        saturation["dispatch_full_error_details"]
+    )
     if control_probe is not None:
         typed_queue_busy_details.extend(
-            item
-            for item in control_probe.get("typed_service_busy_error_details", [])
-            if item.get("code") == "service_busy"
-            and "dispatch queue is full" in str(item.get("message", "")).lower()
+            _typed_dispatch_busy_details(
+                control_probe.get("typed_service_busy_error_details")
+            )
         )
     typed_busy_observed = bool(typed_queue_busy_details)
     budget_status = "approved" if control_budget_document is not None else "not_approved"
@@ -3411,10 +3570,8 @@ def main() -> int:
     )
     max_latency_ms = control_probe.get("max_latency_ms") if control_probe is not None else None
     max_sample_target_ms = control_budget_document.get("max_sample_ms") if control_budget_document else None
-    control_within_candidate_target = (
-        None
-        if budget_target_ms is None
-        else control_latency_ms <= budget_target_ms
+    control_within_candidate_target = _within_target(
+        control_latency_ms, budget_target_ms
     )
     typed_control_failed = (
         saturation["dispatch_full_responses"] == 0 or not typed_busy_observed
@@ -3811,10 +3968,8 @@ def main() -> int:
             "max_latency_ms": max_latency_ms,
             "max_sample_ms": max_sample_target_ms,
             "latency_within_target": control_within_candidate_target,
-            "max_latency_within_target": (
-                None
-                if max_latency_ms is None or max_sample_target_ms is None
-                else max_latency_ms <= max_sample_target_ms
+            "max_latency_within_target": _within_target(
+                max_latency_ms, max_sample_target_ms
             ),
             "approved_budget": control_budget_document,
             "approval_artifact": control_budget_ref,
@@ -3903,7 +4058,12 @@ def main() -> int:
         "identity": identity,
         "report_path": str(args.output.resolve()),
     }
-    dispatch_smoke_status = "pass" if saturation["assertions"]["passed"] else "fail"
+    dispatch_smoke_status = (
+        "pass"
+        if saturation["report_integrity"]["status"] == "pass"
+        and saturation["assertions"]["passed"]
+        else "fail"
+    )
     smoke_status = (
         "pass"
         if v10_acceptance["complete"]
@@ -3942,6 +4102,7 @@ def main() -> int:
             **saturation,
             "approved_control_probe": control_probe,
         },
+        "saturation_report_integrity": saturation["report_integrity"],
         "service_stop_observation": stop,
         "stop_recovery": stop_recovery,
         "dispatch_smoke_status": dispatch_smoke_status,
@@ -3968,6 +4129,7 @@ def main() -> int:
                 "report_sha256": report_sha256,
                 "smoke_status": result["smoke_status"],
                 "dispatch_smoke_status": result["dispatch_smoke_status"],
+                "saturation_report_integrity": saturation["report_integrity"]["status"],
                 "assertions": saturation["assertions"],
                 "fake_clock_status": clock["status"],
                 "stop_status": stop["status"],
@@ -3977,7 +4139,10 @@ def main() -> int:
             sort_keys=True,
         )
     )
-    if not saturation["assertions"]["passed"]:
+    if (
+        saturation["report_integrity"]["status"] != "pass"
+        or not saturation["assertions"]["passed"]
+    ):
         return 1
     if args.full_v10 and not v10_acceptance["complete"]:
         return 1

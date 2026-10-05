@@ -26,6 +26,91 @@ SPEC.loader.exec_module(HOST)
 
 
 class V10ControlHarnessTests(unittest.TestCase):
+    def valid_saturation_result(self, **changes: object) -> dict:
+        assertions = {name: True for name in HOST.SATURATION_ASSERTION_FIELDS}
+        assertions["passed"] = True
+        result = {
+            "normal_requests": 4,
+            "normal_client_concurrency_limit": 4,
+            "normal_max_in_flight_client_processes": 4,
+            "normal_elapsed_ms": 18.0,
+            "normal_outcomes": {"failed": 4},
+            "normal_error_codes": ["service_busy"],
+            "dispatch_full_responses": 4,
+            "dispatch_full_error_details": [
+                {"code": "service_busy", "message": "dispatch queue is full", "count": 4}
+            ],
+            "dispatch_full_responses_before_control": 4,
+            "control": {"latency_ms": 1.0, "response_received": True},
+            "assertions": assertions,
+            "production_boundary": "synthetic separate CLI clients",
+            "saturation_scope": "synthetic fixture",
+        }
+        result.update(changes)
+        return result
+
+    def test_null_saturation_result_is_reported_as_a_fail_closed_result(self) -> None:
+        result = HOST.normalize_saturation_report(None)
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn("saturation_result_missing_or_not_an_object", result["report_integrity"]["issues"])
+        self.assertFalse(result["assertions"]["passed"])
+        self.assertEqual(result["dispatch_full_responses"], 0)
+        self.assertEqual(result["dispatch_full_error_details"], [])
+        self.assertEqual(HOST._typed_dispatch_busy_details(None), [])
+        self.assertIsNone(HOST._within_target(None, 20.0))
+        report = {
+            "queue_and_control": {**result},
+            "control_response": result["control"],
+            "observed_error_codes": result["normal_error_codes"],
+            "assertions": result["assertions"],
+        }
+        json.dumps(report)
+
+    def test_null_dispatch_full_error_details_become_an_explicit_failed_report(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(dispatch_full_error_details=None)
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "dispatch_full_error_details_missing_or_invalid",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+        self.assertEqual(result["dispatch_full_error_details"], [])
+        self.assertEqual(HOST._typed_dispatch_busy_details(result["dispatch_full_error_details"]), [])
+        json.dumps({"queue_and_control": {**result}})
+
+    def test_null_error_details_and_entries_cannot_crash_or_pass_the_report(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(
+                dispatch_full_error_details=[
+                    None,
+                    {"code": "service_busy", "message": None, "count": 1},
+                    {"code": "service_busy", "message": "dispatch queue is full", "count": 2},
+                ],
+                control={"latency_ms": None, "response_received": False},
+            )
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertFalse(result["assertions"]["passed"])
+        self.assertEqual(len(result["dispatch_full_error_details"]), 1)
+        self.assertEqual(
+            HOST._typed_dispatch_busy_details(result["dispatch_full_error_details"]),
+            result["dispatch_full_error_details"],
+        )
+        self.assertIsNone(HOST._within_target(result["control"]["latency_ms"], 20.0))
+        json.dumps(result)
+
+    def test_valid_saturation_report_keeps_its_observed_pass(self) -> None:
+        result = HOST.normalize_saturation_report(self.valid_saturation_result())
+
+        self.assertEqual(result["report_integrity"]["status"], "pass")
+        self.assertTrue(result["assertions"]["passed"])
+        self.assertEqual(len(HOST._typed_dispatch_busy_details(result["dispatch_full_error_details"])), 1)
+
     def budget(self, **changes: object) -> dict:
         return {
             "source": "synthetic-owner-budget",
