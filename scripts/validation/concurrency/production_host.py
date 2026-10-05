@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -3063,6 +3064,7 @@ SATURATION_ASSERTION_FIELDS = (
     "normal_client_active_when_control_responded",
     "control_overlapped_normal_client_interval",
 )
+SATURATION_OUTCOME_FIELDS = ("changed", "unchanged", "rejected", "failed", "unknown")
 
 
 def _finite_number(value: object) -> bool:
@@ -3137,13 +3139,38 @@ def normalize_saturation_report(value: object) -> dict:
     if not _finite_number(elapsed) or elapsed < 0:
         issues.append("normal_elapsed_ms_missing_or_invalid")
         result["normal_elapsed_ms"] = 0.0
-    if not isinstance(result.get("normal_outcomes"), dict):
+    raw_outcomes = result.get("normal_outcomes")
+    if not isinstance(raw_outcomes, dict):
         issues.append("normal_outcomes_missing_or_invalid")
-        result["normal_outcomes"] = {}
+        raw_outcomes = {}
+    outcomes: dict[str, int] = {}
+    if set(raw_outcomes) != set(SATURATION_OUTCOME_FIELDS):
+        issues.append("normal_outcomes_fields_missing_or_invalid")
+    for name in SATURATION_OUTCOME_FIELDS:
+        number = raw_outcomes.get(name)
+        if type(number) is not int or number < 0:
+            issues.append(f"normal_outcome_{name}_missing_or_invalid")
+            number = 0
+        outcomes[name] = number
+    result["normal_outcomes"] = outcomes
+    if sum(outcomes.values()) != result["normal_requests"]:
+        issues.append("normal_outcome_counts_conflict_with_request_count")
     error_codes = result.get("normal_error_codes")
     if not isinstance(error_codes, list) or any(not isinstance(code, str) for code in error_codes):
         issues.append("normal_error_codes_missing_or_invalid")
         result["normal_error_codes"] = []
+    elif len(error_codes) > result["normal_requests"]:
+        issues.append("normal_error_codes_exceed_request_count")
+    if (
+        result["normal_client_concurrency_limit"] < 1
+        or result["normal_client_concurrency_limit"] > result["normal_requests"]
+    ):
+        issues.append("normal_client_concurrency_limit_conflicts_with_request_count")
+    if (
+        result["normal_max_in_flight_client_processes"]
+        > result["normal_client_concurrency_limit"] + 1
+    ):
+        issues.append("normal_max_in_flight_exceeds_concurrency_plus_control")
 
     raw_details = result.get("dispatch_full_error_details")
     if not isinstance(raw_details, list):
@@ -3154,8 +3181,15 @@ def normalize_saturation_report(value: object) -> dict:
         for item in raw_details:
             if (
                 not isinstance(item, dict)
-                or (item.get("code") is not None and not isinstance(item.get("code"), str))
+                or (
+                    item.get("code") is not None
+                    and (
+                        not isinstance(item.get("code"), str)
+                        or not item.get("code")
+                    )
+                )
                 or not isinstance(item.get("message"), str)
+                or "dispatch queue is full" not in item.get("message", "").lower()
                 or type(item.get("count")) is not int
                 or item.get("count", 0) < 1
             ):
@@ -3163,16 +3197,115 @@ def normalize_saturation_report(value: object) -> dict:
                 continue
             details.append(item)
     result["dispatch_full_error_details"] = details
+    error_code_counts = Counter(result["normal_error_codes"])
+    detail_code_counts: Counter[str] = Counter()
+    for item in details:
+        if item["code"] is not None:
+            detail_code_counts[item["code"]] += item["count"]
+    if any(count > error_code_counts[code] for code, count in detail_code_counts.items()):
+        issues.append("dispatch_full_error_codes_exceed_normal_error_codes")
+    detail_count = sum(item["count"] for item in details)
+    if detail_count != result["dispatch_full_responses"]:
+        issues.append("dispatch_full_error_details_count_conflicts_with_total")
+    if result["dispatch_full_responses_before_control"] > result["dispatch_full_responses"]:
+        issues.append("dispatch_full_responses_before_control_exceeds_total")
+    if result["dispatch_full_responses"] > result["normal_requests"]:
+        issues.append("dispatch_full_responses_exceeds_normal_requests")
 
     raw_control = result.get("control")
     if not isinstance(raw_control, dict):
         issues.append("control_result_missing_or_invalid")
         raw_control = {}
+    for name in control_defaults:
+        if name not in raw_control:
+            issues.append(f"control_{name}_missing")
     control = {**control_defaults, **raw_control}
+    if control["outcome"] is not None and not isinstance(control["outcome"], str):
+        issues.append("control_outcome_invalid")
+        control["outcome"] = None
+    if type(control["exit_code"]) is not int:
+        issues.append("control_exit_code_missing_or_invalid")
+        control["exit_code"] = None
+    if control["error"] is not None and not isinstance(control["error"], dict):
+        issues.append("control_error_invalid")
+        control["error"] = None
+    for name in (
+        "request_started_after_smoke_start_ms",
+        "response_completed_after_smoke_start_ms",
+    ):
+        number = control[name]
+        if not _finite_number(number) or number < 0:
+            issues.append(f"control_{name}_missing_or_invalid")
+            control[name] = None
     latency = control.get("latency_ms")
-    if latency is not None and (not _finite_number(latency) or latency < 0):
-        issues.append("control_latency_ms_invalid")
+    if not _finite_number(latency) or latency < 0:
+        issues.append("control_latency_ms_missing_or_invalid")
         control["latency_ms"] = None
+    for name in (
+        "normal_clients_active_at_request_start",
+        "normal_clients_active_at_response",
+        "overlapping_normal_client_count",
+        "dispatch_full_responses_before_request",
+    ):
+        number = control[name]
+        if type(number) is not int or number < 0:
+            issues.append(f"control_{name}_missing_or_invalid")
+            control[name] = 0
+    if (
+        control["normal_clients_active_at_request_start"]
+        > result["normal_client_concurrency_limit"]
+    ):
+        issues.append("control_active_at_request_start_exceeds_concurrency_limit")
+    if (
+        control["normal_clients_active_at_request_start"]
+        > result["normal_max_in_flight_client_processes"]
+    ):
+        issues.append("control_active_at_request_start_exceeds_recorded_maximum")
+    if (
+        control["normal_clients_active_at_response"]
+        > result["normal_client_concurrency_limit"]
+    ):
+        issues.append("control_active_at_response_exceeds_concurrency_limit")
+    if (
+        control["normal_clients_active_at_response"]
+        > result["normal_max_in_flight_client_processes"]
+    ):
+        issues.append("control_active_at_response_exceeds_recorded_maximum")
+    if control["overlapping_normal_client_count"] > result["normal_requests"]:
+        issues.append("control_overlap_count_exceeds_request_count")
+    for name in ("overlapped_normal_clients", "response_received"):
+        if type(control[name]) is not bool:
+            issues.append(f"control_{name}_missing_or_invalid")
+            control[name] = False
+    if (
+        control["request_started_after_smoke_start_ms"] is not None
+        and control["response_completed_after_smoke_start_ms"] is not None
+        and control["latency_ms"] is not None
+    ):
+        elapsed = (
+            control["response_completed_after_smoke_start_ms"]
+            - control["request_started_after_smoke_start_ms"]
+        )
+        # All three values are rounded to three decimal places by the producer.
+        if elapsed < 0 or abs(elapsed - control["latency_ms"]) > 0.002:
+            issues.append("control_timing_fields_conflict")
+        if (
+            control["response_completed_after_smoke_start_ms"]
+            - result["normal_elapsed_ms"]
+            > 0.002
+        ):
+            issues.append("control_response_completes_after_normal_workload")
+    if control["overlapped_normal_clients"] != (control["overlapping_normal_client_count"] > 0):
+        issues.append("control_overlap_fields_conflict")
+    if control["response_received"] != (
+        control["exit_code"] == 0 and control["error"] is None
+    ):
+        issues.append("control_response_fields_conflict")
+    if (
+        control["dispatch_full_responses_before_request"]
+        != result["dispatch_full_responses_before_control"]
+    ):
+        issues.append("control_dispatch_full_responses_conflict_with_top_level")
     result["control"] = control
 
     raw_assertions = result.get("assertions")
@@ -3189,6 +3322,23 @@ def normalize_saturation_report(value: object) -> dict:
     if assertions["passed"] and not all(assertions[name] for name in SATURATION_ASSERTION_FIELDS):
         issues.append("saturation_pass_flag_conflicts_with_failed_assertion")
         assertions["passed"] = False
+    control_assertion_values = {
+        "dispatch_full_response_observed_before_control": (
+            control["dispatch_full_responses_before_request"] > 0
+        ),
+        "normal_client_active_when_control_started": (
+            control["normal_clients_active_at_request_start"] > 0
+        ),
+        "control_response_received": control["response_received"],
+        "normal_client_active_when_control_responded": (
+            control["normal_clients_active_at_response"] > 0
+        ),
+        "control_overlapped_normal_client_interval": control["overlapped_normal_clients"],
+    }
+    for name, observed in control_assertion_values.items():
+        if assertions.get(name) != observed:
+            issues.append(f"saturation_assertion_{name}_conflicts_with_control")
+            assertions[name] = False
     if issues:
         assertions["passed"] = False
     result["assertions"] = assertions

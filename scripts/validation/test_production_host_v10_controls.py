@@ -34,14 +34,33 @@ class V10ControlHarnessTests(unittest.TestCase):
             "normal_client_concurrency_limit": 4,
             "normal_max_in_flight_client_processes": 4,
             "normal_elapsed_ms": 18.0,
-            "normal_outcomes": {"failed": 4},
-            "normal_error_codes": ["service_busy"],
+            "normal_outcomes": {
+                "changed": 0,
+                "unchanged": 0,
+                "rejected": 0,
+                "failed": 4,
+                "unknown": 0,
+            },
+            "normal_error_codes": ["service_busy"] * 4,
             "dispatch_full_responses": 4,
             "dispatch_full_error_details": [
                 {"code": "service_busy", "message": "dispatch queue is full", "count": 4}
             ],
             "dispatch_full_responses_before_control": 4,
-            "control": {"latency_ms": 1.0, "response_received": True},
+            "control": {
+                "outcome": "unchanged",
+                "exit_code": 0,
+                "error": None,
+                "request_started_after_smoke_start_ms": 5.0,
+                "response_completed_after_smoke_start_ms": 6.0,
+                "latency_ms": 1.0,
+                "normal_clients_active_at_request_start": 1,
+                "normal_clients_active_at_response": 1,
+                "overlapping_normal_client_count": 1,
+                "overlapped_normal_clients": True,
+                "dispatch_full_responses_before_request": 4,
+                "response_received": True,
+            },
             "assertions": assertions,
             "production_boundary": "synthetic separate CLI clients",
             "saturation_scope": "synthetic fixture",
@@ -110,6 +129,224 @@ class V10ControlHarnessTests(unittest.TestCase):
         self.assertEqual(result["report_integrity"]["status"], "pass")
         self.assertTrue(result["assertions"]["passed"])
         self.assertEqual(len(HOST._typed_dispatch_busy_details(result["dispatch_full_error_details"])), 1)
+
+    def test_missing_nested_control_fields_fail_closed_even_if_assertions_claim_pass(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(control={})
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn("control_response_received_missing", result["report_integrity"]["issues"])
+        self.assertFalse(result["assertions"]["passed"])
+        self.assertFalse(result["assertions"]["control_response_received"])
+
+    def test_null_nested_control_field_fails_closed(self) -> None:
+        control = self.valid_saturation_result()["control"]
+        control["response_received"] = None
+        result = HOST.normalize_saturation_report(self.valid_saturation_result(control=control))
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn("control_response_received_missing_or_invalid", result["report_integrity"]["issues"])
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_control_metrics_cannot_contradict_assertion_flags(self) -> None:
+        control = self.valid_saturation_result()["control"]
+        control["response_received"] = False
+        control["exit_code"] = 1
+        result = HOST.normalize_saturation_report(self.valid_saturation_result(control=control))
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "saturation_assertion_control_response_received_conflicts_with_control",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+        self.assertFalse(result["assertions"]["control_response_received"])
+
+    def test_nested_and_top_level_dispatch_control_counts_must_match(self) -> None:
+        control = self.valid_saturation_result()["control"]
+        control["dispatch_full_responses_before_request"] = 3
+        result = HOST.normalize_saturation_report(self.valid_saturation_result(control=control))
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "control_dispatch_full_responses_conflict_with_top_level",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_dispatch_detail_counts_must_match_the_total(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(
+                dispatch_full_responses=5,
+                dispatch_full_responses_before_control=4,
+            )
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "dispatch_full_error_details_count_conflicts_with_total",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_dispatch_error_detail_messages_must_describe_queue_full(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(
+                dispatch_full_error_details=[
+                    {"code": "service_busy", "message": "unrelated error", "count": 4}
+                ]
+            )
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "dispatch_full_error_detail_entry_missing_or_invalid",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_dispatch_error_code_counts_must_exist_in_normal_error_codes(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(normal_error_codes=["service_busy"])
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "dispatch_full_error_codes_exceed_normal_error_codes",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_before_control_count_cannot_exceed_total_dispatch_count(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(
+                dispatch_full_responses=3,
+                dispatch_full_responses_before_control=4,
+            )
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "dispatch_full_responses_before_control_exceeds_total",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_dispatch_count_cannot_exceed_normal_request_count(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(normal_requests=3)
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "dispatch_full_responses_exceeds_normal_requests",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_normal_outcome_counts_must_cover_every_request(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(
+                normal_outcomes={
+                    "changed": 0,
+                    "unchanged": 0,
+                    "rejected": 0,
+                    "failed": 3,
+                    "unknown": 0,
+                }
+            )
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "normal_outcome_counts_conflict_with_request_count",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_normal_client_concurrency_measurements_must_be_bounded(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(
+                normal_client_concurrency_limit=2,
+                control={
+                    **self.valid_saturation_result()["control"],
+                    "normal_clients_active_at_request_start": 3,
+                },
+            )
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "control_active_at_request_start_exceeds_concurrency_limit",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_recorded_maximum_allows_the_single_control_client(self) -> None:
+        control = self.valid_saturation_result()["control"]
+        control.update(
+            {
+                "normal_clients_active_at_request_start": 64,
+                "normal_clients_active_at_response": 64,
+                "overlapping_normal_client_count": 64,
+            }
+        )
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(
+                normal_requests=64,
+                normal_client_concurrency_limit=64,
+                normal_max_in_flight_client_processes=65,
+                normal_outcomes={
+                    "changed": 0,
+                    "unchanged": 0,
+                    "rejected": 0,
+                    "failed": 64,
+                    "unknown": 0,
+                },
+                control=control,
+            )
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "pass")
+        self.assertTrue(result["assertions"]["passed"])
+
+    def test_control_active_snapshots_cannot_exceed_recorded_maximum(self) -> None:
+        control = self.valid_saturation_result()["control"]
+        control["normal_clients_active_at_request_start"] = 3
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(
+                normal_max_in_flight_client_processes=2,
+                control=control,
+            )
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "control_active_at_request_start_exceeds_recorded_maximum",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
+
+    def test_control_response_must_complete_before_normal_workload_ends(self) -> None:
+        result = HOST.normalize_saturation_report(
+            self.valid_saturation_result(
+                normal_elapsed_ms=5.0,
+                control={
+                    **self.valid_saturation_result()["control"],
+                    "request_started_after_smoke_start_ms": 4.0,
+                    "response_completed_after_smoke_start_ms": 6.0,
+                    "latency_ms": 2.0,
+                },
+            )
+        )
+
+        self.assertEqual(result["report_integrity"]["status"], "fail")
+        self.assertIn(
+            "control_response_completes_after_normal_workload",
+            result["report_integrity"]["issues"],
+        )
+        self.assertFalse(result["assertions"]["passed"])
 
     def budget(self, **changes: object) -> dict:
         return {
