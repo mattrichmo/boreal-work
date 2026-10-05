@@ -2,7 +2,7 @@
 
 Boreal Work gives people and AI agents a shared local workspace to plan project work, coordinate execution, prove outcomes, and carry useful context into the next handoff.
 
-> **Draft candidate:** This README describes the unmerged PR #11 candidate tested at `351e18c`. The current `main` baseline is `123f345`; the installer below follows `main` and does not include candidate-only changes. The candidate has not been released.
+> **Development status:** Boreal Work v2 is under active development. The installer below uses the `main` branch's install script to install the latest published release; untagged development commits from `main` are not included.
 
 ![Boreal project dashboard showing a task queue and inspector for the readme-demo project](docs/assets/boreal-project-dashboard-v10.png)
 
@@ -12,7 +12,7 @@ Boreal Work gives people and AI agents a shared local workspace to plan project 
 
 **Global dashboard.** Portfolio view with the synthetic “Paper Birch Study” project and its sample follow-ups.
 
-<p><em>Both captures use the local PR #11 candidate at commit <code>351e18c</code> (tree <code>3f8ba75</code>), not current <code>main</code> or a release. See the <a href="docs/README-CAPTURE-NOTES.md">capture provenance and reproduction notes</a>.</em></p>
+<p><em>Both captures were recorded from the local PR #11 candidate at commit <code>351e18c</code> (tree <code>3f8ba75</code>), a pre-integration snapshot rather than the resulting <code>main</code> tree or a release. See the <a href="docs/README-CAPTURE-NOTES.md">capture provenance and reproduction notes</a>.</em></p>
 
 ## What Boreal does
 
