@@ -105,8 +105,10 @@ not the same as a published release.
 
 ## Platforms and limits
 
-- The current v2 installer recognizes macOS on Apple Silicon or Intel and Linux
-  on x86-64. Linux ARM64 and Windows are not supported by this installer.
+- The v2 installer targets release archives for macOS on Apple Silicon or
+  Intel and Linux on x86-64. Linux ARM64 and Windows have no supported release
+  archive target in this source; builds from source on other hosts have not
+  been qualified.
 - The interactive dashboard requires Node.js 20 through 26 and the compiled
   TUI files. The CLI-only source build above does not include those files.
 - The service and project database are local to one host. Boreal does not
