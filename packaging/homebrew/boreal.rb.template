@@ -22,6 +22,7 @@ class Boreal < Formula
   def install
     bin.install "bin/bwrk"
     (lib/"boreal").install "lib/boreal/tui"
+    (lib/"boreal").install "lib/boreal/global-tui"
     (share/"boreal").install "share/boreal/release.json"
     (share/"boreal").install "share/boreal/LICENSE"
   end
@@ -29,6 +30,7 @@ class Boreal < Formula
   test do
     assert_match "bwrk", shell_output("#{bin}/bwrk --version")
     assert_predicate lib/"boreal/tui/entrypoint.js", :exist?
+    assert_predicate lib/"boreal/global-tui/entrypoint.js", :exist?
     assert_predicate share/"boreal/release.json", :exist?
   end
 end
