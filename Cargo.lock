@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "boreal-application"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "boreal-domain",
  "boreal-memory",
@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "boreal-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "boreal-application",
  "boreal-domain",
@@ -34,11 +34,11 @@ dependencies = [
 
 [[package]]
 name = "boreal-domain"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "boreal-memory"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "boreal-migration"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "boreal-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -62,11 +62,11 @@ dependencies = [
 
 [[package]]
 name = "boreal-service"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "boreal-source"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "boreal-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "boreal-domain",
  "libsqlite3-sys",

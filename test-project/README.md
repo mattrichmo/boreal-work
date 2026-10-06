@@ -28,7 +28,7 @@ command -v bwrk
 bwrk --version
 ```
 
-The command must resolve to `.boreal/bin/bwrk` and report `bwrk 0.2.0 (api 2)`.
+The command must resolve to `.boreal/bin/bwrk` and report `bwrk 0.2.1 (api 2)`.
 
 The database path is available as `$BOREAL_TEST_DB`. The service socket path
 `$BOREAL_TEST_SOCKET` is only for the advanced shared-service/debug workflow

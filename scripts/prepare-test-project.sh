@@ -121,7 +121,7 @@ else
 fi
 
 version=$("$local_versioned_binary" --version)
-if [ "$version" != "bwrk 0.2.0 (api 2)" ]; then
+if [ "$version" != "bwrk 0.2.1 (api 2)" ]; then
   echo "unexpected local CLI version: $version" >&2
   exit 1
 fi

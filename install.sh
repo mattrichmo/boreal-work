@@ -69,7 +69,7 @@ No project database or shell profile is changed by machine installation.
 The separate per-user global manager database is provisioned automatically.
 
 Environment:
-  BOREAL_VERSION       release version, for example 0.2.0
+  BOREAL_VERSION       release version, for example 0.2.1
   BOREAL_PREFIX        installation prefix
   BOREAL_REPOSITORY    GitHub owner/repository
   BOREAL_SOURCE_REF    source branch or tag, default main

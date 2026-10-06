@@ -10,7 +10,7 @@ From the repository root, with Rust, Node.js, npm, and `tsc` available:
 
 ```sh
 python3 scripts/release/build_release.py \
-  --version 0.2.0 \
+  --version 0.2.1 \
   --target aarch64-apple-darwin \
   --output-dir /tmp/boreal-release
 ```

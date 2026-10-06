@@ -39,8 +39,8 @@ To pin a release in automation:
 
 ```sh
 curl -fsSL \
-  https://raw.githubusercontent.com/mattrichmo/boreal-work/v0.2.0/install.sh \
-  | BOREAL_VERSION=0.2.0 sh
+  https://raw.githubusercontent.com/mattrichmo/boreal-work/v0.2.1/install.sh \
+  | BOREAL_VERSION=0.2.1 sh
 ```
 
 The default prefix is `~/.local`. Use `BOREAL_PREFIX=/usr/local` or

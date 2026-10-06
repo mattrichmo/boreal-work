@@ -1,6 +1,6 @@
 # Boreal release process
 
-Releases are built from a clean tag such as `v0.2.0`. The release builder
+Releases are built from a clean tag such as `v0.2.1`. The release builder
 compiles the Rust `bwrk` binary, compiles the TypeScript TUI, embeds the
 versioned contract identity, creates a platform archive, and writes a checksum
 file.
@@ -11,7 +11,7 @@ From the repository root, with Rust, Node.js, npm, and `tsc` available:
 
 ```sh
 python3 scripts/release/build_release.py \
-  --version 0.2.0 \
+  --version 0.2.1 \
   --target aarch64-apple-darwin \
   --output-dir /tmp/boreal-release
 ```
@@ -21,7 +21,7 @@ already exist. Inspect the archive and verify the staged install with:
 
 ```sh
 sh install.sh \
-  --archive /tmp/boreal-release/bwrk-v0.2.0-aarch64-apple-darwin.tar.gz \
+  --archive /tmp/boreal-release/bwrk-v0.2.1-aarch64-apple-darwin.tar.gz \
   --prefix /tmp/boreal-prefix
 /tmp/boreal-prefix/bin/bwrk --version
 ```
