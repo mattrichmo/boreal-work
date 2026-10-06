@@ -353,7 +353,7 @@ fn commands_report_source_route_adapters_accurately() {
     );
     for (path, service_supported) in [
         ("source add", true),
-        ("source list", false),
+        ("source list", true),
         ("source search", true),
         ("source show", false),
         ("source verify", false),
@@ -365,6 +365,12 @@ fn commands_report_source_route_adapters_accurately() {
         assert_eq!(route["availability"], "available", "{path}");
         assert_eq!(route["adapters"]["direct"], true, "{path}");
         assert_eq!(route["adapters"]["service"], service_supported, "{path}");
+        if path == "source list" {
+            assert_eq!(
+                route["syntax"],
+                "bwrk source list PROJECT [--limit N] [--offset N]"
+            );
+        }
     }
     assert!(data["unavailable_routes"].as_array().unwrap().is_empty());
 }

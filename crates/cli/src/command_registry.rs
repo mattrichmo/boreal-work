@@ -2650,7 +2650,7 @@ const COMMANDS: &[CommandSpec] = &[
         action: "read",
         output: "sources",
         direct: true,
-        service: false,
+        service: true,
         summary: "list bounded source versions for a project",
     },
     CommandSpec {

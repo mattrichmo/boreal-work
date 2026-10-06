@@ -2254,26 +2254,60 @@ impl MemoryIndex {
     }
 }
 
+/// Rebuild the derived search index from a validated publication. A missing
+/// manifest is an empty index only when Git HEAD also has no published
+/// manifest; a missing working-tree copy of committed memory remains an error.
 pub fn rebuild_index(root: impl AsRef<Path>, project_id: &str) -> Result<MemoryIndex, IndexError> {
     validate_segment(project_id)
         .map_err(|_| IndexError::InvalidQuery("unsafe project ID".into()))?;
     let root = MemoryRoot::new(root.as_ref().to_path_buf())
         .map_err(|_| IndexError::Import(ImportError::InvalidPath))?;
-    let report = validate_import(&root.path, project_id)?;
-    let mut entries = report
-        .entries
-        .iter()
-        .map(|entry| {
-            let note_path = root
-                .checked_child(PathBuf::from(&entry.manifest_path))
-                .map_err(|_| IndexError::Import(ImportError::InvalidPath))?;
-            let bytes = fs::read(note_path)
-                .map_err(|error| IndexError::Import(ImportError::Io(error.to_string())))?;
-            parse_indexed_entry(&bytes, entry)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by(|left, right| left.entry_id.cmp(&right.entry_id));
     let git_revision = git_checked_out_revision(&root.path).map_err(IndexError::Import)?;
+    let manifest_path = root
+        .checked_manifest_path()
+        .map_err(|_| IndexError::Import(ImportError::InvalidPath))?;
+    let manifest_exists = match fs::symlink_metadata(&manifest_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(IndexError::Import(ImportError::Io(error.to_string()))),
+    };
+    let mut entries = if manifest_exists {
+        let report = validate_import(&root.path, project_id)?;
+        report
+            .entries
+            .iter()
+            .map(|entry| {
+                let note_path = root
+                    .checked_child(PathBuf::from(&entry.manifest_path))
+                    .map_err(|_| IndexError::Import(ImportError::InvalidPath))?;
+                let bytes = fs::read(note_path)
+                    .map_err(|error| IndexError::Import(ImportError::Io(error.to_string())))?;
+                parse_indexed_entry(&bytes, entry)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        let prefix = git_prefix(&root.path)
+            .map_err(|error| IndexError::Import(ImportError::Git(error.to_string())))?;
+        let git_manifest_path = git_scoped_path(&prefix, "manifest.json");
+        let committed_manifest = git_output(
+            &root.path,
+            &[
+                "ls-tree",
+                "--name-only",
+                &git_revision,
+                "--",
+                &git_manifest_path,
+            ],
+        )
+        .map_err(|error| IndexError::Import(ImportError::Git(error.to_string())))?;
+        if !committed_manifest.trim().is_empty() {
+            return Err(IndexError::Import(ImportError::InvalidManifest(
+                "published memory manifest is missing from the working tree".into(),
+            )));
+        }
+        Vec::new()
+    };
+    entries.sort_by(|left, right| left.entry_id.cmp(&right.entry_id));
     let index_revision = index_revision(project_id, &git_revision, &entries);
     Ok(MemoryIndex {
         project_id: project_id.to_owned(),

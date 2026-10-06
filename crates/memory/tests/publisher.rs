@@ -1,9 +1,9 @@
 use boreal_memory::publisher as durable_publication;
 use boreal_memory::{
-    publication_identity, publication_side_effect_ref, rebuild_index,
+    initialize_scaffold_baseline, publication_identity, publication_side_effect_ref, rebuild_index,
     reconciled_publication_observation, render_manifest, render_markdown, validate_fresh_clone,
     validate_import, validate_publication_request, Citation, Draft, DraftState, FindingCode,
-    ImportError, IndexLag, ManifestEntry, MemoryAuthority, MemoryDoctor, MemoryRoot,
+    ImportError, IndexError, IndexLag, ManifestEntry, MemoryAuthority, MemoryDoctor, MemoryRoot,
     PublicationIdentity, PublicationJobObservation, PublicationManifest, PublicationRecovery,
     PublicationRecoveryState, PublicationState, PublishError, Publisher, RetentionPolicy,
     RetrievalQuery, SourceTrust,
@@ -1011,6 +1011,82 @@ fn retrieval_is_scoped_deterministic_and_cited() {
         Err(boreal_memory::IndexError::InvalidQuery(_))
     ));
     remove(&path);
+}
+
+#[test]
+fn retrieval_returns_an_empty_index_before_the_first_publication() {
+    let path = test_root("empty-retrieval");
+    let _publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    fs::write(path.join("index.md"), "# Boreal Project Memory\n").unwrap();
+    let baseline_revision =
+        initialize_scaffold_baseline(&path, &[PathBuf::from("index.md")]).unwrap();
+
+    let index = rebuild_index(&path, "project-1").unwrap();
+    assert_eq!(index.entry_count(), 0);
+    assert_eq!(index.git_revision(), baseline_revision);
+    let response = index
+        .search(
+            &RetrievalQuery::new("project-1")
+                .unwrap()
+                .with_text("unpublished"),
+        )
+        .unwrap();
+    assert!(response.hits.is_empty());
+    assert_eq!(response.git_revision, baseline_revision);
+    assert_eq!(response.lag, IndexLag::Current);
+    assert!(!path.join("manifest.json").exists());
+    assert!(matches!(
+        validate_import(&path, "project-1"),
+        Err(ImportError::Io(_))
+    ));
+    remove(&path);
+}
+
+#[test]
+fn retrieval_fails_closed_for_invalid_or_missing_committed_manifests() {
+    let path = test_root("invalid-retrieval-manifest");
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    fs::write(path.join("index.md"), "# Boreal Project Memory\n").unwrap();
+    initialize_scaffold_baseline(&path, &[PathBuf::from("index.md")]).unwrap();
+
+    fs::write(path.join("manifest.json"), "not-json\n").unwrap();
+    assert!(matches!(
+        rebuild_index(&path, "project-1"),
+        Err(IndexError::Import(ImportError::InvalidManifest(_)))
+    ));
+    fs::remove_file(path.join("manifest.json")).unwrap();
+
+    publisher
+        .publish(&draft("entry-1").review(true), "operation-1")
+        .unwrap();
+    fs::remove_file(path.join("manifest.json")).unwrap();
+    assert!(matches!(
+        rebuild_index(&path, "project-1"),
+        Err(IndexError::Import(ImportError::InvalidManifest(message)))
+            if message.contains("missing from the working tree")
+    ));
+    remove(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn retrieval_rejects_a_symlinked_manifest() {
+    use std::os::unix::fs::symlink;
+
+    let path = test_root("symlinked-retrieval-manifest");
+    let _publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    fs::write(path.join("index.md"), "# Boreal Project Memory\n").unwrap();
+    initialize_scaffold_baseline(&path, &[PathBuf::from("index.md")]).unwrap();
+    let external_manifest = test_root("external-retrieval-manifest").join("manifest.json");
+    fs::write(&external_manifest, "not a managed manifest\n").unwrap();
+    symlink(&external_manifest, path.join("manifest.json")).unwrap();
+
+    assert!(matches!(
+        rebuild_index(&path, "project-1"),
+        Err(IndexError::Import(ImportError::InvalidPath))
+    ));
+    remove(&path);
+    remove(external_manifest.parent().unwrap());
 }
 
 #[test]
