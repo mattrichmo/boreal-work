@@ -3,13 +3,15 @@
 import argparse,json,os,socket,struct,subprocess,time,uuid
 from pathlib import Path
 
+ROOT=Path(__file__).resolve().parents[3]
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary',required=True,type=Path)
     parser.add_argument('--root',required=True,type=Path)
-    args=parser.parse_args();binary=args.binary.resolve();root=args.root.absolute()
-    if not root.is_relative_to(Path('/private/tmp')) or root.exists():
-        raise SystemExit('--root must be a new disposable directory beneath /private/tmp')
+    args=parser.parse_args();binary=args.binary.resolve();root=args.root.expanduser().resolve()
+    if root.exists() or root == ROOT or ROOT in root.parents:
+        raise SystemExit('--root must be a new disposable directory outside the checkout')
     root.mkdir(mode=0o700);env=dict(os.environ,BOREAL_GLOBAL_ROOT=str(root/'global'))
     def cli(*argv,cwd=root):
         result=subprocess.run([str(binary),*argv,'--json'],cwd=cwd,env=env,capture_output=True,text=True,timeout=30)
