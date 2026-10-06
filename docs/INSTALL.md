@@ -155,9 +155,10 @@ The formula installs the CLI and TUI and supplies Node.js for
 Download the archive for the current OS/architecture from the
 [GitHub Releases](https://github.com/mattrichmo/boreal-work/releases) page,
 verify it against `SHA256SUMS`, and install `bin/bwrk` plus
-`lib/boreal/tui` and `share/boreal` under the same prefix (or invoke
-`install.sh --archive PATH --prefix PREFIX`). The CLI searches that layout
-when it starts the private dashboard service.
+`lib/boreal/tui`, `lib/boreal/global-tui`, and `share/boreal` under the same
+prefix (or invoke `install.sh --archive PATH --prefix PREFIX`). The project
+dashboard uses `lib/boreal/tui`; the global dashboard uses
+`lib/boreal/global-tui` through the versioned service API.
 
 ## Source build
 

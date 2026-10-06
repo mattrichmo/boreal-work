@@ -381,6 +381,18 @@ def create_archive(stage: Path, archive: Path) -> None:
                         handle.addfile(info)
 
 
+def write_sha256sums(output_dir: Path, version: str) -> None:
+    """Index the target archives for this version in the output directory."""
+    entries = [
+        f"{sha256_file(archive).removeprefix('sha256:')}  {archive.name}"
+        for archive in sorted(output_dir.glob(f"bwrk-v{version}-*.tar.gz"))
+        if archive.is_file()
+    ]
+    (output_dir / "SHA256SUMS").write_text(
+        "".join(f"{entry}\n" for entry in entries), encoding="utf-8"
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
@@ -478,10 +490,7 @@ def main() -> int:
         )
         create_archive(stage, archive)
         shutil.copy2(stage / "share/boreal/release.json", release_manifest)
-        archive_digest = sha256_file(archive).removeprefix("sha256:")
-        (output_dir / "SHA256SUMS").write_text(
-            f"{archive_digest}  {archive.name}\n", encoding="utf-8"
-        )
+        write_sha256sums(output_dir, version)
     finally:
         contract_file.unlink(missing_ok=True)
 

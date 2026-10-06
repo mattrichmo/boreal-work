@@ -15,19 +15,28 @@ python3 scripts/release/build_release.py \
   --output-dir /tmp/boreal-release
 ```
 
-The builder runs the locked Rust release build and `npm run build` for the TUI,
-then stages this install layout:
+The builder runs the locked Rust release build and `npm run build` for both
+TUI packages, then stages this runtime and source layout:
 
 ```text
+apps/tui/...
+apps/global-tui/...
 bin/bwrk
-lib/boreal/tui/*.js
+lib/boreal/tui/...
+lib/boreal/global-tui/...
 share/boreal/release.json
 share/boreal/LICENSE
+share/boreal/install.sh
 ```
 
 It creates a normalized `bwrk-vX.Y.Z-TARGET.tar.gz`, a per-target release
-manifest, and `SHA256SUMS`. The archive metadata is normalized so two builds
-of the same staged payload produce the same archive bytes.
+manifest, and `SHA256SUMS`. The checksum file contains only the target archives
+for the version being built, so building another target of that version
+preserves the earlier archive's checksum without including archives from older
+versions in the output directory. Since the checksum filename is shared, it
+reflects the version in the most recent builder invocation. The archive
+metadata is normalized so two builds of the same staged payload produce the
+same archive bytes.
 
 The complete local build/install check is:
 
@@ -111,11 +120,11 @@ boundary; it intentionally does not hash generated binaries or TUI output.
 `build_release.py` adds those generated assets, records Rust/Node/TypeScript
 toolchain versions, and creates the archive. The current process still does
 not sign artifacts, contact a registry, pause active attempts during an
-upgrade, or migrate a project database. When the public tap and
-`HOMEBREW_TAP_TOKEN` are configured, the release workflow publishes the
-rendered Homebrew formula automatically; otherwise the formula remains a
-checked-in packaging template. The remaining behaviors are part of the P4/P5
-compatibility and cutover gates.
+upgrade, or migrate a project database. No checked-in workflow publishes
+release archives or a rendered Homebrew formula. The formula can be rendered
+locally from reviewed archives with `scripts/release/render_homebrew_formula.py`;
+publishing it to a tap is a separate manual release step. The remaining
+behaviors are part of the P4/P5 compatibility and cutover gates.
 
 The identity simulation is deliberately not a live installer: its target and
 rollback backup are synthetic directories inside a caller-created temp
