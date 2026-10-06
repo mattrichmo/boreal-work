@@ -297,6 +297,7 @@ def binary_freshness(binary: Path) -> dict[str, Any]:
     source_paths = [ROOT / "Cargo.toml", ROOT / "Cargo.lock"]
     source_paths.extend((ROOT / "crates").glob("**/*.rs"))
     source_paths.extend((ROOT / "apps/tui/src").glob("**/*.ts"))
+    source_paths.extend((ROOT / "apps/global-tui/src").glob("**/*.ts"))
     newest = max((path.stat().st_mtime for path in source_paths if path.exists()), default=0.0)
     if binary.stat().st_mtime < newest:
         return {
@@ -321,6 +322,30 @@ def binary_freshness(binary: Path) -> dict[str, Any]:
         "stdout_log": None,
         "stderr_log": None,
     }
+
+
+def global_tui_check_specs(profile: str, binary: Path) -> list[tuple[str, list[str]]]:
+    """Return the direct Global TUI gates for the selected validation profile."""
+    checks = [
+        (
+            "global-tui-typecheck",
+            ["npm", "run", "typecheck", "--prefix", "apps/global-tui"],
+        ),
+        ("global-tui-tests", ["npm", "test", "--prefix", "apps/global-tui"]),
+    ]
+    if profile == "full":
+        checks.append(
+            (
+                "global-tui-pty",
+                [
+                    "python3",
+                    "scripts/validation/global-tui/pty_smoke.py",
+                    "--bin",
+                    str(binary),
+                ],
+            )
+        )
+    return checks
 
 
 def binary_runtime_check(
@@ -498,6 +523,15 @@ def main() -> int:
             timeout_seconds=args.timeout_seconds,
         )
     )
+    for label, command in global_tui_check_specs(args.profile, binary):
+        checks.append(
+            run_check(
+                label,
+                command,
+                log_dir,
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
     if args.profile == "full":
         checks.append(
             run_check(
