@@ -6185,6 +6185,17 @@ impl AttemptOperation {
     }
 }
 
+fn attempt_work_argument_index(parsed: &ParsedCommand, project_id: &str) -> usize {
+    let has_leading_project = parsed.path.first().is_some_and(|value| value == "work")
+        && parsed.options.positionals.len() >= 2
+        && parsed
+            .options
+            .positionals
+            .first()
+            .is_some_and(|value| value == project_id);
+    usize::from(has_leading_project)
+}
+
 fn attempt_mutation_result<A: boreal_application::AttemptLifecycleAdapter>(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
@@ -6193,14 +6204,12 @@ fn attempt_mutation_result<A: boreal_application::AttemptLifecycleAdapter>(
     _store: &SqliteStore,
     kind: AttemptOperation,
 ) -> Result<CliResult, CliError> {
-    let project = ProjectId::new(project_argument(parsed, 0)?);
-    let work_index = if parsed.path.first().is_some_and(|value| value == "work")
-        && parsed.options.project.is_none()
-    {
-        1
-    } else {
-        0
-    };
+    let project_id = project_argument(parsed, 0)?;
+    let project = ProjectId::new(project_id.clone());
+    // Local project binding can populate `options.project` while preserving
+    // the originally supplied positional project. Select by layout and value
+    // so a single work ID equal to the project ID stays at index zero.
+    let work_index = attempt_work_argument_index(parsed, &project_id);
     let work_id = work_argument(parsed, work_index)?;
     let attempt_id = parsed
         .options
@@ -9948,6 +9957,43 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn attempt_mutation_uses_leading_project_only_when_a_work_positional_follows() {
+        let mut retained_project = parse(&args(&[
+            "work",
+            "accept",
+            "project-1",
+            "work-1",
+            "--attempt",
+            "attempt-1",
+            "--fence",
+            "1",
+        ]))
+        .expect("positional project and work ID parse");
+        // Local binding may already have selected the project while retaining
+        // the original positional layout.
+        retained_project.options.project = Some("project-1".into());
+        let index = attempt_work_argument_index(&retained_project, "project-1");
+        assert_eq!(index, 1);
+        assert_eq!(work_argument(&retained_project, index).unwrap(), "work-1");
+
+        let same_id = parse(&args(&[
+            "work",
+            "accept",
+            "project-1",
+            "--project",
+            "project-1",
+            "--attempt",
+            "attempt-2",
+            "--fence",
+            "1",
+        ]))
+        .expect("single positional work ID may equal its project ID");
+        let index = attempt_work_argument_index(&same_id, "project-1");
+        assert_eq!(index, 0);
+        assert_eq!(work_argument(&same_id, index).unwrap(), "project-1");
     }
 
     fn project_db_path(label: &str) -> PathBuf {
