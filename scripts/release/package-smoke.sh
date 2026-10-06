@@ -12,6 +12,11 @@ python3 "$root/scripts/release/build_release.py" --output-dir "$scratch/release"
 archive=$(find "$scratch/release" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)
 [ -n "$archive" ] || { echo "package smoke: archive missing" >&2; exit 1; }
 
+# Exercise the normal pinned-release download and SHA256SUMS lookup through a
+# local publication-layout fixture. Keep the --archive install below as its
+# own smoke path: it intentionally bypasses download/checksum handling.
+python3 "$root/scripts/release/test_package_smoke.py" --archive "$archive"
+
 sh "$root/install.sh" --archive "$archive" --prefix "$scratch/prefix"
 version=$("$scratch/prefix/bin/bwrk" --version)
 manifest_identity=$(python3 - "$scratch/prefix/share/boreal/release.json" <<'PY'
