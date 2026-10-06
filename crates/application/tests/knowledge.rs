@@ -4,7 +4,9 @@ use boreal_application::{
     SourceRegistrationState, WorkApplication,
 };
 use boreal_domain::ActorRole;
-use boreal_memory::Citation as MemoryCitation;
+use boreal_memory::{
+    initialize_scaffold_baseline, Citation as MemoryCitation, MemoryRoot, Publisher,
+};
 use boreal_migration::{MigrationDocument, ProjectRecord, FORMAT, FORMAT_VERSION};
 use boreal_source::{Availability, SourceCatalog};
 use boreal_store::{
@@ -512,6 +514,41 @@ fn memory_draft_review_publish_and_search_preserve_provenance() {
         Some("sha256:wrong-content")
     );
     drop(store);
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn memory_search_returns_empty_for_an_initialized_unpublished_memory_root() {
+    let catalog = SourceCatalog::default();
+    let app = KnowledgeApplication::new(&catalog);
+    let workspace = test_root("empty-memory-search");
+    let memory_root = workspace.join("memory");
+    let _publisher = Publisher::new(MemoryRoot::new(&memory_root).unwrap()).unwrap();
+    fs::write(memory_root.join("index.md"), "# Boreal Project Memory\n").unwrap();
+    let baseline_revision =
+        initialize_scaffold_baseline(&memory_root, &[PathBuf::from("index.md")]).unwrap();
+
+    let search = app
+        .search_memory(
+            &memory_root,
+            MemorySearchInput {
+                project_id: "project-a".to_owned(),
+                text: Some("not published yet".to_owned()),
+                entry_id: None,
+                source_version_id: None,
+                limit: 10,
+                max_excerpt_bytes: 256,
+                requested_git_revision: None,
+            },
+        )
+        .unwrap();
+    assert!(search.response.hits.is_empty());
+    assert_eq!(search.response.git_revision, baseline_revision);
+    assert_eq!(
+        search.provenance.git_revision.as_deref(),
+        Some(baseline_revision.as_str())
+    );
+    assert!(!memory_root.join("manifest.json").exists());
     fs::remove_dir_all(workspace).unwrap();
 }
 

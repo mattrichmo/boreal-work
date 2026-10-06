@@ -93,6 +93,7 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             | ["maintenance", "show"]
             | ["review", "list"]
             | ["review", "show"]
+            | ["source", "list"]
             | ["source", "search"]
             | ["gate", "policy", "publish"]
             | ["work", "claim"]
@@ -1892,6 +1893,12 @@ mod unix {
             data["expected_revision"] = json!(parsed.options.expected_revision);
             return Ok(data);
         }
+        if matches!(path.as_slice(), ["source", "list"]) {
+            data["command"] = json!("source_list");
+            data["limit"] = json!(parsed.options.limit.unwrap_or(50));
+            data["offset"] = json!(parsed.options.offset.unwrap_or(0));
+            return Ok(data);
+        }
         if matches!(path.as_slice(), ["source", "search"]) {
             let query_index = usize::from(parsed.options.project.is_none());
             data["command"] = json!("source_search");
@@ -2616,6 +2623,26 @@ mod unix {
         media_type: Option<String>,
     }
 
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SourceListRequest {
+        command: String,
+        project_id: String,
+        actor_id: String,
+        #[serde(default)]
+        credential_ref: Option<String>,
+        #[serde(default)]
+        harness_id: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        operation_id: Option<String>,
+        #[serde(default)]
+        limit: Option<u64>,
+        #[serde(default)]
+        offset: Option<u64>,
+    }
+
     fn default_actor_role() -> String {
         "agent".to_owned()
     }
@@ -2771,6 +2798,7 @@ mod unix {
                     Ok((result.outcome, result.revision, result.data))
                 }
                 "source_add" => self.source_add(data, &request.operation_id),
+                "source_list" => self.source_list(data, &request.operation_id),
                 "gate_policy_publish" => self.gate_policy_publish(data, &request.operation_id),
                 "source_search" => self.source_search(data),
                 "backup" => self.backup(data, &request.operation_id),
@@ -3120,6 +3148,48 @@ mod unix {
             let mut parsed = parsed;
             parsed.options.positionals.push(query);
             let result = super::super::source_search_result(&parsed, &self.store)?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
+        fn source_list(&self, data: &Value, operation: &str) -> ServiceResult {
+            let request: SourceListRequest = serde_json::from_value(data.clone())
+                .map_err(|error| invalid_service_dto("source_list", error))?;
+            if request.command != "source_list" {
+                return Err(CliError::invalid(
+                    "source_list request command does not match its route",
+                ));
+            }
+            if request.operation_id.as_deref() != Some(operation) {
+                return Err(CliError::invalid(
+                    "source_list operation identity does not match the service envelope",
+                ));
+            }
+            let project = required_trimmed(request.project_id, "project_id")?;
+            let actor = required_trimmed(request.actor_id, "actor_id")?;
+            let database = self
+                .store
+                .database_location()
+                .ok_or_else(|| CliError::invalid("source list needs a project database"))?
+                .to_string_lossy()
+                .into_owned();
+            let parsed = ParsedCommand {
+                path: vec!["source".to_owned(), "list".to_owned()],
+                options: CliOptions {
+                    db: database,
+                    project: Some(project),
+                    actor,
+                    harness: request.harness_id.unwrap_or_default(),
+                    session: request.session_id.unwrap_or_default(),
+                    limit: request.limit.map(|limit| limit.clamp(1, 100)),
+                    offset: request.offset,
+                    json: true,
+                    ..CliOptions::default()
+                },
+            };
+            // Authentication has already consumed the credential reference;
+            // source metadata reads do not persist it or echo it to the client.
+            let _ = request.credential_ref;
+            let result = super::super::source_list_result(&parsed, &self.store)?;
             Ok((result.outcome, result.revision, result.data))
         }
 

@@ -70,7 +70,7 @@ fn start_service(project_root: &Path, database: &Path, socket: &Path) -> Child {
         .arg(database)
         .args(["--socket"])
         .arg(socket)
-        .args(["--max-requests", "8", "--json"])
+        .args(["--max-requests", "11", "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -307,6 +307,37 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     assert_eq!(replay["data"]["registration"]["replayed"], true);
     assert_eq!(replay["data"]["source"]["source_version_id"], source_id);
 
+    let second_input = project_root.join("second-notes.md");
+    fs::write(&second_input, b"a second distinct service source\n")
+        .expect("write second source input");
+    let second_expected_revision = added["data"]["registration"]["revision"]
+        .as_u64()
+        .expect("first source registration returns its revision");
+    let second_added = assert_success(
+        &source_add(
+            &project_root,
+            &database,
+            &socket,
+            Path::new("second-notes.md"),
+            ACTOR,
+            HARNESS,
+            SESSION,
+            second_expected_revision,
+            "op_source_service_capture_second",
+        ),
+        "service second source capture",
+    );
+    let second_source_id = second_added["data"]["source"]["source_version_id"]
+        .as_str()
+        .expect("second service capture returns a source version identity")
+        .to_owned();
+    assert_ne!(second_source_id, source_id);
+
+    // Catalog pages are sorted by source version ID, so assert against both
+    // known IDs instead of assuming capture order is list order.
+    let mut expected_ids = [source_id.clone(), second_source_id.clone()];
+    expected_ids.sort();
+
     let readback = Command::new(binary())
         .current_dir(&project_root)
         .args([
@@ -352,6 +383,52 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     assert_eq!(search["data"]["query"], "service captured source bytes");
     assert!(search["data"]["index_lag"].as_u64().unwrap_or_default() > 0);
     assert!(search["data"]["items"].as_array().unwrap().is_empty());
+
+    let listed_first = Command::new(binary())
+        .current_dir(&project_root)
+        .args(["source", "list", PROJECT, "--limit", "1", "--offset", "0"])
+        .args(["--actor", ACTOR, "--harness", HARNESS, "--session", SESSION])
+        .args(["--socket"])
+        .arg(&socket)
+        .args(["--db"])
+        .arg(&database)
+        .args(["--operation-id", "op_source_service_list", "--json"])
+        .output()
+        .expect("first service source list page launches");
+    let listed_first = assert_success(&listed_first, "first service source list page");
+    assert_eq!(listed_first["data"]["project_id"], PROJECT);
+    assert_eq!(listed_first["data"]["total"], 2);
+    assert_eq!(listed_first["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed_first["data"]["items"][0]["source_version_id"],
+        expected_ids[0]
+    );
+    assert_eq!(listed_first["data"]["offset"], 0);
+    assert_eq!(listed_first["data"]["limit"], 1);
+    assert_eq!(listed_first["data"]["has_more"], true);
+
+    let listed_second = Command::new(binary())
+        .current_dir(&project_root)
+        .args(["source", "list", PROJECT, "--limit", "1", "--offset", "1"])
+        .args(["--actor", ACTOR, "--harness", HARNESS, "--session", SESSION])
+        .args(["--socket"])
+        .arg(&socket)
+        .args(["--db"])
+        .arg(&database)
+        .args(["--operation-id", "op_source_service_list_page_2", "--json"])
+        .output()
+        .expect("second service source list page launches");
+    let listed_second = assert_success(&listed_second, "second service source list page");
+    assert_eq!(listed_second["data"]["project_id"], PROJECT);
+    assert_eq!(listed_second["data"]["total"], 2);
+    assert_eq!(listed_second["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed_second["data"]["items"][0]["source_version_id"],
+        expected_ids[1]
+    );
+    assert_eq!(listed_second["data"]["offset"], 1);
+    assert_eq!(listed_second["data"]["limit"], 1);
+    assert_eq!(listed_second["data"]["has_more"], false);
 
     let service_output = child
         .wait_with_output()
