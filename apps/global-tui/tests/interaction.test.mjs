@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GlobalController } from '../dist/model.js';
+import { GlobalProtocolError } from '../dist/client.js';
 import { runInteractive, runLineInterface } from '../dist/interaction.js';
 import { StreamingKeyDecoder } from '../dist/terminal/keys.js';
 import { form, editField, validateForm, parseLabels, renderForm } from '../dist/forms.js';
@@ -334,6 +335,47 @@ test('known commit with failed refresh consumes the form and retry reads only', 
   assert.match(h.terminal.output,/snapshot unavailable/);
   await h.key('\x03');await h.run;
 });
+
+for (const [outcome, failRefresh] of [['not_committed', false], ['committed', false], ['committed', true]]) {
+  test(`uncertain save receipt ${outcome} with refresh failure ${failRefresh} retains only uncommitted drafts`, async () => {
+    const h = harness(failRefresh ? { failSnapshotAfter: 1 } : {});
+    const execute = h.controller.client.execute.bind(h.controller.client);
+    let mutations = 0, allowSave = false;
+    const readbacks = [];
+    h.controller.client.execute = async (command, payload, mutation) => {
+      if (mutation) {
+        mutations++;
+        if (!allowSave) throw new GlobalProtocolError('delivery unknown', { unknownOutcome: true, operationId: 'op_uncertain', readbackRequired: true });
+      }
+      if (command === 'operation show') {
+        readbacks.push(payload.operation_id);
+        if (outcome === 'not_committed') throw new GlobalProtocolError('operation not found', { errorCode: 'not_found' });
+        return { operation_id: payload.operation_id, revision: 2, result: { id: 'saved' } };
+      }
+      return execute(command, payload, mutation);
+    };
+    try {
+      await h.key('n'); await h.key('Retained uncertain draft'); await h.key('\x13');
+      assert.equal(h.controller.unresolvedOperation, 'op_uncertain');
+      await h.key('\x13');
+      assert.equal(mutations, 1, 'write stays frozen before receipt readback');
+      await h.key('r');
+      assert.deepEqual(readbacks, ['op_uncertain']);
+      assert.equal(h.controller.unresolvedOperation, undefined);
+      assert.equal(mutations, 1, 'receipt readback must not replay the write');
+      allowSave = true;
+      await h.key('\x13');
+      if (outcome === 'not_committed') {
+        assert.equal(mutations, 2, 'the retained draft can be submitted deliberately');
+        assert.equal(h.calls[0].payload.title, 'Retained uncertain draft');
+      } else {
+        assert.equal(mutations, 1, 'a committed draft must be consumed even when refresh fails');
+        assert.equal(h.controller.lastMutationReceipt.operation_id, 'op_uncertain');
+        if (failRefresh) assert.match(h.terminal.output, /Saved; refresh failed/);
+      }
+    } finally { await h.key('\x03'); await h.run; }
+  });
+}
 
 test('revision conflict refreshes safely while retaining form text for deliberate reapply', async () => {
   const h=harness({conflict:true});await h.key('n');await h.key('Keep my draft');await h.key('\r');
