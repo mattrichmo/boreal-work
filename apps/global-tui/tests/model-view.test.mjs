@@ -113,6 +113,21 @@ test("archived project hides active children from Home and active views while ar
  const {client,snapshot}=fixture();snapshot.projects.find(p=>p.id==="biz").archived=true;snapshot.items.push({...snapshot.items[0],id:"biz-unarchived-child",project_id:"biz",archived:false,title:"Retained child"});const c=new GlobalController(client);await c.refresh();c.setRoute("overview");assert.ok(!c.rows().some(r=>r.id==="biz-unarchived-child"));c.setRoute("archive");assert.ok(c.rows().some(r=>r.id==="biz-unarchived-child"));
 });
 
+test("bodyless note summaries render their titles in Archive, Notes, and the inspector across project restore",async()=>{
+ const {snapshot}=fixture();snapshot.items=[];snapshot.projects.find(p=>p.id==="biz").archived=true;
+ snapshot.notes=[
+  {id:"archive-note",project_id:"biz",title:"Archived project reference",archived:false,created_at:now,updated_at:now},
+  {id:"active-note",project_id:"life",title:"Active reference",archived:false,created_at:now,updated_at:now},
+  {id:"independent-note",project_id:"biz",title:"Independently archived reference",archived:true,created_at:now,updated_at:now}
+ ];
+ const c=new GlobalController({snapshot:async()=>structuredClone(snapshot),execute:async()=>({})});await c.refresh();c.setRoute("archive");c.selectId("archive-note");
+ assert.match(render(c,80,20),/▤ Archived project reference/);assert.doesNotMatch(render(c,80,20),/undefined/);
+ c.focus="inspector";assert.match(render(c,80,20),/Archived project reference/);assert.match(render(c,80,20),/Updated/);assert.doesNotMatch(render(c,80,20),/Progress unavailable/);
+ c.focus="work";c.setRoute("notes");assert.deepEqual(c.rows().map(n=>n.id),["active-note"]);assert.match(render(c,80,20),/▤ Active reference/);
+ snapshot.projects.find(p=>p.id==="biz").archived=false;await c.refresh();c.setScope("biz");c.setRoute("notes");assert.deepEqual(c.rows().map(n=>n.id),["archive-note"]);assert.match(render(c,80,20),/▤ Archived project reference/);
+ c.setRoute("archive");assert.deepEqual(c.rows().map(n=>n.id),["independent-note"]);assert.match(render(c,80,20),/▤ Independently archived reference/);
+});
+
 test("Home uses its selectable rows for project summaries and mixed rows show project origin",async()=>{
  const {client}=fixture();const c=new GlobalController(client);await c.refresh();c.setScope();c.setRoute("overview");const rows=c.rows();for(let i=0;i<rows.length;i++){c.selected=i;c.selectedId="id" in rows[i]?rows[i].id:undefined;const row=rows[i];const screen=render(c,120,16);const id="id" in row?row.id:undefined;assert.equal(c.selectedRow()?.id,id);if("title" in row&&"status_id" in row)assert.match(screen,new RegExp(c.projectName(row.project_id)));if("name" in row)assert.match(screen,new RegExp(row.name));}
 });

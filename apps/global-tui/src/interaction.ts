@@ -451,7 +451,7 @@ export async function runInteractive(controller: GlobalController, terminal: Key
     if (key === "ctrl-c") { cleanup(); return; }
     if (suspended || busy) return;
     if(controller.unresolvedOperation&&key==="r"){
-      busy=true;void controller.resolveUnknownOperation().then(result=>{notice=result;if(/committed/i.test(result))modal=undefined;else if(modal?.kind==="form")modal.state.error=`${result} Draft retained; press Ctrl-S only if you still want to submit it.`;}).catch(error=>{notice=`Receipt read failed: ${String(error)}`;}).finally(()=>{busy=false;draw();});return;
+      busy=true;void controller.resolveUnknownOperation().then(result=>{notice=result;if(controller.lastMutationReceipt!==undefined)modal=undefined;else if(modal?.kind==="form")modal.state.error=`${result} Draft retained; press Ctrl-S only if you still want to submit it.`;}).catch(error=>{notice=`Receipt read failed: ${String(error)}`;}).finally(()=>{busy=false;draw();});return;
     }
     if (!controller.snapshot && !["r", "q", "?"].includes(key)) { notice = "No snapshot loaded · press r to retry or q to quit"; draw(); return; }
     if (modal?.kind === "help") { if (key === "escape" || key === "?") modal = undefined; else if(key==="down"||key==="page-down")modal.offset++;else if(key==="up"||key==="page-up")modal.offset=Math.max(0,modal.offset-1);draw();return; }
