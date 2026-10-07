@@ -11,41 +11,16 @@ SQLite runtime builds are verified.
 
 ## Install or update from GitHub
 
-The installer is idempotent: run the same command for a first install or to
-update an existing installation. It installs the CLI and compiled dashboard
-TUI under `~/.local`, and keeps project databases outside the install:
+Use the GitHub source installer for the current v2 code. It fetches the installer from `main`, downloads Boreal source from GitHub, builds the CLI and dashboards for this machine, verifies the package, and installs it under `~/.local`. It does not use GitHub Actions or modify project databases.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --from-source --yes
 bwrk --version
 ```
 
-The final `| sh` is required. Without it, `curl` only prints the installer
-script to the terminal.
+The source build requires Git, Rust/Cargo, Node.js 20 through 26, npm, Python 3, and `tsc`. Run the command again to build and install a newer source version. Use `--ref REF` to pin a source branch or tag.
 
-The installer verifies the matching platform archive. Source builds require
-an explicit `--from-source` or `--allow-source-fallback` choice and Git, Rust,
-Node.js, npm, Python, and `tsc`. Run the command again to update.
-
-After the first v2 release, installed release builds also support the shorter
-update commands:
-
-```sh
-bwrk update
-bwrk upgrade --machine
-```
-
-To pin a release in automation:
-
-```sh
-curl -fsSL \
-  https://raw.githubusercontent.com/mattrichmo/boreal-work/v0.2.1/install.sh \
-  | BOREAL_VERSION=0.2.1 sh
-```
-
-The default prefix is `~/.local`. Use `BOREAL_PREFIX=/usr/local` or
-`--prefix /usr/local` for a system prefix. The installer replaces the CLI,
-TUI, and release metadata atomically; it does not modify a project database.
+Without `--from-source`, the installer uses a prebuilt GitHub release archive. The latest published release is v0.1.0 and has the legacy package layout; it does not contain a compatible v2 archive. The installer reports that mismatch without starting a source build. When a compatible v2 archive is published for your platform, the ordinary installer command can use it without building from source.
 
 ## Global project manager
 
