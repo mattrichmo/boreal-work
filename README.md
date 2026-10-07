@@ -20,10 +20,10 @@ Boreal keeps plans, tasks, dependencies, ownership, sources, evidence, reviews, 
 
 ## Get a safe first result
 
-The installer below follows the repository's `main` branch and verifies the matching release archive. It installs `bwrk` and the dashboard under `~/.local`:
+The latest published release is v0.1.0. Its `bwrk-upgrade.tar.gz` asset uses the legacy package layout; the v2 installer expects a matching platform archive and `SHA256SUMS`, and no compatible v2 archive is published yet. The default installer does not build from source automatically. Until those archives are available, explicitly install from source under the default `~/.local` prefix (requires Git, Rust, Node.js 20 through 26, npm, Python, and `tsc`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --from-source --yes
 bwrk --version
 ```
 
@@ -39,7 +39,19 @@ bwrk doctor
 bwrk dashboard
 ```
 
-The example keeps the separate global-manager database under the temporary directory too. The dashboard footer shows its keys: press `?` for help and `q` to quit. The example prints the temporary project path so you can remove that directory when finished. See the [installation guide](docs/INSTALL.md) for verified archives, pinned releases, updates, and setup details.
+The example keeps the separate global-manager database under the temporary directory too. The dashboard footer shows its keys: press `?` for help and `q` to quit. The example prints the temporary project path so you can remove that directory when finished. See the [installation guide](docs/INSTALL.md) for archive verification, pinned releases, updates, and setup details.
+
+## Build from source
+
+For a CLI-only Rust install:
+
+```sh
+git clone https://github.com/mattrichmo/boreal-work.git
+cd boreal-work
+cargo install --path crates/cli --bin bwrk --locked
+```
+
+This installs only `bwrk`; use the install command above to build and install the CLI with its compiled dashboard.
 
 ## Workflows
 
@@ -76,7 +88,7 @@ Command availability can vary by build, so consult the installed CLI's command l
 
 ## Platforms and current limits
 
-Release archives currently target macOS on Apple Silicon or Intel and Linux on x86-64. Linux ARM64 and Windows are not supported. The interactive dashboard requires Node.js 20 through 26. Boreal Work v2 is under active development; use `bwrk commands` to see which routes are available in your build.
+The installer supports macOS on Apple Silicon or Intel and Linux on x86-64. Compatible v2 release archives for those targets are not yet published; Linux ARM64 and Windows are not supported. The interactive dashboard requires Node.js 20 through 26. Boreal Work v2 is under active development; use `bwrk commands` to see which routes are available in your build.
 
 ## Further reading
 
