@@ -46,6 +46,8 @@ pub enum AdapterError {
     ServiceUnavailable,
     UnknownOutcome {
         operation_id: String,
+        readback: Option<Value>,
+        protocol_error: Option<ProtocolError>,
     },
     ProtocolMismatch,
     Application {
@@ -66,9 +68,14 @@ impl fmt::Display for AdapterError {
             Self::PermissionDenied { scope } => write!(f, "permission denied; requires {scope}"),
             Self::InvalidInput { field, reason } => write!(f, "invalid {field}: {reason}"),
             Self::ServiceUnavailable => f.write_str("the configured Boreal local service is unavailable"),
-            Self::UnknownOutcome { operation_id } => write!(
+            Self::UnknownOutcome {
+                operation_id,
+                protocol_error,
+                ..
+            } => write!(
                 f,
-                "write outcome is unknown for {operation_id}; use operation_status with this same operation ID before retrying"
+                "write outcome is unknown for {operation_id}; {}; use operation_status with this same operation ID before retrying",
+                protocol_error.as_ref().map_or("the service could not confirm its result", |error| error.message.as_str())
             ),
             Self::ProtocolMismatch => f.write_str("Boreal service response did not match the configured protocol version"),
             Self::Application { operation_id, outcome, error, revision } => write!(
@@ -526,6 +533,8 @@ impl BorealBackend {
             if write {
                 AdapterError::UnknownOutcome {
                     operation_id: op.clone(),
+                    readback: None,
+                    protocol_error: None,
                 }
             } else {
                 AdapterError::ServiceUnavailable
@@ -626,6 +635,8 @@ fn call_project_socket(
         if write {
             AdapterError::UnknownOutcome {
                 operation_id: operation_id.into(),
+                readback: None,
+                protocol_error: None,
             }
         } else {
             AdapterError::ServiceUnavailable
@@ -635,6 +646,8 @@ fn call_project_socket(
         return Err(if write {
             AdapterError::UnknownOutcome {
                 operation_id: operation_id.into(),
+                readback: None,
+                protocol_error: None,
             }
         } else {
             AdapterError::ProtocolMismatch
@@ -647,6 +660,8 @@ fn call_project_socket(
         if write {
             AdapterError::UnknownOutcome {
                 operation_id: operation_id.into(),
+                readback: None,
+                protocol_error: None,
             }
         } else {
             AdapterError::ProtocolMismatch
@@ -659,15 +674,19 @@ fn call_project_socket(
         return Err(if write {
             AdapterError::UnknownOutcome {
                 operation_id: operation_id.into(),
+                readback: None,
+                protocol_error: None,
             }
         } else {
             AdapterError::ProtocolMismatch
         });
     }
-    let envelope: Envelope<Value> = serde_json::from_str(&transport.data).map_err(|_| {
+    let envelope: Envelope<Value> = serde_json::from_value(transport.data).map_err(|_| {
         if write {
             AdapterError::UnknownOutcome {
                 operation_id: operation_id.into(),
+                readback: None,
+                protocol_error: None,
             }
         } else {
             AdapterError::ProtocolMismatch
@@ -677,18 +696,23 @@ fn call_project_socket(
         if write {
             AdapterError::UnknownOutcome {
                 operation_id: operation_id.into(),
+                readback: None,
+                protocol_error: None,
             }
         } else {
             AdapterError::ProtocolMismatch
         }
     })?;
     if envelope.operation_id != operation_id
-        || envelope.transport != TransportOutcome::Ok
         || envelope.api_version != API_VERSION
+        || (envelope.transport != TransportOutcome::Ok
+            && envelope.outcome != ApplicationOutcome::Unknown)
     {
         return Err(if write {
             AdapterError::UnknownOutcome {
                 operation_id: operation_id.into(),
+                readback: None,
+                protocol_error: None,
             }
         } else {
             AdapterError::ProtocolMismatch
@@ -762,10 +786,17 @@ struct ProjectTransportResponse {
     api_version: String,
     schema_version: String,
     operation_id: String,
-    data: String,
+    data: Value,
 }
 
 fn envelope_value(envelope: Envelope<Value>, _scope: &str) -> Result<Value, AdapterError> {
+    if envelope.outcome == ApplicationOutcome::Unknown {
+        return Err(AdapterError::UnknownOutcome {
+            operation_id: envelope.operation_id,
+            readback: envelope.data,
+            protocol_error: Some(envelope.error.ok_or(AdapterError::ProtocolMismatch)?),
+        });
+    }
     if !envelope.outcome.is_success() {
         return Err(AdapterError::Application {
             operation_id: envelope.operation_id,
@@ -905,7 +936,11 @@ mod tests {
     use crate::config::{GlobalEndpoint, Policy, ProjectEndpoint};
     use std::{
         collections::{BTreeMap, BTreeSet},
-        path::PathBuf,
+        fs,
+        path::{Path, PathBuf},
+        process::{Child, Command, Stdio},
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     fn test_backend() -> (BorealBackend, AuthenticatedPrincipal) {
@@ -984,5 +1019,299 @@ mod tests {
         assert!(validate_external_identity("sha256:abc123/config-v2", "config_identity").is_ok());
         assert!(validate_external_identity("", "source_version_id").is_err());
         assert!(validate_external_identity("source\nversion", "source_version_id").is_err());
+    }
+
+    #[test]
+    fn project_transport_data_is_the_authoritative_json_envelope_value() {
+        let transport: ProjectTransportResponse = serde_json::from_value(json!({
+            "api_version": PROJECT_API_VERSION,
+            "schema_version": PROJECT_SCHEMA_VERSION,
+            "operation_id": "op_project_status",
+            "data": {
+                "api_version": API_VERSION,
+                "schema_version": boreal_protocol::schema::ENVELOPE,
+                "operation_id": "op_project_status",
+                "revision": 7,
+                "as_of": "2026-10-09T00:00:00Z",
+                "next_status_change_at": null,
+                "transport": "ok",
+                "outcome": "changed",
+                "data": {"project_id": "project-a"},
+                "detail_ref": null,
+                "error": null
+            }
+        }))
+        .expect("service returns the envelope as a JSON object");
+
+        let envelope: Envelope<Value> = serde_json::from_value(transport.data)
+            .expect("nested envelope parses without a string round trip");
+        envelope.validate().expect("nested envelope is valid");
+        assert_eq!(envelope.operation_id, "op_project_status");
+        assert_eq!(envelope.data.unwrap()["project_id"], "project-a");
+    }
+
+    #[test]
+    fn unknown_envelope_keeps_readback_and_service_recovery_guidance() {
+        let mut error = ProtocolError::new(
+            boreal_protocol::ErrorCode::UnknownOutcome,
+            "commit completed but the response was lost",
+            true,
+        );
+        error.readback_required = Some(true);
+        error.operation_preserved = Some(true);
+        let envelope = Envelope {
+            api_version: API_VERSION.into(),
+            schema_version: boreal_protocol::schema::ENVELOPE.into(),
+            operation_id: "op_uncertain_write".into(),
+            revision: Some(11),
+            as_of: "2026-10-09T00:00:00Z".into(),
+            next_status_change_at: None,
+            transport: TransportOutcome::Error,
+            outcome: ApplicationOutcome::Unknown,
+            data: Some(json!({"committed": true, "receipt": "receipt-11"})),
+            detail_ref: None,
+            error: Some(error),
+        };
+
+        match envelope_value(envelope, "project-a").unwrap_err() {
+            AdapterError::UnknownOutcome {
+                operation_id,
+                readback,
+                protocol_error,
+            } => {
+                assert_eq!(operation_id, "op_uncertain_write");
+                assert_eq!(readback.unwrap()["receipt"], "receipt-11");
+                let protocol_error = protocol_error.unwrap();
+                assert_eq!(protocol_error.readback_required, Some(true));
+                assert_eq!(protocol_error.operation_preserved, Some(true));
+                assert!(protocol_error.message.contains("response was lost"));
+            }
+            other => panic!("unknown result was misclassified: {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires a freshly built bwrk binary; run the documented daemon regression command"]
+    async fn project_status_and_operation_readback_accept_a_real_disposable_daemon() {
+        use std::os::unix::net::UnixStream;
+
+        struct TempRoot(PathBuf);
+        impl Drop for TempRoot {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        struct ChildGuard(Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if self.0.try_wait().ok().flatten().is_none() {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+        }
+
+        struct EnvGuard {
+            name: String,
+            previous: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                if let Some(value) = self.previous.take() {
+                    std::env::set_var(&self.name, value);
+                } else {
+                    std::env::remove_var(&self.name);
+                }
+            }
+        }
+
+        fn cli_binary() -> PathBuf {
+            std::env::var_os("BWRK_BIN")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/bwrk")
+                })
+        }
+
+        fn run_cli(binary: &Path, root: &Path, args: &[&str], db: &Path) -> serde_json::Value {
+            let output = Command::new(binary)
+                .current_dir(root)
+                .args(args)
+                .arg("--db")
+                .arg(db)
+                .arg("--json")
+                .output()
+                .expect("disposable bwrk command launches");
+            assert!(
+                output.status.success(),
+                "disposable bwrk command failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice(&output.stdout).expect("disposable bwrk command returns JSON")
+        }
+
+        let binary = cli_binary();
+        assert!(
+            binary.is_file(),
+            "build boreal-cli and set BWRK_BIN to its bwrk binary before running this test: {}",
+            binary.display()
+        );
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let root = TempRoot(
+            std::env::temp_dir().join(format!("boreal-mcp-daemon-{}-{nonce}", std::process::id())),
+        );
+        fs::create_dir_all(&root.0).expect("temporary project root is created");
+        let db = root.0.join(".boreal/boreal.sqlite");
+        let socket = root.0.join(".boreal/mcp-project.sock");
+        let project_id = "mcp-daemon-project";
+        let actor_id = "mcp-daemon-agent";
+        let target_operation_id = "op_mcp_daemon_session";
+        run_cli(
+            &binary,
+            &root.0,
+            &[
+                "init",
+                "--project",
+                project_id,
+                "--actor",
+                actor_id,
+                "--operation-id",
+                "op_mcp_daemon_init",
+            ],
+            &db,
+        );
+        run_cli(
+            &binary,
+            &root.0,
+            &[
+                "session",
+                "start",
+                "--project",
+                project_id,
+                "--actor",
+                actor_id,
+                "--harness",
+                "mcp-daemon-test",
+                "--session",
+                "mcp-daemon-session",
+                "--operation-id",
+                target_operation_id,
+            ],
+            &db,
+        );
+
+        let credential = fs::read_dir(root.0.join(".boreal/credentials"))
+            .expect("project credential directory exists")
+            .filter_map(Result::ok)
+            .map(|entry| fs::read(entry.path()).expect("project credential file reads"))
+            .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .find(|file| file["actor_id"] == actor_id)
+            .and_then(|file| file["credential"].as_str().map(str::to_owned))
+            .expect("project setup created a local actor credential");
+        let credential_env = format!("BOREAL_MCP_DAEMON_CREDENTIAL_{}", std::process::id());
+        let env_guard = EnvGuard {
+            name: credential_env.clone(),
+            previous: std::env::var_os(&credential_env),
+        };
+        std::env::set_var(&credential_env, credential);
+
+        let mut service = ChildGuard(
+            Command::new(&binary)
+                .current_dir(&root.0)
+                .args(["service", "run", "--db"])
+                .arg(&db)
+                .args(["--socket"])
+                .arg(&socket)
+                .args(["--max-requests", "2", "--json"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("disposable Project daemon starts"),
+        );
+        let mut ready = false;
+        for _ in 0..200 {
+            if socket.exists() && UnixStream::connect(&socket).is_ok() {
+                ready = true;
+                break;
+            }
+            if service
+                .0
+                .try_wait()
+                .expect("daemon process status reads")
+                .is_some()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready, "disposable Project daemon did not bind its socket");
+
+        let credential_name = credential_env;
+        let config = Arc::new(McpConfig {
+            version: 1,
+            global: None,
+            projects: BTreeMap::from([(
+                project_id.into(),
+                ProjectEndpoint {
+                    socket: socket.clone(),
+                    credential_env_by_actor: BTreeMap::from([(actor_id.into(), credential_name)]),
+                },
+            )]),
+            principals: BTreeMap::new(),
+            stdio_profiles: BTreeMap::new(),
+            http: None,
+        });
+        config.validate().expect("synthetic MCP binding is valid");
+        let policy = Policy {
+            actor_id: actor_id.into(),
+            projects: BTreeSet::from([project_id.into()]),
+            scopes: BTreeSet::from([SCOPE_PROJECT_READ.into()]),
+        };
+        let principal = AuthenticatedPrincipal::from_stdio_policy("test-agent", &policy, &config);
+        let backend = BorealBackend::new(config);
+
+        let status = backend
+            .project_status(&principal, project_id.into(), 10, 0)
+            .await
+            .expect("MCP Project status reads the real daemon envelope");
+        assert_eq!(status["outcome"], "unchanged");
+        assert!(status["data"].is_object());
+
+        let operation = backend
+            .project_operation_status(&principal, project_id.into(), target_operation_id.into())
+            .await
+            .expect("MCP operation status reads the real daemon envelope");
+        assert_eq!(operation["outcome"], "changed");
+        assert_eq!(
+            operation["data"]["operation"]["operation_id"],
+            target_operation_id
+        );
+
+        for _ in 0..200 {
+            if service
+                .0
+                .try_wait()
+                .expect("daemon process status reads")
+                .is_some()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            service
+                .0
+                .try_wait()
+                .expect("daemon exits after request limit")
+                .is_some(),
+            "disposable Project daemon handled two MCP reads and then stopped"
+        );
+        drop(env_guard);
     }
 }

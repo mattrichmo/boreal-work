@@ -27,7 +27,7 @@ use crate::{
     auth::{AuthError, AuthenticatedPrincipal, OAuthIntrospector},
     backend::{AdapterError, BorealBackend, WorkClaimInput, WorkEditInput},
     config::{HttpConfig, McpConfig, SCOPE_GLOBAL_READ, SCOPE_PROJECT_READ, SCOPE_PROJECT_WRITE},
-    MAX_HTTP_BODY_BYTES, MAX_TOOL_INPUT_BYTES,
+    MAX_HTTP_BODY_BYTES, MAX_TOOL_INPUT_BYTES, MAX_TOOL_OUTPUT_BYTES,
 };
 
 const HTTP_ENDPOINT: &str = "/mcp";
@@ -554,11 +554,23 @@ struct OperationStatusInput {
 
 fn tool_error(error: AdapterError) -> CallToolResult {
     let data = match &error {
-        AdapterError::UnknownOutcome { operation_id } => json!({
+        AdapterError::UnknownOutcome {
+            operation_id,
+            readback,
+            protocol_error,
+        } => json!({
             "error": "unknown_outcome",
+            "outcome": "unknown",
             "message": error.to_string(),
             "operation_id": operation_id,
             "recovery_tool": "operation_status",
+            "readback": readback,
+            "readback_required": protocol_error
+                .as_ref()
+                .and_then(|error| error.readback_required),
+            "recovery": protocol_error
+                .as_ref()
+                .and_then(|error| error.recovery.as_ref()),
         }),
         AdapterError::Application {
             operation_id,
@@ -577,8 +589,25 @@ fn tool_error(error: AdapterError) -> CallToolResult {
         }),
         _ => json!({"error": "boreal_mcp", "message": error.to_string()}),
     };
-    let text =
+    let mut text =
         serde_json::to_string(&data).unwrap_or_else(|_| "{\"error\":\"boreal_mcp\"}".to_owned());
+    if text.len() > MAX_TOOL_OUTPUT_BYTES {
+        text = match &error {
+            AdapterError::UnknownOutcome { operation_id, .. } => serde_json::to_string(&json!({
+                "error": "unknown_outcome",
+                "outcome": "unknown",
+                "message": "the service response included oversized recovery data; read the operation status before retrying",
+                "operation_id": operation_id,
+                "recovery_tool": "operation_status",
+                "readback": null,
+                "readback_omitted": true,
+                "readback_required": true,
+            }))
+            .unwrap_or_else(|_| "{\"error\":\"unknown_outcome\"}".to_owned()),
+            _ => "{\"error\":\"boreal_mcp\",\"message\":\"Boreal MCP error details exceeded the inline output limit\"}"
+                .to_owned(),
+        };
+    }
     CallToolResult::error(vec![ContentBlock::text(text)])
 }
 
@@ -1230,5 +1259,56 @@ mod tests {
             validate_host_origin(&headers, &http),
             Err(StatusCode::FORBIDDEN)
         );
+    }
+
+    #[test]
+    fn unknown_tool_error_keeps_operation_readback_and_recovery_guidance() {
+        let mut protocol_error = boreal_protocol::ProtocolError::new(
+            boreal_protocol::ErrorCode::UnknownOutcome,
+            "the write committed but its final response was unavailable",
+            true,
+        );
+        protocol_error.readback_required = Some(true);
+        protocol_error.recovery = Some(boreal_protocol::RecoveryAction {
+            action: "read_operation_status".into(),
+            safe_argv: vec!["bwrk".into(), "operation".into(), "show".into()],
+        });
+        let result = tool_error(AdapterError::UnknownOutcome {
+            operation_id: "op_uncertain_write".into(),
+            readback: Some(json!({"operation": {"state": "committed"}})),
+            protocol_error: Some(protocol_error),
+        });
+
+        assert_eq!(result.is_error, Some(true));
+        let ContentBlock::Text(content) = &result.content[0] else {
+            panic!("error content is not text");
+        };
+        let data: Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(data["error"], "unknown_outcome");
+        assert_eq!(data["outcome"], "unknown");
+        assert_eq!(data["operation_id"], "op_uncertain_write");
+        assert_eq!(data["recovery_tool"], "operation_status");
+        assert_eq!(data["readback"]["operation"]["state"], "committed");
+        assert_eq!(data["readback_required"], true);
+        assert_eq!(data["recovery"]["action"], "read_operation_status");
+    }
+
+    #[test]
+    fn oversized_unknown_readback_is_bounded_without_losing_recovery_identity() {
+        let result = tool_error(AdapterError::UnknownOutcome {
+            operation_id: "op_large_uncertain_write".into(),
+            readback: Some(json!({"body": "x".repeat(MAX_TOOL_OUTPUT_BYTES)})),
+            protocol_error: None,
+        });
+        let ContentBlock::Text(content) = &result.content[0] else {
+            panic!("error content is not text");
+        };
+        assert!(content.text.len() <= MAX_TOOL_OUTPUT_BYTES);
+        let data: Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(data["error"], "unknown_outcome");
+        assert_eq!(data["outcome"], "unknown");
+        assert_eq!(data["operation_id"], "op_large_uncertain_write");
+        assert_eq!(data["recovery_tool"], "operation_status");
+        assert_eq!(data["readback_omitted"], true);
     }
 }

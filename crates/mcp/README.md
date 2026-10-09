@@ -160,6 +160,30 @@ remain unavailable until their actual Boreal contracts are integrated. There
 is no generic shell, SQL, arbitrary filesystem or URL-fetch tool. Artifact
 bodies are not returned.
 
+## Validation
+
+Run the MCP unit and synthetic HTTP-auth tests from the repository root:
+
+```sh
+cargo test --manifest-path crates/mcp/Cargo.toml --lib
+```
+
+The real-daemon regression starts a disposable `bwrk service run` process over
+a temporary project database and checks both `project_status` and
+`operation_status`. Build the current CLI binary first, then run the daemon
+test explicitly:
+
+```sh
+cargo build -p boreal-cli --bin bwrk
+BWRK_BIN="$PWD/target/debug/bwrk" cargo test \
+  --manifest-path crates/mcp/Cargo.toml --lib \
+  backend::tests::project_status_and_operation_readback_accept_a_real_disposable_daemon \
+  -- --ignored --exact
+```
+
+The test creates and removes only synthetic local project data and credentials;
+it does not contact an external provider or expose a listener.
+
 ## Integration handoff
 
 This package intentionally does not change the root Cargo workspace, the
