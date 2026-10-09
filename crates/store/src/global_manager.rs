@@ -484,10 +484,30 @@ impl GlobalManagerStore {
         package_path: impl AsRef<Path>,
         operation_id: &str,
     ) -> Result<GlobalRestoreReport, StoreError> {
-        let database_path = database_path.as_ref();
-        let package_path = package_path.as_ref();
+        Self::restore_package_to_with_hook(
+            database_path.as_ref(),
+            package_path.as_ref(),
+            operation_id,
+            |_| Ok(()),
+        )
+    }
+
+    fn restore_package_to_with_hook<F>(
+        database_path: &Path,
+        package_path: &Path,
+        operation_id: &str,
+        after_sqlite_quiescence: F,
+    ) -> Result<GlobalRestoreReport, StoreError>
+    where
+        F: FnOnce(&Path) -> Result<(), StoreError>,
+    {
         reject_package_symlink(database_path)?;
         let _maintenance = GlobalMaintenanceGuard::try_exclusive(database_path, operation_id)?;
+        let initial_active_metadata = if database_path.exists() {
+            Some(Self::open_snapshot(database_path)?.validate_invariants()?)
+        } else {
+            None
+        };
         let (manifest, manifest_checksum) = Self::validate_backup_package(package_path)?;
         let parent = database_path.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent).map_err(|error| {
@@ -595,29 +615,57 @@ impl GlobalManagerStore {
         journal["stage"] = json!("staged");
         write_json_atomic(&journal_path, &journal)?;
 
+        let mut prior_database_guard = None;
         if database_path.exists() && !previous_database.exists() {
-            checkpoint_file_for_activation(&database_path)?;
-            fs::rename(&database_path, &previous_database).map_err(|error| {
-                StoreError::Unavailable(format!(
-                    "cannot retain previous Global database {}: {error}",
-                    previous_database.display()
-                ))
-            })?;
-            sync_directory(parent)?;
-            journal["stage"] = json!("previous_retained");
-            write_json_atomic(&journal_path, &journal)?;
+            let current_metadata = Self::open_snapshot(&database_path)?.validate_invariants()?;
+            if current_metadata.database_id == active_id {
+                // An earlier activation completed before its journal update.
+                // Keep the already-active restore in place on replay.
+            } else {
+                let expected = initial_active_metadata.as_ref().ok_or_else(|| {
+                    StoreError::Busy(
+                        "Global database appeared while restore was being prepared".into(),
+                    )
+                })?;
+                if &current_metadata != expected {
+                    return Err(StoreError::Busy(
+                        "Global database changed while restore was being prepared; retry after the writer completes".into(),
+                    ));
+                }
+                let live = checkpoint_file_for_activation(&database_path)?;
+                let locked_metadata = live.validate_invariants()?;
+                if &locked_metadata != expected {
+                    return Err(StoreError::Busy(
+                        "Global database changed during restore quiescence; retry after the writer completes".into(),
+                    ));
+                }
+                after_sqlite_quiescence(&database_path)?;
+                fs::rename(&database_path, &previous_database).map_err(|error| {
+                    StoreError::Unavailable(format!(
+                        "cannot retain previous Global database {}: {error}",
+                        previous_database.display()
+                    ))
+                })?;
+                sync_directory(parent)?;
+                journal["stage"] = json!("previous_retained");
+                write_json_atomic(&journal_path, &journal)?;
+                prior_database_guard = Some(live);
+            }
+        } else if database_path.exists() {
+            let current_metadata = Self::open_snapshot(&database_path)?.validate_invariants()?;
+            if current_metadata.database_id != active_id {
+                return Err(StoreError::Conflict(
+                    "an unexpected Global database occupies the restore destination".into(),
+                ));
+            }
+        } else if initial_active_metadata.is_some() && !previous_database.exists() {
+            return Err(StoreError::Busy(
+                "Global database disappeared while restore was being prepared".into(),
+            ));
         }
 
         if !database_path.exists() {
-            fs::rename(&stage_database, &database_path).map_err(|error| {
-                if previous_database.exists() && !database_path.exists() {
-                    let _ = fs::rename(&previous_database, &database_path);
-                }
-                StoreError::Unavailable(format!(
-                    "cannot activate staged Global database {}: {error}",
-                    database_path.display()
-                ))
-            })?;
+            activate_staged_database_without_replacing(&stage_database, &database_path)?;
             sync_directory(parent)?;
         }
         let activated = Self::open_snapshot(&database_path)?;
@@ -627,6 +675,8 @@ impl GlobalManagerStore {
                 "activated Global database identity does not match its restore journal".into(),
             ));
         }
+        drop(activated);
+        drop(prior_database_guard);
         journal["stage"] = json!("complete");
         write_json_atomic(&journal_path, &journal)?;
         let _ = fs::remove_dir_all(&stage_dir);
@@ -1209,7 +1259,7 @@ fn migrate_legacy_state(db: &SqliteStore) -> Result<Value, StoreError> {
     Ok(state)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct GlobalDatabaseMetadata {
     schema_version: u64,
     database_id: String,
@@ -1404,9 +1454,10 @@ mod recovery_tests {
         checkpoint_for_activation(&staged.inner).unwrap();
         drop(staged);
 
-        checkpoint_file_for_activation(&database).unwrap();
+        let previous_guard = checkpoint_file_for_activation(&database).unwrap();
         fs::rename(&database, &previous_database).unwrap();
         sync_directory(&root).unwrap();
+        drop(previous_guard);
         journal["stage"] = json!("previous_retained");
         write_json_atomic(&journal_path, &journal).unwrap();
 
@@ -1434,6 +1485,106 @@ mod recovery_tests {
             "source-project"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_global_writer_cannot_commit_between_checkpoint_and_database_swap() {
+        let root = root("legacy-writer-swap-race");
+        fs::create_dir_all(&root).unwrap();
+        let database = root.join("global.sqlite");
+        let package = root.join("backup");
+
+        let store = GlobalManagerStore::open(&database).unwrap();
+        store
+            .mutate("fixture", &json!({}), "source", |mut state, _| {
+                state["projects"] = json!([{"id":"source-project","name":"Source"}]);
+                Ok((state, json!({})))
+            })
+            .unwrap();
+        let backup = store.backup_package_to(&package).unwrap();
+        store
+            .mutate("fixture", &json!({}), "active", |mut state, _| {
+                state["projects"] = json!([{"id":"active-project","name":"Active"}]);
+                Ok((state, json!({})))
+            })
+            .unwrap();
+        drop(store);
+
+        let restored = GlobalManagerStore::restore_package_to_with_hook(
+            &database,
+            &package,
+            "restore-legacy-writer-race",
+            |live_database| {
+                let legacy_write = legacy_project_write(live_database, "racing-project");
+                assert!(
+                    legacy_write.is_err(),
+                    "a pre-maintenance Global writer must not commit in the checkpoint-to-swap window"
+                );
+                Ok(())
+            },
+        )
+        .expect("restore proceeds after SQLite rejects the legacy writer");
+        assert_eq!(restored.source_database_id, backup.database_id);
+        assert_ne!(restored.current_database_id, backup.database_id);
+
+        let active = GlobalManagerStore::open(&database).unwrap();
+        let projects = active.state().unwrap()["projects"].clone();
+        assert_eq!(projects[0]["id"], "source-project");
+        assert!(!projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["id"] == "racing-project"));
+        drop(active);
+
+        let previous = GlobalManagerStore::open(restored.previous_database_path.unwrap()).unwrap();
+        let previous_projects = previous.state().unwrap()["projects"].clone();
+        assert_eq!(previous_projects[0]["id"], "active-project");
+        assert!(!previous_projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["id"] == "racing-project"));
+        drop(previous);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn legacy_project_write(database: &Path, project_id: &str) -> Result<(), StoreError> {
+        let legacy = SqliteStore::open_connection(
+            database,
+            super::super::SQLITE_OPEN_READWRITE | super::super::SQLITE_OPEN_CREATE,
+        )?;
+        legacy.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let mut query =
+                legacy.prepare("SELECT state_json FROM global_manager_state WHERE singleton=1")?;
+            if query.step()? != SQLITE_ROW {
+                return Err(StoreError::Corrupt(
+                    "legacy Global state row is missing".into(),
+                ));
+            }
+            let mut state: Value = serde_json::from_str(&query.column_text(0)?)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            drop(query);
+            state["projects"]
+                .as_array_mut()
+                .ok_or_else(|| StoreError::Corrupt("Global projects are not an array".into()))?
+                .push(json!({"id": project_id, "name": project_id}));
+            let encoded = serde_json::to_string(&state)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            let mut update = legacy
+                .prepare("UPDATE global_manager_state SET state_json=?1 WHERE singleton=1")?;
+            update.bind_text(1, &encoded)?;
+            update.run()?;
+            legacy
+                .execute_batch("UPDATE global_schema SET revision=revision+1 WHERE singleton=1")?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = legacy.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+        legacy.execute_batch("COMMIT")
     }
 
     #[test]
@@ -1696,10 +1847,24 @@ fn checkpoint_for_activation(database: &SqliteStore) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn checkpoint_file_for_activation(path: &Path) -> Result<(), StoreError> {
-    let database = SqliteStore::open_connection(path, super::SQLITE_OPEN_READWRITE)?;
-    checkpoint_for_activation(&database)?;
-    drop(database);
+fn checkpoint_file_for_activation(path: &Path) -> Result<GlobalManagerStore, StoreError> {
+    let database = GlobalManagerStore {
+        inner: SqliteStore::open_connection(path, super::SQLITE_OPEN_READWRITE)?,
+        _admission: None,
+    };
+    checkpoint_for_activation(&database.inner)?;
+    // Keep SQLite's exclusive database lock across the filesystem swap. The
+    // Global advisory lock is not honored by pre-maintenance binaries.
+    database.inner.execute_batch("BEGIN EXCLUSIVE")?;
+    if !database
+        .inner
+        .journal_mode()?
+        .eq_ignore_ascii_case("delete")
+    {
+        return Err(StoreError::Busy(
+            "Global journal mode changed during restore quiescence".into(),
+        ));
+    }
     let file_name = path
         .file_name()
         .ok_or_else(|| StoreError::Invalid("Global database path must name a file".into()))?;
@@ -1731,7 +1896,31 @@ fn checkpoint_file_for_activation(path: &Path) -> Result<(), StoreError> {
             }
         }
     }
-    Ok(())
+    Ok(database)
+}
+
+fn activate_staged_database_without_replacing(
+    staged_database: &Path,
+    database_path: &Path,
+) -> Result<(), StoreError> {
+    fs::hard_link(staged_database, database_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            StoreError::Busy(
+                "Global database appeared during restore activation; it was left untouched".into(),
+            )
+        } else {
+            StoreError::Unavailable(format!(
+                "cannot activate staged Global database {}: {error}",
+                database_path.display()
+            ))
+        }
+    })?;
+    fs::remove_file(staged_database).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot remove staged Global database link {}: {error}",
+            staged_database.display()
+        ))
+    })
 }
 
 fn sync_file(path: &Path) -> Result<(), StoreError> {
