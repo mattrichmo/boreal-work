@@ -403,6 +403,7 @@ impl WorkApplication<'_> {
                 )
             })?;
         let mut latest_revision = None;
+        let mut latest_write_revision = None;
         let mut changed = false;
         for artifact in &submission.artifacts {
             let requirement = requirements_by_key
@@ -448,6 +449,41 @@ impl WorkApplication<'_> {
                         "automatic inspection readback does not match its immutable artifact identity".into(),
                     ));
                 }
+                let prior_operation = self
+                    .store_ref()
+                    .operation_readback(&submission.project_id, &operation_id)?
+                    .and_then(|readback| readback.operation)
+                    .ok_or_else(|| {
+                        ApplicationError::Invalid(
+                            "automatic inspection evidence has no operation readback".into(),
+                        )
+                    })?;
+                let prior_result: serde_json::Value = serde_json::from_str(
+                    &prior_operation.result_json,
+                )
+                .map_err(|_| {
+                    ApplicationError::Invalid(
+                        "automatic inspection operation readback is malformed".into(),
+                    )
+                })?;
+                if prior_operation.project_id != submission.project_id
+                    || prior_operation.command != "work.artifact.inspect/v1"
+                    || prior_operation.actor_id != scope.actor_id
+                    || prior_operation.revision == 0
+                    || prior_result
+                        .get("subject_type")
+                        .and_then(serde_json::Value::as_str)
+                        != Some("work")
+                    || prior_result
+                        .get("subject_id")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(submission.work_id.as_str())
+                {
+                    return Err(ApplicationError::Invalid(
+                        "automatic inspection operation readback does not match its immutable artifact identity".into(),
+                    ));
+                }
+                latest_revision = Some(prior_operation.revision);
                 continue;
             }
 
@@ -470,10 +506,8 @@ impl WorkApplication<'_> {
                 .project_revision(&submission.project_id)?
                 .0;
             let mut inspection_scope = scope.clone();
-            inspection_scope.expected_revision = Some(
-                latest_revision
-                    .unwrap_or(current_revision),
-            );
+            inspection_scope.expected_revision =
+                Some(latest_write_revision.unwrap_or(current_revision));
             let context = mutation_context(
                 &inspection_scope,
                 &operation_id,
@@ -500,6 +534,9 @@ impl WorkApplication<'_> {
                 },
             )?;
             latest_revision = Some(mutation.revision);
+            if !mutation.replayed {
+                latest_write_revision = Some(mutation.revision);
+            }
             changed |= !mutation.replayed;
         }
         Ok((latest_revision, changed))

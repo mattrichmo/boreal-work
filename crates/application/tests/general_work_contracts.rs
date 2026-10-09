@@ -559,20 +559,41 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         .unwrap());
     let output = app.submit_output_artifacts_v1(&output_request).unwrap();
     assert!(output.changed);
+    let first_output_evidence = store
+        .artifact_evidence_v1("p1", "w1", "submission-1")
+        .unwrap()
+        .unwrap();
+    let first_automatic_count = first_output_evidence
+        .inspections
+        .iter()
+        .filter(|inspection| inspection.inspector_kind == "automatic")
+        .count();
+    assert_eq!(first_automatic_count, 1);
+    assert_eq!(
+        output.snapshot_revision,
+        store.project_revision("p1").unwrap().0,
+        "initial output result reports the final automatic-inspection revision"
+    );
     let replayed_output = app.submit_output_artifacts_v1(&output_request).unwrap();
     assert!(!replayed_output.changed);
+    assert_eq!(output.snapshot_revision, replayed_output.snapshot_revision);
+    assert_eq!(output.value, replayed_output.value);
     assert_eq!(output.value.artifacts[0].content_digest, digest);
     let output_evidence = store
         .artifact_evidence_v1("p1", "w1", "submission-1")
         .unwrap()
         .unwrap();
     assert_eq!(
+        output_evidence, first_output_evidence,
+        "output retry preserves the exact inspection evidence"
+    );
+    assert_eq!(
         output_evidence
             .inspections
             .iter()
             .filter(|inspection| inspection.inspector_kind == "automatic")
             .count(),
-        1,
+        first_automatic_count,
         "output retry does not duplicate automatic evidence"
     );
     let automatic = output_evidence
