@@ -378,7 +378,7 @@ impl WorkApplication<'_> {
             &json!({
                 "decision_id":decision.decision_id,"submission_id":decision.submission_id,"contract_revision":decision.contract_revision,
                 "input_revision":decision.input_revision,"artifact_set_digest":decision.artifact_set_digest,
-                "producer_actor_id":decision.producer_actor_id,"decision":decision_name,"reason":decision.reason,
+                "producer_actor_id":decision.producer_actor_id.as_str(),"decision":decision_name,"reason":decision.reason,
             }),
             now,
         );
@@ -686,7 +686,7 @@ fn mutation_context(
         operation_id: operation_id.to_owned(),
         request_digest: canonical_request_digest(
             command,
-            json!({"project_id":scope.project_id,"actor_id":scope.actor_id,"session_id":scope.session_id,"subject_id":subject_id,"expected_revision":scope.expected_revision,"payload":payload}),
+            json!({"project_id":scope.project_id.as_str(),"actor_id":scope.actor_id,"session_id":scope.session_id,"subject_id":subject_id,"expected_revision":scope.expected_revision,"payload":payload}),
         ),
         expected_revision: scope.expected_revision,
         now: now.to_owned(),

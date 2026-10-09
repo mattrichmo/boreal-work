@@ -11,7 +11,7 @@ use std::{collections::BTreeSet, fmt, fs, path::PathBuf};
 use boreal_domain::work_model_v3::{
     validate_cycle_assignments, validate_decomposition, validate_direct_dependencies, Cycle,
     CycleAssignment, CycleId, CycleInstance, CycleSeries, CycleTemplate, DirectDependency,
-    ExecutionMode, FoldPolicy, GapPolicy, LocalDateTime, ModelError, TimeResolution,
+    ExecutionMode, FoldPolicy, GapPolicy, LocalDate, LocalDateTime, ModelError, TimeResolution,
 };
 use boreal_domain::{DispatchPolicy, ProjectId, ReasonCode, TimestampMs, WorkId, WorkItem};
 use serde_json::json;
