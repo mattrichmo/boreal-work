@@ -10,6 +10,37 @@ use boreal_domain::ActorRole;
 use serde_json::{json, Value};
 
 pub const GENERAL_WORK_SCHEMA_VERSION: u64 = 1;
+const GENERAL_WORK_TABLES: &[&str] = &[
+    "boreal_work_contract_v1",
+    "boreal_work_input_set_v1",
+    "boreal_work_accepted_input_v1",
+    "boreal_output_submission_v1",
+    "boreal_produced_artifact_v1",
+    "boreal_artifact_inspection_v1",
+    "boreal_artifact_decision_v1",
+    "boreal_external_wait_v1",
+    "boreal_external_wait_event_v1",
+];
+const GENERAL_WORK_IMMUTABILITY_TRIGGERS: &[&str] = &[
+    "boreal_work_contract_v1_immutable_update",
+    "boreal_work_contract_v1_immutable_delete",
+    "boreal_work_input_set_v1_immutable_update",
+    "boreal_work_input_set_v1_immutable_delete",
+    "boreal_work_accepted_input_v1_immutable_update",
+    "boreal_work_accepted_input_v1_immutable_delete",
+    "boreal_output_submission_v1_immutable_update",
+    "boreal_output_submission_v1_immutable_delete",
+    "boreal_produced_artifact_v1_immutable_update",
+    "boreal_produced_artifact_v1_immutable_delete",
+    "boreal_artifact_inspection_v1_immutable_update",
+    "boreal_artifact_inspection_v1_immutable_delete",
+    "boreal_artifact_decision_v1_immutable_update",
+    "boreal_artifact_decision_v1_immutable_delete",
+    "boreal_external_wait_v1_immutable_update",
+    "boreal_external_wait_v1_immutable_delete",
+    "boreal_external_wait_event_v1_immutable_update",
+    "boreal_external_wait_event_v1_immutable_delete",
+];
 pub const GENERAL_WORK_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS boreal_work_contract_v1 (
   project_id TEXT NOT NULL,
@@ -489,7 +520,26 @@ impl SqliteStore {
             "general_work",
             GENERAL_WORK_SCHEMA_VERSION,
             GENERAL_WORK_SCHEMA_SQL,
-        )
+        )?;
+        self.verify_general_work_schema_contract()
+    }
+
+    fn verify_general_work_schema_contract(&self) -> Result<(), StoreError> {
+        for table in GENERAL_WORK_TABLES {
+            if !self.table_exists(table)? {
+                return Err(StoreError::Corrupt(format!(
+                    "general-work schema is missing required table {table}"
+                )));
+            }
+        }
+        for trigger in GENERAL_WORK_IMMUTABILITY_TRIGGERS {
+            if !self.schema_object_exists("trigger", trigger)? {
+                return Err(StoreError::Corrupt(format!(
+                    "general-work schema is missing required immutability trigger {trigger}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn set_work_contract_v1(
@@ -1314,10 +1364,15 @@ impl SqliteStore {
         let (criteria_json, _) = canonical_json_and_digest(&input.criteria_json)?;
         let payload = json!({"work_id":input.work_id,"inspection_id":input.inspection_id,"submission_id":input.submission_id,"artifact_id":input.artifact_id,"artifact_digest":input.artifact_digest,"inspector_kind":input.inspector_kind,"outcome":input.outcome,"criteria_json":criteria_json});
         let context = context.with_payload(payload);
-        self.fact_mutation(&context,"work.artifact.inspect/v1","work",&input.work_id,&[ActorRole::Agent,ActorRole::Reviewer,ActorRole::Operator],||{
+        self.fact_mutation(&context,"work.artifact.inspect/v1","work",&input.work_id,&[ActorRole::Reviewer,ActorRole::Operator],||{
             self.require_general_work_schema()?;
-            let mut artifact=self.prepare("SELECT content_digest FROM boreal_produced_artifact_v1 WHERE project_id=?1 AND work_id=?2 AND submission_id=?3 AND artifact_id=?4")?;artifact.bind_text(1,&context.project_id)?;artifact.bind_text(2,&input.work_id)?;artifact.bind_text(3,&input.submission_id)?;artifact.bind_text(4,&input.artifact_id)?;
+            let mut inspector=self.prepare("SELECT role FROM actor WHERE actor_id=?1")?;inspector.bind_text(1,&context.actor_id)?;
+            if inspector.step()?!=SQLITE_ROW { return Err(StoreError::NotFound{entity:"inspector",id:context.actor_id.clone()}); }
+            let inspector_role=inspector.column_text(0)?;drop(inspector);
+            if !matches!(inspector_role.as_str(),"reviewer"|"operator") { return Err(StoreError::Invalid("human artifact inspection requires a reviewer or operator principal".into())); }
+            let mut artifact=self.prepare("SELECT content_digest,producer_actor_id FROM boreal_produced_artifact_v1 WHERE project_id=?1 AND work_id=?2 AND submission_id=?3 AND artifact_id=?4")?;artifact.bind_text(1,&context.project_id)?;artifact.bind_text(2,&input.work_id)?;artifact.bind_text(3,&input.submission_id)?;artifact.bind_text(4,&input.artifact_id)?;
             if artifact.step()?!=SQLITE_ROW || artifact.column_text(0)?!=input.artifact_digest { return Err(StoreError::Conflict("inspection must name the exact produced artifact digest".into())); }
+            if artifact.column_text(1)? == context.actor_id { return Err(StoreError::Invalid("human artifact inspection must be performed by someone other than the producer".into())); }
             let mut row=self.prepare("INSERT INTO boreal_artifact_inspection_v1(project_id,work_id,inspection_id,submission_id,artifact_id,artifact_digest,inspector_actor_id,inspector_kind,outcome,criteria_json,inspected_at,operation_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)")?;row.bind_text(1,&context.project_id)?;row.bind_text(2,&input.work_id)?;row.bind_text(3,&input.inspection_id)?;row.bind_text(4,&input.submission_id)?;row.bind_text(5,&input.artifact_id)?;row.bind_text(6,&input.artifact_digest)?;row.bind_text(7,&context.actor_id)?;row.bind_text(8,&input.inspector_kind)?;row.bind_text(9,&input.outcome)?;row.bind_text(10,&criteria_json)?;row.bind_text(11,&context.now)?;row.bind_text(12,&context.operation_id)?;row.run()?;Ok(())
         })
     }
@@ -1395,7 +1450,7 @@ impl SqliteStore {
             let accountable_kind=query.column_text(0)?;let accountable_ref=query.column_text(1)?;
             if self.canonical_production {
                 let (role,_)=self.principal_authority(&context.project_id,&context.actor_id)?;
-                let role_ref=match role {ActorRole::Agent=>"agent",ActorRole::Reviewer=>"reviewer",ActorRole::Operator=>"operator"};
+                let role_ref=match role {ActorRole::Agent=>"agent",ActorRole::Reviewer=>"reviewer",ActorRole::Operator=>"operator",ActorRole::Publisher=>"publisher"};
                 if !matches!(role,ActorRole::Reviewer|ActorRole::Operator) && !(accountable_kind=="person_or_role"&&(accountable_ref==context.actor_id||accountable_ref==role_ref)) {
                     return Err(StoreError::Invalid("wait resolution requires the accountable person or a reviewer/operator".into()));
                 }
@@ -2039,12 +2094,17 @@ fn validate_output_submission(input: &OutputSubmissionInput) -> Result<(), Store
     Ok(())
 }
 fn validate_inspection(input: &ArtifactInspectionInput) -> Result<(), StoreError> {
+    if input.inspector_kind == "automatic" {
+        return Err(StoreError::Invalid(
+            "automatic inspections require trusted internal validator provenance; the public recording method accepts human inspections only".into(),
+        ));
+    }
     if input.work_id.trim().is_empty()
         || input.inspection_id.trim().is_empty()
         || input.submission_id.trim().is_empty()
         || input.artifact_id.trim().is_empty()
         || !input.artifact_digest.starts_with("sha256:")
-        || !matches!(input.inspector_kind.as_str(), "automatic" | "human")
+        || input.inspector_kind != "human"
         || !matches!(input.outcome.as_str(), "passed" | "failed" | "unavailable")
         || input.criteria_json.len() > 65536
     {
@@ -2232,5 +2292,33 @@ fn bind_optional_text(
     match value {
         Some(value) => statement.bind_text(index, value),
         None => statement.bind_null(index),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inspection(kind: &str) -> ArtifactInspectionInput {
+        ArtifactInspectionInput {
+            work_id: "w1".into(),
+            inspection_id: "inspect-1".into(),
+            submission_id: "submission-1".into(),
+            artifact_id: "artifact-1".into(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            inspector_kind: kind.into(),
+            outcome: "passed".into(),
+            criteria_json: "[]".into(),
+        }
+    }
+
+    #[test]
+    fn generic_inspection_write_rejects_caller_asserted_automatic_provenance() {
+        assert!(matches!(
+            validate_inspection(&inspection("automatic")),
+            Err(StoreError::Invalid(message))
+                if message.contains("trusted internal validator provenance")
+        ));
+        assert!(validate_inspection(&inspection("human")).is_ok());
     }
 }

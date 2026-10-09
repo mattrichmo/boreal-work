@@ -294,6 +294,14 @@ impl WorkApplication<'_> {
     ) -> Result<OperationResult<()>, ApplicationError> {
         validate_scope(scope)?;
         validate_operation_id(operation_id)?;
+        let kind = match inspection.inspector_kind {
+            boreal_domain::deliverables::InspectorKind::Automatic => {
+                return Err(ApplicationError::Invalid(
+                    "automatic inspections require trusted internal validator provenance; use a reviewer or operator for a human inspection".into(),
+                ));
+            }
+            boreal_domain::deliverables::InspectorKind::Human => "human",
+        };
         if inspection.project_id != scope.project_id
             || inspection.inspector_actor_id.as_str() != scope.actor_id
         {
@@ -301,10 +309,6 @@ impl WorkApplication<'_> {
                 "inspection project and inspector must match the authenticated scope".into(),
             ));
         }
-        let kind = match inspection.inspector_kind {
-            boreal_domain::deliverables::InspectorKind::Automatic => "automatic",
-            boreal_domain::deliverables::InspectorKind::Human => "human",
-        };
         let outcome = match inspection.outcome {
             boreal_domain::deliverables::InspectionOutcome::Passed => "passed",
             boreal_domain::deliverables::InspectionOutcome::Failed => "failed",
@@ -805,5 +809,107 @@ fn parse_business_moment(raw: &str) -> Result<BusinessMoment, ApplicationError> 
         _ => Err(ApplicationError::Invalid(
             "business moment kind is unsupported".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boreal_domain::deliverables::{InspectionOutcome, InspectorKind};
+    use boreal_domain::{ActorId, ProjectId, WorkId};
+    use boreal_store::SqliteStore;
+
+    #[test]
+    fn enrolled_agent_cannot_assert_automatic_inspection() {
+        let store = SqliteStore::open_in_memory(include_str!(
+            "../../../project/spec/schema-v2.sql"
+        ))
+        .expect("synthetic schema opens");
+        let app = WorkApplication::new(&store);
+        let mut scope = PlanningScope::new(ProjectId::new("p1"), "agent-1");
+        scope.expected_revision = Some(0);
+        let inspection = ArtifactInspection {
+            inspection_id: "inspect-1".into(),
+            project_id: ProjectId::new("p1"),
+            work_id: WorkId::new("w1"),
+            submission_id: "submission-1".into(),
+            artifact_id: "artifact-1".into(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            inspector_actor_id: ActorId::new("agent-1"),
+            inspector_kind: InspectorKind::Automatic,
+            outcome: InspectionOutcome::Passed,
+            criteria: Vec::new(),
+            inspected_at: TimestampMs(1),
+        };
+
+        let result = app.record_artifact_inspection_v1(
+            &scope,
+            "op-forged-automatic-inspection",
+            &inspection,
+            "unix-ms:1",
+        );
+        assert!(matches!(
+            result,
+            Err(ApplicationError::Invalid(message))
+                if message.contains("trusted internal validator provenance")
+        ));
+        assert!(!store
+            .operation_exists("op-forged-automatic-inspection")
+            .expect("operation lookup succeeds"));
+    }
+
+    #[test]
+    fn enrolled_agent_cannot_record_a_human_inspection_as_the_producer() {
+        let store = SqliteStore::open_with_work_model_v3(
+            ":memory:",
+            include_str!("../../../project/spec/schema-v2.sql"),
+            include_str!("../../../project/spec/schema-v3.sql"),
+        )
+        .expect("synthetic v3 schema opens");
+        store
+            .ensure_general_work_schema()
+            .expect("general-work schema installs");
+        let app = WorkApplication::new(&store);
+        let project = ProjectId::new("p1");
+        app.init_project(
+            &project,
+            "agent-1",
+            "agent",
+            "fixture-agent",
+            "Fixture agent",
+            "unix-ms:0",
+            "op-init-agent-inspection",
+        )
+        .expect("synthetic agent project initializes");
+        let mut scope = PlanningScope::new(project.clone(), "agent-1");
+        scope.expected_revision = Some(store.project_revision("p1").unwrap().0);
+        let inspection = ArtifactInspection {
+            inspection_id: "inspect-human-1".into(),
+            project_id: project,
+            work_id: WorkId::new("w1"),
+            submission_id: "submission-1".into(),
+            artifact_id: "artifact-1".into(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            inspector_actor_id: ActorId::new("agent-1"),
+            inspector_kind: InspectorKind::Human,
+            outcome: InspectionOutcome::Passed,
+            criteria: Vec::new(),
+            inspected_at: TimestampMs(1),
+        };
+
+        let result = app.record_artifact_inspection_v1(
+            &scope,
+            "op-forged-human-inspection",
+            &inspection,
+            "unix-ms:1",
+        );
+        assert!(matches!(
+            result,
+            Err(ApplicationError::Store(boreal_store::StoreError::Invalid(message)))
+                if message.contains("reviewer or operator principal")
+        ));
+        assert!(!store
+            .operation_exists("op-forged-human-inspection")
+            .expect("operation lookup succeeds"));
     }
 }

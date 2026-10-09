@@ -648,7 +648,7 @@ pub struct ArtifactInspectionDto {
     pub artifact_id: String,
     pub artifact_digest: String,
     pub inspector_actor_id: String,
-    /// `automatic` or `human`; neither value implies the other.
+    /// `automatic` is reserved for a trusted internal validator path.
     pub inspector_kind: ArtifactInspectorKindDto,
     pub outcome: ArtifactInspectionOutcomeDto,
     #[serde(default)]
@@ -665,6 +665,8 @@ pub struct ArtifactInspectionCommandDto {
     pub submission_id: String,
     pub artifact_id: String,
     pub artifact_digest: String,
+    /// The public inspection command accepts `human`; `automatic` is
+    /// reserved for a future trusted internal validator writer.
     pub inspector_kind: ArtifactInspectorKindDto,
     pub outcome: ArtifactInspectionOutcomeDto,
     #[serde(default)]

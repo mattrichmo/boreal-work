@@ -575,7 +575,9 @@ pub fn evaluate_output_coverage(
                     && inspection.submission_id == submission_id
                     && inspection.artifact_id == artifact.artifact_id
                     && inspection.artifact_digest == artifact.identity.content_digest
-                    && inspection.inspector_kind == InspectorKind::Automatic
+                    && (inspection.inspector_kind == InspectorKind::Automatic
+                        || (inspection.inspector_kind == InspectorKind::Human
+                            && inspection.inspector_actor_id != artifact.producer_actor_id))
             })
             .max_by_key(|inspection| inspection.inspected_at);
         if rigor.requires_inspection() {
@@ -985,5 +987,56 @@ mod tests {
         assert!(coverage
             .issues
             .contains(&CoverageIssue::FailedInspection("a".into())));
+    }
+
+    #[test]
+    fn human_inspection_counts_only_when_the_inspector_is_not_the_producer() {
+        let value = contract(vec![requirement("master", true, 1)]);
+        let rigor = RigorProfile::supported("deliverables-validated", 1).unwrap();
+        let item = artifact("a", "master", "s", ArtifactAvailability::Available);
+        let mut inspection = ArtifactInspection {
+            inspection_id: "inspect-1".into(),
+            project_id: ProjectId::new("p"),
+            work_id: WorkId::new("w"),
+            submission_id: "s".into(),
+            artifact_id: "a".into(),
+            artifact_digest: item.identity.content_digest.clone(),
+            inspector_actor_id: item.producer_actor_id.clone(),
+            inspector_kind: InspectorKind::Human,
+            outcome: InspectionOutcome::Passed,
+            criteria: Vec::new(),
+            inspected_at: TimestampMs(10),
+        };
+
+        let self_inspected = evaluate_output_coverage(
+            &value,
+            &rigor,
+            "s",
+            1,
+            2,
+            std::slice::from_ref(&item),
+            std::slice::from_ref(&inspection),
+            None,
+            "set",
+        )
+        .unwrap();
+        assert!(self_inspected
+            .issues
+            .contains(&CoverageIssue::MissingInspection("a".into())));
+
+        inspection.inspector_actor_id = ActorId::new("reviewer");
+        let independently_inspected = evaluate_output_coverage(
+            &value,
+            &rigor,
+            "s",
+            1,
+            2,
+            &[item],
+            &[inspection],
+            None,
+            "set",
+        )
+        .unwrap();
+        assert!(independently_inspected.accepted);
     }
 }
