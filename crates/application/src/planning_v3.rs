@@ -587,6 +587,34 @@ impl SystemTimeZoneDatabase {
         })
     }
 
+    /// Confirm that a supplied name resolves to a parseable installed IANA
+    /// zone. Callers use this when persisting date-only business intent.
+    pub fn validate_timezone(&self, timezone: &str) -> Result<(), PlanningError> {
+        let (bytes, _) = self.read_zone(timezone)?;
+        TzifZone::parse(&bytes).map(|_| ())
+    }
+
+    /// Resolve the civil date in a named zone for a UTC instant. This keeps
+    /// date-only follow-ups distinct from timestamps and honors DST changes.
+    pub fn local_date_at(
+        &self,
+        timezone: &str,
+        instant: TimestampMs,
+    ) -> Result<LocalDate, PlanningError> {
+        let (bytes, _) = self.read_zone(timezone)?;
+        let zone = TzifZone::parse(&bytes)?;
+        let utc_seconds = i64::try_from(instant.as_millis() / 1_000)
+            .map_err(|_| PlanningError::Invalid("timestamp is outside timezone range".into()))?;
+        let local_seconds = utc_seconds
+            .checked_add(i64::from(zone.offset_at(utc_seconds)))
+            .ok_or_else(|| PlanningError::Invalid("local timestamp overflow".into()))?;
+        let days = local_seconds.div_euclid(86_400);
+        let (year, month, day) = civil_from_epoch_days(days);
+        let date = LocalDate::new(year, month, day);
+        date.validate()?;
+        Ok(date)
+    }
+
     pub fn resolve(
         &self,
         timezone: &str,
@@ -841,6 +869,20 @@ fn local_seconds(local: LocalDateTime) -> Result<i64, PlanningError> {
         .ok_or_else(|| PlanningError::Invalid("local timestamp overflow".to_owned()))
 }
 
+fn civil_from_epoch_days(days: i64) -> (i32, u8, u8) {
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year as i32, month as u8, day as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,6 +1059,29 @@ mod tests {
         assert_eq!(early.utc_offset_minutes, -240);
         assert_eq!(late.utc_offset_minutes, -300);
         assert!(early.utc_instant < late.utc_instant);
+    }
+
+    #[test]
+    fn date_only_local_midnight_uses_current_dst_aware_zone_date() {
+        let tzdb = SystemTimeZoneDatabase::system();
+        let midnight = tzdb
+            .resolve(
+                "America/Regina",
+                LocalDateTime::new(LocalDate::new(2026, 10, 9), LocalTime::new(0, 0, 0)),
+                GapPolicy::NextValid,
+                FoldPolicy::EarlierOffset,
+            )
+            .unwrap()
+            .utc_instant;
+        let previous = TimestampMs::from_millis(midnight.as_millis() - 1);
+        assert_eq!(
+            tzdb.local_date_at("America/Regina", previous).unwrap(),
+            LocalDate::new(2026, 10, 8)
+        );
+        assert_eq!(
+            tzdb.local_date_at("America/Regina", midnight).unwrap(),
+            LocalDate::new(2026, 10, 9)
+        );
     }
 
     #[test]

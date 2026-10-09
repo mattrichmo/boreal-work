@@ -1,0 +1,119 @@
+{
+  "schema_version": "boreal.general-work/1",
+  "status": "frozen-wire-contract; application-use-cases-ready; registered CLI/service adapter routes pending",
+  "compatibility": {
+    "receipt_contract": "boreal.command-receipt/v2 remains unchanged",
+    "unknown_object_fields": "ignored by v1 readers for additive compatibility",
+    "unknown_enum_values": "rejected as unsupported",
+    "paths": "locators only; content and lineage use project-scoped source_version_id plus digest"
+  },
+  "operations": {
+    "work.contract.set/v1": {
+      "input": "RequirementSetDto",
+      "application_method": "WorkApplication::set_work_contract_v1",
+      "identity": ["context.project_id", "work_id", "expected_contract_revision", "new_contract_revision", "context.operation_id", "context.expected_project_revision"],
+      "outcome": "GeneralWorkMutationResultDto<null>; readback is WorkContractRevisionDto"
+    },
+    "work.inputs.accept/v1": {
+      "input": "AcceptedInputSetDto",
+      "application_method": "WorkApplication::accept_input_set_v1",
+      "identity": ["context.project_id", "work_id", "expected_contract_revision", "expected_input_revision", "new_input_revision", "context.operation_id", "context.expected_project_revision"],
+      "outcome": "GeneralWorkMutationResultDto<null>; readback is AcceptedInputSetReadDto"
+    },
+    "work.outputs.submit/v1": {
+      "input": "OutputSubmissionCommandDto",
+      "application_method": "WorkApplication::submit_output_artifacts_v1",
+      "identity": ["context.project_id", "work_id", "attempt_id", "fence", "proof_revision", "contract_revision", "input_revision", "context.operation_id", "context.expected_project_revision"],
+      "outcome": "GeneralWorkMutationResultDto<OutputSubmissionDto> with immutable artifact-set digest"
+    },
+    "work.artifact.inspect/v1": {
+      "input": "ArtifactInspectionCommandDto",
+      "application_method": "WorkApplication::record_artifact_inspection_v1",
+      "identity": ["context.project_id", "work_id", "submission_id", "artifact_id", "artifact_digest", "context.actor_id", "context.operation_id", "context.expected_project_revision"],
+      "outcome": "GeneralWorkMutationResultDto<null>; readback is ArtifactEvidenceListDto; never a command receipt"
+    },
+    "work.artifact.decide/v1": {
+      "input": "ArtifactAcceptanceDecisionCommandDto",
+      "application_method": "WorkApplication::record_artifact_decision_v1",
+      "identity": ["context.project_id", "work_id", "submission_id", "contract_revision", "input_revision", "proof_revision", "artifact_set_digest", "context.actor_id", "context.operation_id", "context.expected_project_revision"],
+      "outcome": "GeneralWorkMutationResultDto<null>; readback is ArtifactEvidenceListDto"
+    },
+    "work.wait.create/v1": {
+      "input": "ExternalWaitCreateDto",
+      "application_method": "WorkApplication::create_external_wait_v1",
+      "identity": ["context.project_id", "work_id", "wait_id", "context.operation_id", "context.expected_project_revision"],
+      "outcome": "GeneralWorkMutationResultDto<null>; open structured wait blocks that work and dependent edges only"
+    },
+    "work.wait.resolve/v1": {
+      "input": "ExternalWaitResolveDto",
+      "application_method": "WorkApplication::resolve_external_wait_v1",
+      "identity": ["context.project_id", "work_id", "wait_id", "state", "context.actor_id", "context.operation_id", "context.expected_project_revision"],
+      "outcome": "GeneralWorkMutationResultDto<null>; append-only attributed resolution or cancellation; task completion remains separate"
+    },
+    "work.contract.read/v1": {
+      "application_method": "WorkApplication::work_contract_v1",
+      "input": "project_id, work_id, optional contract_revision",
+      "outcome": "optional immutable WorkContractRevisionDto"
+    },
+    "work.inputs.read/v1": {
+      "application_method": "WorkApplication::accepted_input_set_v1",
+      "input": "project_id, work_id, optional input_revision",
+      "outcome": "optional immutable AcceptedInputSetReadDto, including the exact set header even when it contains no bindings"
+    },
+    "work.outputs.read/v1": {
+      "application_method": "WorkApplication::output_submission_v1",
+      "input": "project_id, work_id, submission_id",
+      "outcome": "optional immutable OutputSubmissionDto"
+    },
+    "work.artifact.evidence.read/v1": {
+      "application_method": "WorkApplication::artifact_evidence_v1",
+      "input": "project_id, work_id, submission_id",
+      "outcome": "optional ArtifactEvidenceListDto with attributed inspection and decision history from one SQLite snapshot"
+    },
+    "work.acceptance.read/v1": {
+      "application_method": "WorkApplication::output_acceptance_v1",
+      "input": "project_id, work_id, expected_project_revision",
+      "outcome": "OutputCoverageDto with source, contract, input, and proof revisions; latest exact submission identity; covered requirement keys; required/optional gaps; stale/rejected observations; and safe next operations",
+      "read_consistency": "single SQLite read transaction; stale expected project revision is rejected"
+    },
+    "work.wait.list/v1": {
+      "application_method": "WorkApplication::external_wait_list_v1",
+      "input": "project_id, optional work_id, include_terminal, expected_project_revision, now_utc_ms",
+      "outcome": "ExternalWaitListDto with source revision, active blocked work IDs, due and overdue follow-up wait IDs, and attributed terminal history",
+      "read_consistency": "result is rejected if project revision changes during the bounded read"
+    }
+  },
+  "business_moment": {
+    "instant": {"kind": "instant", "at_utc_ms": 1791561600000},
+    "date_only": {"kind": "date_only", "date": "2026-10-09", "timezone": "America/Regina"},
+    "rules": [
+      "date-only values retain their civil date and IANA timezone",
+      "date-only years are bounded to the round-trippable YYYY range 0001 through 9999",
+      "instant midnight is an exact instant, not a date-only value",
+      "missing follow-up is allowed and does not erase an open wait"
+    ]
+  },
+  "rigor_profiles_v1": {
+    "lightweight@1": "completion attestation; no invented executable proof",
+    "deliverables-validated@1": "required output coverage and attributable automatic inspection",
+    "reviewed-artifacts@1": "deliverables-validated plus independent exact-submission decision",
+    "software-verification@1": "existing registered software verification gates remain required",
+    "focused": "legacy immutable profile semantics retained",
+    "reviewed": "legacy immutable profile semantics retained"
+  },
+  "legacy_gate_policy": {
+    "legacy_contract_absent": "existing pinned focused/reviewed behavior is unchanged",
+    "new_general_rigor": "lightweight, deliverables-validated, or reviewed-artifacts selected on draft work makes legacy checkpoint/verification/review gates nonblocking while preserving their immutable facts; summary and other non-command gates remain",
+    "software_verification": "existing pinned gates remain required",
+    "published_work": "a first contract or accepted input set on already-open work requires an explicit amendment reason; a first contract preserves existing gate policy",
+    "amendments": "append contract/input and proof revisions with bounded reasons; an explicit nonsoftware rigor amendment may update effective legacy gate requiredness while immutable declarations/facts remain; active attempts and closed/cancelled work cannot be amended"
+  },
+  "bounds": {
+    "requirements_per_work": 64,
+    "outputs_per_requirement": 100,
+    "accepted_inputs_per_revision": 100,
+    "artifact_size_bytes": 1073741824,
+    "criteria_per_requirement": 16,
+    "media_types_per_requirement": 16
+  }
+}

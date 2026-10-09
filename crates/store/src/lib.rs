@@ -34,6 +34,7 @@ pub mod completion;
 mod completion_migrations;
 pub mod cycle_commands;
 pub mod execution;
+pub mod general_work;
 pub mod identity;
 pub mod jobs;
 mod knowledge;
@@ -1545,6 +1546,7 @@ impl SqliteStore {
                 orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_VERSION as u64,
                 orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_SQL,
             )?;
+            store.ensure_general_work_schema()?;
             store.ensure_summary_body_schema()?;
             store.ensure_legacy_summary_schema()?;
         }
@@ -6369,6 +6371,31 @@ impl SqliteStore {
                 .or_insert_with(Vec::new)
                 .push(ReasonCode::HardHold(reason));
         }
+        if self.table_exists("boreal_external_wait_v1")?
+            && self.table_exists("boreal_external_wait_event_v1")?
+        {
+            let mut waits = self.prepare(
+                "SELECT w.work_id, w.wait_id
+                 FROM boreal_external_wait_v1 w
+                 WHERE w.project_id = ?1
+                   AND NOT EXISTS (
+                     SELECT 1 FROM boreal_external_wait_event_v1 e
+                     WHERE e.project_id = w.project_id
+                       AND e.work_id = w.work_id
+                       AND e.wait_id = w.wait_id
+                   )
+                 ORDER BY w.work_id, w.wait_id",
+            )?;
+            waits.bind_text(1, project_id)?;
+            while waits.step()? == SQLITE_ROW {
+                let work_id = waits.column_text(0)?;
+                let wait_id = waits.column_text(1)?;
+                holds
+                    .entry(work_id)
+                    .or_insert_with(Vec::new)
+                    .push(ReasonCode::HardHold(format!("external_wait:{wait_id}")));
+            }
+        }
         Ok((holds, diagnostics))
     }
 
@@ -6789,6 +6816,21 @@ impl SqliteStore {
             }
         }
         gate_rows.retain(|row| !requirement_diagnostics.contains_key(&row.work_id));
+        let general_work_gate_overrides =
+            self.general_work_legacy_gate_overrides_for_project(project_id)?;
+        for row in &mut gate_rows {
+            if general_work_gate_overrides.contains(&row.work_id)
+                && matches!(
+                    row.kind,
+                    GateKind::Checkpoint | GateKind::Verification | GateKind::Review
+                )
+            {
+                // This policy is chosen while draft work is configured and
+                // only affects effective requiredness. The original pinned
+                // declarations and all receipts remain immutable history.
+                row.required = false;
+            }
+        }
 
         let mut receipts = BTreeMap::<(String, String, u64, String), StatusReceiptFact>::new();
         let mut reviews = BTreeMap::<(String, String, u64, String), bool>::new();
@@ -10762,6 +10804,9 @@ impl SqliteStore {
         fence: Option<u64>,
         revision: u64,
     ) -> Result<GateDiagnostics, StoreError> {
+        let general_work_gate_override = self
+            .general_work_legacy_gate_overrides_for_project(project_id)?
+            .contains(work_id);
         let pinned_requirements =
             match self.current_pinned_requirements_for_policy(project_id, work_id) {
                 Ok(requirements) => requirements,
@@ -10810,7 +10855,12 @@ impl SqliteStore {
         while statement.step()? == SQLITE_ROW {
             let gate_id = statement.column_text(0)?;
             let kind = parse_gate_kind(&statement.column_text(1)?)?;
-            let required = statement.column_bool(2)?;
+            let required = statement.column_bool(2)?
+                && !(general_work_gate_override
+                    && matches!(
+                        kind,
+                        GateKind::Checkpoint | GateKind::Verification | GateKind::Review
+                    ));
             let persisted_state = parse_gate_state(&statement.column_text(3)?)?;
             let (state, receipt_id, reason) =
                 if let (Some(attempt_id), Some(fence)) = (attempt_id, fence) {
@@ -10871,11 +10921,14 @@ impl SqliteStore {
                 reason,
             });
         }
-        let missing = gates
+        let mut missing = gates
             .iter()
             .filter(|gate| gate.required && gate.state != GateState::Satisfied)
             .map(|gate| gate.gate_id.clone())
-            .collect();
+            .collect::<Vec<_>>();
+        missing.extend(self.general_work_close_gaps_v1(project_id, work_id, attempt_id, fence)?);
+        missing.sort();
+        missing.dedup();
         Ok(GateDiagnostics {
             project_id: project_id.to_owned(),
             work_id: work_id.to_owned(),

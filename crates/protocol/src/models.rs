@@ -20,6 +20,9 @@ pub struct RouteContextDto {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
+    /// Additive operation identity for revisioned general-work mutations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 /// Read-only, versioned workflow package metadata exposed by the application
@@ -351,6 +354,475 @@ pub struct ReceiptDto {
     pub retention: Option<String>,
 }
 
+/// Additive general-work contract vocabulary. The command receipt DTO above
+/// stays unchanged: artifact inspection and human decisions never fabricate
+/// executable, argv, exit-code, or trusted-runner fields.
+pub const GENERAL_WORK_CONTRACT_VERSION: &str = "boreal.general-work/1";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GeneralWorkMutationContextDto {
+    pub project_id: String,
+    pub actor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub expected_project_revision: u64,
+    pub operation_id: String,
+}
+
+/// Common mutation readback. `value` is the immutable created/read identity
+/// when the operation has one, or JSON null for a fact-only mutation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GeneralWorkMutationResultDto<T> {
+    pub schema_version: String,
+    pub operation_id: String,
+    pub project_revision: u64,
+    pub changed: bool,
+    pub value: T,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OutputRequirementDto {
+    pub requirement_key: String,
+    pub purpose: String,
+    pub required: bool,
+    pub deliverable_type: DeliverableTypeDto,
+    pub allowed_media_types: Vec<String>,
+    pub minimum_count: u16,
+    pub maximum_count: u16,
+    #[serde(default)]
+    pub criteria: Vec<ValidationCriterionDto>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverableTypeDto {
+    Document,
+    Image,
+    Data,
+    Archive,
+    Code,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactAvailabilityDto {
+    Available,
+    Missing,
+    Quarantined,
+    Denied,
+    Corrupt,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactInspectionOutcomeDto {
+    Passed,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactInspectorKindDto {
+    Automatic,
+    Human,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactDecisionKindDto {
+    Approved,
+    Rejected,
+    NeedsRevision,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalWaitStateDto {
+    Open,
+    Resolved,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountableKindDto {
+    PersonOrRole,
+    ExternalService,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ValidationCriterionDto {
+    MinimumBytes(u64),
+    MaximumBytes(u64),
+    MinimumImageWidth(u32),
+    MinimumImageHeight(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RequirementSetDto {
+    pub schema_version: String,
+    pub context: GeneralWorkMutationContextDto,
+    pub work_id: String,
+    /// Current contract generation the caller expects to amend.
+    pub expected_contract_revision: u64,
+    pub new_contract_revision: u64,
+    pub rigor_profile_id: String,
+    pub rigor_profile_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amendment_reason: Option<String>,
+    #[serde(default)]
+    pub requirements: Vec<OutputRequirementDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkContractRevisionDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub contract_revision: u64,
+    pub proof_revision: u64,
+    pub rigor_profile_id: String,
+    pub rigor_profile_version: u32,
+    pub requirements: Vec<OutputRequirementDto>,
+    pub requirements_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amendment_reason: Option<String>,
+    pub actor_id: String,
+    pub operation_id: String,
+    pub project_revision: u64,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InputArtifactRefDto {
+    pub source_version_id: String,
+    pub content_digest: String,
+    pub media_type: String,
+    pub byte_count: u64,
+    pub availability: ArtifactAvailabilityDto,
+    pub access_scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producing_work_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producing_submission_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producing_artifact_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceptedInputDto {
+    pub input_key: String,
+    pub role: String,
+    pub required: bool,
+    pub artifact: InputArtifactRefDto,
+    pub accepted_by: String,
+    pub accepted_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceptedInputSetDto {
+    pub schema_version: String,
+    pub context: GeneralWorkMutationContextDto,
+    pub work_id: String,
+    pub expected_contract_revision: u64,
+    pub expected_input_revision: u64,
+    pub new_input_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amendment_reason: Option<String>,
+    #[serde(default)]
+    pub inputs: Vec<AcceptedInputBindingDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceptedInputSetReadDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub input_revision: u64,
+    pub contract_revision: u64,
+    pub proof_revision: u64,
+    pub bindings_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amendment_reason: Option<String>,
+    pub actor_id: String,
+    pub operation_id: String,
+    pub project_revision: u64,
+    pub created_at: String,
+    #[serde(default)]
+    pub inputs: Vec<AcceptedInputDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceptedInputBindingDto {
+    pub input_key: String,
+    pub role: String,
+    pub required: bool,
+    pub source_version_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producing_work_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producing_submission_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producing_artifact_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProducedArtifactDto {
+    pub artifact_id: String,
+    pub requirement_key: String,
+    pub source_version_id: String,
+    pub content_digest: String,
+    pub media_type: String,
+    pub byte_count: u64,
+    pub availability: ArtifactAvailabilityDto,
+    pub access_scope: String,
+    pub producer_actor_id: String,
+    pub producing_work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OutputSubmissionDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub submission_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub proof_revision: u64,
+    pub contract_revision: u64,
+    pub input_revision: u64,
+    pub rigor_profile_id: String,
+    pub rigor_profile_version: u32,
+    pub producer_actor_id: String,
+    #[serde(default)]
+    pub artifacts: Vec<ProducedArtifactDto>,
+    pub artifact_set_digest: String,
+    pub submitted_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProducedArtifactRefDto {
+    pub artifact_id: String,
+    pub requirement_key: String,
+    pub source_version_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OutputSubmissionCommandDto {
+    pub schema_version: String,
+    pub context: GeneralWorkMutationContextDto,
+    pub work_id: String,
+    pub submission_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub proof_revision: u64,
+    pub contract_revision: u64,
+    pub input_revision: u64,
+    #[serde(default)]
+    pub artifacts: Vec<ProducedArtifactRefDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CriterionObservationDto {
+    pub criterion: String,
+    pub outcome: ArtifactInspectionOutcomeDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactInspectionDto {
+    pub schema_version: String,
+    pub inspection_id: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub submission_id: String,
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub inspector_actor_id: String,
+    /// `automatic` or `human`; neither value implies the other.
+    pub inspector_kind: ArtifactInspectorKindDto,
+    pub outcome: ArtifactInspectionOutcomeDto,
+    #[serde(default)]
+    pub criteria: Vec<CriterionObservationDto>,
+    pub inspected_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactInspectionCommandDto {
+    pub schema_version: String,
+    pub context: GeneralWorkMutationContextDto,
+    pub inspection_id: String,
+    pub work_id: String,
+    pub submission_id: String,
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub inspector_kind: ArtifactInspectorKindDto,
+    pub outcome: ArtifactInspectionOutcomeDto,
+    #[serde(default)]
+    pub criteria: Vec<CriterionObservationDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactAcceptanceDecisionDto {
+    pub schema_version: String,
+    pub decision_id: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub submission_id: String,
+    pub contract_revision: u64,
+    pub input_revision: u64,
+    pub proof_revision: u64,
+    pub artifact_set_digest: String,
+    pub reviewer_actor_id: String,
+    pub decision: ArtifactDecisionKindDto,
+    pub reason: String,
+    pub decided_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactEvidenceListDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub submission_id: String,
+    #[serde(default)]
+    pub inspections: Vec<ArtifactInspectionDto>,
+    #[serde(default)]
+    pub decisions: Vec<ArtifactAcceptanceDecisionDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactAcceptanceDecisionCommandDto {
+    pub schema_version: String,
+    pub context: GeneralWorkMutationContextDto,
+    pub decision_id: String,
+    pub work_id: String,
+    pub submission_id: String,
+    pub contract_revision: u64,
+    pub input_revision: u64,
+    pub proof_revision: u64,
+    pub artifact_set_digest: String,
+    pub decision: ArtifactDecisionKindDto,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OutputCoverageDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub source_revision: u64,
+    pub submission_id: Option<String>,
+    pub artifact_set_digest: Option<String>,
+    pub contract_revision: u64,
+    pub input_revision: u64,
+    pub proof_revision: u64,
+    pub rigor_profile_id: String,
+    pub outputs_accepted: bool,
+    #[serde(default)]
+    pub covered_requirement_keys: Vec<String>,
+    #[serde(default)]
+    pub missing_required: Vec<String>,
+    #[serde(default)]
+    pub missing_optional: Vec<String>,
+    #[serde(default)]
+    pub stale_or_rejected_evidence: Vec<String>,
+    #[serde(default)]
+    pub safe_next_operations: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BusinessMomentDto {
+    Instant { at_utc_ms: u64 },
+    DateOnly { date: String, timezone: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalWaitDto {
+    pub schema_version: String,
+    pub wait_id: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub category: String,
+    pub reason: String,
+    pub accountable_kind: AccountableKindDto,
+    pub accountable_ref: String,
+    pub expected_decision_or_output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<BusinessMomentDto>,
+    pub state: ExternalWaitStateDto,
+    pub created_by: String,
+    pub created_at: String,
+    pub resolution: Option<ExternalWaitResolutionDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<ExternalWaitCancellationDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalWaitResolutionDto {
+    pub actor_id: String,
+    pub resolved_at: String,
+    pub result: String,
+    pub rationale: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalWaitCancellationDto {
+    pub actor_id: String,
+    pub cancelled_at: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalWaitCreateDto {
+    pub schema_version: String,
+    pub context: GeneralWorkMutationContextDto,
+    pub wait_id: String,
+    pub work_id: String,
+    pub category: String,
+    pub reason: String,
+    pub accountable_kind: AccountableKindDto,
+    pub accountable_ref: String,
+    pub expected_decision_or_output: String,
+    pub follow_up: Option<BusinessMomentDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalWaitResolveDto {
+    pub schema_version: String,
+    pub context: GeneralWorkMutationContextDto,
+    pub work_id: String,
+    pub wait_id: String,
+    pub state: ExternalWaitStateDto,
+    pub result: Option<String>,
+    pub rationale: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalWaitListDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub source_revision: u64,
+    #[serde(default)]
+    pub waits: Vec<ExternalWaitDto>,
+    #[serde(default)]
+    pub blocked_work_ids: Vec<String>,
+    #[serde(default)]
+    pub due_follow_up_ids: Vec<String>,
+    #[serde(default)]
+    pub overdue_follow_up_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReceiptSubjectDto {
     pub work_id: String,
@@ -471,6 +943,99 @@ mod tests {
         .unwrap();
         assert_eq!(doctor.project_id.as_deref(), Some("project-1"));
         assert_eq!(doctor.actor_id, None);
+    }
+
+    #[test]
+    fn general_work_wire_types_are_additive_and_reject_unknown_enum_values() {
+        let mut value = serde_json::json!({
+            "requirement_key":"logo.master",
+            "purpose":"Approved master asset",
+            "required":true,
+            "deliverable_type":"image",
+            "allowed_media_types":["image/png"],
+            "minimum_count":1,
+            "maximum_count":2,
+            "criteria":[{"kind":"maximum_bytes","value":5000000}],
+            "future_field":{"added":"later"}
+        });
+        let requirement: OutputRequirementDto = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(requirement.deliverable_type, DeliverableTypeDto::Image);
+        assert_eq!(requirement.minimum_count, 1);
+
+        value["deliverable_type"] = serde_json::json!("unknown_asset_kind");
+        assert!(serde_json::from_value::<OutputRequirementDto>(value).is_err());
+
+        let mut decision = serde_json::json!({
+            "schema_version":"boreal.general-work/1",
+            "decision_id":"decision-1",
+            "project_id":"project-1",
+            "work_id":"work-1",
+            "submission_id":"submission-1",
+            "contract_revision":2,
+            "input_revision":3,
+            "proof_revision":4,
+            "artifact_set_digest":"sha256:abc",
+            "reviewer_actor_id":"reviewer-1",
+            "decision":"approved",
+            "reason":"checked exact output",
+            "decided_at":"unix-ms:10"
+        });
+        let parsed: ArtifactAcceptanceDecisionDto =
+            serde_json::from_value(decision.clone()).unwrap();
+        assert_eq!(parsed.proof_revision, 4);
+        decision["proof_revision"] = serde_json::json!(5);
+        assert_eq!(
+            serde_json::from_value::<ArtifactAcceptanceDecisionDto>(decision)
+                .unwrap()
+                .proof_revision,
+            5
+        );
+
+        let command_context: GeneralWorkMutationContextDto =
+            serde_json::from_value(serde_json::json!({
+                "project_id":"project-1",
+                "actor_id":"operator-1",
+                "harness_id":null,
+                "session_id":"session-1",
+                "expected_project_revision":9,
+                "operation_id":"op-1"
+            }))
+            .unwrap();
+        assert_eq!(command_context.expected_project_revision, 9);
+        assert_eq!(command_context.operation_id, "op-1");
+        assert!(
+            serde_json::from_value::<GeneralWorkMutationContextDto>(serde_json::json!({
+                "project_id":"project-1",
+                "actor_id":"operator-1",
+                "session_id":"session-1",
+                "expected_project_revision":9
+            }))
+            .is_err()
+        );
+
+        let input_set: AcceptedInputSetDto = serde_json::from_value(serde_json::json!({
+            "schema_version":"boreal.general-work/1",
+            "context":{
+                "project_id":"project-1","actor_id":"operator-1",
+                "expected_project_revision":9,"operation_id":"op-input"
+            },
+            "work_id":"work-1","expected_contract_revision":1,
+            "expected_input_revision":0,"new_input_revision":1,
+            "inputs":[{
+                "input_key":"brief","role":"creative brief","required":true,
+                "source_version_id":"source-v2","accepted_by":"forged-client-value"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(input_set.inputs[0].source_version_id, "source-v2");
+        let encoded = serde_json::to_value(input_set).unwrap();
+        assert!(encoded["inputs"][0].get("accepted_by").is_none());
+
+        let date: BusinessMomentDto = serde_json::from_value(serde_json::json!({
+            "kind":"date_only","date":"2026-10-09","timezone":"America/Regina"
+        }))
+        .unwrap();
+        assert!(matches!(date, BusinessMomentDto::DateOnly { .. }));
     }
 }
 
