@@ -151,6 +151,7 @@ impl From<PlanningError> for ApplicationError {
 
 pub struct WorkApplication<'a> {
     store: &'a SqliteStore,
+    source_catalog: Option<&'a boreal_source::SourceCatalog>,
 }
 
 impl WorkApplication<'_> {
@@ -161,7 +162,23 @@ impl WorkApplication<'_> {
 
 impl<'a> WorkApplication<'a> {
     pub fn new(store: &'a SqliteStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            source_catalog: None,
+        }
+    }
+
+    /// Construct the application boundary used by source-backed general-work
+    /// operations. Such operations verify immutable source bytes against both
+    /// the catalog and the relational source identity before they proceed.
+    pub fn with_source_catalog(
+        store: &'a SqliteStore,
+        source_catalog: &'a boreal_source::SourceCatalog,
+    ) -> Self {
+        Self {
+            store,
+            source_catalog: Some(source_catalog),
+        }
     }
 
     /// Build a bounded declared-gate receipt without executing or persisting

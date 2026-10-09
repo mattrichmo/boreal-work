@@ -1226,6 +1226,12 @@ impl WorkApplication<'_> {
 
         let snapshot = adapter.current_attempt(&request.project_id, &request.attempt_id)?;
         policy.validate(&snapshot, &request, kind)?;
+        if matches!(kind, AttemptCommandKind::Start) {
+            self.verify_required_input_sources(
+                request.project_id.as_str(),
+                request.work_id.as_str(),
+            )?;
+        }
         let command = AttemptCommand {
             project_id: request.project_id.clone(),
             work_id: request.work_id.clone(),

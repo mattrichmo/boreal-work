@@ -1,7 +1,7 @@
 //! Durable application façade for receipts, reviews, and proof-gated closeout.
 
 use boreal_domain::{
-    ActorId, AttemptId, ConfigIdentity, Fence, GateId, GateKind, ProfileId, ReceiptId,
+    ActorId, AttemptId, ConfigIdentity, Fence, GateId, GateKind, ProfileId, ProjectId, ReceiptId,
     ReceiptResult, SourceVersionId, TimestampMs, WorkId,
 };
 use boreal_store::{
@@ -1120,8 +1120,9 @@ impl WorkApplication<'_> {
         now: TimestampMs,
         evaluation_operation_id: &str,
     ) -> Result<CloseIntentResult, ApplicationError> {
-        Ok(self.store().finalize_close_intent(CloseIntentRequest {
-            project_id: self.project_for_work(intent.work_id.as_str())?,
+        let project_id = self.project_for_work(intent.work_id.as_str())?;
+        let request = CloseIntentRequest {
+            project_id: project_id.clone(),
             actor_id: actor_id.to_owned(),
             session_id: session_id.map(str::to_owned),
             expected_project_revision,
@@ -1152,7 +1153,25 @@ impl WorkApplication<'_> {
                 expected_project_revision,
                 intent,
             ),
-        })?)
+        };
+        // A prior operation is an immutable readback, so its retry must keep
+        // resolving even if the host later loses a source blob. New close
+        // evaluations reverify project inputs and the exact attempt outputs
+        // before entering the store's atomic close transaction.
+        let prior_close_operation = self
+            .store()
+            .operation_readback(&project_id, evaluation_operation_id)?
+            .and_then(|readback| readback.operation)
+            .is_some_and(|operation| operation.command == "close.finalize");
+        if !prior_close_operation {
+            self.verify_general_work_close_sources_v1(
+                &ProjectId::new(project_id),
+                intent.work_id.as_str(),
+                intent.attempt_id.as_str(),
+                intent.fence.get(),
+            )?;
+        }
+        Ok(self.store().finalize_close_intent(request)?)
     }
 
     fn store(&self) -> &SqliteStore {

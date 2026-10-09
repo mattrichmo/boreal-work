@@ -515,6 +515,10 @@ pub struct ExternalWaitRecord {
 }
 
 impl SqliteStore {
+    pub fn general_work_schema_available_v1(&self) -> Result<bool, StoreError> {
+        self.table_exists("boreal_work_contract_v1")
+    }
+
     pub fn ensure_general_work_schema(&self) -> Result<(), StoreError> {
         self.install_feature_schema(
             "general_work",
@@ -929,6 +933,34 @@ impl SqliteStore {
             });
         }
         Ok(Some(record))
+    }
+
+    /// Read the most recent immutable submission for an exact fenced attempt.
+    /// The lookup is project and work scoped so close checks never infer a
+    /// submission from a caller's current directory or an artifact name.
+    pub fn output_submission_for_attempt_v1(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        attempt_id: &str,
+        fence: u64,
+    ) -> Result<Option<OutputSubmissionRecord>, StoreError> {
+        self.require_general_work_schema()?;
+        let mut query = self.prepare(
+            "SELECT submission_id FROM boreal_output_submission_v1
+             WHERE project_id=?1 AND work_id=?2 AND attempt_id=?3 AND fence=?4
+             ORDER BY rowid DESC LIMIT 1",
+        )?;
+        query.bind_text(1, project_id)?;
+        query.bind_text(2, work_id)?;
+        query.bind_text(3, attempt_id)?;
+        query.bind_i64(4, fence)?;
+        if query.step()? != SQLITE_ROW {
+            return Ok(None);
+        }
+        let submission_id = query.column_text(0)?;
+        drop(query);
+        self.output_submission_v1(project_id, work_id, &submission_id)
     }
 
     /// Read the immutable inspection and decision history for one exact

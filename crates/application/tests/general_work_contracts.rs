@@ -20,7 +20,9 @@ use boreal_domain::{
     OperationId, PersistedLifecycle, ProjectId, SourceVersionId, TimestampMs, WorkId, WorkItem,
     WorkKind,
 };
+use boreal_source::{FilesystemBlobStore, SourceCatalog, SourceVersion};
 use boreal_store::{SourceVersionRegistrationInput, SqliteStore};
+use std::path::PathBuf;
 
 const SCHEMA_V2: &str = include_str!("../../../project/spec/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../project/spec/schema-v3.sql");
@@ -31,26 +33,49 @@ fn scope(store: &SqliteStore, actor_id: &str) -> boreal_application::PlanningSco
     scope
 }
 
-fn register_source(store: &SqliteStore, source_id: &str, actor_id: &str, digest_byte: char) {
-    let operation_id = format!("op-source-{source_id}");
+fn register_source(
+    catalog: &SourceCatalog,
+    store: &SqliteStore,
+    source_label: &str,
+    actor_id: &str,
+    content_byte: u8,
+) -> (SourceVersion, Vec<u8>) {
+    let operation_id = format!("op-source-{source_label}");
+    let bytes = vec![content_byte; 128];
+    let origin = format!("synthetic-general-work-fixture/{source_label}");
+    let version = catalog
+        .capture("p1", &origin, &bytes, "text/plain")
+        .expect("synthetic source bytes capture");
     store
         .register_source_version(&SourceVersionRegistrationInput {
             operation_id: operation_id.clone(),
             project_id: "p1".into(),
             actor_id: actor_id.into(),
-            source_version_id: source_id.into(),
-            origin: "synthetic-general-work-fixture".into(),
+            source_version_id: version.source_version_id.clone(),
+            origin,
             access_scope: "project".into(),
-            content_digest: format!("sha256:{}", digest_byte.to_string().repeat(64)),
-            media_type: "text/plain".into(),
-            byte_count: 128,
+            content_digest: version.content_digest.clone(),
+            media_type: version.media_type.clone(),
+            byte_count: version.byte_count as u64,
             captured_at: "unix-ms:1".into(),
-            parser_identity: "test-fixture/1".into(),
+            parser_identity: boreal_source::DEFAULT_PARSER_IDENTITY.into(),
             availability: "available".into(),
             citation_json: "[]".into(),
             request_digest: format!("sha256:{operation_id}"),
         })
         .expect("synthetic source registers");
+    (version, bytes)
+}
+
+fn temporary_source_root() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "boreal-general-work-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos()
+    ))
 }
 
 fn attempt_request(operation_id: &str, at: u64) -> AttemptRequest {
@@ -75,7 +100,11 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
     store
         .ensure_general_work_schema()
         .expect("general-work feature schema installs");
-    let app = WorkApplication::new(&store);
+    let source_root = temporary_source_root();
+    std::fs::create_dir_all(&source_root).expect("synthetic source catalog root creates");
+    let catalog = SourceCatalog::with_persistent_filesystem(&source_root)
+        .expect("synthetic persistent source catalog opens");
+    let app = WorkApplication::with_source_catalog(&store, &catalog);
     let project = ProjectId::new("p1");
     app.init_project(
         &project,
@@ -113,7 +142,8 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         acceptance_profile: AcceptanceProfile::focused(),
     };
     store.create_work(&work, "unix-ms:0").expect("fixture work creates");
-    register_source(&store, "input-src", "operator-1", 'b');
+    let (input_source, input_bytes) =
+        register_source(&catalog, &store, "input-src", "operator-1", b'b');
 
     let requirement = OutputRequirement {
         key: RequirementKey::parse("brief").unwrap(),
@@ -161,12 +191,12 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         role: "approved brief".into(),
         required: true,
         source: InputSource::CapturedSource {
-            source_version_id: SourceVersionId::new("input-src"),
+            source_version_id: SourceVersionId::new(input_source.source_version_id.clone()),
         },
         accepted_by: ActorId::new("operator-1"),
         accepted_at: TimestampMs(2),
     };
-    let input_request = AcceptInputSetRequest {
+    let mut input_request = AcceptInputSetRequest {
         scope: scope(&store, "operator-1"),
         operation_id: "op-inputs".into(),
         work_id: "w1".into(),
@@ -177,6 +207,59 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         amendment_reason: Some("accept the brief source for this open work".into()),
         now: "unix-ms:2".into(),
     };
+    let mismatched_bytes = vec![b'x'; 128];
+    let mismatched_source = catalog
+        .capture(
+            "p1",
+            "synthetic-general-work-fixture/mismatched-catalog-source",
+            &mismatched_bytes,
+            "text/plain",
+        )
+        .expect("synthetic mismatched catalog source captures");
+    store
+        .register_source_version(&SourceVersionRegistrationInput {
+            operation_id: "op-source-mismatched-catalog-metadata".into(),
+            project_id: "p1".into(),
+            actor_id: "operator-1".into(),
+            source_version_id: mismatched_source.source_version_id.clone(),
+            origin: "synthetic-general-work-fixture/mismatched-catalog-source".into(),
+            access_scope: "project".into(),
+            content_digest: format!("sha256:{}", "e".repeat(64)),
+            media_type: mismatched_source.media_type.clone(),
+            byte_count: mismatched_source.byte_count as u64 - 1,
+            captured_at: "unix-ms:1".into(),
+            parser_identity: boreal_source::DEFAULT_PARSER_IDENTITY.into(),
+            availability: "available".into(),
+            citation_json: "[]".into(),
+            request_digest: "sha256:op-source-mismatched-catalog-metadata".into(),
+        })
+        .expect("synthetic mismatched source registry row inserts");
+    input_request.scope.expected_revision = Some(store.project_revision("p1").unwrap().0);
+    let mut mismatched_input = input_request.clone();
+    mismatched_input.operation_id = "op-inputs-mismatched-catalog".into();
+    mismatched_input.inputs[0].source = InputSource::CapturedSource {
+        source_version_id: SourceVersionId::new(mismatched_source.source_version_id),
+    };
+    assert!(matches!(
+        app.accept_input_set_v1(&mismatched_input),
+        Err(boreal_application::ApplicationError::Invalid(message))
+            if message.contains("do not match the catalog identity")
+    ));
+    assert!(!store
+        .operation_exists("op-inputs-mismatched-catalog")
+        .unwrap());
+    let unverified_input_request = AcceptInputSetRequest {
+        operation_id: "op-inputs-without-catalog".into(),
+        ..input_request.clone()
+    };
+    assert!(matches!(
+        WorkApplication::new(&store).accept_input_set_v1(&unverified_input_request),
+        Err(boreal_application::ApplicationError::Invalid(message))
+            if message.contains("source catalog is required")
+    ));
+    assert!(!store
+        .operation_exists("op-inputs-without-catalog")
+        .unwrap());
     assert!(app.accept_input_set_v1(&input_request).unwrap().changed);
     assert!(!app.accept_input_set_v1(&input_request).unwrap().changed);
     let inputs = store
@@ -184,7 +267,10 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         .unwrap()
         .unwrap();
     assert_eq!(inputs.bindings.len(), 1);
-    assert_eq!(inputs.bindings[0].source_version_id, "input-src");
+    assert_eq!(
+        inputs.bindings[0].source_version_id,
+        input_source.source_version_id
+    );
 
     let stale_input_request = AcceptInputSetRequest {
         scope: scope(&store, "operator-1"),
@@ -218,26 +304,50 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
     let adapter = SqliteAttemptAdapter::new(&store);
     app.accept(&adapter, attempt_request("op-accept", 11))
         .expect("agent accepts attempt");
+    let input_blob = FilesystemBlobStore::new(&source_root)
+        .blob_path(&input_source.content_digest)
+        .expect("input blob path resolves");
+    std::fs::remove_file(&input_blob).expect("synthetic input blob is removed");
+    assert!(!app.accept_input_set_v1(&input_request).unwrap().changed);
+    let missing_input_start =
+        app.start(&adapter, attempt_request("op-start-missing-input", 12));
+    assert!(matches!(
+        missing_input_start,
+        Err(boreal_application::ApplicationError::Invalid(message))
+            if message.contains("bytes are missing")
+    ));
+    assert!(!store
+        .operation_exists("op-start-missing-input")
+        .unwrap());
+    catalog
+        .capture(
+            "p1",
+            "synthetic-general-work-fixture/input-src",
+            &input_bytes,
+            "text/plain",
+        )
+        .expect("exact source recapture repairs the fixture blob");
     app.start(&adapter, attempt_request("op-start", 12))
         .expect("agent starts attempt");
-    register_source(&store, "output-src", "agent-1", 'c');
+    let (output_source, output_bytes) =
+        register_source(&catalog, &store, "output-src", "agent-1", b'c');
 
     let current_revision = store.project_revision("p1").unwrap().0;
     let before_submission = store
         .output_acceptance_v1("p1", "w1", current_revision)
         .unwrap()
         .unwrap();
-    let digest = format!("sha256:{}", "c".repeat(64));
+    let digest = output_source.content_digest.clone();
     let artifact = ProducedArtifact {
         artifact_id: "brief-v1".into(),
         requirement_key: RequirementKey::parse("brief").unwrap(),
         submission_id: "submission-1".into(),
         identity: ArtifactIdentity {
             project_id: project.clone(),
-            source_version_id: SourceVersionId::new("output-src"),
+            source_version_id: SourceVersionId::new(output_source.source_version_id.clone()),
             content_digest: digest.clone(),
-            media_type: "text/plain".into(),
-            byte_count: 128,
+            media_type: output_source.media_type.clone(),
+            byte_count: output_source.byte_count as u64,
             availability: ArtifactAvailability::Available,
         },
         producing_work_id: WorkId::new("w1"),
@@ -259,6 +369,18 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         artifacts: vec![artifact],
         now: "unix-ms:13".into(),
     };
+    let mut mismatched_output = output_request.clone();
+    mismatched_output.operation_id = "op-output-mismatched-source".into();
+    mismatched_output.artifacts[0].identity.content_digest =
+        format!("sha256:{}", "d".repeat(64));
+    assert!(matches!(
+        app.submit_output_artifacts_v1(&mismatched_output),
+        Err(boreal_application::ApplicationError::Invalid(message))
+            if message.contains("does not match the expected digest")
+    ));
+    assert!(!store
+        .operation_exists("op-output-mismatched-source")
+        .unwrap());
     let output = app.submit_output_artifacts_v1(&output_request).unwrap();
     assert!(output.changed);
     assert!(!app
@@ -266,6 +388,44 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         .unwrap()
         .changed);
     assert_eq!(output.value.artifacts[0].content_digest, digest);
+    app.verify_general_work_close_sources_v1(&project, "w1", "a1", 1)
+        .expect("close source read verifies current input and output bytes");
+    let output_blob = FilesystemBlobStore::new(&source_root)
+        .blob_path(&output_source.content_digest)
+        .expect("output blob path resolves");
+    std::fs::remove_file(&output_blob).expect("synthetic output blob is removed");
+    assert!(!app
+        .submit_output_artifacts_v1(&output_request)
+        .unwrap()
+        .changed);
+    assert!(matches!(
+        app.verify_general_work_close_sources_v1(&project, "w1", "a1", 1),
+        Err(boreal_application::ApplicationError::Invalid(message))
+            if message.contains("bytes are missing")
+    ));
+    catalog
+        .capture(
+            "p1",
+            "synthetic-general-work-fixture/output-src",
+            &output_bytes,
+            "text/plain",
+        )
+        .expect("exact output recapture repairs the fixture blob");
+    std::fs::write(&output_blob, vec![b'd'; 128]).expect("synthetic output bytes are corrupted");
+    assert!(matches!(
+        app.verify_general_work_close_sources_v1(&project, "w1", "a1", 1),
+        Err(boreal_application::ApplicationError::Invalid(message))
+            if message.contains("are corrupt")
+    ));
+    std::fs::remove_file(&output_blob).expect("corrupt synthetic blob is removed");
+    catalog
+        .capture(
+            "p1",
+            "synthetic-general-work-fixture/output-src",
+            &output_bytes,
+            "text/plain",
+        )
+        .expect("exact output recapture restores the fixture blob");
 
     let stale_decision = ArtifactDecision {
         decision_id: "decision-stale".into(),
@@ -467,4 +627,7 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         .find(|row| row.work.id.as_str() == "w1")
         .expect("work remains visible in status");
     assert_eq!(status_work.work.lifecycle, PersistedLifecycle::Open);
+    drop(app);
+    drop(catalog);
+    std::fs::remove_dir_all(source_root).expect("synthetic source catalog is cleaned up");
 }

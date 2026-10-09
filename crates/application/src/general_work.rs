@@ -2,6 +2,8 @@
 //! Adapters use these methods instead of composing lifecycle or acceptance
 //! decisions in clients.
 
+use std::collections::BTreeMap;
+
 use boreal_domain::deliverables::{
     AcceptedInput, ArtifactDecision, ArtifactInspection, InputSource, OutputRequirement,
     ProducedArtifact, RigorProfile,
@@ -92,6 +94,34 @@ pub struct ExternalWaitList {
     pub overdue_follow_up_ids: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct SourceVerification {
+    source_version_id: String,
+    expected_digest: Option<String>,
+    expected_media_type: Option<String>,
+    expected_byte_count: Option<u64>,
+}
+
+impl SourceVerification {
+    fn required_input(source_version_id: &str) -> Self {
+        Self {
+            source_version_id: source_version_id.to_owned(),
+            expected_digest: None,
+            expected_media_type: None,
+            expected_byte_count: None,
+        }
+    }
+
+    fn artifact(source_version_id: &str, digest: &str, media_type: &str, byte_count: u64) -> Self {
+        Self {
+            source_version_id: source_version_id.to_owned(),
+            expected_digest: Some(digest.to_owned()),
+            expected_media_type: Some(media_type.to_owned()),
+            expected_byte_count: Some(byte_count),
+        }
+    }
+}
+
 impl WorkApplication<'_> {
     pub fn set_work_contract_v1(
         &self,
@@ -162,6 +192,12 @@ impl WorkApplication<'_> {
                 "at most 100 accepted inputs are supported".into(),
             ));
         }
+        let prior_operation = self
+            .store_ref()
+            .operation_readback(request.scope.project_id.as_str(), &request.operation_id)?
+            .and_then(|readback| readback.operation)
+            .is_some_and(|operation| operation.command == "work.inputs.accept/v1");
+        let mut source_verifications = Vec::new();
         for input in &request.inputs {
             input.validate().map_err(|error| {
                 ApplicationError::Invalid(format!("invalid accepted input: {error:?}"))
@@ -175,6 +211,17 @@ impl WorkApplication<'_> {
                     "accepted input scope, revision, and actor must match this mutation".into(),
                 ));
             }
+            if input.required && !prior_operation {
+                source_verifications.push(SourceVerification::required_input(
+                    input_source_version_id(input),
+                ));
+            }
+        }
+        if !prior_operation {
+            self.verify_source_bytes_batch(
+                request.scope.project_id.as_str(),
+                &source_verifications,
+            )?;
         }
         let bindings = request
             .inputs
@@ -220,6 +267,12 @@ impl WorkApplication<'_> {
                 "output submission exceeds the 6,400 artifact bound".into(),
             ));
         }
+        let prior_operation = self
+            .store_ref()
+            .operation_readback(request.scope.project_id.as_str(), &request.operation_id)?
+            .and_then(|readback| readback.operation)
+            .is_some_and(|operation| operation.command == "work.outputs.submit/v1");
+        let mut source_verifications = Vec::with_capacity(request.artifacts.len());
         for artifact in &request.artifacts {
             artifact.validate().map_err(|error| {
                 ApplicationError::Invalid(format!("invalid produced artifact: {error:?}"))
@@ -235,6 +288,20 @@ impl WorkApplication<'_> {
                     "output artifact scope, submission, producer, and fence must match".into(),
                 ));
             }
+            if !prior_operation {
+                source_verifications.push(SourceVerification::artifact(
+                    artifact.identity.source_version_id.as_str(),
+                    &artifact.identity.content_digest,
+                    &artifact.identity.media_type,
+                    artifact.identity.byte_count,
+                ));
+            }
+        }
+        if !prior_operation {
+            self.verify_source_bytes_batch(
+                request.scope.project_id.as_str(),
+                &source_verifications,
+            )?;
         }
         let context = mutation_context(
             &request.scope,
@@ -647,6 +714,188 @@ impl WorkApplication<'_> {
         Ok(self
             .store_ref()
             .artifact_evidence_v1(project_id.as_str(), work_id, submission_id)?)
+    }
+
+    /// Recheck the latest required inputs and current attempt's submitted
+    /// artifacts before close readiness. This read is intentionally separate
+    /// from SQL metadata: only the host that owns the source catalog can prove
+    /// that the content-addressed bytes are still present and intact.
+    pub fn verify_general_work_close_sources_v1(
+        &self,
+        project_id: &ProjectId,
+        work_id: &str,
+        attempt_id: &str,
+        fence: u64,
+    ) -> Result<(), ApplicationError> {
+        if !self.store_ref().general_work_schema_available_v1()? {
+            return Ok(());
+        }
+        let Some(_contract) =
+            self.store_ref()
+                .work_contract_v1(project_id.as_str(), work_id, None)?
+        else {
+            return Ok(());
+        };
+        let mut source_verifications =
+            self.required_input_source_verifications(project_id.as_str(), work_id)?;
+        if let Some(submission) = self.store_ref().output_submission_for_attempt_v1(
+            project_id.as_str(),
+            work_id,
+            attempt_id,
+            fence,
+        )? {
+            for artifact in submission.artifacts {
+                source_verifications.push(SourceVerification::artifact(
+                    &artifact.source_version_id,
+                    &artifact.content_digest,
+                    &artifact.media_type,
+                    artifact.byte_count,
+                ));
+            }
+        }
+        self.verify_source_bytes_batch(project_id.as_str(), &source_verifications)
+    }
+
+    pub(crate) fn verify_required_input_sources(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<(), ApplicationError> {
+        if !self.store_ref().general_work_schema_available_v1()? {
+            return Ok(());
+        }
+        let verifications = self.required_input_source_verifications(project_id, work_id)?;
+        self.verify_source_bytes_batch(project_id, &verifications)
+    }
+
+    fn required_input_source_verifications(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<Vec<SourceVerification>, ApplicationError> {
+        let Some(input_set) = self
+            .store_ref()
+            .accepted_input_set_v1(project_id, work_id, None)?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(input_set
+            .bindings
+            .iter()
+            .filter(|binding| binding.required)
+            .map(|binding| SourceVerification::required_input(&binding.source_version_id))
+            .collect())
+    }
+
+    fn verify_source_bytes_batch(
+        &self,
+        project_id: &str,
+        requests: &[SourceVerification],
+    ) -> Result<(), ApplicationError> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let mut sources = BTreeMap::new();
+        for request in requests {
+            let source = self
+                .store_ref()
+                .source_version(project_id, &request.source_version_id)?
+                .ok_or_else(|| {
+                    ApplicationError::Invalid(format!(
+                        "general-work source {} is not registered in project {project_id}",
+                        request.source_version_id
+                    ))
+                })?;
+            if source.availability != "available" {
+                return Err(ApplicationError::Invalid(format!(
+                    "general-work source {} is {} in the source registry",
+                    request.source_version_id, source.availability
+                )));
+            }
+            if let (Some(digest), Some(media_type), Some(byte_count)) = (
+                request.expected_digest.as_deref(),
+                request.expected_media_type.as_deref(),
+                request.expected_byte_count,
+            ) {
+                if source.content_digest != digest
+                    || source.media_type != media_type
+                    || source.byte_count != byte_count
+                {
+                    return Err(ApplicationError::Invalid(format!(
+                        "general-work source {} does not match the expected digest, media type, and size",
+                        request.source_version_id
+                    )));
+                }
+            }
+            // SourceCatalog::verify materializes the checked object as a Vec.
+            // Reuse its existing parser bound so source-backed work never
+            // turns a declared 1 GiB artifact limit into a 1 GiB read.
+            let max_bytes = boreal_source::DEFAULT_MAX_PARSE_BYTES as u64;
+            if source.byte_count > max_bytes {
+                return Err(ApplicationError::Invalid(format!(
+                    "general-work source {} exceeds the verified-byte bound of {max_bytes}",
+                    request.source_version_id
+                )));
+            }
+            sources.insert(request.source_version_id.as_str(), source);
+        }
+        let catalog = self.source_catalog.ok_or_else(|| {
+            ApplicationError::Invalid(format!(
+                "source catalog is required to verify general-work source {}",
+                requests[0].source_version_id
+            ))
+        })?;
+        for (source_version_id, source) in sources {
+            // `verify` first authorizes every immutable identity field against
+            // the catalog, then reads the content-addressed object and checks
+            // its digest and exact byte count. Constructing this bounded
+            // identity avoids enumerating an unbounded catalog just to find
+            // one project/version pair.
+            let version = boreal_source::SourceVersion {
+                project_id: source.project_id.clone(),
+                source_version_id: source.source_version_id.clone(),
+                origin: source.origin.clone(),
+                media_type: source.media_type.clone(),
+                byte_count: usize::try_from(source.byte_count).map_err(|_| {
+                    ApplicationError::Invalid(format!(
+                        "general-work source {source_version_id} byte count is too large"
+                    ))
+                })?,
+                content_digest: source.content_digest.clone(),
+                availability: boreal_source::Availability::Available,
+                parser_identity: Some(source.parser_identity.clone()),
+            };
+            let bytes = catalog.verify(&version).map_err(|error| {
+                let state = match error {
+                    boreal_source::SourceError::MissingBlob => "bytes are missing",
+                    boreal_source::SourceError::DigestMismatch => {
+                        "do not match the catalog identity or are corrupt"
+                    }
+                    boreal_source::SourceError::ScopeViolation => {
+                        "are not registered in the project source catalog"
+                    }
+                    _ => "could not be verified",
+                };
+                ApplicationError::Invalid(format!(
+                    "general-work source {source_version_id} {state}"
+                ))
+            })?;
+            if bytes.len() as u64 != source.byte_count {
+                return Err(ApplicationError::Invalid(format!(
+                    "general-work source {source_version_id} byte count changed during verification"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn input_source_version_id(input: &AcceptedInput) -> &str {
+    match &input.source {
+        InputSource::CapturedSource { source_version_id }
+        | InputSource::ProducedArtifact {
+            source_version_id, ..
+        } => source_version_id.as_str(),
     }
 }
 

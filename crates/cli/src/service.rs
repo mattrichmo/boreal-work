@@ -4879,7 +4879,16 @@ mod unix {
             // a partially committed finish behind.
             let summary_body = read_summary_body_from_data(data)?;
             let summary = summary_payload(&receipt, &summary_body, operation);
-            let app = WorkApplication::new(&self.store);
+            let database = self
+                .store
+                .database_location()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".boreal/boreal.sqlite".to_owned());
+            let source_catalog = boreal_source::SourceCatalog::with_persistent_filesystem(
+                super::super::source_catalog_root(&database),
+            )
+            .map_err(super::super::map_source_error)?;
+            let app = WorkApplication::with_source_catalog(&self.store, &source_catalog);
             let journal = app.authenticated_operation_journal(&identity);
             let expected_revision = optional_u64(data, "expected_revision")?;
             let parent_request_digest =
