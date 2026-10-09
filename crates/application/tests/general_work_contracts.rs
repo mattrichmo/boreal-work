@@ -133,7 +133,7 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         new_contract_revision: 1,
         rigor: RigorProfile::supported("reviewed-artifacts", 1).unwrap(),
         requirements: vec![requirement],
-        amendment_reason: None,
+        amendment_reason: Some("declare required brief output on open work".into()),
         now: "unix-ms:1".into(),
     };
     assert!(app
