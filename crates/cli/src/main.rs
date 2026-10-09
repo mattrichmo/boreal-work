@@ -1087,9 +1087,16 @@ fn run_with_operation_at(
     if store.is_canonical_production() {
         credentials::authenticate(&parsed, &store)?;
     }
-    let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
-    dispatch(&parsed, operation, &app, &adapter, &store)
+    if parsed.path == ["agent", "finish"] && parsed.options.close {
+        let source_root = source_catalog_root(&parsed.options.db);
+        let catalog = source_catalog_create(&source_root)?;
+        let app = WorkApplication::with_source_catalog(&store, &catalog);
+        dispatch(&parsed, operation, &app, &adapter, &store)
+    } else {
+        let app = WorkApplication::new(&store);
+        dispatch(&parsed, operation, &app, &adapter, &store)
+    }
 }
 
 /// Bind a command to the selected project without changing the parser's
@@ -10039,6 +10046,33 @@ mod tests {
         (catalog, captured.source.source_version_id)
     }
 
+    fn register_persistent_fixture_source(database: &Path, project: &str) -> boreal_source::SourceVersion {
+        let database = database.to_string_lossy();
+        let catalog = source_catalog_create(&source_catalog_root(&database))
+            .expect("persistent fixture source catalog opens");
+        let store = SqliteStore::open(Path::new(database.as_ref()), PRODUCTION_SCHEMA)
+            .expect("fixture database opens");
+        KnowledgeApplication::new(&catalog)
+            .capture_source_with_store(
+                &store,
+                SourceCaptureInput {
+                    operation_id: format!(
+                        "op_cli_persistent_fixture_source_{}_{}",
+                        std::process::id(),
+                        now_ms_u64()
+                    ),
+                    project_id: project.to_owned(),
+                    origin: "tests/cli-persistent-source-fixture.txt".to_owned(),
+                    media_type: "text/plain".to_owned(),
+                    bytes: b"deterministic persistent CLI source fixture".to_vec(),
+                },
+                DEFAULT_ACTOR,
+                &now(),
+            )
+            .expect("persistent fixture source captures and registers")
+            .source
+    }
+
     fn enroll_fixture_agent(database: &Path, project: &str, session: Option<&str>) -> &'static str {
         let actor = "fixture-agent";
         let root = database
@@ -11450,7 +11484,46 @@ mod tests {
 
         run(&args(&["init", "p", "--db", &db])).expect("project initializes");
         run(&args(&["work", "create", "p", "w", "task", "--db", &db])).expect("work creates");
-        let (_source_catalog, source_version) = register_fixture_source(&db_path, "p");
+        let source = register_persistent_fixture_source(&db_path, "p");
+        let source_version = source.source_version_id.clone();
+        let store = SqliteStore::open(&db_path, PRODUCTION_SCHEMA).expect("database opens");
+        let catalog = source_catalog(&source_catalog_root(&db))
+            .expect("persistent source catalog remains available");
+        let app = WorkApplication::with_source_catalog(&store, &catalog);
+        let mut operator_scope = boreal_application::PlanningScope::new(
+            ProjectId::new("p"),
+            DEFAULT_ACTOR,
+        );
+        operator_scope.session_id = Some(DEFAULT_SESSION.to_owned());
+        operator_scope.expected_revision = Some(
+            store
+                .project_revision("p")
+                .expect("project revision reads")
+                .0,
+        );
+        app.set_work_contract_v1(&boreal_application::SetWorkContractRequest {
+            scope: operator_scope.clone(),
+            operation_id: "op-cli-close-work-contract".into(),
+            work_id: "w".into(),
+            expected_contract_revision: 0,
+            new_contract_revision: 1,
+            rigor: boreal_domain::deliverables::RigorProfile::supported("lightweight", 1)
+                .expect("lightweight rigor exists"),
+            requirements: vec![boreal_domain::deliverables::OutputRequirement {
+                key: boreal_domain::deliverables::RequirementKey::parse("deliverable")
+                    .expect("requirement key is valid"),
+                purpose: "Persistent source-backed close fixture".into(),
+                required: true,
+                deliverable_type: boreal_domain::deliverables::DeliverableType::Document,
+                allowed_media_types: vec!["text/plain".into()],
+                minimum_count: 1,
+                maximum_count: 1,
+                criteria: Vec::new(),
+            }],
+            amendment_reason: None,
+            now: "unix-ms:1".into(),
+        })
+        .expect("source-backed close contract records");
         let actor = enroll_fixture_agent(&db_path, "p", None);
         let started = run(&args(&[
             "agent",
@@ -11474,6 +11547,52 @@ mod tests {
         .expect("start data");
         let attempt_id = started["attempt_id"].as_str().expect("attempt id");
         let fence = started["fence"].as_u64().expect("fence");
+        let output_revision = store
+            .project_revision("p")
+            .expect("project revision reads")
+            .0;
+        let output_acceptance = store
+            .output_acceptance_v1("p", "w", output_revision)
+            .expect("output acceptance evaluates")
+            .expect("contract acceptance exists");
+        let mut agent_scope = boreal_application::PlanningScope::new(
+            ProjectId::new("p"),
+            actor,
+        );
+        agent_scope.session_id = Some("s".to_owned());
+        agent_scope.expected_revision = Some(output_revision);
+        app.submit_output_artifacts_v1(&boreal_application::SubmitOutputArtifactsRequest {
+            scope: agent_scope,
+            operation_id: "op-cli-close-output-submit".into(),
+            work_id: "w".into(),
+            submission_id: "submission-cli-close".into(),
+            attempt_id: attempt_id.to_owned(),
+            fence,
+            proof_revision: output_acceptance.proof_revision,
+            contract_revision: 1,
+            input_revision: 0,
+            artifacts: vec![boreal_domain::deliverables::ProducedArtifact {
+                artifact_id: "output-cli-close".into(),
+                requirement_key: boreal_domain::deliverables::RequirementKey::parse("deliverable")
+                    .expect("requirement key is valid"),
+                submission_id: "submission-cli-close".into(),
+                identity: boreal_domain::deliverables::ArtifactIdentity {
+                    project_id: ProjectId::new("p"),
+                    source_version_id: SourceVersionId::new(source_version.clone()),
+                    content_digest: source.content_digest.clone(),
+                    media_type: source.media_type.clone(),
+                    byte_count: source.byte_count as u64,
+                    availability: boreal_domain::deliverables::ArtifactAvailability::Available,
+                },
+                producing_work_id: WorkId::new("w"),
+                attempt_id: attempt_id.to_owned(),
+                fence,
+                producer_actor_id: ActorId::new(actor),
+                captured_at: TimestampMs(13),
+            }],
+            now: "unix-ms:13".into(),
+        })
+        .expect("agent submits persistent source-backed output");
         let claimed_store =
             SqliteStore::open(&db_path, PRODUCTION_SCHEMA).expect("database opens after claim");
         assert!(

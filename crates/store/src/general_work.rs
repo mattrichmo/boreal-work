@@ -10,6 +10,7 @@ use boreal_domain::ActorRole;
 use serde_json::{json, Value};
 
 pub const GENERAL_WORK_SCHEMA_VERSION: u64 = 1;
+const MAX_AUTOMATIC_INSPECTION_BYTES: usize = 4 * 1024 * 1024;
 const GENERAL_WORK_TABLES: &[&str] = &[
     "boreal_work_contract_v1",
     "boreal_work_input_set_v1",
@@ -465,6 +466,19 @@ pub struct ArtifactInspectionInput {
     pub criteria_json: String,
 }
 
+/// Identity and verified content supplied by the application for an
+/// Automatic inspection. Results and observations are intentionally absent:
+/// this Store operation derives them from the pinned contract and bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedAutomaticInspectionInput {
+    pub work_id: String,
+    pub inspection_id: String,
+    pub submission_id: String,
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub verified_bytes: Option<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactDecisionInput {
     pub work_id: String,
@@ -662,6 +676,23 @@ impl SqliteStore {
             created_at: query.column_text(12)?,
             legacy_gate_policy: query.column_text(13)?,
         }))
+    }
+
+    /// Read the typed output requirements from one immutable contract revision.
+    /// The parser and bounds are shared with contract admission and close checks.
+    pub fn work_contract_requirements_v1(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        revision: u64,
+    ) -> Result<Vec<boreal_domain::deliverables::OutputRequirement>, StoreError> {
+        let contract = self
+            .work_contract_v1(project_id, work_id, Some(revision))?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "work contract revision",
+                id: format!("{project_id}/{work_id}/{revision}"),
+            })?;
+        parse_output_requirements(&contract.requirements_json)
     }
 
     pub fn set_accepted_input_set_v1(
@@ -1409,6 +1440,100 @@ impl SqliteStore {
         })
     }
 
+    /// Derive and persist Automatic evidence from verified source bytes.
+    /// Outcome and criteria observations are computed here from the exact
+    /// pinned output requirement; callers cannot submit a claimed result.
+    pub fn record_verified_automatic_inspection_v1(
+        &self,
+        context: &V3MutationContext,
+        input: &VerifiedAutomaticInspectionInput,
+    ) -> Result<MutationResult, StoreError> {
+        validate_verified_automatic_inspection(input)?;
+        let payload = json!({
+            "work_id":input.work_id,
+            "inspection_id":input.inspection_id,
+            "submission_id":input.submission_id,
+            "artifact_id":input.artifact_id,
+            "artifact_digest":input.artifact_digest,
+            "verified_byte_count":input.verified_bytes.as_ref().map(|bytes| bytes.len()),
+            "verified_byte_digest":input.verified_bytes.as_ref().map(|bytes| checksum(bytes)),
+        });
+        let context = context.with_payload(payload);
+        self.fact_mutation(
+            &context,
+            "work.artifact.inspect/v1",
+            "work",
+            &input.work_id,
+            &[ActorRole::Agent, ActorRole::Reviewer, ActorRole::Operator],
+            || {
+                self.require_general_work_schema()?;
+                let mut artifact = self.prepare(
+                    "SELECT a.content_digest,a.byte_count,a.requirement_key,a.availability_snapshot,c.requirements_json
+                     FROM boreal_produced_artifact_v1 a
+                     JOIN boreal_output_submission_v1 s
+                       ON s.project_id=a.project_id AND s.work_id=a.work_id AND s.submission_id=a.submission_id
+                     JOIN boreal_work_contract_v1 c
+                       ON c.project_id=s.project_id AND c.work_id=s.work_id AND c.contract_revision=s.contract_revision
+                     WHERE a.project_id=?1 AND a.work_id=?2 AND a.submission_id=?3 AND a.artifact_id=?4",
+                )?;
+                artifact.bind_text(1, &context.project_id)?;
+                artifact.bind_text(2, &input.work_id)?;
+                artifact.bind_text(3, &input.submission_id)?;
+                artifact.bind_text(4, &input.artifact_id)?;
+                if artifact.step()? != SQLITE_ROW {
+                    return Err(StoreError::NotFound {
+                        entity: "produced artifact",
+                        id: input.artifact_id.clone(),
+                    });
+                }
+                let content_digest = artifact.column_text(0)?;
+                let byte_count = artifact.column_u64(1)?;
+                let requirement_key = artifact.column_text(2)?;
+                let availability = artifact.column_text(3)?;
+                let requirements_json = artifact.column_text(4)?;
+                drop(artifact);
+                if content_digest != input.artifact_digest || availability != "available" {
+                    return Err(StoreError::Conflict(
+                        "automatic inspection must name the exact available artifact identity".into(),
+                    ));
+                }
+                let requirements = parse_output_requirements(&requirements_json)?;
+                let requirement = requirements
+                    .iter()
+                    .find(|requirement| requirement.key.as_str() == requirement_key.as_str())
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(
+                            "submitted artifact requirement is absent from its pinned contract".into(),
+                        )
+                    })?;
+                if let Some(bytes) = input.verified_bytes.as_deref() {
+                    if bytes.len() as u64 != byte_count
+                        || checksum(bytes) != input.artifact_digest
+                    {
+                        return Err(StoreError::Conflict(
+                            "automatic inspection bytes do not match the exact artifact digest and size".into(),
+                        ));
+                    }
+                }
+                let (outcome, observations) = automatic_inspection_observations(
+                    input.verified_bytes.as_deref(),
+                    &requirement.criteria,
+                );
+                let criteria_json = json!(observations
+                    .iter()
+                    .map(|observation| json!({
+                        "criterion": observation.criterion,
+                        "outcome": inspection_outcome_name(observation.outcome),
+                        "detail": observation.detail,
+                    }))
+                    .collect::<Vec<_>>())
+                .to_string();
+                let (criteria_json, _) = canonical_json_and_digest(&criteria_json)?;
+                let mut row=self.prepare("INSERT INTO boreal_artifact_inspection_v1(project_id,work_id,inspection_id,submission_id,artifact_id,artifact_digest,inspector_actor_id,inspector_kind,outcome,criteria_json,inspected_at,operation_id) VALUES(?1,?2,?3,?4,?5,?6,?7,'automatic',?8,?9,?10,?11)")?;row.bind_text(1,&context.project_id)?;row.bind_text(2,&input.work_id)?;row.bind_text(3,&input.inspection_id)?;row.bind_text(4,&input.submission_id)?;row.bind_text(5,&input.artifact_id)?;row.bind_text(6,&input.artifact_digest)?;row.bind_text(7,&context.actor_id)?;row.bind_text(8,inspection_outcome_name(outcome))?;row.bind_text(9,&criteria_json)?;row.bind_text(10,&context.now)?;row.bind_text(11,&context.operation_id)?;row.run()?;Ok(())
+            },
+        )
+    }
+
     pub fn record_artifact_decision_v1(
         &self,
         context: &V3MutationContext,
@@ -2131,12 +2256,159 @@ fn validate_inspection(input: &ArtifactInspectionInput) -> Result<(), StoreError
             "automatic inspections require trusted internal validator provenance; the public recording method accepts human inspections only".into(),
         ));
     }
+    validate_inspection_fields(input)
+}
+
+fn validate_verified_automatic_inspection(
+    input: &VerifiedAutomaticInspectionInput,
+) -> Result<(), StoreError> {
+    if input.work_id.trim().is_empty()
+        || input.work_id.len() > 255
+        || input.inspection_id.trim().is_empty()
+        || input.inspection_id.len() > 255
+        || input.submission_id.trim().is_empty()
+        || input.submission_id.len() > 255
+        || input.artifact_id.trim().is_empty()
+        || input.artifact_id.len() > 255
+        || !input.artifact_digest.starts_with("sha256:")
+        || input.verified_bytes.as_ref().is_some_and(|bytes| {
+            bytes.len() > MAX_AUTOMATIC_INSPECTION_BYTES
+                || checksum(bytes) != input.artifact_digest
+        })
+    {
+        return Err(StoreError::Invalid(
+            "verified automatic inspection identity or bounded bytes are invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn automatic_inspection_observations(
+    bytes: Option<&[u8]>,
+    criteria: &[boreal_domain::deliverables::ValidationCriterion],
+) -> (
+    boreal_domain::deliverables::InspectionOutcome,
+    Vec<boreal_domain::deliverables::CriterionObservation>,
+) {
+    use boreal_domain::deliverables::{
+        CriterionObservation, InspectionOutcome, ValidationCriterion,
+    };
+    let Some(bytes) = bytes else {
+        let detail = "verified source bytes were unavailable at automatic inspection time";
+        let observations = if criteria.is_empty() {
+            vec![CriterionObservation {
+                criterion: "verified_source_bytes".into(),
+                outcome: InspectionOutcome::Unavailable,
+                detail: detail.into(),
+            }]
+        } else {
+            criteria
+                .iter()
+                .map(|criterion| CriterionObservation {
+                    criterion: automatic_criterion_key(criterion),
+                    outcome: InspectionOutcome::Unavailable,
+                    detail: detail.into(),
+                })
+                .collect()
+        };
+        return (InspectionOutcome::Unavailable, observations);
+    };
+    if criteria.is_empty() {
+        return (
+            InspectionOutcome::Passed,
+            vec![CriterionObservation {
+                criterion: "verified_source_bytes".into(),
+                outcome: InspectionOutcome::Passed,
+                detail: format!(
+                    "verified {} source bytes against the pinned digest and byte count; no additional criteria were declared",
+                    bytes.len()
+                ),
+            }],
+        );
+    }
+    let observations = criteria
+        .iter()
+        .map(|criterion| {
+            let (outcome, detail) = match criterion {
+                ValidationCriterion::MinimumBytes(minimum) => (
+                    if (bytes.len() as u64) >= *minimum {
+                        InspectionOutcome::Passed
+                    } else {
+                        InspectionOutcome::Failed
+                    },
+                    format!("verified {} bytes; minimum is {minimum}", bytes.len()),
+                ),
+                ValidationCriterion::MaximumBytes(maximum) => (
+                    if (bytes.len() as u64) <= *maximum {
+                        InspectionOutcome::Passed
+                    } else {
+                        InspectionOutcome::Failed
+                    },
+                    format!("verified {} bytes; maximum is {maximum}", bytes.len()),
+                ),
+                ValidationCriterion::MinimumImageWidth(_)
+                | ValidationCriterion::MinimumImageHeight(_) => (
+                    InspectionOutcome::Unavailable,
+                    "automatic image dimensions are unavailable because no bounded image parser is defined".into(),
+                ),
+            };
+            CriterionObservation {
+                criterion: automatic_criterion_key(criterion),
+                outcome,
+                detail,
+            }
+        })
+        .collect::<Vec<_>>();
+    let outcome = if observations
+        .iter()
+        .any(|observation| observation.outcome == InspectionOutcome::Failed)
+    {
+        InspectionOutcome::Failed
+    } else if observations
+        .iter()
+        .any(|observation| observation.outcome == InspectionOutcome::Unavailable)
+    {
+        InspectionOutcome::Unavailable
+    } else {
+        InspectionOutcome::Passed
+    };
+    (outcome, observations)
+}
+
+fn automatic_criterion_key(
+    criterion: &boreal_domain::deliverables::ValidationCriterion,
+) -> String {
+    use boreal_domain::deliverables::ValidationCriterion;
+    match criterion {
+        ValidationCriterion::MinimumBytes(value) => format!("minimum_bytes:{value}"),
+        ValidationCriterion::MaximumBytes(value) => format!("maximum_bytes:{value}"),
+        ValidationCriterion::MinimumImageWidth(value) => {
+            format!("minimum_image_width:{value}")
+        }
+        ValidationCriterion::MinimumImageHeight(value) => {
+            format!("minimum_image_height:{value}")
+        }
+    }
+}
+
+fn inspection_outcome_name(
+    outcome: boreal_domain::deliverables::InspectionOutcome,
+) -> &'static str {
+    use boreal_domain::deliverables::InspectionOutcome;
+    match outcome {
+        InspectionOutcome::Passed => "passed",
+        InspectionOutcome::Failed => "failed",
+        InspectionOutcome::Unavailable => "unavailable",
+    }
+}
+
+fn validate_inspection_fields(input: &ArtifactInspectionInput) -> Result<(), StoreError> {
     if input.work_id.trim().is_empty()
         || input.inspection_id.trim().is_empty()
         || input.submission_id.trim().is_empty()
         || input.artifact_id.trim().is_empty()
         || !input.artifact_digest.starts_with("sha256:")
-        || input.inspector_kind != "human"
+        || !matches!(input.inspector_kind.as_str(), "human" | "automatic")
         || !matches!(input.outcome.as_str(), "passed" | "failed" | "unavailable")
         || input.criteria_json.len() > 65536
     {

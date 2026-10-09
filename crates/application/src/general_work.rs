@@ -15,7 +15,7 @@ use boreal_domain::{ProjectId, TimestampMs};
 use boreal_store::general_work::{
     AcceptedInputBindingInput, AcceptedInputSetInput, ArtifactDecisionInput,
     ArtifactInspectionInput, ExternalWaitInput, OutputSubmissionInput, ProducedArtifactInput,
-    WorkContractRevisionInput,
+    VerifiedAutomaticInspectionInput, WorkContractRevisionInput,
 };
 use boreal_store::{MutationResult, StoreError, V3MutationContext};
 use serde_json::{json, Value};
@@ -344,12 +344,165 @@ impl WorkApplication<'_> {
         let (mutation, record) = self
             .store_ref()
             .submit_output_artifacts_v1(&context, &input)?;
+        let (inspection_revision, inspections_changed) = self
+            .record_automatic_output_inspections(&request.scope, &record, &request.now)?;
         Ok(OperationResult {
             operation_id: request.operation_id.clone(),
-            snapshot_revision: mutation.revision,
-            changed: !mutation.replayed,
+            snapshot_revision: inspection_revision.unwrap_or(mutation.revision),
+            changed: !mutation.replayed || inspections_changed,
             value: record,
         })
+    }
+
+    /// Obtain the exact immutable source bytes for each submitted artifact and
+    /// ask Store to derive trusted Automatic evidence. Public requests cannot
+    /// provide an outcome, observations, or inspector kind.
+    fn record_automatic_output_inspections(
+        &self,
+        scope: &PlanningScope,
+        submission: &boreal_store::general_work::OutputSubmissionRecord,
+        now: &str,
+    ) -> Result<(Option<u64>, bool), ApplicationError> {
+        let rigor = RigorProfile::supported(
+            submission.rigor_profile_id.clone(),
+            u32::try_from(submission.rigor_profile_version).map_err(|_| {
+                ApplicationError::Invalid("stored rigor profile version is too large".into())
+            })?,
+        )
+        .map_err(|error| {
+            ApplicationError::Invalid(format!("stored rigor profile is invalid: {error:?}"))
+        })?;
+        let requirements = self.store_ref().work_contract_requirements_v1(
+            &submission.project_id,
+            &submission.work_id,
+            submission.contract_revision,
+        )?;
+        let requirements_by_key = requirements
+            .into_iter()
+            .map(|requirement| (requirement.key.as_str().to_owned(), requirement))
+            .collect::<BTreeMap<_, _>>();
+        if !rigor.requires_inspection()
+            && submission.artifacts.iter().all(|artifact| {
+                requirements_by_key
+                    .get(&artifact.requirement_key)
+                    .is_none_or(|requirement| requirement.criteria.is_empty())
+            })
+        {
+            return Ok((None, false));
+        }
+        let evidence = self
+            .store_ref()
+            .artifact_evidence_v1(
+                &submission.project_id,
+                &submission.work_id,
+                &submission.submission_id,
+            )?
+            .ok_or_else(|| {
+                ApplicationError::Invalid(
+                    "submitted artifacts disappeared before automatic inspection".into(),
+                )
+            })?;
+        let mut latest_revision = None;
+        let mut changed = false;
+        for artifact in &submission.artifacts {
+            let requirement = requirements_by_key
+                .get(&artifact.requirement_key)
+                .ok_or_else(|| {
+                    ApplicationError::Invalid(format!(
+                        "submitted artifact {} names an undeclared output requirement",
+                        artifact.artifact_id
+                    ))
+                })?;
+            if !rigor.requires_inspection() && requirement.criteria.is_empty() {
+                continue;
+            }
+            let stable_identity = json!({
+                "project_id": submission.project_id,
+                "work_id": submission.work_id,
+                "submission_id": submission.submission_id,
+                "artifact_id": artifact.artifact_id,
+                "artifact_digest": artifact.content_digest,
+                "contract_revision": submission.contract_revision,
+            });
+            let digest = canonical_request_digest(
+                "work.artifact.inspect.automatic/v1",
+                stable_identity,
+            );
+            let suffix = digest.strip_prefix("sha256:").unwrap_or(&digest);
+            let operation_id = format!("op_auto_inspect_{suffix}");
+            let inspection_id = format!("auto_inspection_{suffix}");
+            if let Some(prior) = evidence
+                .inspections
+                .iter()
+                .find(|inspection| inspection.inspection_id == inspection_id)
+            {
+                if prior.project_id != submission.project_id
+                    || prior.work_id != submission.work_id
+                    || prior.submission_id != submission.submission_id
+                    || prior.artifact_id != artifact.artifact_id
+                    || prior.artifact_digest != artifact.content_digest
+                    || prior.inspector_actor_id != scope.actor_id
+                    || prior.inspector_kind != "automatic"
+                {
+                    return Err(ApplicationError::Invalid(
+                        "automatic inspection readback does not match its immutable artifact identity".into(),
+                    ));
+                }
+                continue;
+            }
+
+            let source_request = SourceVerification::artifact(
+                &artifact.source_version_id,
+                &artifact.content_digest,
+                &artifact.media_type,
+                artifact.byte_count,
+            );
+            let verified = self.verified_source_bytes_batch(
+                &submission.project_id,
+                std::slice::from_ref(&source_request),
+            );
+            let verified_bytes = match verified {
+                Ok(mut bytes_by_id) => bytes_by_id.remove(&artifact.source_version_id),
+                Err(_) => None,
+            };
+            let current_revision = self
+                .store_ref()
+                .project_revision(&submission.project_id)?
+                .0;
+            let mut inspection_scope = scope.clone();
+            inspection_scope.expected_revision = Some(
+                latest_revision
+                    .unwrap_or(current_revision),
+            );
+            let context = mutation_context(
+                &inspection_scope,
+                &operation_id,
+                "work.artifact.inspect/v1",
+                &submission.work_id,
+                &json!({
+                    "inspection_id": inspection_id,
+                    "submission_id": submission.submission_id,
+                    "artifact_id": artifact.artifact_id,
+                    "artifact_digest": artifact.content_digest,
+                    "verified_byte_count": verified_bytes.as_ref().map(|bytes| bytes.len()),
+                }),
+                now,
+            );
+            let mutation = self.store_ref().record_verified_automatic_inspection_v1(
+                &context,
+                &VerifiedAutomaticInspectionInput {
+                    work_id: submission.work_id.clone(),
+                    inspection_id,
+                    submission_id: submission.submission_id.clone(),
+                    artifact_id: artifact.artifact_id.clone(),
+                    artifact_digest: artifact.content_digest.clone(),
+                    verified_bytes,
+                },
+            )?;
+            latest_revision = Some(mutation.revision);
+            changed |= !mutation.replayed;
+        }
+        Ok((latest_revision, changed))
     }
 
     pub fn record_artifact_inspection_v1(
@@ -792,8 +945,25 @@ impl WorkApplication<'_> {
         project_id: &str,
         requests: &[SourceVerification],
     ) -> Result<(), ApplicationError> {
+        // Verify one materialized source at a time. A submission can contain
+        // many artifacts; retaining every Vec until the batch ends would turn
+        // the per-source 4 MiB bound into an unbounded aggregate allocation.
+        for request in requests {
+            drop(self.verified_source_bytes_batch(
+                project_id,
+                std::slice::from_ref(request),
+            )?);
+        }
+        Ok(())
+    }
+
+    fn verified_source_bytes_batch(
+        &self,
+        project_id: &str,
+        requests: &[SourceVerification],
+    ) -> Result<BTreeMap<String, Vec<u8>>, ApplicationError> {
         if requests.is_empty() {
-            return Ok(());
+            return Ok(BTreeMap::new());
         }
         let mut sources = BTreeMap::new();
         for request in requests {
@@ -845,6 +1015,7 @@ impl WorkApplication<'_> {
                 requests[0].source_version_id
             ))
         })?;
+        let mut verified_bytes = BTreeMap::new();
         for (source_version_id, source) in sources {
             // `verify` first authorizes every immutable identity field against
             // the catalog, then reads the content-addressed object and checks
@@ -885,8 +1056,9 @@ impl WorkApplication<'_> {
                     "general-work source {source_version_id} byte count changed during verification"
                 )));
             }
+            verified_bytes.insert(source_version_id.to_owned(), bytes);
         }
-        Ok(())
+        Ok(verified_bytes)
     }
 }
 

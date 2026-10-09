@@ -9,7 +9,7 @@ use boreal_domain::deliverables::{
     AcceptedInput, AcceptanceDecisionKind, ArtifactAvailability, ArtifactDecision,
     ArtifactIdentity, ArtifactInspection as Inspection, DeliverableType, InputSource,
     InspectionOutcome, InspectorKind, OutputRequirement, ProducedArtifact, RequirementKey,
-    RigorProfile,
+    RigorProfile, ValidationCriterion,
 };
 use boreal_domain::external_waits::{
     AccountableParty, BusinessDate, BusinessMoment, CivilDate, ExternalWait,
@@ -39,12 +39,13 @@ fn register_source(
     source_label: &str,
     actor_id: &str,
     content_byte: u8,
+    media_type: &str,
 ) -> (SourceVersion, Vec<u8>) {
     let operation_id = format!("op-source-{source_label}");
     let bytes = vec![content_byte; 128];
     let origin = format!("synthetic-general-work-fixture/{source_label}");
     let version = catalog
-        .capture("p1", &origin, &bytes, "text/plain")
+        .capture("p1", &origin, &bytes, media_type)
         .expect("synthetic source bytes capture");
     store
         .register_source_version(&SourceVersionRegistrationInput {
@@ -91,6 +92,167 @@ fn attempt_request(operation_id: &str, at: u64) -> AttemptRequest {
         format!("sha256:{operation_id}"),
         TimestampMs(at),
     )
+}
+
+fn automatic_inspection_fixture(
+    criteria: Vec<ValidationCriterion>,
+) -> (
+    boreal_store::general_work::ArtifactInspectionRecord,
+    boreal_store::general_work::OutputAcceptanceRecord,
+) {
+    let store = SqliteStore::open_with_work_model_v3(":memory:", SCHEMA_V2, SCHEMA_V3)
+        .expect("synthetic v3 schema opens");
+    store
+        .ensure_general_work_schema()
+        .expect("general-work schema installs");
+    let source_root = temporary_source_root();
+    std::fs::create_dir_all(&source_root).expect("synthetic source root creates");
+    let catalog = SourceCatalog::with_persistent_filesystem(&source_root)
+        .expect("persistent source catalog opens");
+    let app = WorkApplication::with_source_catalog(&store, &catalog);
+    let project = ProjectId::new("p1");
+    app.init_project(
+        &project,
+        "operator-1",
+        "operator",
+        "fixture-credential",
+        "Fixture operator",
+        "unix-ms:0",
+        "op-init-auto-inspection",
+    )
+    .expect("synthetic project initializes");
+    store
+        .ensure_actor("agent-1", "agent", "fixture-agent", "Fixture agent", "unix-ms:0")
+        .expect("synthetic agent registers");
+    store
+        .create_work(
+            &WorkItem {
+                id: WorkId::new("w1"),
+                project_id: project.clone(),
+                kind: WorkKind::Task,
+                parent_id: None,
+                title: "Automatic inspection fixture".into(),
+                description: "Synthetic bounded source validation".into(),
+                lifecycle: PersistedLifecycle::Open,
+                priority: 0,
+                dispatch_policy: DispatchPolicy::Automatic,
+                hard_holds: Vec::new(),
+                acceptance_profile: AcceptanceProfile::focused(),
+            },
+            "unix-ms:0",
+        )
+        .expect("fixture work creates");
+    let image_output = criteria.iter().any(|criterion| {
+        matches!(
+            criterion,
+            ValidationCriterion::MinimumImageWidth(_) | ValidationCriterion::MinimumImageHeight(_)
+        )
+    });
+    let media_type = if image_output { "image/png" } else { "text/plain" };
+    let requirement = OutputRequirement {
+        key: RequirementKey::parse("artifact").unwrap(),
+        purpose: "Bounded fixture output".into(),
+        required: true,
+        deliverable_type: if image_output {
+            DeliverableType::Image
+        } else {
+            DeliverableType::Document
+        },
+        allowed_media_types: vec![media_type.into()],
+        minimum_count: 1,
+        maximum_count: 1,
+        criteria,
+    };
+    app.set_work_contract_v1(&SetWorkContractRequest {
+        scope: scope(&store, "operator-1"),
+        operation_id: "op-set-auto-inspection-contract".into(),
+        work_id: "w1".into(),
+        expected_contract_revision: 0,
+        new_contract_revision: 1,
+        rigor: RigorProfile::supported("deliverables-validated", 1).unwrap(),
+        requirements: vec![requirement],
+        amendment_reason: None,
+        now: "unix-ms:1".into(),
+    })
+    .expect("validated-output contract is recorded");
+    app.claim(
+        &project,
+        "w1",
+        "agent-1",
+        "test-harness",
+        None,
+        "a1",
+        "op-claim-auto-inspection",
+        "sha256:op-claim-auto-inspection",
+        None,
+        "unix-ms:10",
+        "unix-ms:1800010",
+        "unix-ms:7200010",
+    )
+    .expect("fixture agent claims work");
+    let adapter = SqliteAttemptAdapter::new(&store);
+    app.accept(&adapter, attempt_request("op-accept-auto-inspection", 11))
+        .expect("fixture agent accepts work");
+    app.start(&adapter, attempt_request("op-start-auto-inspection", 12))
+        .expect("fixture agent starts work");
+    let (source, _) = register_source(
+        &catalog,
+        &store,
+        "auto-output",
+        "agent-1",
+        b'x',
+        media_type,
+    );
+    let acceptance = store
+        .output_acceptance_v1("p1", "w1", store.project_revision("p1").unwrap().0)
+        .unwrap()
+        .unwrap();
+    app.submit_output_artifacts_v1(&SubmitOutputArtifactsRequest {
+        scope: scope(&store, "agent-1"),
+        operation_id: "op-submit-auto-inspection".into(),
+        work_id: "w1".into(),
+        submission_id: "submission-auto-inspection".into(),
+        attempt_id: "a1".into(),
+        fence: 1,
+        proof_revision: acceptance.proof_revision,
+        contract_revision: 1,
+        input_revision: 0,
+        artifacts: vec![ProducedArtifact {
+            artifact_id: "artifact-v1".into(),
+            requirement_key: RequirementKey::parse("artifact").unwrap(),
+            submission_id: "submission-auto-inspection".into(),
+            identity: ArtifactIdentity {
+                project_id: project,
+                source_version_id: SourceVersionId::new(source.source_version_id),
+                content_digest: source.content_digest.clone(),
+                media_type: source.media_type.clone(),
+                byte_count: source.byte_count as u64,
+                availability: ArtifactAvailability::Available,
+            },
+            producing_work_id: WorkId::new("w1"),
+            attempt_id: "a1".into(),
+            fence: 1,
+            producer_actor_id: ActorId::new("agent-1"),
+            captured_at: TimestampMs(13),
+        }],
+        now: "unix-ms:13".into(),
+    })
+    .expect("output submission derives automatic inspection");
+    let evidence = store
+        .artifact_evidence_v1("p1", "w1", "submission-auto-inspection")
+        .unwrap()
+        .unwrap();
+    assert_eq!(evidence.inspections.len(), 1);
+    let acceptance = store
+        .output_acceptance_v1("p1", "w1", store.project_revision("p1").unwrap().0)
+        .unwrap()
+        .unwrap();
+    let inspection = evidence.inspections.into_iter().next().unwrap();
+    drop(app);
+    drop(catalog);
+    drop(store);
+    let _ = std::fs::remove_dir_all(source_root);
+    (inspection, acceptance)
 }
 
 #[test]
@@ -143,7 +305,14 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
     };
     store.create_work(&work, "unix-ms:0").expect("fixture work creates");
     let (input_source, input_bytes) =
-        register_source(&catalog, &store, "input-src", "operator-1", b'b');
+        register_source(
+            &catalog,
+            &store,
+            "input-src",
+            "operator-1",
+            b'b',
+            "text/plain",
+        );
 
     let requirement = OutputRequirement {
         key: RequirementKey::parse("brief").unwrap(),
@@ -153,7 +322,7 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         allowed_media_types: vec!["text/plain".into()],
         minimum_count: 1,
         maximum_count: 1,
-        criteria: Vec::new(),
+        criteria: vec![ValidationCriterion::MinimumBytes(64)],
     };
     let contract_request = SetWorkContractRequest {
         scope: scope(&store, "operator-1"),
@@ -330,7 +499,14 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
     app.start(&adapter, attempt_request("op-start", 12))
         .expect("agent starts attempt");
     let (output_source, output_bytes) =
-        register_source(&catalog, &store, "output-src", "agent-1", b'c');
+        register_source(
+            &catalog,
+            &store,
+            "output-src",
+            "agent-1",
+            b'c',
+            "text/plain",
+        );
 
     let current_revision = store.project_revision("p1").unwrap().0;
     let before_submission = store
@@ -383,11 +559,31 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         .unwrap());
     let output = app.submit_output_artifacts_v1(&output_request).unwrap();
     assert!(output.changed);
-    assert!(!app
-        .submit_output_artifacts_v1(&output_request)
-        .unwrap()
-        .changed);
+    let replayed_output = app.submit_output_artifacts_v1(&output_request).unwrap();
+    assert!(!replayed_output.changed);
     assert_eq!(output.value.artifacts[0].content_digest, digest);
+    let output_evidence = store
+        .artifact_evidence_v1("p1", "w1", "submission-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        output_evidence
+            .inspections
+            .iter()
+            .filter(|inspection| inspection.inspector_kind == "automatic")
+            .count(),
+        1,
+        "output retry does not duplicate automatic evidence"
+    );
+    let automatic = output_evidence
+        .inspections
+        .into_iter()
+        .find(|inspection| inspection.inspector_kind == "automatic")
+        .expect("verified source bytes produce automatic evidence");
+    assert_eq!(automatic.outcome, "passed");
+    assert_eq!(automatic.inspector_actor_id, "agent-1");
+    assert_eq!(automatic.criteria[0].criterion, "minimum_bytes:64");
+    assert_eq!(automatic.criteria[0].outcome, InspectionOutcome::Passed);
     app.verify_general_work_close_sources_v1(&project, "w1", "a1", 1)
         .expect("close source read verifies current input and output bytes");
     let output_blob = FilesystemBlobStore::new(&source_root)
@@ -487,8 +683,12 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         .artifact_evidence_v1("p1", "w1", "submission-1")
         .unwrap()
         .unwrap();
-    assert_eq!(evidence.inspections[0].inspector_kind, "human");
-    assert_eq!(evidence.inspections[0].inspector_actor_id, "reviewer-1");
+    let human_inspection = evidence
+        .inspections
+        .iter()
+        .find(|inspection| inspection.inspector_kind == "human")
+        .expect("independent human inspection remains distinct");
+    assert_eq!(human_inspection.inspector_actor_id, "reviewer-1");
 
     let decision = ArtifactDecision {
         decision_id: "decision-1".into(),
@@ -630,4 +830,42 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
     drop(app);
     drop(catalog);
     std::fs::remove_dir_all(source_root).expect("synthetic source catalog is cleaned up");
+}
+
+#[test]
+fn verified_byte_criteria_create_passing_automatic_inspection() {
+    let (inspection, acceptance) =
+        automatic_inspection_fixture(vec![ValidationCriterion::MinimumBytes(64)]);
+    assert_eq!(inspection.inspector_kind, "automatic");
+    assert_eq!(inspection.outcome, "passed");
+    assert_eq!(inspection.criteria[0].criterion, "minimum_bytes:64");
+    assert_eq!(inspection.criteria[0].outcome, InspectionOutcome::Passed);
+    assert!(acceptance.coverage.accepted);
+}
+
+#[test]
+fn verified_byte_criteria_reject_undersized_artifact() {
+    let (inspection, acceptance) =
+        automatic_inspection_fixture(vec![ValidationCriterion::MinimumBytes(129)]);
+    assert_eq!(inspection.inspector_kind, "automatic");
+    assert_eq!(inspection.outcome, "failed");
+    assert_eq!(inspection.criteria[0].criterion, "minimum_bytes:129");
+    assert_eq!(inspection.criteria[0].outcome, InspectionOutcome::Failed);
+    assert!(!acceptance.coverage.accepted);
+}
+
+#[test]
+fn unsupported_image_dimension_criterion_is_explicitly_unavailable() {
+    let (inspection, acceptance) = automatic_inspection_fixture(vec![
+        ValidationCriterion::MaximumBytes(256),
+        ValidationCriterion::MinimumImageWidth(640),
+    ]);
+    assert_eq!(inspection.outcome, "unavailable");
+    assert_eq!(inspection.criteria[0].outcome, InspectionOutcome::Passed);
+    assert_eq!(inspection.criteria[1].criterion, "minimum_image_width:640");
+    assert_eq!(inspection.criteria[1].outcome, InspectionOutcome::Unavailable);
+    assert!(inspection.criteria[1]
+        .detail
+        .contains("no bounded image parser is defined"));
+    assert!(!acceptance.coverage.accepted);
 }
