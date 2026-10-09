@@ -174,7 +174,7 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         expected_input_revision: 0,
         new_input_revision: 1,
         inputs: vec![accepted_input],
-        amendment_reason: None,
+        amendment_reason: Some("accept the brief source for this open work".into()),
         now: "unix-ms:2".into(),
     };
     assert!(app.accept_input_set_v1(&input_request).unwrap().changed);
