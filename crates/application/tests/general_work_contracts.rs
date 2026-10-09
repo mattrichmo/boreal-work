@@ -171,7 +171,7 @@ fn automatic_inspection_fixture(
         new_contract_revision: 1,
         rigor: RigorProfile::supported("deliverables-validated", 1).unwrap(),
         requirements: vec![requirement],
-        amendment_reason: None,
+        amendment_reason: Some("declare automatic-inspection fixture contract".into()),
         now: "unix-ms:1".into(),
     })
     .expect("validated-output contract is recorded");
@@ -253,6 +253,31 @@ fn automatic_inspection_fixture(
     drop(store);
     let _ = std::fs::remove_dir_all(source_root);
     (inspection, acceptance)
+}
+
+fn inspection_observations(
+    inspection: &boreal_store::general_work::ArtifactInspectionRecord,
+) -> Vec<serde_json::Value> {
+    serde_json::from_str(&inspection.criteria_json)
+        .expect("persisted inspection criteria are serialized observations")
+}
+
+fn assert_observation(
+    observations: &[serde_json::Value],
+    index: usize,
+    criterion: &str,
+    outcome: InspectionOutcome,
+) {
+    let observation = observations
+        .get(index)
+        .expect("expected inspection observation is present");
+    let outcome = match outcome {
+        InspectionOutcome::Passed => "passed",
+        InspectionOutcome::Failed => "failed",
+        InspectionOutcome::Unavailable => "unavailable",
+    };
+    assert_eq!(observation["criterion"], criterion);
+    assert_eq!(observation["outcome"], outcome);
 }
 
 #[test]
@@ -603,8 +628,13 @@ fn contracts_lineage_review_wait_and_close_readback_are_revision_bound() {
         .expect("verified source bytes produce automatic evidence");
     assert_eq!(automatic.outcome, "passed");
     assert_eq!(automatic.inspector_actor_id, "agent-1");
-    assert_eq!(automatic.criteria[0].criterion, "minimum_bytes:64");
-    assert_eq!(automatic.criteria[0].outcome, InspectionOutcome::Passed);
+    let observations = inspection_observations(&automatic);
+    assert_observation(
+        &observations,
+        0,
+        "minimum_bytes:64",
+        InspectionOutcome::Passed,
+    );
     app.verify_general_work_close_sources_v1(&project, "w1", "a1", 1)
         .expect("close source read verifies current input and output bytes");
     let output_blob = FilesystemBlobStore::new(&source_root)
@@ -859,8 +889,13 @@ fn verified_byte_criteria_create_passing_automatic_inspection() {
         automatic_inspection_fixture(vec![ValidationCriterion::MinimumBytes(64)]);
     assert_eq!(inspection.inspector_kind, "automatic");
     assert_eq!(inspection.outcome, "passed");
-    assert_eq!(inspection.criteria[0].criterion, "minimum_bytes:64");
-    assert_eq!(inspection.criteria[0].outcome, InspectionOutcome::Passed);
+    let observations = inspection_observations(&inspection);
+    assert_observation(
+        &observations,
+        0,
+        "minimum_bytes:64",
+        InspectionOutcome::Passed,
+    );
     assert!(acceptance.coverage.accepted);
 }
 
@@ -870,8 +905,13 @@ fn verified_byte_criteria_reject_undersized_artifact() {
         automatic_inspection_fixture(vec![ValidationCriterion::MinimumBytes(129)]);
     assert_eq!(inspection.inspector_kind, "automatic");
     assert_eq!(inspection.outcome, "failed");
-    assert_eq!(inspection.criteria[0].criterion, "minimum_bytes:129");
-    assert_eq!(inspection.criteria[0].outcome, InspectionOutcome::Failed);
+    let observations = inspection_observations(&inspection);
+    assert_observation(
+        &observations,
+        0,
+        "minimum_bytes:129",
+        InspectionOutcome::Failed,
+    );
     assert!(!acceptance.coverage.accepted);
 }
 
@@ -882,11 +922,22 @@ fn unsupported_image_dimension_criterion_is_explicitly_unavailable() {
         ValidationCriterion::MinimumImageWidth(640),
     ]);
     assert_eq!(inspection.outcome, "unavailable");
-    assert_eq!(inspection.criteria[0].outcome, InspectionOutcome::Passed);
-    assert_eq!(inspection.criteria[1].criterion, "minimum_image_width:640");
-    assert_eq!(inspection.criteria[1].outcome, InspectionOutcome::Unavailable);
-    assert!(inspection.criteria[1]
-        .detail
+    let observations = inspection_observations(&inspection);
+    assert_observation(
+        &observations,
+        0,
+        "maximum_bytes:256",
+        InspectionOutcome::Passed,
+    );
+    assert_observation(
+        &observations,
+        1,
+        "minimum_image_width:640",
+        InspectionOutcome::Unavailable,
+    );
+    assert!(observations[1]["detail"]
+        .as_str()
+        .expect("criterion detail is serialized as text")
         .contains("no bounded image parser is defined"));
     assert!(!acceptance.coverage.accepted);
 }
