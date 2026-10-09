@@ -5,22 +5,43 @@ The supported release artifact is a platform-specific archive containing the
 databases are not part of the install and are never created as an install side
 effect. Installation automatically provisions a separate per-user global
 manager SQLite database, including CLI-only installations. The global manager
-is independent of the installation prefix and any project folder. The initial binary matrix is macOS ARM64, macOS Intel, and Linux
-x86_64; Linux ARM64 and Windows remain unsupported until their transport and
-SQLite runtime builds are verified.
+is independent of the installation prefix and any project folder. Source
+builds are supported on Apple Silicon and Intel macOS and x86_64 Linux.
+Published v0.2.1 archives cover Apple Silicon macOS and x86_64 Linux; Linux
+ARM64 and Windows remain unsupported until their transport and SQLite runtime
+builds are verified.
+
+The CLI works without Node.js. The project and Global dashboards require
+Node.js 20 through 26 and report an actionable error before starting their
+private service when that runtime is unavailable or outside the supported
+range. Set `BOREAL_NODE` to select the project dashboard runtime or
+`BOREAL_NODE_BINARY` for the Global dashboard. JSON snapshots remain usable
+without Node.js.
 
 ## Install or update from GitHub
 
-Use the GitHub source installer for the current v2 code. It fetches the installer from `main`, downloads Boreal source from GitHub, builds the CLI and dashboards for this machine, verifies the package, and installs it under `~/.local`. It does not use GitHub Actions or modify project databases.
+For Apple Silicon macOS and x86_64 Linux, use the prebuilt release installer. It fetches the installer from `main`, selects the compatible archive from the latest GitHub release, verifies the archive against `SHA256SUMS`, and installs it under `~/.local`. The current release, v0.2.1, includes those two platform archives. Installation does not use GitHub Actions or modify project databases.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --from-source --yes
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --yes
 bwrk --version
 ```
 
-The source build requires Git, Rust/Cargo, Node.js 20 through 26, npm, Python 3, and `tsc`. Run the command again to build and install a newer source version. Use `--ref REF` to pin a source branch or tag.
+To pin the currently published version, pass `--version 0.2.1`:
 
-Without `--from-source`, the installer uses a prebuilt GitHub release archive. The latest published release is v0.1.0 and has the legacy package layout; it does not contain a compatible v2 archive. The installer reports that mismatch without starting a source build. When a compatible v2 archive is published for your platform, the ordinary installer command can use it without building from source.
+```sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --version 0.2.1 --yes
+```
+
+### Source-build fallback
+
+Intel macOS does not have a prebuilt v0.2.1 archive. To build from source, use the explicit option below. This requires Git, Rust/Cargo, Node.js 20 through 26, npm, Python 3, and `tsc`. Use `--ref REF` to pin a source branch or tag.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --from-source --yes
+```
+
+Linux ARM64 and Windows are not currently supported.
 
 ## Global project manager
 
@@ -122,8 +143,8 @@ brew install boreal
 brew upgrade boreal
 ```
 
-The formula installs the CLI and TUI and supplies Node.js for
-`bwrk dashboard`.
+The formula installs the CLI and both TUIs and supplies Node.js for
+`bwrk dashboard` and `bwrk dashboard global`.
 
 ## Advanced archive install
 
