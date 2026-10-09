@@ -20,12 +20,28 @@ Boreal keeps plans, tasks, dependencies, ownership, sources, evidence, reviews, 
 
 ## Get a safe first result
 
-The latest published release is v0.1.0. Its `bwrk-upgrade.tar.gz` asset uses the legacy package layout; the v2 installer expects a matching platform archive and `SHA256SUMS`, and no compatible v2 archive is published yet. The default installer does not build from source automatically. Until those archives are available, explicitly install from source under the default `~/.local` prefix (requires Git, Rust, Node.js 20 through 26, npm, Python, and `tsc`):
+For Apple Silicon macOS or x86_64 Linux, install the latest compatible prebuilt release under the default `~/.local` prefix:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --yes
+bwrk --version
+```
+
+The installer selects the compatible platform archive from the latest GitHub release and verifies it against `SHA256SUMS` before installing. The current release, v0.2.1, includes Apple Silicon macOS and x86_64 Linux archives. To pin that version, add `--version 0.2.1`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --version 0.2.1 --yes
+```
+
+### Source-build fallback
+
+Intel macOS does not have a prebuilt v0.2.1 archive. To build from source under `~/.local`, use the explicit source option (requires Git, Rust, Node.js 20 through 26, npm, Python, and `tsc`):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --from-source --yes
-bwrk --version
 ```
+
+Linux ARM64 and Windows are not currently supported.
 
 Try project setup in a new temporary directory before using an existing project. The example initializes a local project, checks it, and opens its dashboard:
 
@@ -88,7 +104,7 @@ Command availability can vary by build, so consult the installed CLI's command l
 
 ## Platforms and current limits
 
-The installer supports macOS on Apple Silicon or Intel and Linux on x86-64. Compatible v2 release archives for those targets are not yet published; Linux ARM64 and Windows are not supported. The interactive dashboard requires Node.js 20 through 26. Boreal Work v2 is under active development; use `bwrk commands` to see which routes are available in your build.
+The installer supports source builds on macOS Apple Silicon or Intel and Linux x86-64. Prebuilt v0.2.1 release archives are available for Apple Silicon macOS and Linux x86-64; Linux ARM64 and Windows are not supported. The interactive dashboard requires Node.js 20 through 26. Boreal Work v2 is under active development; use `bwrk commands` to see which routes are available in your build.
 
 ## Further reading
 
