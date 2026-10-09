@@ -37,6 +37,67 @@ fn bind_positional_target(
     }
 }
 
+fn map_memory_error(error: boreal_application::KnowledgeError) -> CliError {
+    let code = match &error {
+        boreal_application::KnowledgeError::Source(boreal_source::SourceError::DigestMismatch) => {
+            ErrorCode::IntegrityQuarantined
+        }
+        _ => ErrorCode::InvalidArgument,
+    };
+    CliError::with(code, ApplicationOutcome::Rejected, error.to_string())
+}
+
+fn publication_readback_unknown(
+    operation: &str,
+    state: &str,
+    stage: &str,
+    reconciliation: &str,
+    side_effect_ref: Option<&str>,
+    detail: &str,
+) -> CliError {
+    CliError::unknown_delivery(
+        operation,
+        format!(
+            "memory publication state={state}, database_stage={stage}, reconciliation={reconciliation}, side_effect_ref={}; readback failed: {detail}; use `bwrk memory readback --project <project> {operation}` before retrying",
+            side_effect_ref.unwrap_or("unavailable")
+        ),
+    )
+}
+
+fn failed_publication_error(
+    operation: &str,
+    publish_error: boreal_application::KnowledgeError,
+    readback_error: boreal_application::KnowledgeError,
+    job: Result<Option<boreal_store::jobs::ExternalJobRecord>, boreal_store::StoreError>,
+) -> CliError {
+    match job {
+        Ok(None) => map_memory_error(publish_error),
+        Ok(Some(record)) if matches!(record.stage.as_str(), "registered" | "admitted")
+            && record.side_effect_ref.is_none() =>
+        {
+            map_memory_error(publish_error)
+        }
+        Ok(Some(record)) => publication_readback_unknown(
+            operation,
+            "unknown",
+            &record.stage,
+            &record.reconciliation_state,
+            record.side_effect_ref.as_deref(),
+            &format!("publish failed: {publish_error}; readback failed: {readback_error}"),
+        ),
+        Err(job_error) => publication_readback_unknown(
+            operation,
+            "unknown",
+            "unavailable",
+            "unavailable",
+            None,
+            &format!(
+                "publish failed: {publish_error}; readback failed: {readback_error}; publication record lookup failed: {job_error}"
+            ),
+        ),
+    }
+}
+
 pub(super) fn payload(parsed: &ParsedCommand) -> Result<Value, CliError> {
     let context = project_context::resolve(parsed)?;
     let mut change = if let Some(path) = &parsed.options.input {
@@ -133,8 +194,7 @@ pub(super) fn apply(
         expected_revision: dto.expected_revision,
         now: now(),
     };
-    let map_error =
-        |error: boreal_application::KnowledgeError| CliError::invalid(error.to_string());
+    let map_error = |error: boreal_application::KnowledgeError| map_memory_error(error);
     let mutation = matches!(
         &dto.change,
         MemoryOperationDto::Draft { .. }
@@ -221,45 +281,86 @@ pub(super) fn apply(
                     // has crossed that boundary, preserve the original
                     // operation identity and tell the caller to read it back
                     // before considering another publication attempt.
-                    if let Ok(readback) =
-                        app.read_memory_publication(store, &identity, &memory_root, operation)
-                    {
-                        let state = readback
-                            .get("reconciliation_state")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        if state == "reconciled"
-                            && readback.get("readback_required").and_then(Value::as_bool)
-                                == Some(false)
-                        {
-                            let mut response = bounded_result(
-                                Some(json!({
-                                    "operation_id": operation,
-                                    "state": "Reconciled",
-                                    "readback": readback,
-                                })),
-                                Some(store.project_revision(project).map_err(map_store_error)?.0),
-                            )?;
-                            response.outcome = ApplicationOutcome::Changed;
-                            return Ok(response);
-                        }
-                        if readback.get("readback_required").and_then(Value::as_bool) == Some(true)
-                            && state != "not_published"
-                        {
-                            return Err(CliError::unknown_delivery(
+                    match app.read_memory_publication(store, &identity, &memory_root, operation) {
+                        Ok(readback) => {
+                            let state = readback
+                                .get("reconciliation_state")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            if state == "reconciled"
+                                && readback.get("readback_required").and_then(Value::as_bool)
+                                    == Some(false)
+                            {
+                                let mut response = bounded_result(
+                                    Some(json!({
+                                        "operation_id": operation,
+                                        "state": "Reconciled",
+                                        "readback": readback,
+                                    })),
+                                    Some(
+                                        store.project_revision(project).map_err(map_store_error)?.0,
+                                    ),
+                                )?;
+                                response.outcome = ApplicationOutcome::Changed;
+                                return Ok(response);
+                            }
+                            if readback.get("readback_required").and_then(Value::as_bool)
+                                == Some(true)
+                                && state != "not_published"
+                            {
+                                return Err(CliError::unknown_delivery(
                                 operation,
                                 format!(
                                     "memory publication is {state}; use `bwrk memory readback --project {project} {operation}` before retrying"
                                 ),
+                            ));
+                            }
+                        }
+                        Err(readback_error) => {
+                            let job =
+                                store.external_job_by_operation_with_identity(&identity, operation);
+                            return Err(failed_publication_error(
+                                operation,
+                                error,
+                                readback_error,
+                                job,
                             ));
                         }
                     }
                     return Err(map_error(error));
                 }
             };
-            let readback = app
-                .read_memory_publication(store, &identity, &memory_root, operation)
-                .map_err(map_error)?;
+            let readback =
+                match app.read_memory_publication(store, &identity, &memory_root, operation) {
+                    Ok(readback) => readback,
+                    Err(error) => {
+                        let state = format!("{:?}", result.state);
+                        let stage = format!("{:?}", result.job.state);
+                        let reconciliation = match result.state {
+                            boreal_application::MemoryPublicationState::Pending => {
+                                "publication_pending"
+                            }
+                            boreal_application::MemoryPublicationState::ReadbackRequired => {
+                                "readback_required"
+                            }
+                            boreal_application::MemoryPublicationState::Reconciled => "reconciled",
+                            boreal_application::MemoryPublicationState::Rejected => "rejected",
+                            boreal_application::MemoryPublicationState::Failed => "failed",
+                        };
+                        return Err(publication_readback_unknown(
+                            operation,
+                            &state,
+                            &stage,
+                            reconciliation,
+                            result.job.side_effect_ref.as_deref(),
+                            &format!(
+                                "{}; job error: {}",
+                                error,
+                                result.job.error.as_deref().unwrap_or("none")
+                            ),
+                        ));
+                    }
+                };
             let mut response = bounded_result(
                 Some(
                     json!({"operation_id":operation,"state":format!("{:?}",result.state),"readback":readback}),
@@ -367,5 +468,119 @@ mod tests {
 
         bind_positional_target(&mut change, "draft_id", "draft-7").unwrap();
         assert!(bind_positional_target(&mut change, "draft_id", "draft-8").is_err());
+    }
+
+    #[test]
+    fn source_digest_mismatch_is_quarantined_in_memory_routes() {
+        let root = std::env::temp_dir().join(format!(
+            "boreal-memory-digest-mismatch-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create disposable source catalog");
+        let catalog = SourceCatalog::with_persistent_filesystem(&root).expect("catalog");
+        let version = catalog
+            .capture("p1", "notes.md", b"original bytes", "text/plain")
+            .expect("capture source");
+        let blob_path = boreal_source::FilesystemBlobStore::new(&root)
+            .blob_path(&version.content_digest)
+            .expect("content addressed blob path");
+        fs::write(blob_path, b"tampered bytes").expect("tamper disposable blob");
+        let error = catalog
+            .verify(&version)
+            .expect_err("tampered bytes are rejected");
+        assert_eq!(error, boreal_source::SourceError::DigestMismatch);
+        let error = map_memory_error(error.into());
+        assert_eq!(error.code, ErrorCode::IntegrityQuarantined);
+        assert_eq!(error.outcome, ApplicationOutcome::Rejected);
+        fs::remove_dir_all(root).expect("remove disposable source catalog");
+    }
+
+    #[test]
+    fn publish_error_with_effect_stage_and_failed_readback_remains_unknown() {
+        let error = failed_publication_error(
+            "op-memory-publish",
+            boreal_application::KnowledgeError::Invalid("synthetic publish error".into()),
+            boreal_application::KnowledgeError::Invalid("synthetic readback error".into()),
+            Ok(Some(boreal_store::jobs::ExternalJobRecord {
+                job_id: "op-memory-publish".into(),
+                operation_id: "op-memory-publish".into(),
+                project_id: "p1".into(),
+                subject_type: "project".into(),
+                subject_id: "p1".into(),
+                kind: "memory_publication".into(),
+                request_digest: "sha256:request".into(),
+                stage: "readback_required".into(),
+                side_effect_ref: Some("git:abc123".into()),
+                source_identity: None,
+                config_identity: None,
+                actor_id: "operator".into(),
+                session_id: None,
+                started_at: None,
+                deadline: None,
+                result_digest: None,
+                reconciliation_state: "git_committed_db_pending".into(),
+                error_message: None,
+                created_at: "2026-10-09T00:00:00Z".into(),
+                updated_at: "2026-10-09T00:00:01Z".into(),
+            })),
+        );
+        assert_eq!(error.outcome, ApplicationOutcome::Unknown);
+        let protocol = error.protocol_error.as_deref().expect("protocol error");
+        assert_eq!(protocol.operation_id.as_deref(), Some("op-memory-publish"));
+        assert_eq!(protocol.readback_required, Some(true));
+        assert!(protocol.message.contains("readback_required"));
+        assert!(protocol.message.contains("git_committed_db_pending"));
+        assert!(protocol.message.contains("git:abc123"));
+    }
+
+    #[test]
+    fn publication_readback_failures_preserve_unknown_operation_details() {
+        for state in ["Pending", "ReadbackRequired", "Reconciled", "Failed"] {
+            let error = publication_readback_unknown(
+                "op-memory-publish",
+                state,
+                "readback_required",
+                "git_committed_db_pending",
+                Some("git:abc123"),
+                "synthetic readback interruption",
+            );
+            assert_eq!(error.code, ErrorCode::UnknownOutcome);
+            assert_eq!(error.outcome, ApplicationOutcome::Unknown);
+            let protocol = error.protocol_error.as_deref().expect("protocol error");
+            assert_eq!(protocol.operation_id.as_deref(), Some("op-memory-publish"));
+            assert_eq!(protocol.operation_preserved, Some(true));
+            assert_eq!(protocol.readback_required, Some(true));
+            assert!(protocol.message.contains(state));
+            assert!(protocol.message.contains("readback_required"));
+            assert!(protocol.message.contains("git_committed_db_pending"));
+            assert!(protocol.message.contains("git:abc123"));
+        }
+    }
+
+    #[test]
+    fn unreadable_publication_record_after_publish_error_is_unknown() {
+        let error = failed_publication_error(
+            "op-memory-publish",
+            boreal_application::KnowledgeError::Invalid("synthetic publish error".into()),
+            boreal_application::KnowledgeError::Invalid("synthetic readback error".into()),
+            Err(boreal_store::StoreError::Corrupt(
+                "synthetic job lookup interruption".into(),
+            )),
+        );
+        assert_eq!(error.outcome, ApplicationOutcome::Unknown);
+        assert_eq!(error.code, ErrorCode::UnknownOutcome);
+        let protocol = error.protocol_error.as_deref().expect("protocol error");
+        assert_eq!(protocol.operation_id.as_deref(), Some("op-memory-publish"));
+        assert_eq!(protocol.operation_preserved, Some(true));
+        assert_eq!(protocol.readback_required, Some(true));
+        assert!(protocol.message.contains("synthetic publish error"));
+        assert!(protocol.message.contains("synthetic readback error"));
+        assert!(protocol
+            .message
+            .contains("synthetic job lookup interruption"));
     }
 }
