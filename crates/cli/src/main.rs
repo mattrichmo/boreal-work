@@ -64,6 +64,7 @@ mod global_service;
 mod history_commands;
 mod knowledge_maintenance;
 mod knowledge_parity;
+mod machine_update;
 mod memory_commands;
 mod operational_commands;
 mod orchestration_commands;
@@ -74,7 +75,6 @@ mod service;
 mod setup;
 mod summary_commands;
 mod template_commands;
-mod update;
 mod work_split;
 
 /// The compatibility schema is reserved for explicitly labeled fixtures and
@@ -104,6 +104,8 @@ Usage:
   bwrk setup [PROJECT_DIR] [--project ID] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk install [PROJECT_DIR] [--project ID] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk update [--json]
+  bwrk update status [--json]
+  bwrk update recover --yes [--json]
   bwrk upgrade --machine [--json]  (alias for update)
   bwrk backup --project PROJECT PACKAGE_DIR [--socket PATH] [--json]
   bwrk restore PACKAGE_DIR [--db PATH] [--json]
@@ -161,6 +163,8 @@ struct CliOptions {
     service_workspace: Option<PathBuf>,
     extra: std::collections::BTreeMap<String, Vec<String>>,
     db: String,
+    #[serde(skip)]
+    db_explicit: bool,
     socket: Option<String>,
     project: Option<String>,
     actor: String,
@@ -224,6 +228,7 @@ impl Default for CliOptions {
             service_workspace: None,
             extra: Default::default(),
             db: ".boreal/boreal.sqlite".to_owned(),
+            db_explicit: false,
             socket: None,
             project: None,
             actor: DEFAULT_ACTOR.to_owned(),
@@ -730,6 +735,12 @@ fn run_with_operation_at(
             message,
         ));
     }
+    // Machine package operations are installation-scoped. Dispatch them
+    // before project discovery, authentication, sockets, or project database
+    // selection can become an authority for the update.
+    if machine_update::is_route(&parsed) {
+        return machine_update::run(&parsed, operation);
+    }
     if parsed.options.socket.is_some()
         && !setup::is_setup_command(&parsed.path)
         && !command_registry::is_registry_path(&parsed.path)
@@ -866,27 +877,6 @@ fn run_with_operation_at(
             return doctor_result(&parsed, &store);
         }
         return diagnostic_commands::run(&parsed, operation, &store);
-    }
-    if parsed.path.len() == 1 && matches!(parsed.path[0].as_str(), "update" | "upgrade") {
-        if parsed.options.socket.is_none() {
-            let context = project_context::resolve(&parsed)?;
-            let store = SqliteStore::open_read_only_for_diagnostics(&context.database)
-                .map_err(map_store_error)?;
-            project_context::validate_store(&context, &store)?;
-            credentials::authenticate(&parsed, &store)?;
-            require_operator(&store, &context.project_id, &parsed.options.actor)?;
-        }
-        if parsed.options.socket.is_some() {
-            if service::supports(&parsed) {
-                return service::request(&parsed, operation);
-            }
-            return Err(CliError::with(
-                ErrorCode::UnknownCommandNamespace,
-                ApplicationOutcome::Rejected,
-                "the requested update command is not available through the selected service socket",
-            ));
-        }
-        return service::run_update(&parsed, operation);
     }
     if matches!(parsed.path.as_slice(), [path] if path == "backup" || path == "restore") {
         if parsed.options.socket.is_some() {
@@ -1792,6 +1782,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         service_workspace: None,
         extra: Default::default(),
         db: ".boreal/boreal.sqlite".to_owned(),
+        db_explicit: false,
         socket: None,
         project: None,
         actor: DEFAULT_ACTOR.to_owned(),
@@ -2057,7 +2048,10 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 _ => None,
             };
             match canonical {
-                "--db" => options.db = value.unwrap(),
+                "--db" => {
+                    options.db = value.unwrap();
+                    options.db_explicit = true;
+                }
                 "--socket" => options.socket = Some(value.unwrap()),
                 "--project" => options.project = Some(value.unwrap()),
                 "--actor" => {
@@ -2377,6 +2371,10 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["workflows", "list"] => options.positionals.is_empty(),
         ["workflows", "show"] => options.positionals.len() == 1,
         ["update"] => options.positionals.is_empty() && !options.machine,
+        ["update", "status"] => options.positionals.is_empty() && !options.machine,
+        ["update", "recover"] => {
+            options.positionals.is_empty() && !options.machine && options.setup.yes
+        }
         ["upgrade"] => options.positionals.is_empty() && options.machine,
         ["backup"] => positionals == 1,
         ["restore"] => positionals == 1 && options.socket.is_none(),

@@ -625,6 +625,33 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
             }
             "export".to_owned()
         }
+        ["backup"] => {
+            payload["path"] = json!(required(
+                value("out"),
+                "global backup requires --out PACKAGE_DIR"
+            )?);
+            "backup".to_owned()
+        }
+        ["backup", "verify"] => {
+            payload["path"] = json!(required(
+                parsed.options.input.clone(),
+                "global backup verify requires --input PACKAGE_DIR"
+            )?);
+            "backup verify".to_owned()
+        }
+        ["database", "inspect"] => "database inspect".to_owned(),
+        ["restore"] => {
+            if !parsed.options.setup.yes {
+                return Err(CliError::invalid(
+                    "global restore replaces the active database; review the package and pass --yes",
+                ));
+            }
+            payload["path"] = json!(required(
+                parsed.options.input.clone(),
+                "global restore requires --input PACKAGE_DIR"
+            )?);
+            "restore".to_owned()
+        }
         ["import"] => {
             payload["input_path"] = json!(required(
                 parsed.options.input.clone(),
@@ -736,6 +763,79 @@ pub(crate) fn execute_request(
     operation: &str,
 ) -> Result<Value, CliError> {
     let path = ensure_global_root()?;
+    if command == "backup" {
+        let requested = payload
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::invalid("global backup requires --out PACKAGE_DIR"))?;
+        let destination = resolve_global_artifact_path(requested)?;
+        let report = GlobalManagerApplication::backup_database_package_to(&path, &destination)
+            .map_err(global_error)?;
+        return Ok(json!({
+            "backup": true,
+            "package_path": report.package_path,
+            "database_path": report.database_path,
+            "manifest_path": report.manifest_path,
+            "database_id": report.database_id,
+            "schema_version": report.schema_version,
+            "revision": report.revision,
+            "byte_count": report.byte_count,
+            "database_checksum": report.database_checksum,
+            "manifest_checksum": report.manifest_checksum,
+            "private_data": true,
+            "contains_revision_history": true,
+        }));
+    }
+    if command == "backup verify" {
+        let requested = payload.get("path").and_then(Value::as_str).ok_or_else(|| {
+            CliError::invalid("global backup verify requires --input PACKAGE_DIR")
+        })?;
+        let package = resolve_global_artifact_path(requested)?;
+        let report =
+            GlobalManagerApplication::inspect_backup_package(&package).map_err(global_error)?;
+        return Ok(json!({
+            "verified": true,
+            "package_path": report.package_path,
+            "database_id": report.database_id,
+            "schema_version": report.schema_version,
+            "revision": report.revision,
+            "byte_count": report.byte_count,
+            "database_checksum": report.database_checksum,
+            "manifest_checksum": report.manifest_checksum,
+            "private_data": true,
+            "contains_revision_history": true,
+        }));
+    }
+    if command == "database inspect" {
+        let report = GlobalManagerApplication::inspect_database(&path).map_err(global_error)?;
+        return Ok(json!({
+            "database": path,
+            "database_id": report.database_id,
+            "schema_version": report.schema_version,
+            "revision": report.revision,
+            "verified": true,
+        }));
+    }
+    if command == "restore" {
+        let requested = payload
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::invalid("global restore requires --input PACKAGE_DIR"))?;
+        let package = resolve_global_artifact_path(requested)?;
+        let report = GlobalManagerApplication::restore_backup(&path, &package, operation)
+            .map_err(global_error)?;
+        return Ok(json!({
+            "restored": true,
+            "package_path": report.package_path,
+            "database_path": report.database_path,
+            "previous_database_path": report.previous_database_path,
+            "source_database_id": report.source_database_id,
+            "source_revision": report.source_revision,
+            "current_database_id": report.current_database_id,
+            "current_revision": report.current_revision,
+            "manifest_checksum": report.manifest_checksum,
+        }));
+    }
     let app = GlobalManagerApplication::open(path).map_err(global_error)?;
     if command == "export" {
         let data = app
@@ -831,6 +931,35 @@ pub(crate) fn execute_request(
             .collect::<Vec<_>>());
     }
     Ok(result)
+}
+
+fn resolve_global_artifact_path(path: &str) -> Result<PathBuf, CliError> {
+    let requested = PathBuf::from(path);
+    if requested
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(CliError::invalid(
+            "parent traversal is not permitted in Global artifact paths",
+        ));
+    }
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        env::current_dir()
+            .map_err(|error| {
+                CliError::invalid(format!("cannot resolve current directory: {error}"))
+            })?
+            .join(requested)
+    };
+    let parent = absolute.parent().unwrap_or(Path::new("."));
+    let parent = fs::canonicalize(parent).map_err(|error| {
+        CliError::invalid(format!("Global artifact directory is unavailable: {error}"))
+    })?;
+    let name = absolute
+        .file_name()
+        .ok_or_else(|| CliError::invalid("Global artifact path must name a package directory"))?;
+    Ok(parent.join(name))
 }
 
 pub(crate) fn write_export(
@@ -950,6 +1079,8 @@ fn is_mutation(command: &str) -> bool {
             | "linked page"
             | "linked job show"
             | "export"
+            | "backup"
+            | "backup verify"
     )
 }
 

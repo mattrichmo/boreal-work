@@ -32,6 +32,20 @@ SOURCE_LOCKED=0
 ALLOW_SOURCE_FALLBACK="${BOREAL_ALLOW_SOURCE_FALLBACK:-0}"
 INSTALL_LOCK=""
 UI_TEMP=""
+UPDATE_JOURNAL_PATH="${BOREAL_UPDATE_JOURNAL_PATH:-}"
+UPDATE_STAGE_PATH="${BOREAL_UPDATE_STAGE_PATH:-}"
+UPDATE_TARGET_PATH="${BOREAL_UPDATE_TARGET_IDENTITY_PATH:-}"
+UPDATE_GLOBAL_RESTORE_PATH="${BOREAL_UPDATE_GLOBAL_RESTORE_PATH:-}"
+UPDATE_PACKAGE_BACKUP_PATH="${BOREAL_UPDATE_PACKAGE_BACKUP_PATH:-}"
+UPDATE_GLOBAL_BACKUP_PATH="${BOREAL_UPDATE_GLOBAL_BACKUP_PATH:-}"
+UPDATE_OPERATION_ID="${BOREAL_UPDATE_OPERATION_ID:-}"
+UPDATE_RECOVERY_OPERATION_ID="${BOREAL_UPDATE_RECOVERY_OPERATION_ID:-}"
+GLOBAL_ROOT=""
+GLOBAL_DATABASE=""
+GLOBAL_MUTATION_STARTED=0
+SOURCE_GLOBAL_DATABASE_ID=""
+SOURCE_GLOBAL_SCHEMA=""
+SOURCE_GLOBAL_REVISION=""
 
 case "${0##*/}" in
   install.sh)
@@ -45,6 +59,72 @@ esac
 die() {
   echo "boreal install: $*" >&2
   exit 1
+}
+
+write_update_marker() {
+  [ -n "$UPDATE_STAGE_PATH" ] || return 0
+  case "$1" in
+    preparing|installer_starting|target_verified|package_publish_started|package_published|global_migration_started|global_migrated|global_restore_started|global_restored|package_rollback_started|rollback_started|installer_complete|rolled_back|recovery_required) ;;
+    *) die "invalid update journal stage" ;;
+  esac
+  marker_tmp="${UPDATE_STAGE_PATH}.tmp.$$"
+  (umask 077; printf '%s\n' "$1" > "$marker_tmp") || die "cannot stage update journal marker"
+  sync
+  mv -f "$marker_tmp" "$UPDATE_STAGE_PATH" || die "cannot publish update journal marker"
+  sync
+}
+
+write_update_target_identity() {
+  [ -n "$UPDATE_TARGET_PATH" ] || return 0
+  target_identity=$1
+  case "$target_identity" in *[!A-Za-z0-9:._+-]*) die "unsafe target package identity" ;; esac
+  marker_tmp="${UPDATE_TARGET_PATH}.tmp.$$"
+  (umask 077; printf '%s\n' "$target_identity" > "$marker_tmp") || die "cannot stage target package identity"
+  sync
+  mv -f "$marker_tmp" "$UPDATE_TARGET_PATH" || die "cannot publish target package identity"
+  sync
+}
+
+write_global_restore_identity() {
+  [ -n "$UPDATE_GLOBAL_RESTORE_PATH" ] || return 0
+  restore_marker_operation_id=$UPDATE_OPERATION_ID
+  restore_marker_database_id=$1
+  restore_marker_revision=$2
+  case "$restore_marker_operation_id" in *[!A-Za-z0-9:._+-]*|"") return 1 ;; esac
+  case "$restore_marker_database_id" in restore-*) ;; *) return 1 ;; esac
+  restore_marker_suffix=${restore_marker_database_id#restore-}
+  [ "${#restore_marker_suffix}" -eq 32 ] || return 1
+  case "$restore_marker_suffix" in *[!0-9a-f]*) return 1 ;; esac
+  case "$restore_marker_revision" in *[!0-9]*|"") return 1 ;; esac
+  marker_tmp="${UPDATE_GLOBAL_RESTORE_PATH}.tmp.$$"
+  (umask 077; printf '{"operation_id":"%s","database_id":"%s","revision":%s}\n' "$restore_marker_operation_id" "$restore_marker_database_id" "$restore_marker_revision" > "$marker_tmp") \
+    || { rm -f "$marker_tmp"; return 1; }
+  sync || { rm -f "$marker_tmp"; return 1; }
+  mv -f "$marker_tmp" "$UPDATE_GLOBAL_RESTORE_PATH" || { rm -f "$marker_tmp"; return 1; }
+  sync || return 1
+}
+
+resolve_global_root() {
+  if [ -n "${BOREAL_GLOBAL_ROOT:-}" ]; then
+    GLOBAL_ROOT=$BOREAL_GLOBAL_ROOT
+  elif [ -n "${BOREAL_GLOBAL_DATA_DIR:-}" ]; then
+    GLOBAL_ROOT=$BOREAL_GLOBAL_DATA_DIR
+  elif [ "$(uname -s)" = Darwin ] && [ -n "${HOME:-}" ]; then
+    GLOBAL_ROOT="$HOME/Library/Application Support/Boreal"
+  elif [ -n "${XDG_STATE_HOME:-}" ]; then
+    GLOBAL_ROOT="$XDG_STATE_HOME/boreal"
+  elif [ -n "${HOME:-}" ]; then
+    GLOBAL_ROOT="$HOME/.local/state/boreal"
+  else
+    die "cannot resolve the invoking user's Global database root"
+  fi
+  case "$GLOBAL_ROOT" in /*) ;; *) die "Global database root must be absolute" ;; esac
+  if printf '%s' "$GLOBAL_ROOT" | LC_ALL=C grep '[[:cntrl:]]' >/dev/null 2>&1; then
+    die "Global database root contains control characters"
+  fi
+  GLOBAL_DATABASE="$GLOBAL_ROOT/global.sqlite"
+  BOREAL_GLOBAL_ROOT=$GLOBAL_ROOT
+  export BOREAL_GLOBAL_ROOT
 }
 
 usage() {
@@ -1214,6 +1294,42 @@ case "$PREFIX" in
   *) die "installation prefix must be absolute" ;;
 esac
 
+if [ -n "$UPDATE_JOURNAL_PATH" ] && [ "$UPDATE_JOURNAL_PATH" != "$PREFIX/.boreal-update/.bwrk-update.json" ]; then
+  die "machine update journal path does not match the selected prefix"
+fi
+if [ -n "$UPDATE_STAGE_PATH" ] && [ "$UPDATE_STAGE_PATH" != "$PREFIX/.boreal-update/.bwrk-update.stage" ]; then
+  die "machine update stage path does not match the selected prefix"
+fi
+if [ -n "$UPDATE_TARGET_PATH" ] && [ "$UPDATE_TARGET_PATH" != "$PREFIX/.boreal-update/.bwrk-update.target" ]; then
+  die "machine update target identity path does not match the selected prefix"
+fi
+if [ -n "$UPDATE_GLOBAL_RESTORE_PATH" ] && [ "$UPDATE_GLOBAL_RESTORE_PATH" != "$PREFIX/.boreal-update/.bwrk-update.global-restore" ]; then
+  die "machine Global restore identity path does not match the selected prefix"
+fi
+if [ -n "$UPDATE_PACKAGE_BACKUP_PATH" ]; then
+  case "$UPDATE_PACKAGE_BACKUP_PATH" in
+    "$PREFIX"/.boreal-update/*/package-backup) ;;
+    *) die "machine package recovery path is outside the selected prefix" ;;
+  esac
+  backup_token=${UPDATE_PACKAGE_BACKUP_PATH%/package-backup}
+  backup_token=${backup_token##*/}
+  case "$backup_token" in *[!0-9a-f]*|"") die "machine package recovery path has an unsafe operation token" ;; esac
+  [ "${#backup_token}" -eq 64 ] || die "machine package recovery path has an invalid operation token"
+  [ ! -L "$PREFIX/.boreal-update" ] || die "machine update state directory must not be a symlink"
+fi
+if [ -n "$UPDATE_GLOBAL_RESTORE_PATH" ]; then
+  [ ! -L "$PREFIX/.boreal-update" ] || die "machine update state directory must not be a symlink"
+fi
+resolve_global_root
+if [ -n "$UPDATE_GLOBAL_BACKUP_PATH" ]; then
+  case "$UPDATE_GLOBAL_BACKUP_PATH" in
+    "$GLOBAL_ROOT"/.boreal-recovery/update/*) ;;
+    *) die "Global recovery package is outside the invoking user's recovery directory" ;;
+  esac
+  [ ! -L "$GLOBAL_ROOT/.boreal-recovery" ] || die "Global recovery directory must not be a symlink"
+  [ ! -L "$GLOBAL_ROOT/.boreal-recovery/update" ] || die "Global recovery update directory must not be a symlink"
+fi
+
 # Also reject spellings such as // or /./, and an existing symlink to /.
 if ! printf '%s\n' "$PREFIX" | awk -F/ '{ for (i=1; i<=NF; i++) if ($i != "" && $i != ".") found=1 } END { exit !found }'; then
   die "installation prefix resolves to the filesystem root"
@@ -1308,10 +1424,12 @@ TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/boreal-install.XXXXXX")
 rollback_item() {
   relative=$1
   if [ -e "$BACKUP_ROOT/$relative" ] || [ -L "$BACKUP_ROOT/$relative" ]; then
+    rm -f "$BACKUP_ROOT/.published.$2" || return 1
     rm -rf "$PREFIX/$relative" || return 1
     mv "$BACKUP_ROOT/$relative" "$PREFIX/$relative" || return 1
   elif [ -f "$BACKUP_ROOT/.published.$2" ]; then
     rm -rf "$PREFIX/$relative" || return 1
+    rm -f "$BACKUP_ROOT/.published.$2" || return 1
   fi
 }
 cleanup() {
@@ -1319,28 +1437,81 @@ cleanup() {
   trap - EXIT HUP INT TERM
   restore_failed=0
   if [ "$ROLLBACK_NEEDED" -eq 1 ]; then
-    rollback_item bin/bwrk binary || restore_failed=1
-    rollback_item lib/boreal/tui tui || restore_failed=1
-    rollback_item apps/tui tui_source || restore_failed=1
-    rollback_item lib/boreal/global-tui global_tui || restore_failed=1
-    rollback_item apps/global-tui global_tui_source || restore_failed=1
-    rollback_item share/boreal/release.json manifest || restore_failed=1
-    rollback_item share/boreal/LICENSE license || restore_failed=1
-    rollback_item share/boreal/install.sh updater || restore_failed=1
+    if [ "$GLOBAL_MUTATION_STARTED" -eq 1 ]; then
+      restore_global=0
+      if [ -n "$UPDATE_GLOBAL_BACKUP_PATH" ] && [ -x "$PREFIX/bin/bwrk" ]; then
+        if "$PREFIX/bin/bwrk" global database inspect --json > "$TEMP_ROOT/global-current.json" 2>/dev/null; then
+          current_database_id=$(sed -n 's/.*"database_id":"\([^"]*\)".*/\1/p' "$TEMP_ROOT/global-current.json")
+          current_schema=$(sed -n 's/.*"schema_version":\([0-9][0-9]*\).*/\1/p' "$TEMP_ROOT/global-current.json")
+          current_revision=$(sed -n 's/.*"revision":\([0-9][0-9]*\).*/\1/p' "$TEMP_ROOT/global-current.json")
+          if [ "$current_database_id" = "$SOURCE_GLOBAL_DATABASE_ID" ] && [ "$current_schema" = "$SOURCE_GLOBAL_SCHEMA" ]; then
+            # The schema did not change. New writes remain compatible with
+            # the previous package, so retain them and only roll back files.
+            restore_global=0
+          elif [ "$current_database_id" = "$SOURCE_GLOBAL_DATABASE_ID" ] \
+            && [ "$current_revision" = "$SOURCE_GLOBAL_REVISION" ] \
+            && [ "$current_schema" -gt "$SOURCE_GLOBAL_SCHEMA" ] 2>/dev/null; then
+            # Only the schema identity advanced; no Global mutation occurred
+            # after the verified snapshot, so the physical restore is safe.
+            restore_global=1
+          else
+            restore_failed=1
+          fi
+        else
+          restore_failed=1
+        fi
+      elif [ -z "$UPDATE_GLOBAL_BACKUP_PATH" ] && [ ! -e "$GLOBAL_DATABASE" ]; then
+        # A first install has not provisioned Global yet.
+        restore_global=0
+      else
+        # The Global change cannot be proven reversible. Keep the new package
+        # and recovery material instead of pairing an old package with an
+        # unknown database.
+        restore_failed=1
+      fi
+      if [ "$restore_global" -eq 1 ] && [ "$restore_failed" -eq 0 ]; then
+        write_update_marker global_restore_started || restore_failed=1
+        recovery_operation=$UPDATE_RECOVERY_OPERATION_ID
+        [ -n "$recovery_operation" ] || recovery_operation="installer-rollback-$$"
+        if [ "$restore_failed" -eq 0 ] && "$PREFIX/bin/bwrk" global restore --input "$UPDATE_GLOBAL_BACKUP_PATH" --yes --operation-id "$recovery_operation" --json > "$TEMP_ROOT/global-restore.json"; then
+          restored_global_database_id=$(sed -n 's/.*"current_database_id":"\([^"]*\)".*/\1/p' "$TEMP_ROOT/global-restore.json")
+          restored_global_revision=$(sed -n 's/.*"current_revision":\([0-9][0-9]*\).*/\1/p' "$TEMP_ROOT/global-restore.json")
+          write_global_restore_identity "$restored_global_database_id" "$restored_global_revision" || restore_failed=1
+          if [ "$restore_failed" -eq 0 ]; then write_update_marker global_restored || restore_failed=1; fi
+        else
+          restore_failed=1
+        fi
+      fi
+    fi
+    if [ "$restore_failed" -eq 0 ]; then
+      write_update_marker package_rollback_started || restore_failed=1
+      rollback_item bin/bwrk binary || restore_failed=1
+      rollback_item lib/boreal/tui tui || restore_failed=1
+      rollback_item apps/tui tui_source || restore_failed=1
+      rollback_item lib/boreal/global-tui global_tui || restore_failed=1
+      rollback_item apps/global-tui global_tui_source || restore_failed=1
+      rollback_item share/boreal/release.json manifest || restore_failed=1
+      rollback_item share/boreal/LICENSE license || restore_failed=1
+      rollback_item share/boreal/install.sh updater || restore_failed=1
+    fi
   fi
   if [ -n "$INSTALL_STAGE" ]; then rm -rf "$INSTALL_STAGE"; fi
-  if [ -n "$BACKUP_ROOT" ] && [ "$restore_failed" -eq 0 ]; then rm -rf "$BACKUP_ROOT"; fi
+  if [ -n "$BACKUP_ROOT" ] && [ "$restore_failed" -eq 0 ] && [ -z "$UPDATE_PACKAGE_BACKUP_PATH" ]; then rm -rf "$BACKUP_ROOT"; fi
   if [ -n "$TEMP_ROOT" ]; then rm -rf "$TEMP_ROOT"; fi
   if [ -n "$INSTALL_LOCK" ]; then rm -rf "$INSTALL_LOCK"; fi
   if [ "$restore_failed" -ne 0 ]; then
+    write_update_marker recovery_required || true
     printf 'boreal install: rollback needs manual recovery; backups retained at %s\n' "$BACKUP_ROOT" >&2
     status=1
+  elif [ "$ROLLBACK_NEEDED" -eq 1 ]; then
+    write_update_marker rolled_back || true
   fi
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
+write_update_marker installer_starting
 phase 2 "Verify and inspect the release archive"
 
 if [ -z "$LOCAL_ARCHIVE" ]; then
@@ -1399,6 +1570,11 @@ fi
 [ ! -L "$PACKAGE_ROOT/share/boreal/LICENSE" ] || die "release license must not be a symlink"
 [ -s "$PACKAGE_ROOT/share/boreal/install.sh" ] || die "release archive has no updater"
 [ ! -L "$PACKAGE_ROOT/share/boreal/install.sh" ] || die "release updater must not be a symlink"
+target_manifest_version=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$PACKAGE_ROOT/share/boreal/release.json")
+target_binary_digest=$(sed -n 's/.*"binary":{[^}]*"sha256":"\([^"]*\)".*/\1/p' "$PACKAGE_ROOT/share/boreal/release.json")
+[ -n "$target_manifest_version" ] && [ -n "$target_binary_digest" ] || die "release manifest has no target package identity"
+write_update_target_identity "$target_manifest_version:$target_binary_digest"
+write_update_marker target_verified
 
 phase 3 "Stage selected components"
 mkdir -p "$PREFIX"
@@ -1530,7 +1706,52 @@ verify_staged_capabilities || die "staged workflow/skill capability validation f
 if [ "$VERIFY_INSTALL" -eq 1 ]; then
   "$INSTALL_STAGE/bin/bwrk" --version || die "staged binary verification failed; existing install is unchanged"
 fi
-BACKUP_ROOT=$(mktemp -d "$PREFIX/.bwrk-backup.XXXXXX")
+
+# A physical Global snapshot is ready before any package file is published.
+# The command runs through the staged binary's read-only backup entry point,
+# so schema inspection cannot itself trigger the migration being protected.
+if [ -e "$GLOBAL_DATABASE" ] || [ -L "$GLOBAL_DATABASE" ]; then
+  [ ! -L "$GLOBAL_DATABASE" ] || die "Global database must not be a symlink before machine update"
+  [ -f "$GLOBAL_DATABASE" ] || die "Global database is not a regular file"
+  if [ -z "$UPDATE_GLOBAL_BACKUP_PATH" ]; then
+    mkdir -p "$GLOBAL_ROOT/.boreal-recovery/update"
+    chmod 700 "$GLOBAL_ROOT/.boreal-recovery" "$GLOBAL_ROOT/.boreal-recovery/update"
+    direct_operation=${UPDATE_OPERATION_ID:-installer-$$}
+    case "$direct_operation" in *[!A-Za-z0-9:._+-]*|"") die "unsafe machine update operation ID" ;; esac
+    UPDATE_GLOBAL_BACKUP_PATH="$GLOBAL_ROOT/.boreal-recovery/update/direct-$direct_operation"
+    [ ! -e "$UPDATE_GLOBAL_BACKUP_PATH" ] || die "Global recovery package already exists: $UPDATE_GLOBAL_BACKUP_PATH"
+    "$INSTALL_STAGE/bin/bwrk" global backup --out "$UPDATE_GLOBAL_BACKUP_PATH" --json > "$TEMP_ROOT/global-backup.json" \
+      || die "could not create a verified pre-update Global database backup"
+  else
+    [ -d "$UPDATE_GLOBAL_BACKUP_PATH" ] && [ ! -L "$UPDATE_GLOBAL_BACKUP_PATH" ] \
+      || die "pre-update Global recovery package is unavailable"
+    "$INSTALL_STAGE/bin/bwrk" global backup verify --input "$UPDATE_GLOBAL_BACKUP_PATH" --json > "$TEMP_ROOT/global-backup.json" \
+      || die "pre-update Global recovery package failed validation"
+  fi
+  source_global_database_id=$(sed -n 's/.*"database_id":"\([^"]*\)".*/\1/p' "$TEMP_ROOT/global-backup.json")
+  SOURCE_GLOBAL_SCHEMA=$(sed -n 's/.*"schema_version":\([0-9][0-9]*\).*/\1/p' "$TEMP_ROOT/global-backup.json")
+  SOURCE_GLOBAL_REVISION=$(sed -n 's/.*"revision":\([0-9][0-9]*\).*/\1/p' "$TEMP_ROOT/global-backup.json")
+  [ -n "$source_global_database_id" ] && [ -n "$SOURCE_GLOBAL_SCHEMA" ] && [ -n "$SOURCE_GLOBAL_REVISION" ] \
+    || die "pre-update Global backup omitted its source identity"
+  SOURCE_GLOBAL_DATABASE_ID=$source_global_database_id
+  "$INSTALL_STAGE/bin/bwrk" global database inspect --json > "$TEMP_ROOT/global-before-publish.json" \
+    || die "Global database changed or became unavailable during update admission"
+  current_database_id=$(sed -n 's/.*"database_id":"\([^"]*\)".*/\1/p' "$TEMP_ROOT/global-before-publish.json")
+  current_schema=$(sed -n 's/.*"schema_version":\([0-9][0-9]*\).*/\1/p' "$TEMP_ROOT/global-before-publish.json")
+  current_revision=$(sed -n 's/.*"revision":\([0-9][0-9]*\).*/\1/p' "$TEMP_ROOT/global-before-publish.json")
+  [ "$current_database_id" = "$SOURCE_GLOBAL_DATABASE_ID" ] \
+    && [ "$current_schema" = "$SOURCE_GLOBAL_SCHEMA" ] \
+    && [ "$current_revision" = "$SOURCE_GLOBAL_REVISION" ] \
+    || die "Global data changed after its recovery backup; retry the update to capture a current snapshot"
+fi
+
+if [ -n "$UPDATE_PACKAGE_BACKUP_PATH" ]; then
+  BACKUP_ROOT=$UPDATE_PACKAGE_BACKUP_PATH
+  [ ! -e "$BACKUP_ROOT" ] && [ ! -L "$BACKUP_ROOT" ] || die "package recovery directory already exists"
+  (umask 077; mkdir -p "$BACKUP_ROOT")
+else
+  BACKUP_ROOT=$(mktemp -d "$PREFIX/.bwrk-backup.XXXXXX")
+fi
 mkdir -p "$BACKUP_ROOT/bin" "$BACKUP_ROOT/lib/boreal" "$BACKUP_ROOT/share/boreal" "$BACKUP_ROOT/apps"
 ROLLBACK_NEEDED=1
 publish_item() {
@@ -1546,6 +1767,7 @@ publish_item() {
   fi
 }
 phase 4 "Publish installation"
+write_update_marker package_publish_started
 publish_item bin/bwrk binary
 publish_item lib/boreal/tui tui
 publish_item apps/tui tui_source
@@ -1554,6 +1776,7 @@ publish_item apps/global-tui global_tui_source
 publish_item share/boreal/release.json manifest
 publish_item share/boreal/LICENSE license
 publish_item share/boreal/install.sh updater
+write_update_marker package_published
 # Verify the exact published executable, not a PATH-resolved older installation.
 if [ "$VERIFY_INSTALL" -eq 1 ]; then
   "$PREFIX/bin/bwrk" --version || die "published binary verification failed; restoring prior installation"
@@ -1568,8 +1791,12 @@ fi
 # Provision through the Rust application even when only the CLI was selected.
 # A failure keeps binary rollback enabled; global data is never deleted during
 # binary rollback, so existing personal records remain recoverable.
+write_update_marker global_migration_started
+GLOBAL_MUTATION_STARTED=1
 "$PREFIX/bin/bwrk" global bootstrap --json > "$TEMP_ROOT/global-bootstrap.json" \
   || die "global manager provisioning failed; restoring prior installation"
+write_update_marker global_migrated
+write_update_marker installer_complete
 ROLLBACK_NEEDED=0
 
 echo "Boreal ${REQUESTED_VERSION} installed to $PREFIX"

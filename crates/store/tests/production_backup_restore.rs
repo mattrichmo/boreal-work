@@ -104,6 +104,56 @@ fn production_package_round_trip_advances_epoch_and_retains_previous_database() 
 }
 
 #[test]
+fn independent_empty_destination_restores_get_distinct_physical_identities() {
+    let source_path = temp_path("identity-source.sqlite");
+    let first_target = temp_path("identity-first.sqlite");
+    let second_target = temp_path("identity-second.sqlite");
+    let package_path = temp_path("identity-package");
+    for path in [&source_path, &first_target, &second_target] {
+        remove_sqlite_files(path);
+    }
+    let _ = fs::remove_dir_all(&package_path);
+
+    let source = initialize(&source_path, "identity-source-project");
+    let source_identity = IdentityStore::new(&source)
+        .database_identity()
+        .expect("source identity");
+    source
+        .backup_package_to(&package_path)
+        .expect("source package succeeds");
+    drop(source);
+
+    let first = SqliteStore::restore_package_to(&package_path, &first_target)
+        .expect("first independent restore succeeds");
+    let second = SqliteStore::restore_package_to(&package_path, &second_target)
+        .expect("second independent restore succeeds");
+    assert_eq!(first.current_restore_epoch, second.current_restore_epoch);
+    assert_eq!(
+        first.source_restore_epoch,
+        source_identity.restore_epoch.get()
+    );
+    assert_ne!(
+        first.current_database_instance_id, second.current_database_instance_id,
+        "separate activations of one package must not share a fencing identity"
+    );
+
+    for path in [&first_target, &second_target] {
+        let restored = SqliteStore::open(path, PRODUCTION_SCHEMA).expect("restored database opens");
+        assert_eq!(
+            restored
+                .list_project_ids()
+                .expect("project survives restore"),
+            vec!["identity-source-project"]
+        );
+    }
+
+    let _ = fs::remove_dir_all(&package_path);
+    remove_sqlite_files(&source_path);
+    remove_sqlite_files(&first_target);
+    remove_sqlite_files(&second_target);
+}
+
+#[test]
 fn restore_fails_closed_when_another_connection_holds_a_read_transaction() {
     let source_path = temp_path("active-reader-source.sqlite");
     let target_path = temp_path("active-reader-target.sqlite");

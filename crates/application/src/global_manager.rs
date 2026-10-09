@@ -1,7 +1,9 @@
 //! Application boundary for the installation-wide global manager.
 
 use boreal_domain::global_manager::{ManagementItemKind, StatusCategory};
-use boreal_store::global_manager::GlobalManagerStore;
+use boreal_store::global_manager::{
+    GlobalBackupPackageReport, GlobalDatabaseInspection, GlobalManagerStore, GlobalRestoreReport,
+};
 use boreal_store::StoreError;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -73,6 +75,54 @@ impl GlobalManagerApplication {
     }
     pub fn revision(&self) -> Result<u64, GlobalManagerError> {
         Ok(self.store.revision()?)
+    }
+
+    /// Create a validated physical Global SQLite backup. The result contains
+    /// bounded artifact metadata; database bytes remain on the local filesystem.
+    pub fn backup_package_to(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> Result<GlobalBackupPackageReport, GlobalManagerError> {
+        Ok(self.store.backup_package_to(destination)?)
+    }
+
+    /// Back up an existing Global database without opening it through a
+    /// first-open schema migration. Installers use this entry point before
+    /// publishing a package that may migrate the invoking user's database.
+    pub fn backup_database_package_to(
+        database_path: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<GlobalBackupPackageReport, GlobalManagerError> {
+        Ok(GlobalManagerStore::backup_database_package_to(
+            database_path,
+            destination,
+        )?)
+    }
+
+    pub fn inspect_database(
+        database_path: impl AsRef<Path>,
+    ) -> Result<GlobalDatabaseInspection, GlobalManagerError> {
+        Ok(GlobalManagerStore::inspect_database(database_path)?)
+    }
+
+    pub fn inspect_backup_package(
+        package_path: impl AsRef<Path>,
+    ) -> Result<GlobalBackupPackageReport, GlobalManagerError> {
+        Ok(GlobalManagerStore::inspect_backup_package(package_path)?)
+    }
+
+    /// Restore a physical Global backup through the store's exclusive
+    /// maintenance boundary and retained-previous-database path.
+    pub fn restore_backup(
+        database_path: impl AsRef<Path>,
+        package_path: impl AsRef<Path>,
+        operation_id: &str,
+    ) -> Result<GlobalRestoreReport, GlobalManagerError> {
+        Ok(GlobalManagerStore::restore_package_to(
+            database_path,
+            package_path,
+            operation_id,
+        )?)
     }
 
     /// Executes one logical global operation. The caller supplies a stable

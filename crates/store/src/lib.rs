@@ -67,6 +67,7 @@ pub mod knowledge_parity;
 pub use knowledge_parity::*;
 pub mod summary_queries;
 pub use summary_queries::*;
+pub mod global_maintenance;
 pub mod global_manager;
 pub mod orchestration;
 pub mod orchestration_runtime;
@@ -2422,10 +2423,10 @@ impl SqliteStore {
         let next_epoch = current_epoch
             .checked_add(1)
             .ok_or_else(|| StoreError::Invalid("restore epoch overflow".to_owned()))?;
-        let current_database_instance_id = format!(
-            "{}-restore-{next_epoch}",
-            source_identity.database_instance_id.as_str()
-        );
+        // Keep the selected physical identity in the committed restore
+        // receipt in the staged database. Reconciliation reuses that staged
+        // activation rather than deriving another identity from the source.
+        let current_database_instance_id = identity::fresh_database_instance_id().to_string();
         let staging = if let Some(job) = job {
             maintenance_restore_staging_path(destination, &job.operation_id)?
         } else {

@@ -109,6 +109,29 @@ impl DatabaseInstanceId {
     }
 }
 
+/// Creates a fresh physical database identity for one restore activation.
+///
+/// SQLite's process-wide PRNG is used instead of deriving an ID from the
+/// backup identity and epoch: two independent restores of the same package
+/// can share an epoch while still fencing one another as distinct databases.
+pub fn fresh_database_instance_id() -> DatabaseInstanceId {
+    let mut bytes = [0_u8; 16];
+    unsafe {
+        libsqlite3_sys::sqlite3_randomness(
+            bytes.len() as std::os::raw::c_int,
+            bytes.as_mut_ptr().cast(),
+        );
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2 + 8);
+    encoded.push_str("restore-");
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    DatabaseInstanceId(encoded)
+}
+
 impl fmt::Display for DatabaseInstanceId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
