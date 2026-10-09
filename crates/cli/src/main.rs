@@ -4238,6 +4238,7 @@ fn map_source_error(error: boreal_source::SourceError) -> CliError {
         boreal_source::SourceError::ScopeViolation | boreal_source::SourceError::MissingBlob => {
             ErrorCode::NotFound
         }
+        boreal_source::SourceError::DigestMismatch => ErrorCode::IntegrityQuarantined,
         boreal_source::SourceError::Storage(_) => ErrorCode::ServiceUnavailable,
         boreal_source::SourceError::OperationConflict
         | boreal_source::SourceError::SourceMetadataConflict => ErrorCode::OperationConflict,
@@ -9977,6 +9978,13 @@ mod runner_process {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_digest_mismatch_maps_to_integrity_quarantined() {
+        let error = map_source_error(boreal_source::SourceError::DigestMismatch);
+        assert_eq!(error.code, ErrorCode::IntegrityQuarantined);
+        assert_eq!(error.outcome, ApplicationOutcome::Rejected);
+    }
 
     #[test]
     fn session_registration_digest_is_stable_and_revision_bound() {
