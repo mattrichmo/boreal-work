@@ -207,16 +207,56 @@ pub(super) fn apply(
                 .map_err(|e| CliError::invalid(e.to_string()))?;
             root.validate_existing_repository()
                 .map_err(|e| CliError::invalid(e.to_string()))?;
-            let result = app
-                .publish_durable_memory(
-                    store,
-                    &identity,
-                    &context,
-                    &memory_root,
-                    &review_id,
-                    &expected_manifest_identity,
-                )
-                .map_err(map_error)?;
+            let result = match app.publish_durable_memory(
+                store,
+                &identity,
+                &context,
+                &memory_root,
+                &review_id,
+                &expected_manifest_identity,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    // Git and SQLite cannot commit atomically. If publication
+                    // has crossed that boundary, preserve the original
+                    // operation identity and tell the caller to read it back
+                    // before considering another publication attempt.
+                    if let Ok(readback) =
+                        app.read_memory_publication(store, &identity, &memory_root, operation)
+                    {
+                        let state = readback
+                            .get("reconciliation_state")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if state == "reconciled"
+                            && readback.get("readback_required").and_then(Value::as_bool)
+                                == Some(false)
+                        {
+                            let mut response = bounded_result(
+                                Some(json!({
+                                    "operation_id": operation,
+                                    "state": "Reconciled",
+                                    "readback": readback,
+                                })),
+                                Some(store.project_revision(project).map_err(map_store_error)?.0),
+                            )?;
+                            response.outcome = ApplicationOutcome::Changed;
+                            return Ok(response);
+                        }
+                        if readback.get("readback_required").and_then(Value::as_bool) == Some(true)
+                            && state != "not_published"
+                        {
+                            return Err(CliError::unknown_delivery(
+                                operation,
+                                format!(
+                                    "memory publication is {state}; use `bwrk memory readback --project {project} {operation}` before retrying"
+                                ),
+                            ));
+                        }
+                    }
+                    return Err(map_error(error));
+                }
+            };
             let readback = app
                 .read_memory_publication(store, &identity, &memory_root, operation)
                 .map_err(map_error)?;

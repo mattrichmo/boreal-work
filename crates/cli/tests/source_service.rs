@@ -70,7 +70,7 @@ fn start_service(project_root: &Path, database: &Path, socket: &Path) -> Child {
         .arg(database)
         .args(["--socket"])
         .arg(socket)
-        .args(["--max-requests", "14", "--json"])
+        .args(["--max-requests", "20", "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -104,16 +104,40 @@ fn source_add(
     expected_revision: u64,
     operation_id: &str,
 ) -> Output {
+    source_add_with_media_type(
+        project_root,
+        database,
+        socket,
+        input,
+        "integration/source.md",
+        "text/markdown",
+        actor,
+        harness,
+        session,
+        expected_revision,
+        operation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_add_with_media_type(
+    project_root: &Path,
+    database: &Path,
+    socket: &Path,
+    input: &Path,
+    origin: &str,
+    media_type: &str,
+    actor: &str,
+    harness: &str,
+    session: &str,
+    expected_revision: u64,
+    operation_id: &str,
+) -> Output {
     Command::new(binary())
         .current_dir(project_root)
         .args(["source", "add", PROJECT, "--input"])
         .arg(input)
-        .args([
-            "--origin",
-            "integration/source.md",
-            "--media-type",
-            "text/markdown",
-        ])
+        .args(["--origin", origin, "--media-type", media_type])
         .args(["--actor", actor, "--harness", harness, "--session", session])
         .args(["--expected-revision", &expected_revision.to_string()])
         .args(["--operation-id", operation_id, "--socket"])
@@ -338,7 +362,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
 
     // Catalog pages are sorted by source version ID, so assert against both
     // known IDs instead of assuming capture order is list order.
-    let mut expected_ids = [source_id.clone(), second_source_id.clone()];
+    let mut expected_ids = vec![source_id.clone(), second_source_id.clone()];
     expected_ids.sort();
 
     let readback = Command::new(binary())
@@ -441,6 +465,127 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     let decoded = hex_decode(portable_read["data"]["bytes_hex"].as_str().unwrap());
     assert_eq!(decoded, b"service captured source bytes\n");
 
+    let binary_bytes = b"design\0asset\xff\x80";
+    let binary_input = project_root.join("creative-asset.bin");
+    fs::write(&binary_input, binary_bytes).expect("write binary source fixture");
+    let binary_expected_revision = second_added["data"]["registration"]["revision"]
+        .as_u64()
+        .expect("second capture returns a project revision");
+    let binary_added = assert_success(
+        &source_add_with_media_type(
+            &project_root,
+            &database,
+            &socket,
+            Path::new("creative-asset.bin"),
+            "integration/creative-asset.bin",
+            "application/octet-stream",
+            ACTOR,
+            HARNESS,
+            SESSION,
+            binary_expected_revision,
+            "op_source_service_binary_capture",
+        ),
+        "service binary source capture",
+    );
+    let binary_id = binary_added["data"]["source"]["source_version_id"]
+        .as_str()
+        .expect("binary capture returns its immutable version ID")
+        .to_owned();
+    let binary_digest = binary_added["data"]["source"]["content_digest"]
+        .as_str()
+        .expect("binary capture returns its digest")
+        .to_owned();
+    assert_eq!(
+        binary_added["data"]["source"]["media_type"],
+        "application/octet-stream"
+    );
+    fs::remove_file(&binary_input).expect("remove original binary input");
+
+    // The service returns bounded hex ranges; materialize only after the
+    // originating file has disappeared and verify the full content identity.
+    let mut materialized = Vec::new();
+    let mut offset = 0_usize;
+    loop {
+        let offset_text = offset.to_string();
+        let operation_id = format!("op_source_service_binary_read_{offset}");
+        let output = Command::new(binary())
+            .current_dir(&project_root)
+            .args([
+                "source",
+                "read",
+                PROJECT,
+                &binary_id,
+                "--offset",
+                &offset_text,
+                "--length",
+                "5",
+                "--actor",
+                ACTOR,
+                "--harness",
+                HARNESS,
+                "--session",
+                SESSION,
+                "--operation-id",
+                &operation_id,
+                "--socket",
+            ])
+            .arg(&socket)
+            .args(["--db"])
+            .arg(&database)
+            .args(["--json"])
+            .output()
+            .expect("service binary source read launches");
+        let read = assert_success(&output, "service binary source read");
+        assert_eq!(read["data"]["content_digest"], binary_digest);
+        assert_eq!(read["data"]["offset"], offset as u64);
+        assert_eq!(read["data"]["total_bytes"], binary_bytes.len() as u64);
+        let chunk = hex_decode(read["data"]["bytes_hex"].as_str().unwrap());
+        assert!(chunk.len() <= 5, "each service read stays within its bound");
+        materialized.extend_from_slice(&chunk);
+        match read["data"]["next_offset"].as_u64() {
+            Some(next) => offset = next as usize,
+            None => break,
+        }
+    }
+    let materialized_path = project_root.join("materialized-creative-asset.bin");
+    fs::write(&materialized_path, materialized).expect("write bounded materialization");
+    let materialized = fs::read(&materialized_path).expect("read bounded materialization");
+    assert_eq!(materialized, binary_bytes);
+    assert_eq!(boreal_source::content_digest(&materialized), binary_digest);
+    expected_ids.push(binary_id.clone());
+    expected_ids.sort();
+
+    let invalid_offset = (binary_bytes.len() + 1).to_string();
+    let invalid_read = Command::new(binary())
+        .current_dir(&project_root)
+        .args([
+            "source",
+            "read",
+            PROJECT,
+            &binary_id,
+            "--offset",
+            &invalid_offset,
+            "--length",
+            "5",
+            "--actor",
+            ACTOR,
+            "--harness",
+            HARNESS,
+            "--session",
+            SESSION,
+            "--operation-id",
+            "op_source_service_binary_read_invalid_range",
+            "--socket",
+        ])
+        .arg(&socket)
+        .args(["--db"])
+        .arg(&database)
+        .args(["--json"])
+        .output()
+        .expect("invalid service source read launches");
+    assert!(!invalid_read.status.success());
+    assert_eq!(json(&invalid_read)["error"]["code"], "invalid_argument");
+
     let listed_first = Command::new(binary())
         .current_dir(&project_root)
         .args(["source", "list", PROJECT, "--limit", "1", "--offset", "0"])
@@ -455,7 +600,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     let listed_first = assert_success(&listed_first, "first service source list page");
     assert_eq!(listed_first["data"]["project_id"], PROJECT);
     assert!(listed_first["data"].get("catalog_root").is_none());
-    assert_eq!(listed_first["data"]["total"], 2);
+    assert_eq!(listed_first["data"]["total"], 3);
     assert_eq!(listed_first["data"]["items"].as_array().unwrap().len(), 1);
     assert_eq!(
         listed_first["data"]["items"][0]["source_version_id"],
@@ -478,7 +623,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         .expect("second service source list page launches");
     let listed_second = assert_success(&listed_second, "second service source list page");
     assert_eq!(listed_second["data"]["project_id"], PROJECT);
-    assert_eq!(listed_second["data"]["total"], 2);
+    assert_eq!(listed_second["data"]["total"], 3);
     assert_eq!(listed_second["data"]["items"].as_array().unwrap().len(), 1);
     assert_eq!(
         listed_second["data"]["items"][0]["source_version_id"],
@@ -486,7 +631,29 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     );
     assert_eq!(listed_second["data"]["offset"], 1);
     assert_eq!(listed_second["data"]["limit"], 1);
-    assert_eq!(listed_second["data"]["has_more"], false);
+    assert_eq!(listed_second["data"]["has_more"], true);
+
+    let listed_third = Command::new(binary())
+        .current_dir(&project_root)
+        .args(["source", "list", PROJECT, "--limit", "1", "--offset", "2"])
+        .args(["--actor", ACTOR, "--harness", HARNESS, "--session", SESSION])
+        .args(["--socket"])
+        .arg(&socket)
+        .args(["--db"])
+        .arg(&database)
+        .args(["--operation-id", "op_source_service_list_page_3", "--json"])
+        .output()
+        .expect("third service source list page launches");
+    let listed_third = assert_success(&listed_third, "third service source list page");
+    assert_eq!(listed_third["data"]["total"], 3);
+    assert_eq!(listed_third["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed_third["data"]["items"][0]["source_version_id"],
+        expected_ids[2]
+    );
+    assert_eq!(listed_third["data"]["offset"], 2);
+    assert_eq!(listed_third["data"]["limit"], 1);
+    assert_eq!(listed_third["data"]["has_more"], false);
 
     let service_output = child
         .wait_with_output()

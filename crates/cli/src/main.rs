@@ -4184,13 +4184,7 @@ fn source_read_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<Cli
     let catalog = source_catalog(&catalog_root)?;
     let range = KnowledgeApplication::new(&catalog)
         .read_source_range(&project, source_id, offset, limit)
-        .map_err(|error| {
-            CliError::with(
-                ErrorCode::NotFound,
-                ApplicationOutcome::Rejected,
-                format!("source read failed for project {project} version {source_id}: {error}"),
-            )
-        })?;
+        .map_err(map_knowledge_error)?;
     let bytes_hex = range
         .bytes
         .iter()
