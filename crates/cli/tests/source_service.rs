@@ -70,7 +70,7 @@ fn start_service(project_root: &Path, database: &Path, socket: &Path) -> Child {
         .arg(database)
         .args(["--socket"])
         .arg(socket)
-        .args(["--max-requests", "11", "--json"])
+        .args(["--max-requests", "14", "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -272,6 +272,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     );
     assert_eq!(added["outcome"], "changed");
     assert_eq!(added["data"]["registration"]["state"], "store_committed");
+    assert_eq!(added["data"]["index"]["state"], "indexed");
     assert_eq!(added["data"]["request_context"]["project_id"], PROJECT);
     assert_eq!(added["data"]["request_context"]["actor_id"], ACTOR);
     assert_eq!(added["data"]["request_context"]["harness_id"], HARNESS);
@@ -369,7 +370,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
 
     let search = Command::new(binary())
         .current_dir(&project_root)
-        .args(["source", "search", PROJECT, "service captured source bytes"])
+        .args(["source", "search", PROJECT, "captured source bytes"])
         .args(["--actor", ACTOR, "--harness", HARNESS, "--session", SESSION])
         .args(["--socket"])
         .arg(&socket)
@@ -380,9 +381,62 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         .expect("service source search launches");
     let search = assert_success(&search, "service source search");
     assert_eq!(search["data"]["project_id"], PROJECT);
-    assert_eq!(search["data"]["query"], "service captured source bytes");
-    assert!(search["data"]["index_lag"].as_u64().unwrap_or_default() > 0);
-    assert!(search["data"]["items"].as_array().unwrap().is_empty());
+    assert_eq!(search["data"]["query"], "captured source bytes");
+    assert_eq!(search["data"]["index_lag"], 0);
+    let search_items = search["data"]["items"].as_array().unwrap();
+    assert_eq!(search_items.len(), 2);
+    assert!(search_items
+        .iter()
+        .any(|item| item["source_version_id"] == source_id));
+
+    let shown = Command::new(binary())
+        .current_dir(&project_root)
+        .args(["source", "show", PROJECT, &source_id, "--socket"])
+        .arg(&socket)
+        .args(["--db"])
+        .arg(&database)
+        .args(["--json"])
+        .output()
+        .expect("service source show launches");
+    let shown = assert_success(&shown, "service source show");
+    assert_eq!(shown["data"]["source"]["source_version_id"], source_id);
+    assert_eq!(
+        shown["data"]["source"]["content_digest"],
+        added["data"]["source"]["content_digest"]
+    );
+
+    let verified = Command::new(binary())
+        .current_dir(&project_root)
+        .args(["source", "verify", PROJECT, &source_id, "--socket"])
+        .arg(&socket)
+        .args(["--db"])
+        .arg(&database)
+        .args(["--json"])
+        .output()
+        .expect("service source verify launches");
+    let verified = assert_success(&verified, "service source verify");
+    assert_eq!(verified["data"]["verified"], true);
+    assert_eq!(
+        verified["data"]["verified_digest"],
+        added["data"]["source"]["content_digest"]
+    );
+
+    let portable_read = Command::new(binary())
+        .current_dir(&project_root)
+        .args([
+            "source", "read", PROJECT, &source_id, "--offset", "0", "--length", "65536", "--socket",
+        ])
+        .arg(&socket)
+        .args(["--db"])
+        .arg(&database)
+        .args(["--json"])
+        .output()
+        .expect("service source read launches");
+    let portable_read = assert_success(&portable_read, "service source read");
+    assert_eq!(portable_read["data"]["encoding"], "hex");
+    assert_eq!(portable_read["data"]["next_offset"], Value::Null);
+    let decoded = hex_decode(portable_read["data"]["bytes_hex"].as_str().unwrap());
+    assert_eq!(decoded, b"service captured source bytes\n");
 
     let listed_first = Command::new(binary())
         .current_dir(&project_root)
@@ -456,4 +510,15 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     );
 
     let _ = fs::remove_dir_all(root);
+}
+
+fn hex_decode(value: &str) -> Vec<u8> {
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).unwrap();
+            u8::from_str_radix(pair, 16).unwrap()
+        })
+        .collect()
 }

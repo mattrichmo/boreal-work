@@ -582,6 +582,11 @@ pub struct CycleCommandDto {
 pub struct MemoryCitationDto {
     pub source_version_id: String,
     pub location: String,
+    /// Excerpt supplied for validation against the cited immutable source.
+    /// Older clients may omit it; the application rejects unverified new
+    /// durable drafts while continuing to read their existing records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

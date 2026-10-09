@@ -2641,8 +2641,8 @@ const COMMANDS: &[CommandSpec] = &[
         action: "read",
         output: "source",
         direct: true,
-        service: false,
-        summary: "read one exact source version and its registration",
+        service: true,
+        summary: "read one exact source version and its registration through CLI or service",
     },
     CommandSpec {
         path: "source list",
@@ -2668,8 +2668,17 @@ const COMMANDS: &[CommandSpec] = &[
         action: "read",
         output: "source_verification",
         direct: true,
-        service: false,
-        summary: "verify a source blob against its immutable digest",
+        service: true,
+        summary: "verify a source blob against its immutable digest through CLI or service",
+    },
+    CommandSpec {
+        path: "source read",
+        syntax: "bwrk source read PROJECT SOURCE_VERSION_ID [--offset N] [--length 1..65536]",
+        action: "read",
+        output: "source_bytes",
+        direct: true,
+        service: true,
+        summary: "read a bounded, digest-verified byte range by project and source version identity",
     },
 ];
 
@@ -3185,7 +3194,7 @@ fn input_schema(path: &str) -> Value {
             })
         }
         "memory draft" => {
-            json!({"type":"object","required":["entry_id","title","body","citations"]})
+            json!({"type":"object","required":["entry_id","title","body","citations"],"properties":{"entry_id":{"type":"string","minLength":1},"title":{"type":"string","minLength":1},"body":{"type":"string"},"citations":{"type":"array","minItems":1,"items":{"type":"object","required":["source_version_id","location","excerpt"],"properties":{"source_version_id":{"type":"string","minLength":1},"location":{"type":"string","minLength":1,"maxLength":4096},"excerpt":{"type":"string","minLength":1,"maxLength":65536}}}}},"description":"Each citation excerpt is checked against the exact project source version and its line or byte locator; the durable draft records the excerpt digest."})
         }
         "memory review" => json!({"type":"object","required":["decision","reason"]}),
         "memory publish" => json!({"type":"object","required":["expected_manifest_identity"]}),
@@ -3436,6 +3445,8 @@ const LEGACY_COMMANDS: &[&str] = &[
     "source add",
     "source list",
     "source show",
+    "source verify",
+    "source read",
     "claim create",
     "claim list",
     "claim show",
@@ -3549,6 +3560,7 @@ mod tests {
                 include_expiry: false,
                 limit: None,
                 offset: None,
+                byte_limit: None,
                 max_requests: None,
                 dispatch_workers: None,
                 dispatch_capacity: None,
@@ -3613,7 +3625,11 @@ mod tests {
         assert_eq!(route["path"], "source show");
         assert_eq!(route["availability"], "available");
         assert_eq!(route["adapters"]["direct"], true);
-        assert_eq!(route["adapters"]["service"], false);
+        assert_eq!(route["adapters"]["service"], true);
+
+        let read = registry_result(Some("source read")).unwrap();
+        let read_route = read.data.unwrap()["available"][0].clone();
+        assert_eq!(read_route["adapters"]["service"], true);
 
         let memory = registry_result(Some("memory")).unwrap();
         let memory_data = memory.data.unwrap();

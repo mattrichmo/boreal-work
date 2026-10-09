@@ -6,6 +6,28 @@ associate the result with a consistent project snapshot. Mutations require
 and operation identity options. `--input` reads a JSON object from a path
 confined to the selected project root.
 
+## Sources
+
+```text
+boreal source show PROJECT SOURCE_VERSION_ID
+boreal source verify PROJECT SOURCE_VERSION_ID
+boreal source read PROJECT SOURCE_VERSION_ID [--offset N] [--length 1..65536]
+```
+
+`source read` returns a bounded hex byte range identified by project and
+immutable source version. Check `content_digest`, `total_bytes`, and
+`next_offset` while assembling chunks; the response does not use the captured
+host path as a locator. Capture immediately attempts bounded indexing, so
+plain-text sources are searchable as soon as catalog capture and SQLite
+registration complete. The capture result reports parse/index failure for
+binary, unsupported, or oversized text without discarding the source.
+
+New durable memory-draft citations include `source_version_id`, `location`,
+and an `excerpt` of at most 64 KiB. Boreal checks the exact project/version,
+locator, and excerpt bytes before persisting only the excerpt digest. Use
+`line:N[-M]` (or an origin-qualified equivalent) or `byte:N-M` with a
+half-open byte range.
+
 ## Decisions
 
 ```text

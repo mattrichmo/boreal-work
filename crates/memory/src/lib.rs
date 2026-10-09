@@ -45,6 +45,9 @@ const LOCK_WAIT: Duration = Duration::from_secs(10);
 pub struct Citation {
     pub source_version_id: String,
     pub location: String,
+    /// Digest of the excerpt that was checked against this immutable source
+    /// version when the draft was created. Older published entries omit it.
+    pub excerpt_digest: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +128,17 @@ impl Draft {
             .any(|citation| citation.source_version_id.is_empty() || citation.location.is_empty())
         {
             return Err(MemoryError::MissingCitation);
+        }
+        if citations.iter().any(|citation| {
+            citation.excerpt_digest.as_deref().is_some_and(|value| {
+                !value.starts_with("sha256:")
+                    || value.len() != 71
+                    || !value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }) {
+            return Err(MemoryError::InvalidManifest(
+                "citation excerpt digest is malformed".into(),
+            ));
         }
         Ok(Self {
             project_id: project_id.to_owned(),
@@ -495,7 +509,17 @@ fn render_markdown_as(draft: &Draft, state: &str) -> Result<String, MemoryError>
     });
     let source_lines = citations
         .iter()
-        .map(|citation| format!("- {} ({})", citation.source_version_id, citation.location))
+        .map(|citation| {
+            let excerpt = citation
+                .excerpt_digest
+                .as_deref()
+                .map(|digest| format!(" [excerpt_digest={digest}]"))
+                .unwrap_or_default();
+            format!(
+                "- {} ({}){excerpt}",
+                citation.source_version_id, citation.location
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     Ok(format!(
@@ -2373,13 +2397,19 @@ fn parse_indexed_entry(
 fn parse_rendered_citation(line: &str) -> Option<Citation> {
     let value = line.strip_prefix("- ")?;
     let (source_version_id, location) = value.rsplit_once(" (")?;
-    let location = location.strip_suffix(')')?;
+    let (location, excerpt_digest) =
+        if let Some((location, digest)) = location.split_once(") [excerpt_digest=") {
+            (location, Some(digest.strip_suffix(']')?.to_owned()))
+        } else {
+            (location.strip_suffix(')')?, None)
+        };
     if source_version_id.is_empty() || location.is_empty() {
         return None;
     }
     Some(Citation {
         source_version_id: source_version_id.to_owned(),
         location: location.to_owned(),
+        excerpt_digest,
     })
 }
 
@@ -4152,6 +4182,7 @@ mod tests {
             vec![Citation {
                 source_version_id: "sv_1".into(),
                 location: "line:1".into(),
+                excerpt_digest: None,
             }],
         )
         .unwrap()
@@ -4454,12 +4485,19 @@ mod tests {
     #[test]
     fn manifest_and_markdown_are_canonical() {
         let mut draft = draft().review(true);
+        draft.citations[0].excerpt_digest =
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
         draft.citations.push(Citation {
             source_version_id: "sv_0".into(),
             location: "line:2".into(),
+            excerpt_digest: None,
         });
         let markdown = render_markdown(&draft).unwrap();
         assert!(markdown.find("sv_0").unwrap() < markdown.find("sv_1").unwrap());
+        let parsed =
+            parse_rendered_citation(markdown.lines().find(|line| line.contains("sv_1")).unwrap())
+                .unwrap();
+        assert_eq!(parsed.excerpt_digest, draft.citations[0].excerpt_digest);
         let identity = publication_identity(&draft, "op_1").unwrap();
         assert!(!identity.manifest_identity.is_empty());
     }

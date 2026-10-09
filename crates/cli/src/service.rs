@@ -95,6 +95,9 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             | ["review", "show"]
             | ["source", "list"]
             | ["source", "search"]
+            | ["source", "show"]
+            | ["source", "verify"]
+            | ["source", "read"]
             | ["gate", "policy", "publish"]
             | ["work", "claim"]
             | ["work", "accept"]
@@ -1910,6 +1913,31 @@ mod unix {
             data["limit"] = json!(parsed.options.limit.unwrap_or(20));
             return Ok(data);
         }
+        if matches!(path.as_slice(), ["source", "show"])
+            || matches!(path.as_slice(), ["source", "verify"])
+            || matches!(path.as_slice(), ["source", "read"])
+        {
+            let index = usize::from(parsed.options.project.is_none());
+            data["source_version_id"] = json!(parsed
+                .options
+                .positionals
+                .get(index)
+                .ok_or_else(|| CliError::invalid("source command requires a source version ID"))?);
+            data["command"] = json!(match path[1] {
+                "show" => "source_show",
+                "verify" => "source_verify",
+                "read" => "source_read",
+                _ => unreachable!(),
+            });
+            if path[1] == "read" {
+                data["offset"] = json!(parsed.options.offset.unwrap_or(0));
+                data["length"] = json!(parsed
+                    .options
+                    .byte_limit
+                    .unwrap_or(boreal_source::MAX_SOURCE_READ_BYTES as u64));
+            }
+            return Ok(data);
+        }
         match path.as_slice() {
             ["workflows", "list"] => {
                 data["command"] = json!("workflow_list");
@@ -2643,6 +2671,27 @@ mod unix {
         offset: Option<u64>,
     }
 
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SourceVersionRequest {
+        command: String,
+        project_id: String,
+        actor_id: String,
+        #[serde(default)]
+        credential_ref: Option<String>,
+        #[serde(default)]
+        harness_id: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        operation_id: Option<String>,
+        source_version_id: String,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        length: Option<u64>,
+    }
+
     fn default_actor_role() -> String {
         "agent".to_owned()
     }
@@ -2801,6 +2850,9 @@ mod unix {
                 "source_list" => self.source_list(data, &request.operation_id),
                 "gate_policy_publish" => self.gate_policy_publish(data, &request.operation_id),
                 "source_search" => self.source_search(data),
+                "source_show" => self.source_version_read(data, &request.operation_id, "show"),
+                "source_verify" => self.source_version_read(data, &request.operation_id, "verify"),
+                "source_read" => self.source_version_read(data, &request.operation_id, "read"),
                 "backup" => self.backup(data, &request.operation_id),
                 "maintenance_show" => self.maintenance_show(data),
                 "migration_dry_run" => self.migration(data, false),
@@ -3190,6 +3242,76 @@ mod unix {
             // source metadata reads do not persist it or echo it to the client.
             let _ = request.credential_ref;
             let result = super::super::source_list_result(&parsed, &self.store)?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
+        fn source_version_read(
+            &self,
+            data: &Value,
+            operation: &str,
+            action: &str,
+        ) -> ServiceResult {
+            let request: SourceVersionRequest = serde_json::from_value(data.clone())
+                .map_err(|error| invalid_service_dto("source_version_read", error))?;
+            let expected_command = format!("source_{action}");
+            if request.command != expected_command {
+                return Err(CliError::invalid(
+                    "source request command does not match its route",
+                ));
+            }
+            if request.operation_id.as_deref() != Some(operation) {
+                return Err(CliError::invalid(
+                    "source read operation identity does not match the service envelope",
+                ));
+            }
+            let project = required_trimmed(request.project_id, "project_id")?;
+            let actor = required_trimmed(request.actor_id, "actor_id")?;
+            let binding = IdentityStore::new(&self.store)
+                .workspace_binding(&project)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            let database = self
+                .store
+                .database_location()
+                .ok_or_else(|| CliError::invalid("source read needs a project database"))?
+                .to_string_lossy()
+                .into_owned();
+            let mut parsed = ParsedCommand {
+                path: vec!["source".to_owned(), action.to_owned()],
+                options: CliOptions {
+                    service_workspace: Some(PathBuf::from(binding.canonical_root())),
+                    db: database,
+                    project: Some(project),
+                    actor,
+                    harness: request.harness_id.unwrap_or_default(),
+                    session: request.session_id.unwrap_or_default(),
+                    operation_id: Some(operation.to_owned()),
+                    offset: request.offset,
+                    byte_limit: request.length,
+                    json: true,
+                    ..CliOptions::default()
+                },
+            };
+            parsed.options.positionals.push(request.source_version_id);
+            if action == "read" {
+                let length = parsed
+                    .options
+                    .byte_limit
+                    .unwrap_or(boreal_source::MAX_SOURCE_READ_BYTES as u64);
+                if length == 0 || length > boreal_source::MAX_SOURCE_READ_BYTES as u64 {
+                    return Err(CliError::invalid(format!(
+                        "source read length must be in 1..={}",
+                        boreal_source::MAX_SOURCE_READ_BYTES
+                    )));
+                }
+            }
+            // Authentication consumed this secret before dispatch.
+            let _ = request.credential_ref;
+            let result = match action {
+                "show" => super::super::source_show_result(&parsed, &self.store)?,
+                "verify" => super::super::source_verify_result(&parsed, &self.store)?,
+                "read" => super::super::source_read_result(&parsed, &self.store)?,
+                _ => return Err(CliError::invalid("unsupported source read operation")),
+            };
             Ok((result.outcome, result.revision, result.data))
         }
 

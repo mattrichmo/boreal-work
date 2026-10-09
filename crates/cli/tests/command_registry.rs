@@ -346,6 +346,7 @@ fn commands_report_source_route_adapters_accurately() {
         [
             "source add",
             "source list",
+            "source read",
             "source search",
             "source show",
             "source verify",
@@ -355,8 +356,9 @@ fn commands_report_source_route_adapters_accurately() {
         ("source add", true),
         ("source list", true),
         ("source search", true),
-        ("source show", false),
-        ("source verify", false),
+        ("source show", true),
+        ("source verify", true),
+        ("source read", true),
     ] {
         let route = routes
             .iter()

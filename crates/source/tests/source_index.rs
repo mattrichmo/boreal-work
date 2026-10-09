@@ -154,6 +154,68 @@ fn retrieval_respects_result_and_excerpt_bounds() {
 }
 
 #[test]
+fn portable_reads_are_verified_bounded_and_citations_match_their_locator() {
+    let catalog = SourceCatalog::default();
+    let version = catalog
+        .capture(
+            "project-a",
+            "docs/portable.md",
+            b"alpha\nbeta\n",
+            "text/markdown",
+        )
+        .unwrap();
+
+    let first = catalog
+        .read_range("project-a", &version.source_version_id, 0, 4)
+        .unwrap();
+    assert_eq!(first.bytes, b"alph");
+    assert_eq!(first.total_bytes, 11);
+    assert_eq!(first.next_offset, Some(4));
+    assert_eq!(first.content_digest, version.content_digest);
+    let second = catalog
+        .read_range("project-a", &version.source_version_id, 4, 64)
+        .unwrap();
+    assert_eq!(second.bytes, b"a\nbeta\n");
+    assert_eq!(second.next_offset, None);
+
+    assert_eq!(
+        catalog.read_range("project-b", &version.source_version_id, 0, 1),
+        Err(SourceError::ScopeViolation)
+    );
+    assert_eq!(
+        catalog.read_range("project-a", &version.source_version_id, 0, 0),
+        Err(SourceError::InvalidReadRange)
+    );
+    assert_eq!(
+        catalog.read_range("project-a", &version.source_version_id, 12, 1),
+        Err(SourceError::InvalidReadRange)
+    );
+    assert_eq!(
+        catalog.cite(&version, "line:1", b"beta"),
+        Err(SourceError::ExcerptNotFound)
+    );
+    assert_eq!(
+        catalog.cite(&version, "docs/portable.md:9", b"beta"),
+        Err(SourceError::InvalidCitationLocator)
+    );
+    assert_eq!(
+        catalog.cite(&version, "untyped locator", b"beta"),
+        Err(SourceError::InvalidCitationLocator)
+    );
+    let citation = catalog.cite(&version, "line:2", b"beta").unwrap();
+    catalog
+        .verify_citation(&version, &citation, b"beta")
+        .unwrap();
+    assert_eq!(
+        catalog
+            .cite(&version, "byte:6-10", b"beta")
+            .unwrap()
+            .excerpt_digest,
+        boreal_source::content_digest(b"beta")
+    );
+}
+
+#[test]
 fn retrieval_never_serves_derived_text_after_blob_loss_or_tampering() {
     let root = test_root("retrieval-integrity");
     let catalog = SourceCatalog::with_filesystem(&root);

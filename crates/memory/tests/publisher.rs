@@ -44,6 +44,7 @@ fn draft(entry_id: &str) -> Draft {
         vec![Citation {
             source_version_id: "source-1".into(),
             location: "line:4".into(),
+            excerpt_digest: None,
         }],
     )
     .unwrap()

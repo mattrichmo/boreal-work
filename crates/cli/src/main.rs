@@ -128,6 +128,7 @@ Usage:
   bwrk source show <project> <source-version-id> [--db PATH] [--json]
   bwrk source list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk source verify <project> <source-version-id> [--db PATH] [--json]
+  bwrk source read <project> <source-version-id> [--offset N] [--length N] [--db PATH] [--json]
   bwrk doctor [--project PROJECT] [--db PATH] [--json]
   bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk work show <project> <work-id> [--db PATH] [--json]
@@ -187,6 +188,7 @@ struct CliOptions {
     include_expiry: bool,
     limit: Option<u64>,
     offset: Option<u64>,
+    byte_limit: Option<u64>,
     max_requests: Option<usize>,
     dispatch_workers: Option<usize>,
     dispatch_capacity: Option<usize>,
@@ -250,6 +252,7 @@ impl Default for CliOptions {
             include_expiry: false,
             limit: None,
             offset: None,
+            byte_limit: None,
             max_requests: None,
             dispatch_workers: None,
             dispatch_capacity: None,
@@ -1680,6 +1683,7 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["source", "list"] => source_list_result(parsed, store),
         ["source", "search"] => source_search_result(parsed, store),
         ["source", "verify"] => source_verify_result(parsed, store),
+        ["source", "read"] => source_read_result(parsed, store),
         ["doctor"] => doctor_result(parsed, store),
         ["work", "claim"] => claim_result(parsed, app, adapter, operation, store),
         ["work", "accept"] => attempt_mutation_result(
@@ -1818,6 +1822,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         include_expiry: false,
         limit: None,
         offset: None,
+        byte_limit: None,
         max_requests: None,
         dispatch_workers: None,
         dispatch_capacity: None,
@@ -2033,6 +2038,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--time-limit"
                 | "--limit"
                 | "--offset"
+                | "--length"
                 | "--max-requests"
                 | "--dispatch-workers"
                 | "--workers"
@@ -2121,6 +2127,16 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                     options.limit = Some(limit);
                 }
                 "--offset" => options.offset = Some(parse_revision(&value.unwrap())?),
+                "--length" => {
+                    let length = parse_revision(&value.unwrap())?;
+                    if !(1..=boreal_source::MAX_SOURCE_READ_BYTES as u64).contains(&length) {
+                        return Err(CliError::invalid(format!(
+                            "--length must be in the range 1..={}",
+                            boreal_source::MAX_SOURCE_READ_BYTES
+                        )));
+                    }
+                    options.byte_limit = Some(length);
+                }
                 "--max-requests" => {
                     let value = parse_revision(&value.unwrap())?;
                     options.max_requests = Some(usize::try_from(value).map_err(|_| {
@@ -2442,7 +2458,7 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         }
         ["source", "list"] => positionals == usize::from(options.project.is_none()),
         ["source", "search"] => positionals == 1 + usize::from(options.project.is_none()),
-        ["source", "show"] | ["source", "verify"] => {
+        ["source", "show"] | ["source", "verify"] | ["source", "read"] => {
             positionals == 1 + usize::from(options.project.is_none())
         }
         ["work", "list" | "ready" | "parallel" | "recent-closed" | "review-candidates" | "next"]
@@ -3968,6 +3984,14 @@ fn source_add_result(
                 "revision": registration_revision,
                 "replayed": registration_replayed,
             },
+            "index": {
+                "state": format!("{:?}", result.index.state).to_ascii_lowercase(),
+                "parser_identity": result.index.parser_identity,
+                "chunk_count": result.index.chunk_count,
+                "index_revision": result.index.index_revision,
+                "warnings": result.index.warnings,
+                "error": result.index.error,
+            },
             "project_revision_before": revision,
             "duplicate": result.duplicate,
             "reused_existing_version": result.reused_existing_version,
@@ -4136,6 +4160,56 @@ fn source_verify_result(
             "verified_digest": verified_digest,
             "byte_count": result.byte_count,
             "verified": verified,
+        })),
+        Some(revision),
+    )
+}
+
+fn source_read_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let index = usize::from(parsed.options.project.is_none());
+    let source_id = parsed
+        .options
+        .positionals
+        .get(index)
+        .ok_or_else(|| CliError::invalid("source read requires a source version identifier"))?;
+    let offset = parsed.options.offset.unwrap_or(0) as usize;
+    let limit = parsed
+        .options
+        .byte_limit
+        .unwrap_or(boreal_source::MAX_SOURCE_READ_BYTES as u64) as usize;
+    let revision = store_revision(store, &ProjectId::new(project.clone()))?;
+    let context = project_context::resolve(parsed)?;
+    let catalog_root = project_context::confined_path(
+        &context.root,
+        &source_catalog_root(&parsed.options.db),
+        true,
+    )?;
+    let catalog = source_catalog(&catalog_root)?;
+    let range = KnowledgeApplication::new(&catalog)
+        .read_source_range(&project, source_id, offset, limit)
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("source read failed for project {project} version {source_id}: {error}"),
+            )
+        })?;
+    let bytes_hex = range
+        .bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    bounded_result(
+        Some(json!({
+            "project_id": range.project_id,
+            "source_version_id": range.source_version_id,
+            "content_digest": range.content_digest,
+            "offset": range.offset,
+            "total_bytes": range.total_bytes,
+            "next_offset": range.next_offset,
+            "encoding": "hex",
+            "bytes_hex": bytes_hex,
         })),
         Some(revision),
     )

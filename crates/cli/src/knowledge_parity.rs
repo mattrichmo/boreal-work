@@ -769,7 +769,7 @@ fn enrich_search(
                 },
             )
             .map_err(map_knowledge_error)?;
-        data["published_memory_search"] = json!({"git_revision":result.response.git_revision,"index_revision":result.response.index_revision,"lag":format!("{:?}",result.response.lag),"hits":result.response.hits.iter().map(|hit|json!({"entry_id":hit.entry_id,"title":hit.title,"excerpt":hit.excerpt,"content_digest":hit.content_digest,"git_revision":hit.git_revision,"index_revision":hit.index_revision,"authority":format!("{:?}",hit.authority),"source_trust":format!("{:?}",hit.source_trust),"citations":hit.citations.iter().map(|citation|json!({"source_version_id":citation.source_version_id,"location":citation.location})).collect::<Vec<_>>()})).collect::<Vec<_>>()});
+        data["published_memory_search"] = json!({"git_revision":result.response.git_revision,"index_revision":result.response.index_revision,"lag":format!("{:?}",result.response.lag),"hits":result.response.hits.iter().map(|hit|json!({"entry_id":hit.entry_id,"title":hit.title,"excerpt":hit.excerpt,"content_digest":hit.content_digest,"git_revision":hit.git_revision,"index_revision":hit.index_revision,"authority":format!("{:?}",hit.authority),"source_trust":format!("{:?}",hit.source_trust),"citations":hit.citations.iter().map(|citation|json!({"source_version_id":citation.source_version_id,"location":citation.location,"excerpt_digest":citation.excerpt_digest})).collect::<Vec<_>>()})).collect::<Vec<_>>()});
     }
     Ok(())
 }

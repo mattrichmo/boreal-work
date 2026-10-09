@@ -32,6 +32,10 @@ pub const DEFAULT_MAX_PARSE_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_MAX_PARSE_CHUNKS: usize = 100_000;
 pub const DEFAULT_MAX_CHUNK_BYTES: usize = 16 * 1024;
 pub const DEFAULT_MAX_RETRIEVAL_EXCERPT_BYTES: usize = 4 * 1024;
+/// Maximum source object that may be read through portable adapter routes.
+pub const MAX_PORTABLE_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum bytes returned in one portable source read.
+pub const MAX_SOURCE_READ_BYTES: usize = 64 * 1024;
 const CATALOG_LOCK_WAIT: Duration = Duration::from_secs(10);
 /// Canonical content identity shared with the migration boundary.
 pub const DIGEST_ALGORITHM: &str = "sha256";
@@ -104,6 +108,20 @@ pub struct Citation {
     pub source_version_id: String,
     pub location: String,
     pub excerpt_digest: String,
+}
+
+/// A digest-verified slice of an immutable source object. Callers can fetch a
+/// large supported object in bounded chunks without relying on its original
+/// host path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceByteRange {
+    pub project_id: String,
+    pub source_version_id: String,
+    pub content_digest: String,
+    pub offset: usize,
+    pub total_bytes: usize,
+    pub bytes: Vec<u8>,
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -264,9 +282,12 @@ pub enum SourceError {
     MissingBlob,
     StaleParser,
     InvalidCitation,
+    InvalidCitationLocator,
     CitationTooLarge,
     ExcerptNotFound,
     InvalidRetrievalQuery,
+    InvalidReadRange,
+    SourceTooLarge,
     EmptyParser,
     EmptyOperation,
     OperationConflict,
@@ -284,6 +305,9 @@ impl fmt::Display for SourceError {
             Self::MissingBlob => f.write_str("source blob is unavailable"),
             Self::StaleParser => f.write_str("parser result targets a different source version"),
             Self::InvalidCitation => f.write_str("citation is invalid for the source version"),
+            Self::InvalidCitationLocator => {
+                f.write_str("citation locator does not identify the supplied excerpt")
+            }
             Self::CitationTooLarge => {
                 f.write_str("citation exceeds the configured verification bound")
             }
@@ -291,6 +315,8 @@ impl fmt::Display for SourceError {
                 f.write_str("citation excerpt is not present in the source blob")
             }
             Self::InvalidRetrievalQuery => f.write_str("retrieval query or bound is invalid"),
+            Self::InvalidReadRange => f.write_str("source byte range or read bound is invalid"),
+            Self::SourceTooLarge => f.write_str("source exceeds the portable read size bound"),
             Self::EmptyParser => f.write_str("parser identity is empty"),
             Self::EmptyOperation => f.write_str("source operation identity is empty"),
             Self::OperationConflict => {
@@ -726,6 +752,41 @@ impl SourceCatalog {
             .read_verified(&stored.content_digest, stored.byte_count)
     }
 
+    /// Read one bounded, digest-verified byte range from the exact project
+    /// source version. The complete object is verified before a slice is
+    /// returned, so callers never receive bytes from a corrupt blob.
+    pub fn read_range(
+        &self,
+        project_id: &str,
+        source_version_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SourceByteRange, SourceError> {
+        if limit == 0 || limit > MAX_SOURCE_READ_BYTES {
+            return Err(SourceError::InvalidReadRange);
+        }
+        let version = self.show_version(project_id, source_version_id)?;
+        if version.byte_count > MAX_PORTABLE_SOURCE_BYTES {
+            return Err(SourceError::SourceTooLarge);
+        }
+        if offset > version.byte_count {
+            return Err(SourceError::InvalidReadRange);
+        }
+        let bytes = self.verify(&version)?;
+        let end = offset.saturating_add(limit).min(bytes.len());
+        let range = bytes[offset..end].to_vec();
+        let next_offset = (end < bytes.len()).then_some(end);
+        Ok(SourceByteRange {
+            project_id: version.project_id,
+            source_version_id: version.source_version_id,
+            content_digest: version.content_digest,
+            offset,
+            total_bytes: bytes.len(),
+            bytes: range,
+            next_offset,
+        })
+    }
+
     pub fn availability(&self, version: &SourceVersion) -> Result<Availability, SourceError> {
         let stored = self.authorized_version(version)?;
         Ok(
@@ -749,9 +810,7 @@ impl SourceCatalog {
     ) -> Result<Citation, SourceError> {
         self.validate_citation_bounds(location, excerpt)?;
         let bytes = self.verify(version)?;
-        if !contains_subslice(&bytes, excerpt) {
-            return Err(SourceError::ExcerptNotFound);
-        }
+        validate_citation_locator(location, &version.origin, &bytes, excerpt)?;
         Ok(Citation {
             source_version_id: version.source_version_id.clone(),
             location: location.to_owned(),
@@ -772,9 +831,7 @@ impl SourceCatalog {
             return Err(SourceError::InvalidCitation);
         }
         let bytes = self.verify(version)?;
-        if !contains_subslice(&bytes, excerpt) {
-            return Err(SourceError::ExcerptNotFound);
-        }
+        validate_citation_locator(&citation.location, &version.origin, &bytes, excerpt)?;
         Ok(())
     }
 
@@ -2065,6 +2122,93 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack
             .windows(needle.len())
             .any(|window| window == needle)
+}
+
+fn validate_citation_locator(
+    location: &str,
+    origin: &str,
+    bytes: &[u8],
+    excerpt: &[u8],
+) -> Result<(), SourceError> {
+    let locator = if location.starts_with("line:")
+        || location.starts_with("byte:")
+        || location.starts_with("bytes:")
+    {
+        location
+    } else {
+        location
+            .strip_prefix(&format!("{origin}:"))
+            .or_else(|| location.strip_prefix(&format!("{origin}#")))
+            .ok_or(SourceError::InvalidCitationLocator)?
+    };
+
+    if let Some(range) = locator
+        .strip_prefix("byte:")
+        .or_else(|| locator.strip_prefix("bytes:"))
+    {
+        let (start, end) =
+            parse_half_open_range(range).ok_or(SourceError::InvalidCitationLocator)?;
+        let selected = bytes
+            .get(start..end)
+            .ok_or(SourceError::InvalidCitationLocator)?;
+        return if selected == excerpt {
+            Ok(())
+        } else {
+            Err(SourceError::ExcerptNotFound)
+        };
+    }
+
+    // An origin-qualified location may use `path:12`, `path:line:12`, or
+    // `path#L12-L13`; the unqualified canonical spelling is `line:12`.
+    let locator = locator
+        .strip_prefix("line:")
+        .or_else(|| locator.strip_prefix('L'))
+        .unwrap_or(locator);
+    let (start, end) = parse_inclusive_range(locator).ok_or(SourceError::InvalidCitationLocator)?;
+    let selected = line_range(bytes, start, end).ok_or(SourceError::InvalidCitationLocator)?;
+    if contains_subslice(selected, excerpt) {
+        Ok(())
+    } else {
+        Err(SourceError::ExcerptNotFound)
+    }
+}
+
+fn parse_half_open_range(value: &str) -> Option<(usize, usize)> {
+    let (start, end) = value.split_once('-')?;
+    let start = start.parse::<usize>().ok()?;
+    let end = end.parse::<usize>().ok()?;
+    (end > start).then_some((start, end))
+}
+
+fn parse_inclusive_range(value: &str) -> Option<(usize, usize)> {
+    let (start, end) = match value.split_once('-') {
+        Some((start, end)) => (start.parse::<usize>().ok()?, end.parse::<usize>().ok()?),
+        None => {
+            let line = value.parse::<usize>().ok()?;
+            (line, line)
+        }
+    };
+    (start > 0 && end >= start).then_some((start, end))
+}
+
+fn line_range(bytes: &[u8], start: usize, end: usize) -> Option<&[u8]> {
+    let mut cursor = 0;
+    let mut selected_start = None;
+    let mut selected_end = None;
+    for (index, segment) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        let line = index + 1;
+        if line == start {
+            selected_start = Some(cursor);
+        }
+        cursor += segment.len();
+        if line == end {
+            selected_end = Some(cursor);
+            break;
+        }
+    }
+    let from = selected_start?;
+    let to = selected_end?;
+    bytes.get(from..to)
 }
 
 /// Return the stable content address used by the source blob store.

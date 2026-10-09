@@ -86,6 +86,12 @@ Raw source text is data, not an instruction to Boreal or the agent harness.
 Retrieval names source trust/authority separately from relevance. A model may
 summarize a source, but publication still requires a cited review operation.
 
+New durable memory drafts include a source-version ID, a checked line or byte
+locator, and the excerpt used to validate the citation. Boreal stores the
+excerpt digest with the draft and published Markdown so later readers can
+distinguish a verified excerpt from an unverified legacy locator. Raw excerpt
+text is not copied into the published note.
+
 An external Git edit to the memory branch is imported as a new published
 revision after schema, ID, citation, and path validation. Conflicting edits
 become a visible import conflict; the service never silently overwrites human

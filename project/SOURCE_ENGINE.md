@@ -34,8 +34,10 @@ still reported by doctor rather than silently recreated.
 2. Capture bytes or an immutable Git reference outside the work-state write
    transaction. Bound bytes, time, redirects, and parser resources.
 3. Store content by digest and commit metadata in a short transaction.
-4. Parse/index asynchronously. Record parser version, warnings, and an output
-   digest. Failed parsing remains visible and retryable.
+4. Immediately attempt bounded plain-text indexing after capture. Record parser
+   version, warnings, and an output digest. Unsupported, binary, or oversized
+   content remains captured with an explicit failed index report and lag; the
+   derived index can be rebuilt later.
 5. Let a human or agent propose a cited draft note/decision. Draft review and
    Git publication are a separate memory-entry lifecycle. Source text does
    not become an authoritative claim merely because it was parsed.
@@ -60,6 +62,15 @@ Search starts with IDs, metadata filters, and local full-text indexing. Add
 embedding search only after a recall/precision benchmark and a clear
 reindexing policy. A context pack is generated on demand with a byte/token
 budget, source citations, and revision; it is not a new source of truth.
+
+Portable reads use the project ID and immutable source-version ID, not the
+captured host path. A read returns at most 64 KiB of hex-encoded verified bytes
+per request and reports the complete object digest, total length, and next
+offset. Portable materializers verify that the returned ranges reconstruct
+that digest; objects over 16 MiB are explicitly unsupported by this route.
+Citation locators use `line:N[-M]` (or an origin-qualified equivalent) or
+`byte:N-M` with a half-open byte range. The supplied excerpt must occur at the
+selected line range or exactly match the selected byte range.
 
 ## Integration with work
 

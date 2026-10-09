@@ -4,9 +4,7 @@ use boreal_application::{
     SourceRegistrationState, WorkApplication,
 };
 use boreal_domain::ActorRole;
-use boreal_memory::{
-    initialize_scaffold_baseline, Citation as MemoryCitation, MemoryRoot, Publisher,
-};
+use boreal_memory::{initialize_scaffold_baseline, MemoryRoot, Publisher};
 use boreal_migration::{MigrationDocument, ProjectRecord, FORMAT, FORMAT_VERSION};
 use boreal_source::{Availability, SourceCatalog};
 use boreal_store::{
@@ -175,6 +173,15 @@ fn source_capture_is_operation_aware_and_explicit_about_store_registration() {
         first.operation.durability,
         KnowledgeDurability::SourceCatalog
     );
+    assert_eq!(first.index.state, boreal_source::ParseState::Indexed);
+    let captured_search = app
+        .search_sources(boreal_source::RetrievalRequest::new(
+            "project-a",
+            "immutable",
+        ))
+        .unwrap();
+    assert_eq!(captured_search.lag, 0);
+    assert_eq!(captured_search.hits.len(), 1);
     assert_eq!(
         first.registration,
         SourceRegistrationState::StoreRegistrationPending {
@@ -191,6 +198,11 @@ fn source_capture_is_operation_aware_and_explicit_about_store_registration() {
         verified.verified_digest.as_deref(),
         Some(first.source.content_digest.as_str())
     );
+    let range = app
+        .read_source_range("project-a", &first.source.source_version_id, 0, 9)
+        .unwrap();
+    assert_eq!(range.bytes, b"immutable");
+    assert_eq!(range.next_offset, Some(9));
 
     let mut changed = SourceCaptureInput {
         operation_id: "source-op-1".to_owned(),
@@ -230,10 +242,11 @@ fn memory_draft_review_publish_and_search_preserve_provenance() {
         .cite_source(
             "project-a",
             &source.source.source_version_id,
-            "docs/guide.md:1",
+            "line:1",
             b"verified review",
         )
         .unwrap();
+    let verified_excerpt_digest = citation.citation.excerpt_digest.clone();
 
     let draft = app
         .draft_memory(MemoryDraftInput {
@@ -242,9 +255,10 @@ fn memory_draft_review_publish_and_search_preserve_provenance() {
             entry_id: "release-review".to_owned(),
             title: "Release review".to_owned(),
             body: "The release process requires a verified review.".to_owned(),
-            citations: vec![MemoryCitation {
+            citations: vec![boreal_application::MemoryCitationInput {
                 source_version_id: citation.citation.source_version_id,
                 location: citation.citation.location,
+                excerpt: "verified review".to_owned(),
             }],
         })
         .unwrap();
@@ -286,7 +300,11 @@ fn memory_draft_review_publish_and_search_preserve_provenance() {
             entry_id: reviewed.draft.entry_id.clone(),
             title: reviewed.draft.title.clone(),
             body: reviewed.draft.body.clone(),
-            citations: reviewed.draft.citations.clone(),
+            citations: vec![boreal_application::MemoryCitationInput {
+                source_version_id: source.source.source_version_id.clone(),
+                location: "line:1".to_owned(),
+                excerpt: "verified review".to_owned(),
+            }],
         },
     )
     .unwrap();
@@ -398,6 +416,12 @@ fn memory_draft_review_publish_and_search_preserve_provenance() {
         .unwrap();
     assert_eq!(search.response.hits.len(), 1);
     assert_eq!(search.response.hits[0].entry_id, "release-review");
+    assert_eq!(
+        search.response.hits[0].citations[0]
+            .excerpt_digest
+            .as_deref(),
+        Some(verified_excerpt_digest.as_str())
+    );
     assert_eq!(
         search.provenance.git_revision,
         reconciled_readback["verified_git_revision"]

@@ -31,9 +31,10 @@ use boreal_migration::{
     FORMAT_VERSION, LEGACY_FORMAT,
 };
 use boreal_source::{
-    Availability, Citation as SourceCitation, RetrievalRequest as SourceRetrievalRequest,
-    RetrievalResponse as SourceRetrievalResponse, SourceCaptureReceipt, SourceCaptureRequest,
-    SourceCatalog, SourceError, SourceVersion,
+    Availability, Citation as SourceCitation, ParseReport as SourceIndexReport,
+    RetrievalRequest as SourceRetrievalRequest, RetrievalResponse as SourceRetrievalResponse,
+    SourceByteRange, SourceCaptureReceipt, SourceCaptureRequest, SourceCatalog, SourceError,
+    SourceVersion,
 };
 use serde_json::{json, Value};
 
@@ -118,6 +119,9 @@ pub struct SourceCaptureResult {
     pub operation: KnowledgeOperation,
     pub provenance: KnowledgeProvenance,
     pub source: SourceVersion,
+    /// Result of the bounded plain-text indexing attempt. Binary or oversized
+    /// content remains captured with an explicit failed parse report.
+    pub index: SourceIndexReport,
     pub duplicate: bool,
     pub reused_existing_version: bool,
     pub registration: SourceRegistrationState,
@@ -146,7 +150,16 @@ pub struct MemoryDraftInput {
     pub entry_id: String,
     pub title: String,
     pub body: String,
-    pub citations: Vec<MemoryCitation>,
+    pub citations: Vec<MemoryCitationInput>,
+}
+
+/// User-supplied evidence for a memory citation. The excerpt is checked by the
+/// source catalog and only its digest is retained in the durable draft.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryCitationInput {
+    pub source_version_id: String,
+    pub location: String,
+    pub excerpt: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -415,6 +428,14 @@ impl<'a> KnowledgeApplication<'a> {
                     input.media_type,
                     input.bytes,
                 ))?;
+        let index = self.source_catalog.parse_and_index(
+            &receipt.source_version,
+            boreal_source::DEFAULT_PARSER_IDENTITY,
+        )?;
+        let source = self.source_catalog.show_version(
+            &receipt.source_version.project_id,
+            &receipt.source_version.source_version_id,
+        )?;
         Ok(SourceCaptureResult {
             operation: KnowledgeOperation {
                 operation_id: input.operation_id,
@@ -422,12 +443,13 @@ impl<'a> KnowledgeApplication<'a> {
                 durability: KnowledgeDurability::SourceCatalog,
             },
             provenance: KnowledgeProvenance {
-                project_id: Some(receipt.source_version.project_id.clone()),
-                source_version_id: Some(receipt.source_version.source_version_id.clone()),
-                source_digest: Some(receipt.source_version.content_digest.clone()),
+                project_id: Some(source.project_id.clone()),
+                source_version_id: Some(source.source_version_id.clone()),
+                source_digest: Some(source.content_digest.clone()),
                 ..KnowledgeProvenance::default()
             },
-            source: receipt.source_version,
+            source,
+            index,
             duplicate: receipt.duplicate,
             reused_existing_version: receipt.reused_existing_version,
             registration: SourceRegistrationState::StoreRegistrationPending {
@@ -615,6 +637,22 @@ impl<'a> KnowledgeApplication<'a> {
         })
     }
 
+    /// Return one size-bounded, digest-verified range using the logical
+    /// project/version identity. The source's original path is never used as
+    /// the read locator.
+    pub fn read_source_range(
+        &self,
+        project_id: &str,
+        source_version_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SourceByteRange, KnowledgeError> {
+        require_project(project_id)?;
+        self.source_catalog
+            .read_range(project_id, source_version_id, offset, limit)
+            .map_err(KnowledgeError::from)
+    }
+
     pub fn cite_source(
         &self,
         project_id: &str,
@@ -643,6 +681,20 @@ impl<'a> KnowledgeApplication<'a> {
     ) -> Result<MemoryDraftResult, KnowledgeError> {
         require_operation(&input.operation_id)?;
         require_project(&input.project_id)?;
+        let mut citations = Vec::with_capacity(input.citations.len());
+        for citation in &input.citations {
+            let checked = self.cite_source(
+                &input.project_id,
+                &citation.source_version_id,
+                &citation.location,
+                citation.excerpt.as_bytes(),
+            )?;
+            citations.push(MemoryCitation {
+                source_version_id: checked.citation.source_version_id,
+                location: checked.citation.location,
+                excerpt_digest: Some(checked.citation.excerpt_digest),
+            });
+        }
         let request_digest = canonical_request_digest(
             "memory.draft/v1",
             json!({
@@ -650,9 +702,10 @@ impl<'a> KnowledgeApplication<'a> {
                 "entry_id": input.entry_id,
                 "title": input.title,
                 "body_digest": sha256_content_digest(input.body.as_bytes()),
-                "citations": input.citations.iter().map(|citation| json!({
+                "citations": citations.iter().map(|citation| json!({
                     "source_version_id": citation.source_version_id,
                     "location": citation.location,
+                    "excerpt_digest": citation.excerpt_digest,
                 })).collect::<Vec<_>>(),
             }),
         );
@@ -661,7 +714,7 @@ impl<'a> KnowledgeApplication<'a> {
             &input.entry_id,
             &input.title,
             &input.body,
-            input.citations,
+            citations,
         )?;
         Ok(MemoryDraftResult {
             operation: KnowledgeOperation {
@@ -1730,7 +1783,16 @@ fn input_contains_format(input: &str, format: &str) -> bool {
 fn citations_json(citations: &[boreal_memory::Citation]) -> Value {
     json!(citations
         .iter()
-        .map(|c| json!({"source_version_id":c.source_version_id,"location":c.location}))
+        .map(|citation| {
+            let mut value = json!({
+                "source_version_id": citation.source_version_id,
+                "location": citation.location,
+            });
+            if let Some(digest) = &citation.excerpt_digest {
+                value["excerpt_digest"] = json!(digest);
+            }
+            value
+        })
         .collect::<Vec<_>>())
 }
 #[expect(
@@ -1768,6 +1830,10 @@ fn stored_draft(record: &boreal_store::memory::MemoryDraftRecord) -> Result<Draf
                     .and_then(Value::as_str)
                     .ok_or_else(|| KnowledgeError::Invalid("citation location missing".into()))?
                     .into(),
+                excerpt_digest: value
+                    .get("excerpt_digest")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             })
         })
         .collect::<Result<Vec<_>, KnowledgeError>>()?;

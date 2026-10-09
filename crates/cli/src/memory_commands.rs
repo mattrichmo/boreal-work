@@ -168,9 +168,10 @@ pub(super) fn apply(
                         body,
                         citations: citations
                             .into_iter()
-                            .map(|c| boreal_application::MemoryCitation {
+                            .map(|c| boreal_application::MemoryCitationInput {
                                 source_version_id: c.source_version_id,
                                 location: c.location,
+                                excerpt: c.excerpt.unwrap_or_default(),
                             })
                             .collect(),
                     },
@@ -275,7 +276,7 @@ pub(super) fn apply(
                 .map_err(map_error)?;
             bounded_result(Some(json!({"project_id":project,"git_revision":result.response.git_revision,"index_revision":result.response.index_revision,"lag":format!("{:?}",result.response.lag),
                 "hits":result.response.hits.iter().map(|h|json!({"entry_id":h.entry_id,"title":h.title,"excerpt":h.excerpt,"content_digest":h.content_digest,"git_revision":h.git_revision,
-                    "citations":h.citations.iter().map(|c|json!({"source_version_id":c.source_version_id,"location":c.location})).collect::<Vec<_>>()})).collect::<Vec<_>>()})),Some(store.project_revision(project).map_err(map_store_error)?.0)).map(|mut response|{response.outcome=ApplicationOutcome::Unchanged;response})
+                    "citations":h.citations.iter().map(|c|json!({"source_version_id":c.source_version_id,"location":c.location,"excerpt_digest":c.excerpt_digest})).collect::<Vec<_>>()})).collect::<Vec<_>>()})),Some(store.project_revision(project).map_err(map_store_error)?.0)).map(|mut response|{response.outcome=ApplicationOutcome::Unchanged;response})
         }
         MemoryOperationDto::Reconcile { operation_id } => {
             let result = app
