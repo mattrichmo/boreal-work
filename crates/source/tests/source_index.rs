@@ -216,6 +216,56 @@ fn portable_reads_are_verified_bounded_and_citations_match_their_locator() {
 }
 
 #[test]
+fn portable_materialization_survives_missing_original_and_catalog_restart() {
+    let root = test_root("portable-materialization");
+    let original = root.join("temporary-asset.bin");
+    let bytes = [b"binary\0asset\xff".as_slice(), &[0, 255, 17, 128]].concat();
+    fs::write(&original, &bytes).unwrap();
+
+    let catalog_root = root.join("project-a").join("source");
+    fs::create_dir_all(&catalog_root).unwrap();
+    let first = SourceCatalog::with_persistent_filesystem(&catalog_root).unwrap();
+    let version = first
+        .capture(
+            "project-a",
+            "deliverables/asset.bin",
+            &bytes,
+            "application/octet-stream",
+        )
+        .unwrap();
+    drop(first);
+    fs::remove_file(&original).unwrap();
+
+    let reopened = SourceCatalog::with_persistent_filesystem(&catalog_root).unwrap();
+    let materialized = root.join("permitted-export").join("asset.bin");
+    fs::create_dir_all(materialized.parent().unwrap()).unwrap();
+    let mut output = fs::File::create(&materialized).unwrap();
+    let mut offset = 0;
+    loop {
+        let range = reopened
+            .read_range("project-a", &version.source_version_id, offset, 5)
+            .unwrap();
+        assert_eq!(range.content_digest, version.content_digest);
+        assert_eq!(range.total_bytes, bytes.len());
+        use std::io::Write;
+        output.write_all(&range.bytes).unwrap();
+        match range.next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    output.sync_all().unwrap();
+    let materialized_bytes = fs::read(&materialized).unwrap();
+    assert_eq!(materialized_bytes, bytes);
+    assert_eq!(
+        boreal_source::content_digest(&materialized_bytes),
+        version.content_digest
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn retrieval_never_serves_derived_text_after_blob_loss_or_tampering() {
     let root = test_root("retrieval-integrity");
     let catalog = SourceCatalog::with_filesystem(&root);

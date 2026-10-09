@@ -3977,8 +3977,6 @@ fn source_add_result(
         Some(json!({
             "project_id": project,
             "source": source_json(&result.source),
-            "input": input_path,
-            "catalog_root": catalog_root,
             "registration": {
                 "state": "store_committed",
                 "revision": registration_revision,
@@ -4035,7 +4033,6 @@ fn source_show_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<Cli
             "project_id": project,
             "source": source_json(&source),
             "sqlite_registration": registration.as_ref().map(source_record_json),
-            "catalog_root": catalog_root,
         })),
         Some(revision),
     )
@@ -4073,7 +4070,6 @@ fn source_list_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<Cli
             "offset": offset,
             "limit": limit,
             "has_more": offset.saturating_add(limit) < total,
-            "catalog_root": catalog_root,
         })),
         Some(revision),
     )

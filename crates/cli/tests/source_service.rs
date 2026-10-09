@@ -273,6 +273,8 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
     assert_eq!(added["outcome"], "changed");
     assert_eq!(added["data"]["registration"]["state"], "store_committed");
     assert_eq!(added["data"]["index"]["state"], "indexed");
+    assert!(added["data"].get("input").is_none());
+    assert!(added["data"].get("catalog_root").is_none());
     assert_eq!(added["data"]["request_context"]["project_id"], PROJECT);
     assert_eq!(added["data"]["request_context"]["actor_id"], ACTOR);
     assert_eq!(added["data"]["request_context"]["harness_id"], HARNESS);
@@ -400,6 +402,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         .expect("service source show launches");
     let shown = assert_success(&shown, "service source show");
     assert_eq!(shown["data"]["source"]["source_version_id"], source_id);
+    assert!(shown["data"].get("catalog_root").is_none());
     assert_eq!(
         shown["data"]["source"]["content_digest"],
         added["data"]["source"]["content_digest"]
@@ -451,6 +454,7 @@ fn source_add_uses_authenticated_service_context_and_durable_readback() {
         .expect("first service source list page launches");
     let listed_first = assert_success(&listed_first, "first service source list page");
     assert_eq!(listed_first["data"]["project_id"], PROJECT);
+    assert!(listed_first["data"].get("catalog_root").is_none());
     assert_eq!(listed_first["data"]["total"], 2);
     assert_eq!(listed_first["data"]["items"].as_array().unwrap().len(), 1);
     assert_eq!(
