@@ -1317,6 +1317,7 @@ impl BorealBackend {
             });
         }
         let request_id = next_read_operation_id();
+        let response_collection = collection.clone();
         let payload = GlobalDetailPageRequest {
             collection,
             project_id,
@@ -1339,7 +1340,8 @@ impl BorealBackend {
         })?;
         let encoded =
             serde_json::to_string(&request).map_err(|_| AdapterError::ProtocolMismatch)?;
-        let response = self.global_call(encoded, request_id.clone()).await?;
+        let mut response = self.global_call(encoded, request_id.clone()).await?;
+        sanitize_global_page_response(&mut response, &response_collection)?;
         let size = serde_json::to_vec(&response)
             .map_err(|_| AdapterError::ProtocolMismatch)?
             .len();
@@ -2125,6 +2127,130 @@ fn redact_source_paths(
     Ok(())
 }
 
+/// Restrict Global page rows to the fields in the typed, path-free MCP
+/// projection. Imported Global snapshots preserve unknown fields for restore
+/// compatibility, so redacting only `description`/`body` is not sufficient:
+/// an imported row could otherwise smuggle an arbitrary `path` into this
+/// management-only surface.
+fn sanitize_global_page_response(
+    response: &mut Value,
+    collection: &str,
+) -> Result<(), AdapterError> {
+    let Some(data) = response.get_mut("data").and_then(Value::as_object_mut) else {
+        return Err(AdapterError::ProtocolMismatch);
+    };
+    if data.get("collection").and_then(Value::as_str) != Some(collection) {
+        return Err(AdapterError::ProtocolMismatch);
+    }
+    let Some(rows) = data.get_mut("rows").and_then(Value::as_array_mut) else {
+        return Err(AdapterError::ProtocolMismatch);
+    };
+    for row in rows {
+        let Some(fields) = row.as_object_mut() else {
+            return Err(AdapterError::ProtocolMismatch);
+        };
+        fields.retain(|key, value| global_page_field_is_safe(collection, key, value));
+    }
+    Ok(())
+}
+
+fn global_page_field_is_safe(collection: &str, field: &str, value: &mut Value) -> bool {
+    let (strings, nullable_strings, integers, booleans, labels): (
+        &[&str],
+        &[&str],
+        &[&str],
+        &[&str],
+        bool,
+    ) = match collection {
+        "projects" => (
+            &[
+                "id",
+                "name",
+                "lifecycle",
+                "health",
+                "created_at",
+                "updated_at",
+            ],
+            &[],
+            &["priority"],
+            &["archived"],
+            true,
+        ),
+        "items" => (
+            &[
+                "id",
+                "kind",
+                "title",
+                "status_id",
+                "created_at",
+                "updated_at",
+            ],
+            &["project_id", "parent_id", "due_at", "follow_up_at"],
+            &["priority", "position"],
+            &["archived"],
+            true,
+        ),
+        "notes" => (
+            &["id", "title", "created_at", "updated_at"],
+            &["project_id"],
+            &[],
+            &["archived"],
+            false,
+        ),
+        "statuses" => (
+            &["project_id", "status_id", "label", "category"],
+            &[],
+            &["position"],
+            &[],
+            false,
+        ),
+        "relationships" => (
+            &["source_id", "target_id", "kind"],
+            &["project_id"],
+            &[],
+            &[],
+            false,
+        ),
+        "note_links" => (&["note_id", "item_id"], &["project_id"], &[], &[], false),
+        "status_history" => (
+            &["item_id", "changed_at"],
+            &[
+                "workflow_owner_id",
+                "from_workflow_owner_id",
+                "from_status_id",
+                "from_status_label",
+                "from_status_category",
+                "to_status_id",
+                "to_status_label",
+                "to_status_category",
+            ],
+            &["revision"],
+            &[],
+            false,
+        ),
+        _ => return false,
+    };
+
+    if labels && field == "labels" {
+        let Value::Array(values) = value else {
+            return false;
+        };
+        values.retain(|label| label.as_str().is_some_and(|text| text.len() <= 128));
+        values.truncate(32);
+        return true;
+    }
+    if strings.contains(&field) {
+        return value.as_str().is_some();
+    }
+    if nullable_strings.contains(&field) {
+        return value.is_null() || value.as_str().is_some();
+    }
+    if integers.contains(&field) {
+        return value.as_i64().is_some() || value.as_u64().is_some();
+    }
+    booleans.contains(&field) && value.is_boolean()
+}
+
 fn project_tool_names(
     read: bool,
     write: bool,
@@ -2291,6 +2417,51 @@ mod tests {
             "source-v1"
         );
         assert!(!response.to_string().contains("/home/synthetic"));
+    }
+
+    #[test]
+    fn global_page_drops_unmodeled_fields_and_nested_path_payloads() {
+        let mut response = json!({
+            "data": {
+                "collection": "items",
+                "rows": [{
+                    "id": "item-1",
+                    "project_id": "mgmt-1",
+                    "title": "Plan",
+                    "description": "private detail",
+                    "path": "/home/synthetic/private",
+                    "extra": {"path": "/home/synthetic/nested"},
+                    "labels": ["release", {"path": "/home/synthetic/label"}, 7],
+                    "position": 3
+                }],
+                "total": 1,
+                "limit": 20,
+                "offset": 0,
+                "revision": 4
+            }
+        });
+
+        sanitize_global_page_response(&mut response, "items").unwrap();
+        let row = &response["data"]["rows"][0];
+        assert_eq!(row["id"], "item-1");
+        assert_eq!(row["title"], "Plan");
+        assert_eq!(row["labels"], json!(["release"]));
+        assert_eq!(row["position"], 3);
+        assert!(row.get("description").is_none());
+        assert!(row.get("path").is_none());
+        assert!(row.get("extra").is_none());
+        assert!(!response.to_string().contains("/home/synthetic"));
+    }
+
+    #[test]
+    fn global_page_rejects_a_mismatched_collection_response() {
+        let mut response = json!({
+            "data": {"collection": "associations", "rows": []}
+        });
+        assert!(matches!(
+            sanitize_global_page_response(&mut response, "items"),
+            Err(AdapterError::ProtocolMismatch)
+        ));
     }
 
     #[tokio::test]
