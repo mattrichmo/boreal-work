@@ -20,8 +20,11 @@ use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
 use crate::{
-    config::{McpConfig, SCOPE_GLOBAL_READ, SCOPE_PROJECT_READ, SCOPE_PROJECT_WRITE},
-    AuthenticatedPrincipal, MAX_SERVICE_FRAME_BYTES, MAX_TOOL_OUTPUT_BYTES,
+    config::{
+        McpConfig, SCOPE_GLOBAL_READ, SCOPE_PROJECT_EVIDENCE_WRITE, SCOPE_PROJECT_FINISH_CLOSE,
+        SCOPE_PROJECT_READ, SCOPE_PROJECT_WRITE,
+    },
+    AuthenticatedPrincipal, MAX_SERVICE_FRAME_BYTES, MAX_TOOL_INPUT_BYTES, MAX_TOOL_OUTPUT_BYTES,
 };
 
 const PROJECT_API_VERSION: &str = "2";
@@ -132,6 +135,11 @@ impl BorealBackend {
         let global_read = principal.has_scope(SCOPE_GLOBAL_READ) && self.config.global.is_some();
         let project_read = principal.has_scope(SCOPE_PROJECT_READ);
         let project_write = principal.has_scope(SCOPE_PROJECT_WRITE);
+        // These operations depend on operation readback for safe recovery.
+        // Report them only when the authenticated token has both the narrow
+        // write grant and the Project read grant used by that recovery path.
+        let evidence_write = project_read && principal.has_scope(SCOPE_PROJECT_EVIDENCE_WRITE);
+        let finish_close = project_read && principal.has_scope(SCOPE_PROJECT_FINISH_CLOSE);
         json!({
             "mcp_protocol_version": crate::MCP_PROTOCOL_VERSION,
             "boreal_api_version": API_VERSION,
@@ -147,12 +155,15 @@ impl BorealBackend {
                 "project_id": project_id,
                 "read_available": project_read,
                 "write_available": project_write,
-                "tools": project_tool_names(project_read, project_write),
+                "evidence_write_available": evidence_write,
+                "finish_close_available": finish_close,
+                "tools": project_tool_names(project_read, project_write, evidence_write, finish_close),
             })).collect::<Vec<_>>(),
             "unavailable": [
                 "source and memory content reads await the digest-verified bounded-read service contract",
                 "artifact body reads are not exposed",
-                "Global writes, Send, evidence submission, review decisions, operator hold resolution, and machine administration are not exposed"
+                "Global writes and Send are not exposed",
+                "evidence execution, review decisions, operator hold resolution, and machine administration are not exposed"
             ],
         })
     }
@@ -290,6 +301,20 @@ impl BorealBackend {
         data["target_operation_id"] = json!(target_operation_id);
         self.project_call(&project_id, operation_id, data, false)
             .await
+            .map_err(|error| match error {
+                AdapterError::Application {
+                    outcome,
+                    error,
+                    revision,
+                    ..
+                } => AdapterError::Application {
+                    operation_id: target_operation_id,
+                    outcome,
+                    error,
+                    revision,
+                },
+                other => other,
+            })
     }
 
     /// Call the existing Project guide/next/resume service routes for a stable,
@@ -626,6 +651,153 @@ impl BorealBackend {
             "reason": input.reason,
             "confirmed": input.confirmed,
         });
+        self.project_call(&project_id, operation_id, data, true)
+            .await
+    }
+
+    /// Record an imported receipt through Boreal's existing evidence service.
+    /// The MCP operation ID must match the receipt's durable operation ID so
+    /// operation_status can reconcile a lost response without duplication.
+    pub async fn project_evidence_add(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: ProjectEvidenceAddInput,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_READ)?;
+        self.authorize_project(principal, &project_id, SCOPE_PROJECT_EVIDENCE_WRITE)?;
+        validate_identifier(&input.session_id, "session_id")?;
+        validate_operation_id(&input.operation_id)?;
+        if input.expected_revision == 0 {
+            return Err(AdapterError::InvalidInput {
+                field: "expected_revision",
+                reason: "must be a positive committed revision",
+            });
+        }
+        let receipt = receipt_dto_from_value(&input.receipt)?;
+        if receipt.operation_id != input.operation_id {
+            return Err(AdapterError::InvalidInput {
+                field: "operation_id",
+                reason: "must match receipt.operation_id for durable readback",
+            });
+        }
+        match self
+            .project_operation_status(principal, project_id.clone(), input.operation_id.clone())
+            .await
+        {
+            Ok(readback) => {
+                let operation = &readback["data"]["operation"];
+                if operation["operation_id"] != input.operation_id
+                    || operation["command"] != "receipt.insert"
+                    || operation["project_id"] != project_id
+                    || operation["actor_id"] != principal.actor_id
+                    || operation["session_id"] != input.session_id
+                    || operation["attempt_id"] != receipt.subject.attempt_id
+                    || operation["fence"] != receipt.subject.fence
+                {
+                    return Err(AdapterError::Application {
+                        operation_id: input.operation_id,
+                        outcome: ApplicationOutcome::Conflict,
+                        error: ProtocolError::new(
+                            boreal_protocol::ErrorCode::ClaimConflict,
+                            "durable receipt operation ID is already bound to another operation or actor context",
+                            false,
+                        ),
+                        revision: readback["revision"].as_u64(),
+                    });
+                }
+                let stored_receipt: boreal_protocol::models::ReceiptDto =
+                    serde_json::from_value(readback["data"]["receipt"].clone())
+                        .map_err(|_| AdapterError::ProtocolMismatch)?;
+                if stored_receipt != receipt {
+                    return Err(AdapterError::Application {
+                        operation_id: input.operation_id,
+                        outcome: ApplicationOutcome::Conflict,
+                        error: ProtocolError::new(
+                            boreal_protocol::ErrorCode::ClaimConflict,
+                            "durable receipt operation ID is already bound to another receipt or actor context",
+                            false,
+                        ),
+                        revision: readback["revision"].as_u64(),
+                    });
+                }
+                let stored_result = readback["data"]["receipt"]["result"].clone();
+                return Ok(json!({
+                    "api_version": API_VERSION,
+                    "schema_version": boreal_protocol::schema::ENVELOPE,
+                    "operation_id": input.operation_id,
+                    "revision": readback["revision"],
+                    "outcome": "unchanged",
+                    "data": {
+                        "receipt_id": receipt.receipt_id.as_str(),
+                        "operation_id": receipt.operation_id.as_str(),
+                        "result": stored_result,
+                        "replayed": true,
+                    }
+                }));
+            }
+            Err(AdapterError::Application { error, .. })
+                if error.code == boreal_protocol::ErrorCode::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let operation_id = input.operation_id.clone();
+        let mut data = self.project_common_for_session(
+            principal,
+            &project_id,
+            &operation_id,
+            &input.session_id,
+        )?;
+        data["command"] = json!("evidence_add");
+        data["expected_revision"] = json!(input.expected_revision);
+        data["receipt"] =
+            serde_json::to_value(receipt).map_err(|_| AdapterError::ProtocolMismatch)?;
+        self.project_call(&project_id, operation_id, data, true)
+            .await
+    }
+
+    /// Submit a typed receipt and summary through Boreal's atomic finish-close
+    /// service route. The server performs receipt, fence, gate, and closeout
+    /// validation; this adapter never launches verifier work.
+    pub async fn project_finish_close(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: ProjectFinishCloseInput,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_READ)?;
+        self.authorize_project(principal, &project_id, SCOPE_PROJECT_FINISH_CLOSE)?;
+        validate_identifier(&input.session_id, "session_id")?;
+        validate_identifier(&input.work_id, "work_id")?;
+        validate_identifier(&input.attempt_id, "attempt_id")?;
+        validate_operation_id(&input.operation_id)?;
+        if input.fence == 0 || input.expected_revision == 0 {
+            return Err(AdapterError::InvalidInput {
+                field: "fence or expected_revision",
+                reason: "fence and expected_revision must be positive",
+            });
+        }
+        if input.summary_body.is_empty() || input.summary_body.len() > MAX_TOOL_INPUT_BYTES {
+            return Err(AdapterError::InvalidInput {
+                field: "summary_body",
+                reason: "must be non-empty and fit within the 16 KiB MCP request bound",
+            });
+        }
+        let receipt = receipt_dto_from_value(&input.receipt)?;
+        let operation_id = input.operation_id.clone();
+        let mut data = self.project_common_for_session(
+            principal,
+            &project_id,
+            &operation_id,
+            &input.session_id,
+        )?;
+        data["command"] = json!("finish_close");
+        data["work_id"] = json!(input.work_id);
+        data["attempt_id"] = json!(input.attempt_id);
+        data["fence"] = json!(input.fence);
+        data["expected_revision"] = json!(input.expected_revision);
+        data["summary_body"] = json!(input.summary_body);
+        data["receipt"] =
+            serde_json::to_value(receipt).map_err(|_| AdapterError::ProtocolMismatch)?;
         self.project_call(&project_id, operation_id, data, true)
             .await
     }
@@ -1244,6 +1416,36 @@ pub struct WorkCheckpointInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ProjectEvidenceAddInput {
+    pub project_id: String,
+    /// Stable Project session associated with the authenticated actor.
+    pub session_id: String,
+    pub expected_revision: u64,
+    /// Must match receipt.operation_id so durable readback uses the same key.
+    pub operation_id: String,
+    /// Versioned Boreal ReceiptDto; Boreal owns semantic validation and retention.
+    pub receipt: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectFinishCloseInput {
+    pub project_id: String,
+    pub session_id: String,
+    pub work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub expected_revision: u64,
+    /// Reuse this durable close operation ID for operation_status after a timeout.
+    pub operation_id: String,
+    /// Versioned Boreal ReceiptDto; Boreal validates it against the exact close subject.
+    pub receipt: Value,
+    /// Inline summary body; MCP does not accept paths or fetch references.
+    pub summary_body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AttemptTransitionInput {
     pub project_id: String,
     pub session_id: String,
@@ -1610,7 +1812,12 @@ fn next_read_operation_id() -> String {
     )
 }
 
-fn project_tool_names(read: bool, write: bool) -> Vec<&'static str> {
+fn project_tool_names(
+    read: bool,
+    write: bool,
+    evidence_write: bool,
+    finish_close: bool,
+) -> Vec<&'static str> {
     let mut result = Vec::new();
     if read {
         result.extend([
@@ -1641,7 +1848,35 @@ fn project_tool_names(read: bool, write: bool) -> Vec<&'static str> {
             "project_attempt_renew",
         ]);
     }
+    if evidence_write {
+        result.push("project_evidence_add");
+    }
+    if finish_close {
+        result.push("project_finish_close");
+    }
     result
+}
+
+fn receipt_dto_from_value(
+    value: &Value,
+) -> Result<boreal_protocol::models::ReceiptDto, AdapterError> {
+    if !value.is_object() {
+        return Err(AdapterError::InvalidInput {
+            field: "receipt",
+            reason: "must be a Boreal receipt object",
+        });
+    }
+    let encoded = serde_json::to_vec(value).map_err(|_| AdapterError::ProtocolMismatch)?;
+    if encoded.len() > MAX_TOOL_INPUT_BYTES {
+        return Err(AdapterError::InvalidInput {
+            field: "receipt",
+            reason: "exceeds the 16 KiB MCP input bound",
+        });
+    }
+    serde_json::from_value(value.clone()).map_err(|_| AdapterError::InvalidInput {
+        field: "receipt",
+        reason: "does not match the versioned Boreal ReceiptDto",
+    })
 }
 
 #[cfg(test)]
@@ -1718,6 +1953,199 @@ mod tests {
                 .len()
                 >= 3
         );
+    }
+
+    #[tokio::test]
+    async fn evidence_and_finish_are_default_denied_and_not_inherited_from_work_write() {
+        let (backend, principal) = test_backend();
+        let capabilities = backend.capabilities(&principal);
+        let project_tools = capabilities["projects"][0]["tools"].as_array().unwrap();
+        assert!(!project_tools
+            .iter()
+            .any(|tool| tool == "project_evidence_add"));
+        assert!(!project_tools
+            .iter()
+            .any(|tool| tool == "project_finish_close"));
+
+        let evidence_denied = backend
+            .project_evidence_add(
+                &principal,
+                ProjectEvidenceAddInput {
+                    project_id: "project-a".into(),
+                    session_id: "session-a".into(),
+                    expected_revision: 1,
+                    operation_id: "op_receipt_denied".into(),
+                    receipt: json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            evidence_denied,
+            AdapterError::PermissionDenied {
+                scope: SCOPE_PROJECT_EVIDENCE_WRITE
+            }
+        ));
+
+        let finish_denied = backend
+            .project_finish_close(
+                &principal,
+                ProjectFinishCloseInput {
+                    project_id: "project-a".into(),
+                    session_id: "session-a".into(),
+                    work_id: "work-a".into(),
+                    attempt_id: "attempt-a".into(),
+                    fence: 1,
+                    expected_revision: 1,
+                    operation_id: "op_finish_denied".into(),
+                    receipt: json!({}),
+                    summary_body: "synthetic denied close".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            finish_denied,
+            AdapterError::PermissionDenied {
+                scope: SCOPE_PROJECT_FINISH_CLOSE
+            }
+        ));
+
+        let mut write_without_read = principal.clone();
+        write_without_read.scopes.remove(SCOPE_PROJECT_READ);
+        write_without_read
+            .scopes
+            .insert(SCOPE_PROJECT_EVIDENCE_WRITE.into());
+        write_without_read
+            .scopes
+            .insert(SCOPE_PROJECT_FINISH_CLOSE.into());
+        let restricted_capabilities = backend.capabilities(&write_without_read);
+        let restricted_tools = restricted_capabilities["projects"][0]["tools"]
+            .as_array()
+            .unwrap();
+        assert!(!restricted_tools
+            .iter()
+            .any(|tool| tool == "project_evidence_add"));
+        assert!(!restricted_tools
+            .iter()
+            .any(|tool| tool == "project_finish_close"));
+
+        let evidence_without_read = backend
+            .project_evidence_add(
+                &write_without_read,
+                ProjectEvidenceAddInput {
+                    project_id: "project-a".into(),
+                    session_id: "session-a".into(),
+                    expected_revision: 1,
+                    operation_id: "op_evidence_without_read".into(),
+                    receipt: json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            evidence_without_read,
+            AdapterError::PermissionDenied {
+                scope: SCOPE_PROJECT_READ
+            }
+        ));
+
+        let finish_without_read = backend
+            .project_finish_close(
+                &write_without_read,
+                ProjectFinishCloseInput {
+                    project_id: "project-a".into(),
+                    session_id: "session-a".into(),
+                    work_id: "work-a".into(),
+                    attempt_id: "attempt-a".into(),
+                    fence: 1,
+                    expected_revision: 1,
+                    operation_id: "op_finish_without_read".into(),
+                    receipt: json!({}),
+                    summary_body: "synthetic denied close".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            finish_without_read,
+            AdapterError::PermissionDenied {
+                scope: SCOPE_PROJECT_READ
+            }
+        ));
+
+        let mut explicitly_granted = principal;
+        explicitly_granted
+            .scopes
+            .insert(SCOPE_PROJECT_EVIDENCE_WRITE.into());
+        explicitly_granted
+            .scopes
+            .insert(SCOPE_PROJECT_FINISH_CLOSE.into());
+        let granted_capabilities = backend.capabilities(&explicitly_granted);
+        let tools = granted_capabilities["projects"][0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert!(tools.contains("project_evidence_add"));
+        assert!(tools.contains("project_finish_close"));
+    }
+
+    #[tokio::test]
+    async fn evidence_receipt_operation_must_match_for_durable_readback() {
+        let (backend, mut principal) = test_backend();
+        principal.scopes.insert(SCOPE_PROJECT_EVIDENCE_WRITE.into());
+        let error = backend
+            .project_evidence_add(
+                &principal,
+                ProjectEvidenceAddInput {
+                    project_id: "project-a".into(),
+                    session_id: "session-a".into(),
+                    expected_revision: 1,
+                    operation_id: "op_mcp_receipt_outer".into(),
+                    receipt: json!({
+                        "schema_version": "boreal.receipt.v1",
+                        "receipt_id": "receipt-mismatch",
+                        "operation_id": "op_mcp_receipt_inner",
+                        "subject": {
+                            "work_id": "work-a",
+                            "attempt_id": "attempt-a",
+                            "fence": 1,
+                            "gate_id": "verification"
+                        },
+                        "executable": "synthetic-check",
+                        "argv": [],
+                        "cwd": ".",
+                        "exit_code": 0,
+                        "started_at": "unix-ms:1",
+                        "ended_at": "unix-ms:2",
+                        "source_snapshot_hash": "source-v1",
+                        "config_identity": "config-v1",
+                        "environment_fingerprint": "synthetic-env-v1",
+                        "output_digest": "sha256:synthetic",
+                        "output_ref": null,
+                        "coverage": {
+                            "kind": "verification",
+                            "profile_id": "focused",
+                            "profile_version": "1"
+                        },
+                        "attestation": "external_attested",
+                        "result": "passed",
+                        "retention": null
+                    }),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AdapterError::InvalidInput {
+                field: "operation_id",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2310,7 +2738,7 @@ mod tests {
             work_id: Some("mcp-tool-work".into()),
             attempt_id: Some("mcp-tool-attempt".into()),
             fence: claimed["data"]["fence"].as_u64(),
-            source_version_id,
+            source_version_id: source_version_id.clone(),
             config_identity: "mcp-test-config-v1".into(),
             expected_revision: claimed["revision"].as_u64().unwrap(),
             operation_id: "op_mcp_agent_start".into(),
@@ -2350,6 +2778,289 @@ mod tests {
             .expect("MCP submits the active attempt for downstream verification");
         assert_eq!(submitted["outcome"], "changed");
         assert_eq!(submitted["data"]["phase"], "verifying");
+
+        let external_receipt = |receipt_id: &str, operation_id: &str| {
+            json!({
+                "schema_version": "boreal.receipt.v1",
+                "receipt_id": receipt_id,
+                "operation_id": operation_id,
+                "subject": {
+                    "work_id": "mcp-tool-work",
+                    "attempt_id": "mcp-tool-attempt",
+                    "fence": claimed["data"]["fence"],
+                    "gate_id": "verification"
+                },
+                "executable": "synthetic-check",
+                "argv": ["synthetic-check"],
+                "cwd": ".",
+                "exit_code": 0,
+                "started_at": "unix-ms:1",
+                "ended_at": "unix-ms:2",
+                "source_snapshot_hash": source_version_id,
+                "config_identity": "mcp-test-config-v1",
+                "environment_fingerprint": "synthetic-env-v1",
+                "output_digest": "sha256:synthetic-mcp-proof",
+                "output_ref": null,
+                "coverage": {
+                    "kind": "verification",
+                    "profile_id": "focused",
+                    "profile_version": "1"
+                },
+                "attestation": "external_attested",
+                "result": "passed",
+                "retention": null
+            })
+        };
+        let evidence_policy = Policy {
+            actor_id: worker_id.into(),
+            projects: BTreeSet::from([project_id.into()]),
+            scopes: BTreeSet::from([
+                SCOPE_PROJECT_READ.into(),
+                SCOPE_PROJECT_EVIDENCE_WRITE.into(),
+            ]),
+        };
+        let evidence_principal = AuthenticatedPrincipal::from_stdio_policy(
+            "test-evidence-writer",
+            &evidence_policy,
+            &backend.config,
+        );
+        let evidence_capabilities = backend.capabilities(&evidence_principal);
+        let evidence_tool_list = evidence_capabilities["projects"][0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert!(evidence_tool_list.contains("project_evidence_add"));
+        assert!(!evidence_tool_list.contains("project_work_edit"));
+        assert!(!evidence_tool_list.contains("project_finish_close"));
+
+        let evidence_input = ProjectEvidenceAddInput {
+            project_id: project_id.into(),
+            session_id: "mcp-worker-session".into(),
+            expected_revision: submitted["revision"].as_u64().unwrap(),
+            operation_id: "op_mcp_evidence_add".into(),
+            receipt: external_receipt("receipt-mcp-evidence", "op_mcp_evidence_add"),
+        };
+        let evidence_added = backend
+            .project_evidence_add(&evidence_principal, evidence_input.clone())
+            .await
+            .expect("explicit evidence grant imports a typed synthetic receipt");
+        assert_eq!(evidence_added["outcome"], "changed");
+        assert_eq!(evidence_added["data"]["receipt_id"], "receipt-mcp-evidence");
+        let evidence_replayed = backend
+            .project_evidence_add(&evidence_principal, evidence_input.clone())
+            .await
+            .expect("exact receipt operation replays without creating another receipt");
+        assert_eq!(evidence_replayed["outcome"], "unchanged");
+        assert_eq!(evidence_replayed["data"]["replayed"], true);
+
+        let mut changed_receipt = evidence_input.receipt.clone();
+        changed_receipt["output_digest"] = json!("sha256:changed-payload");
+        let changed_input = ProjectEvidenceAddInput {
+            receipt: changed_receipt,
+            ..evidence_input.clone()
+        };
+        match backend
+            .project_evidence_add(&evidence_principal, changed_input)
+            .await
+        {
+            Err(AdapterError::Application { outcome, .. }) => {
+                assert_eq!(outcome, ApplicationOutcome::Conflict);
+            }
+            other => {
+                panic!("receipt operation ID reuse with changed content was accepted: {other:?}")
+            }
+        }
+
+        let stale_input = ProjectEvidenceAddInput {
+            expected_revision: submitted["revision"].as_u64().unwrap(),
+            operation_id: "op_mcp_stale_evidence".into(),
+            receipt: external_receipt("receipt-mcp-stale", "op_mcp_stale_evidence"),
+            ..evidence_input.clone()
+        };
+        match backend
+            .project_evidence_add(&evidence_principal, stale_input)
+            .await
+        {
+            Err(AdapterError::Application { outcome, error, .. }) => {
+                assert_eq!(outcome, ApplicationOutcome::Conflict);
+                assert_eq!(error.code, boreal_protocol::ErrorCode::StaleRevision);
+            }
+            other => panic!("stale receipt revision was not returned as a conflict: {other:?}"),
+        }
+        let evidence_readback = backend
+            .project_operation_status(
+                &evidence_principal,
+                project_id.into(),
+                "op_mcp_evidence_add".into(),
+            )
+            .await
+            .expect("receipt mutation remains queryable by its durable operation ID");
+        assert_eq!(
+            evidence_readback["data"]["operation"]["operation_id"],
+            "op_mcp_evidence_add"
+        );
+
+        let finish_policy = Policy {
+            actor_id: worker_id.into(),
+            projects: BTreeSet::from([project_id.into()]),
+            scopes: BTreeSet::from([SCOPE_PROJECT_READ.into(), SCOPE_PROJECT_FINISH_CLOSE.into()]),
+        };
+        let finish_principal = AuthenticatedPrincipal::from_stdio_policy(
+            "test-finish-closer",
+            &finish_policy,
+            &backend.config,
+        );
+        let finish_capabilities = backend.capabilities(&finish_principal);
+        let finish_tool_list = finish_capabilities["projects"][0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert!(finish_tool_list.contains("project_finish_close"));
+        assert!(!finish_tool_list.contains("project_work_edit"));
+        assert!(!finish_tool_list.contains("project_evidence_add"));
+
+        let current_before_finish = backend
+            .project_status(&principal, project_id.into(), 10, 0)
+            .await
+            .expect("current revision is read before finish-close");
+        let finish_input = ProjectFinishCloseInput {
+            project_id: project_id.into(),
+            session_id: "mcp-worker-session".into(),
+            work_id: "mcp-tool-work".into(),
+            attempt_id: "mcp-tool-attempt".into(),
+            fence: claimed["data"]["fence"].as_u64().unwrap(),
+            expected_revision: current_before_finish["revision"].as_u64().unwrap(),
+            operation_id: "op_mcp_finish_close".into(),
+            receipt: external_receipt("receipt-mcp-finish", "op_mcp_finish_receipt"),
+            summary_body: "Synthetic finish-close summary; no verifier was run by MCP.".into(),
+        };
+
+        // A disposable same-tree proxy commits the finish through the real
+        // Project daemon, then drops only the MCP client's response. The
+        // original durable operation ID is available for reconciliation.
+        let finish_proxy_socket = root.0.join(".boreal/mcp-finish-proxy.sock");
+        let finish_proxy_listener = UnixListener::bind(&finish_proxy_socket)
+            .expect("temporary finish response-loss proxy binds");
+        fs::set_permissions(&finish_proxy_socket, fs::Permissions::from_mode(0o600))
+            .expect("finish proxy socket is owner-only");
+        let finish_upstream_socket = socket.clone();
+        let finish_proxy_thread = thread::spawn(move || {
+            for request_number in 0..2 {
+                let (mut downstream, _) = finish_proxy_listener
+                    .accept()
+                    .expect("finish proxy accepts MCP call");
+                let mut prefix = [0_u8; 4];
+                downstream
+                    .read_exact(&mut prefix)
+                    .expect("finish MCP request frame length arrives");
+                let mut request_body = vec![0; u32::from_be_bytes(prefix) as usize];
+                downstream
+                    .read_exact(&mut request_body)
+                    .expect("finish MCP request body arrives");
+                let mut upstream = UnixStream::connect(&finish_upstream_socket)
+                    .expect("finish proxy reaches the disposable daemon");
+                upstream.write_all(&prefix).expect("upstream frame starts");
+                upstream
+                    .write_all(&request_body)
+                    .expect("upstream receives exact finish request");
+                let mut response_prefix = [0_u8; 4];
+                upstream
+                    .read_exact(&mut response_prefix)
+                    .expect("real daemon completes and returns finish response");
+                let mut response_body = vec![0; u32::from_be_bytes(response_prefix) as usize];
+                upstream
+                    .read_exact(&mut response_body)
+                    .expect("real daemon finish response body arrives");
+                if request_number == 1 {
+                    downstream
+                        .write_all(&response_prefix)
+                        .expect("finish operation readback length forwards");
+                    downstream
+                        .write_all(&response_body)
+                        .expect("finish operation readback body forwards");
+                }
+            }
+        });
+        let finish_proxy_config = Arc::new(McpConfig {
+            version: 1,
+            global: None,
+            projects: BTreeMap::from([(
+                project_id.into(),
+                ProjectEndpoint {
+                    socket: finish_proxy_socket,
+                    credential_env_by_actor: BTreeMap::from([(
+                        worker_id.into(),
+                        worker_credential_env.clone(),
+                    )]),
+                },
+            )]),
+            principals: BTreeMap::new(),
+            stdio_profiles: BTreeMap::new(),
+            http: None,
+        });
+        finish_proxy_config
+            .validate()
+            .expect("finish response-loss proxy binding is valid");
+        let finish_proxy_backend = BorealBackend::new(finish_proxy_config);
+        let finish_lost = finish_proxy_backend
+            .project_finish_close(&finish_principal, finish_input.clone())
+            .await
+            .expect_err("dropped finish response is reported as an unknown outcome");
+        assert!(matches!(
+            finish_lost,
+            AdapterError::UnknownOutcome { ref operation_id, .. }
+                if operation_id == "op_mcp_finish_close"
+        ));
+        let finish_readback = finish_proxy_backend
+            .project_operation_status(
+                &finish_principal,
+                project_id.into(),
+                "op_mcp_finish_close".into(),
+            )
+            .await
+            .expect_err("readback returns Boreal's durable missing-gate rejection");
+        match finish_readback {
+            AdapterError::Application { outcome, error, .. } => {
+                assert_eq!(outcome, ApplicationOutcome::Rejected, "{error:?}");
+            }
+            other => panic!("finish operation readback was not an application result: {other:?}"),
+        }
+        finish_proxy_thread
+            .join()
+            .expect("finish proxy forwards the request and its readback");
+
+        match backend
+            .project_finish_close(&finish_principal, finish_input.clone())
+            .await
+        {
+            Err(AdapterError::Application { outcome, .. }) => {
+                // The fixture does not claim a checkpoint receipt. Boreal
+                // retains its authoritative gate rejection and finish result.
+                assert_eq!(outcome, ApplicationOutcome::Rejected);
+            }
+            other => panic!("finish-close replay did not retain the authoritative missing-gate result: {other:?}"),
+        }
+        let changed_finish = ProjectFinishCloseInput {
+            summary_body: "A different summary cannot reuse the close operation ID.".into(),
+            ..finish_input
+        };
+        match backend
+            .project_finish_close(&finish_principal, changed_finish)
+            .await
+        {
+            Err(AdapterError::Application { outcome, .. }) => {
+                assert_eq!(outcome, ApplicationOutcome::Conflict);
+            }
+            other => {
+                panic!("changed finish-close payload reused a durable operation ID: {other:?}")
+            }
+        }
 
         let post_start = backend
             .project_status(&principal, project_id.into(), 10, 0)

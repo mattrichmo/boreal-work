@@ -4916,15 +4916,35 @@ mod unix {
             let receipt_replayed = if witnessed_receipt {
                 true
             } else {
-                app.record_receipt(
+                // The durable parent intent is itself a revisioned write.
+                // Translate the caller's pre-intent expected revision to the
+                // revision immediately after that intent so receipt insertion
+                // remains optimistic-concurrency checked without rejecting
+                // every first finish request as stale.
+                let receipt_expected_revision = optional_u64(data, "expected_revision")?
+                    .map(|revision| {
+                        revision.checked_add(1).ok_or_else(|| {
+                            CliError::invalid("finish_close expected_revision is exhausted")
+                        })
+                    })
+                    .transpose()?;
+                let receipt_result = app.record_receipt(
                     &actor,
                     Some(&session),
                     &receipt,
-                    optional_u64(data, "expected_revision")?,
+                    receipt_expected_revision,
                     TimestampMs::from_millis(now_ms_u64()),
-                )
-                .map_err(map_application_error)?
-                .replayed
+                );
+                match receipt_result {
+                    Ok(result) => result.replayed,
+                    Err(error) => {
+                        let error = map_application_error(error);
+                        if error.code == ErrorCode::StaleRevision {
+                            super::super::persist_finish_revision_conflict(&finish_context)?;
+                        }
+                        return Err(error);
+                    }
+                }
             };
             let adapter = SqliteAttemptAdapter::new(&self.store);
             let submitted = app
@@ -8454,7 +8474,7 @@ mod tests {
             "session_id": "session-finish",
             "attempt_id": "attempt-finish",
             "fence": 1,
-            "expected_revision": Value::Null,
+            "expected_revision": handler.store.project_revision("service-project").unwrap().0,
             "summary_body": "Completed service finish fixture.",
             "receipt": {
                 "schema_version": "boreal.receipt.v1",
@@ -8478,6 +8498,21 @@ mod tests {
                 "retention": null,
             }
         });
+        let finish_revision = finish["expected_revision"]
+            .as_u64()
+            .expect("finish fixture has an expected revision");
+        let mut stale_finish = finish.clone();
+        stale_finish["expected_revision"] = json!(finish_revision - 1);
+        let stale_error = handler
+            .finish_close(&stale_finish, "op_service_stale_finish_close")
+            .expect_err("stale finish must fail before persisting its intent");
+        assert_eq!(stale_error.code, ErrorCode::StaleRevision);
+        assert!(handler
+            .store
+            .operation("op_service_stale_finish_close")
+            .expect("stale parent lookup succeeds")
+            .is_none());
+
         let result = handler
             .finish_close(&finish, "op_service_finish_close")
             .expect("service finish close returns a bounded gate result");

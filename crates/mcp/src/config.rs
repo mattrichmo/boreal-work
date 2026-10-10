@@ -14,6 +14,8 @@ const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 pub(crate) const SCOPE_GLOBAL_READ: &str = "boreal:global:read";
 pub(crate) const SCOPE_PROJECT_READ: &str = "boreal:project:read";
 pub(crate) const SCOPE_PROJECT_WRITE: &str = "boreal:project:work-write";
+pub(crate) const SCOPE_PROJECT_EVIDENCE_WRITE: &str = "boreal:project:evidence-write";
+pub(crate) const SCOPE_PROJECT_FINISH_CLOSE: &str = "boreal:project:finish-close";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -198,7 +200,11 @@ impl McpConfig {
         for scope in &policy.scopes {
             if !matches!(
                 scope.as_str(),
-                SCOPE_GLOBAL_READ | SCOPE_PROJECT_READ | SCOPE_PROJECT_WRITE
+                SCOPE_GLOBAL_READ
+                    | SCOPE_PROJECT_READ
+                    | SCOPE_PROJECT_WRITE
+                    | SCOPE_PROJECT_EVIDENCE_WRITE
+                    | SCOPE_PROJECT_FINISH_CLOSE
             ) {
                 return Err(ConfigError::Invalid(format!("unsupported grant {scope:?}")));
             }
@@ -208,6 +214,14 @@ impl McpConfig {
         {
             return Err(ConfigError::Invalid(
                 "project work-write requires project read and at least one explicitly bound project".into(),
+            ));
+        }
+        if (policy.scopes.contains(SCOPE_PROJECT_EVIDENCE_WRITE)
+            || policy.scopes.contains(SCOPE_PROJECT_FINISH_CLOSE))
+            && (!policy.scopes.contains(SCOPE_PROJECT_READ) || policy.projects.is_empty())
+        {
+            return Err(ConfigError::Invalid(
+                "project evidence-write and finish-close require project read and at least one explicitly bound project".into(),
             ));
         }
         if policy.scopes.contains(SCOPE_PROJECT_READ) {
@@ -452,6 +466,36 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("requires project read"));
+    }
+
+    #[test]
+    fn evidence_and_finish_grants_require_project_read_and_explicit_binding() {
+        for scope in [SCOPE_PROJECT_EVIDENCE_WRITE, SCOPE_PROJECT_FINISH_CLOSE] {
+            let mut config = base();
+            config.principals.insert(
+                "alice".into(),
+                Policy {
+                    actor_id: "agent-a".into(),
+                    projects: BTreeSet::from(["project-a".into()]),
+                    scopes: BTreeSet::from([scope.into()]),
+                },
+            );
+            assert!(config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("require project read"));
+
+            config
+                .principals
+                .get_mut("alice")
+                .unwrap()
+                .scopes
+                .insert(SCOPE_PROJECT_READ.into());
+            config
+                .validate()
+                .expect("capability grant is valid only with explicit Project read and binding");
+        }
     }
 
     #[test]

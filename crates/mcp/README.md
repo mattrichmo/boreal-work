@@ -115,6 +115,15 @@ project ID does not authorize it. Supported grants are:
 * `boreal:global:read`
 * `boreal:project:read`
 * `boreal:project:work-write`
+* `boreal:project:evidence-write`
+* `boreal:project:finish-close`
+
+Evidence write and finish-close each require Project read and an explicit
+project binding. They are separate grants, neither implies the other, and
+neither is inherited from ordinary work-write. Add only the specific grant a
+principal needs to its `[principals.<subject>]` or `[stdio_profiles.<name>]`
+entry. For HTTP, the active token must also include Project read; the effective
+grant is the intersection of token scopes and configured policy scopes.
 
 HTTP uses OAuth 2.0 bearer access tokens checked at the configured RFC 7662
 introspection endpoint. The introspection response must include an active
@@ -175,6 +184,8 @@ on each call:
 | `project_attempt_renew` | Project work-write | Renew a fenced attempt lease |
 | `project_attempt_submit` | Project work-write | Submit for downstream verification |
 | `project_attempt_release` | Project work-write | Release a fenced attempt with an optional reason |
+| `project_evidence_add` | Project evidence-write | Import a typed Boreal receipt through `evidence_add`; the durable operation ID must equal `receipt.operation_id` |
+| `project_finish_close` | Project finish-close | Submit a typed receipt and inline summary to the existing finish-close service under a durable close operation ID |
 
 Tool input is capped at 16 KiB, service frames at 128 KiB, inline tool output
 at 64 KiB, page size at 50 rows and backend concurrency at 32 calls. A write
@@ -191,14 +202,18 @@ the original operation through the Project service before dispatching a retry.
 project bindings. Its response is marked private with a zero cache lifetime so
 one principal's view cannot be reused for another principal.
 
-Global writes, Send/Intake, operator hold resolution, artifact/evidence
-mutation, workflow/review decisions, source/memory body reads, and machine
-administration are not exposed. Evidence submission and review decisions remain
-gated until Boreal has a separate, explicit authorization contract for them.
-`project_attempt_submit` hands work to downstream verification; it does not
-approve or close it. `project_session_end` records a session boundary; it does
-not create a handoff summary. There is no generic shell, SQL, arbitrary
-filesystem or URL-fetch tool. Artifact bodies are not returned.
+Global writes, Send/Intake, operator hold resolution, evidence execution,
+workflow/review decisions, source/memory body reads, and machine
+administration are not exposed. `project_evidence_add` imports a typed receipt;
+it does not run a verifier. The verifier-capable `evidence_run` service route
+has no MCP wrapper. `project_finish_close` calls Boreal's existing closeout
+route, which validates the receipt, attempt, fence, summary, and gates; Boreal
+may return a gate rejection while retaining its durable result. It also does
+not run verifier work. `project_attempt_submit` hands work to downstream
+verification; it does not approve or close it. `project_session_end` records a
+session boundary; it does not create a handoff summary. There is no generic
+shell, SQL, arbitrary filesystem or URL-fetch tool. Artifact bodies are not
+returned.
 
 ## Accepted feature matrix and service mapping
 
@@ -210,8 +225,8 @@ filesystem or URL-fetch tool. Artifact bodies are not returned.
 | Resume context | `project_agent_resume` | Project service `command=resume` → `ServiceCommandHandler::guidance("resume")` | Available as read-only recovery guidance. |
 | Start or resume attempt | `project_agent_start` | Project service `command=start` → `ServiceCommandHandler::start`; uses `WorkApplication::claim`, `accept`, and `start` | Available as the existing atomic route; the MCP adapter does not create a second lifecycle. |
 | Work checkpoint | `project_work_checkpoint` | Project service `command=completion` → `completion_commands::apply` → `WorkApplication::complete` with `CompletionCommandDto(kind="work.checkpoint")` | Available as a typed checkpoint. It is not an evidence receipt or a finish decision. |
-| Evidence receipt/run | No MCP tool | Existing service methods `evidence_add` and `evidence_run`; receipt storage uses `WorkApplication::record_receipt` | Service routes exist, but MCP wrappers and a dedicated evidence grant do not. Evidence execution can invoke configured verifier work, so this remains unavailable until the authorization decision is made. |
-| Final finish | No MCP tool | Existing `finish_close` service method validates receipt and summary, records the receipt, prepares finish, and records summary | Service route exists, but there is no MCP wrapper or separate finish/evidence permission. Final closeout remains unavailable under the current grants. |
+| Receipt import | `project_evidence_add` under `boreal:project:evidence-write` | Project service `command=evidence_add` → `WorkApplication::record_receipt` | Available for typed receipt imports only. Boreal retains invalid or untrusted receipts under its existing rules. No verifier process is run. The operation ID must equal the receipt's durable operation ID. |
+| Final finish-close | `project_finish_close` under `boreal:project:finish-close` | Project service `command=finish_close` → receipt admission, `WorkApplication::prepare_finish`, summary recording, and close finalization | Available through the existing service contract. The service owns attempt/fence/gate validation and durable replay; a gate rejection remains a rejection. The MCP adapter does not implement a parallel close rule or run verifier work. |
 | Release | `project_attempt_release` | Project service `command=release` → `ServiceCommandHandler::release` → `WorkApplication::release` | Available with explicit attempt ID, fence, expected revision, and operation ID. |
 | Submit for verification | `project_attempt_submit` | Project service `command=submit` → `WorkApplication::submit` | Available as a nonterminal handoff to downstream verification; it does not approve or close work. |
 
@@ -229,6 +244,16 @@ uses Boreal's selector when `work_id` is omitted and requires the current
 operation ID. On an uncertain write, read `operation_status` for that same ID
 before retrying.
 
+For `project_evidence_add`, use the receipt's own `operation_id` as the MCP
+operation ID, then use it for `operation_status` after a timeout. For
+`project_finish_close`, use the durable outer close operation ID for
+`operation_status`; Boreal separately journals the receipt and close result.
+Reuse the exact original payload after readback. A changed payload under that
+same ID is a conflict. The expected project revision is checked before Boreal
+records the finish intent. If a concurrent write advances the project after
+that intent but before receipt admission, Boreal records a terminal conflict;
+refresh the project state and submit a new finish operation ID.
+
 ## Validation
 
 Run the MCP unit and synthetic HTTP-auth tests from the repository root:
@@ -239,9 +264,11 @@ cargo test -p boreal-mcp --lib
 
 The real-daemon regression starts a disposable `bwrk service run` process over
 a temporary project database and checks status, work edits, claim/replay,
-revision conflicts, and operation readback after a deliberately dropped
-response. Build the current CLI binary first, then run the daemon test
-explicitly:
+revision conflicts, scoped synthetic receipt import, finish-close gate
+rejection/replay, and operation readback after deliberately dropped edit and
+finish responses. The receipts use synthetic `external_attested` fixtures;
+the test does not run a verifier. Build the current CLI binary first, then run
+the daemon test explicitly:
 
 ```sh
 cargo build -p boreal-cli --bin bwrk

@@ -27,10 +27,14 @@ use crate::{
     auth::{AuthError, AuthenticatedPrincipal, OAuthIntrospector},
     backend::{
         AdapterError, AgentStartInput, AttemptTransitionInput, BorealBackend,
-        ProjectAgentContextInput, ProjectSessionEndInput, ProjectSessionStartInput,
-        WorkCheckpointInput, WorkClaimInput, WorkCreateInput, WorkEditInput, WorkWaitInput,
+        ProjectAgentContextInput, ProjectEvidenceAddInput, ProjectFinishCloseInput,
+        ProjectSessionEndInput, ProjectSessionStartInput, WorkCheckpointInput, WorkClaimInput,
+        WorkCreateInput, WorkEditInput, WorkWaitInput,
     },
-    config::{HttpConfig, McpConfig, SCOPE_GLOBAL_READ, SCOPE_PROJECT_READ, SCOPE_PROJECT_WRITE},
+    config::{
+        HttpConfig, McpConfig, SCOPE_GLOBAL_READ, SCOPE_PROJECT_EVIDENCE_WRITE,
+        SCOPE_PROJECT_FINISH_CLOSE, SCOPE_PROJECT_READ, SCOPE_PROJECT_WRITE,
+    },
     MAX_HTTP_BODY_BYTES, MAX_TOOL_INPUT_BYTES, MAX_TOOL_OUTPUT_BYTES,
 };
 
@@ -801,6 +805,86 @@ impl BorealMcpServer {
     }
 
     #[tool(
+        name = "project_evidence_add",
+        description = "Record an imported Boreal ReceiptDto through the existing evidence service. Requires the separate Project evidence-write grant; this tool does not run verifier work.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_evidence_add(
+        &self,
+        Parameters(input): Parameters<ProjectEvidenceAddInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        if let Ok(principal) = &principal {
+            if let Err(error) =
+                Self::scope_project(principal, &input.project_id, SCOPE_PROJECT_EVIDENCE_WRITE)
+            {
+                return tool_error(error);
+            }
+        }
+        let operation_id = input.operation_id.clone();
+        let result = match &principal {
+            Ok(principal) => self.backend.project_evidence_add(principal, input).await,
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_evidence_add",
+            SCOPE_PROJECT_EVIDENCE_WRITE,
+            Some(&operation_id),
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_finish_close",
+        description = "Submit a typed receipt and inline summary to Boreal's existing finish-close service. Requires the separate Project finish-close grant; Boreal owns receipt, attempt, fence, gate, and closeout validation. This tool does not run verifier work.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_finish_close(
+        &self,
+        Parameters(input): Parameters<ProjectFinishCloseInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        if let Ok(principal) = &principal {
+            if let Err(error) =
+                Self::scope_project(principal, &input.project_id, SCOPE_PROJECT_FINISH_CLOSE)
+            {
+                return tool_error(error);
+            }
+        }
+        let operation_id = input.operation_id.clone();
+        let result = match &principal {
+            Ok(principal) => self.backend.project_finish_close(principal, input).await,
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_finish_close",
+            SCOPE_PROJECT_FINISH_CLOSE,
+            Some(&operation_id),
+            result,
+        )
+    }
+
+    #[tool(
         name = "project_attempt_submit",
         description = "Submit a fenced Project attempt to Boreal for downstream verification. This does not make a review or final acceptance decision.",
         annotations(
@@ -1242,7 +1326,13 @@ async fn resource_metadata(State(state): State<HttpAuthState>) -> Json<Value> {
     Json(json!({
         "resource": state.http.resource_uri,
         "authorization_servers": state.http.authorization_servers,
-        "scopes_supported": [SCOPE_GLOBAL_READ, SCOPE_PROJECT_READ, SCOPE_PROJECT_WRITE],
+        "scopes_supported": [
+            SCOPE_GLOBAL_READ,
+            SCOPE_PROJECT_READ,
+            SCOPE_PROJECT_WRITE,
+            SCOPE_PROJECT_EVIDENCE_WRITE,
+            SCOPE_PROJECT_FINISH_CLOSE
+        ],
         "bearer_methods_supported": ["header"],
     }))
 }
@@ -1480,13 +1570,18 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        let scope = match token {
+            "synthetic-evidence" => "boreal:project:read boreal:project:evidence-write",
+            "synthetic-finish" => "boreal:project:read boreal:project:finish-close",
+            _ => "boreal:project:read",
+        };
         Json(json!({
-            "active": token == "synthetic-valid",
+            "active": matches!(token, "synthetic-valid" | "synthetic-evidence" | "synthetic-finish"),
             "sub": "alice",
             "iss": provider_config.issuer,
             "aud": [provider_config.resource_uri],
             "exp": now + 300,
-            "scope": "boreal:project:read"
+            "scope": scope
         }))
         .into_response()
     }
@@ -1565,7 +1660,11 @@ mod tests {
                 Policy {
                     actor_id: "agent-a".into(),
                     projects: BTreeSet::from(["project-a".into()]),
-                    scopes: BTreeSet::from([SCOPE_PROJECT_READ.into()]),
+                    scopes: BTreeSet::from([
+                        SCOPE_PROJECT_READ.into(),
+                        SCOPE_PROJECT_EVIDENCE_WRITE.into(),
+                        SCOPE_PROJECT_FINISH_CLOSE.into(),
+                    ]),
                 },
             )]),
             stdio_profiles: BTreeMap::new(),
@@ -1579,6 +1678,19 @@ mod tests {
             tokio::spawn(async move { axum::serve(mcp_listener, router).await.unwrap() });
         let endpoint = format!("http://{mcp_addr}/mcp");
         let client = reqwest::Client::new();
+
+        let metadata_url = format!("http://{mcp_addr}{OAUTH_RESOURCE_METADATA_MCP}");
+        let metadata_response = client.get(metadata_url).send().await.unwrap();
+        assert_eq!(metadata_response.status(), StatusCode::OK);
+        let metadata_body = metadata_response.text().await.unwrap();
+        let metadata: Value = serde_json::from_str(&metadata_body).unwrap();
+        let supported_scopes = metadata["scopes_supported"].as_array().unwrap();
+        assert!(supported_scopes
+            .iter()
+            .any(|scope| scope == SCOPE_PROJECT_EVIDENCE_WRITE));
+        assert!(supported_scopes
+            .iter()
+            .any(|scope| scope == SCOPE_PROJECT_FINISH_CLOSE));
 
         let missing = client.post(&endpoint).send().await.unwrap();
         assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
@@ -1625,6 +1737,40 @@ mod tests {
         assert!(listed_body.contains("boreal_capabilities"), "{listed_body}");
         assert!(!listed_body.contains("global_page"), "{listed_body}");
         assert!(!listed_body.contains("project_work_edit"), "{listed_body}");
+        assert!(
+            !listed_body.contains("project_evidence_add"),
+            "{listed_body}"
+        );
+        assert!(
+            !listed_body.contains("project_finish_close"),
+            "{listed_body}"
+        );
+
+        let evidence_list = post_mcp(
+            &client,
+            &endpoint,
+            "synthetic-evidence",
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":{"_meta":client_meta()}}),
+        )
+        .await;
+        assert_eq!(evidence_list.status(), StatusCode::OK);
+        let evidence_list_body = evidence_list.text().await.unwrap();
+        assert!(evidence_list_body.contains("project_evidence_add"));
+        assert!(!evidence_list_body.contains("project_finish_close"));
+        assert!(!evidence_list_body.contains("project_work_edit"));
+
+        let finish_list = post_mcp(
+            &client,
+            &endpoint,
+            "synthetic-finish",
+            json!({"jsonrpc":"2.0","id":6,"method":"tools/list","params":{"_meta":client_meta()}}),
+        )
+        .await;
+        assert_eq!(finish_list.status(), StatusCode::OK);
+        let finish_list_body = finish_list.text().await.unwrap();
+        assert!(finish_list_body.contains("project_finish_close"));
+        assert!(!finish_list_body.contains("project_evidence_add"));
+        assert!(!finish_list_body.contains("project_work_edit"));
 
         let denied = post_mcp(&client, &endpoint, "synthetic-valid", json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":client_meta(),"name":"project_work_show","arguments":{"project_id":"project-b","work_id":"work-1"}}})).await;
         assert_eq!(denied.status(), StatusCode::OK);

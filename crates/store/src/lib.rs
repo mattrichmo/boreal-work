@@ -8601,6 +8601,49 @@ impl SqliteStore {
         }
     }
 
+    /// Appends an identity-bound operation and audit event only when the
+    /// project still has the caller's expected revision. The revision check
+    /// and append share one immediate transaction. Exact operation replays
+    /// are returned before checking the current revision, so a lost response
+    /// remains safely recoverable after the original append advanced it.
+    pub fn append_identity_operation_audit_at_revision(
+        &self,
+        context: &identity::IdentityContext,
+        operation: OperationRecord,
+        audit: AuditEventRecord,
+        expected_revision: u64,
+    ) -> Result<OperationReadback, StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let identity = operations::OperationIdentity::from_record(
+                &operation,
+                Some((audit.subject_type.clone(), audit.subject_id.clone())),
+            );
+            let journal = operations::OperationJournal::new(self);
+            if let Some(readback) = journal.replay_in_context(context, &identity)? {
+                return Ok(readback);
+            }
+            let actual_revision = self.project_revision(&operation.project_id)?.0;
+            if actual_revision != expected_revision {
+                return Err(StoreError::StaleRevision {
+                    expected: expected_revision,
+                    actual: actual_revision,
+                });
+            }
+            self.append_identity_operation_audit_in_transaction(context, operation, audit)
+        })();
+        match result {
+            Ok(value) => {
+                self.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     /// Identity-bound audit readback for adapters that must not use an
     /// operation-only lookup.
     pub fn audit_event_in_context(

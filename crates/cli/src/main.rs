@@ -4693,6 +4693,22 @@ fn operation_show_result(
         .transpose()
         .map_err(map_store_error)?
         .flatten();
+    if operation
+        .as_ref()
+        .is_some_and(|record| record.command == "finish_close")
+    {
+        if let Some(identity) = identity.as_ref() {
+            let app = WorkApplication::new(store);
+            let journal = app.authenticated_operation_journal(identity);
+            if let Some(result) = finish_result_readback(
+                &journal,
+                operation_id,
+                &finish_result_operation_id(operation_id),
+            )? {
+                return Ok(result);
+            }
+        }
+    }
     let recovery_obligations = store
         .list_unresolved_recovery_obligations(&project, None, 500)
         .map_err(map_store_error)?
@@ -4928,12 +4944,17 @@ fn receipt_record_json(receipt: &ReceiptRecord) -> Result<Value, CliError> {
         .gate_id
         .as_deref()
         .ok_or_else(|| receipt_readback_mismatch("durable receipt is missing its indexed gate"))?;
-    if indexed_gate_id != subject_gate_id {
+    let scoped_gate_prefix = format!("{}:", receipt.work_id);
+    let scoped_subject_gate = if subject_gate_id.starts_with(&scoped_gate_prefix) {
+        subject_gate_id.to_owned()
+    } else {
+        format!("{scoped_gate_prefix}{subject_gate_id}")
+    };
+    if indexed_gate_id != subject_gate_id && indexed_gate_id != scoped_subject_gate {
         return Err(receipt_readback_mismatch(
             "durable receipt subject gate does not match its indexed gate",
         ));
     }
-    let scoped_gate_prefix = format!("{}:", receipt.work_id);
     let wire_gate_id = subject_gate_id
         .strip_prefix(&scoped_gate_prefix)
         .unwrap_or(subject_gate_id);
@@ -6449,7 +6470,13 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             }
             true
         }
-        Err(error) => return Err(map_application_error(error)),
+        Err(error) => {
+            let error = map_application_error(error);
+            if error.code == ErrorCode::StaleRevision {
+                persist_finish_revision_conflict(&finish_context)?;
+            }
+            return Err(error);
+        }
     };
     let submitted = app
         .prepare_finish(
@@ -8960,40 +8987,42 @@ fn ensure_finish_parent_intent(
         "readback_required": true,
     })
     .to_string();
-    journal
-        .append(
-            OperationRecord {
-                operation_id: operation.to_owned(),
-                project_id: project.as_str().to_owned(),
-                command: "finish_close".to_owned(),
-                actor_id: actor.to_owned(),
-                session_id: Some(session.to_owned()),
-                expected_revision,
-                attempt_id: Some(attempt.to_owned()),
-                fence: Some(fence),
-                request_digest: request_digest.to_owned(),
-                outcome: StoreOperationOutcome::Busy,
-                result_json: payload.clone(),
-                revision: 0,
-                created_at: created_at.clone(),
-                completed_at: None,
-            },
-            AuditEventRecord {
-                project_id: project.as_str().to_owned(),
-                revision: 0,
-                operation_id: operation.to_owned(),
-                event_type: "close.requested".to_owned(),
-                subject_type: "attempt".to_owned(),
-                subject_id: attempt.to_owned(),
-                actor_id: actor.to_owned(),
-                session_id: Some(session.to_owned()),
-                fence: Some(fence),
-                as_of: created_at,
-                payload_json: payload,
-            },
-        )
-        .map(|_| ())
-        .map_err(map_application_error)
+    let operation_record = OperationRecord {
+        operation_id: operation.to_owned(),
+        project_id: project.as_str().to_owned(),
+        command: "finish_close".to_owned(),
+        actor_id: actor.to_owned(),
+        session_id: Some(session.to_owned()),
+        expected_revision,
+        attempt_id: Some(attempt.to_owned()),
+        fence: Some(fence),
+        request_digest: request_digest.to_owned(),
+        outcome: StoreOperationOutcome::Busy,
+        result_json: payload.clone(),
+        revision: 0,
+        created_at: created_at.clone(),
+        completed_at: None,
+    };
+    let audit_record = AuditEventRecord {
+        project_id: project.as_str().to_owned(),
+        revision: 0,
+        operation_id: operation.to_owned(),
+        event_type: "close.requested".to_owned(),
+        subject_type: "attempt".to_owned(),
+        subject_id: attempt.to_owned(),
+        actor_id: actor.to_owned(),
+        session_id: Some(session.to_owned()),
+        fence: Some(fence),
+        as_of: created_at,
+        payload_json: payload,
+    };
+    let appended = match expected_revision {
+        Some(expected_revision) => {
+            journal.append_at_revision(operation_record, audit_record, expected_revision)
+        }
+        None => journal.append(operation_record, audit_record),
+    };
+    appended.map(|_| ()).map_err(map_application_error)
 }
 
 fn finish_result_from_operation(operation: &OperationRecord) -> Result<CliResult, CliError> {
@@ -9182,6 +9211,19 @@ fn append_finish_result_operation(
         )
         .map(|_| ())
         .map_err(map_application_error)
+}
+
+fn persist_finish_revision_conflict(
+    context: &FinishCloseJournalContext<'_, '_>,
+) -> Result<(), CliError> {
+    append_finish_result_operation(
+        context,
+        ApplicationOutcome::Conflict,
+        &json!({
+            "state": "conflict",
+            "reason": "project_revision_changed_after_finish_intent",
+        }),
+    )
 }
 
 fn store_revision(store: &SqliteStore, project: &ProjectId) -> Result<u64, CliError> {

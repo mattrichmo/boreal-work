@@ -77,6 +77,37 @@ impl<'a> AuthenticatedOperationJournal<'a> {
             .map_err(ApplicationError::from)
     }
 
+    /// Appends an operation only if the authenticated project's current
+    /// revision matches the caller's expected revision. This keeps a durable
+    /// intent from being written for a request that is already stale.
+    pub fn append_at_revision(
+        &self,
+        operation: OperationRecord,
+        audit: AuditEventRecord,
+        expected_revision: u64,
+    ) -> Result<OperationReadback, ApplicationError> {
+        if operation.project_id != self.identity.project_id {
+            return Err(ApplicationError::Store(StoreError::WrongSubject {
+                expected: self.identity.project_id.clone(),
+                actual: operation.project_id,
+            }));
+        }
+        if audit.project_id != self.identity.project_id {
+            return Err(ApplicationError::Store(StoreError::WrongSubject {
+                expected: self.identity.project_id.clone(),
+                actual: audit.project_id,
+            }));
+        }
+        self.store
+            .append_identity_operation_audit_at_revision(
+                self.identity,
+                operation,
+                audit,
+                expected_revision,
+            )
+            .map_err(ApplicationError::from)
+    }
+
     /// Read an operation in the authenticated project without requiring the
     /// caller to guess its immutable fields. This is for recovery/subject
     /// discovery; replay validation must still compare the returned record to
