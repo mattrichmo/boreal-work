@@ -243,7 +243,7 @@ returned.
 | Start or resume attempt | `project_agent_start` | Project service `command=start` → `ServiceCommandHandler::start`; uses `WorkApplication::claim`, `accept`, and `start` | Available as the existing atomic route; the MCP adapter does not create a second lifecycle. |
 | Work checkpoint | `project_work_checkpoint` | Project service `command=completion` → `completion_commands::apply` → `WorkApplication::complete` with `CompletionCommandDto(kind="work.checkpoint")` | Available as a typed checkpoint. It is not an evidence receipt or a finish decision. |
 | Receipt import | `project_evidence_add` under `boreal:project:evidence-write` | Project service `command=evidence_add` → `WorkApplication::record_receipt` | Available for typed receipt imports only. Boreal retains invalid or untrusted receipts under its existing rules. No verifier process is run. The operation ID must equal the receipt's durable operation ID. |
-| Final finish-close | `project_finish_close` under `boreal:project:finish-close` | Project service `command=finish_close` → receipt admission, `WorkApplication::prepare_finish`, summary recording, and close finalization | Available through the existing service contract. The service owns attempt/fence/gate validation and durable replay; a gate rejection remains a rejection. The MCP adapter does not implement a parallel close rule or run verifier work. |
+| Final finish-close | `project_finish_close` under `boreal:project:finish-close` | Project service `command=finish_close` → receipt admission, `WorkApplication::prepare_finish`, summary recording, and close finalization | Available through the existing service contract. The service owns attempt/fence/gate validation and durable replay; a gate rejection remains a rejection. A submit rejection after receipt admission is durably recorded with receipt and submit operation IDs, while exact replay returns that result. The MCP adapter does not implement a parallel close rule or run verifier work. |
 | Release | `project_attempt_release` | Project service `command=release` → `ServiceCommandHandler::release` → `WorkApplication::release` | Available with explicit attempt ID, fence, expected revision, and operation ID. |
 | Submit for verification | `project_attempt_submit` | Project service `command=submit` → `WorkApplication::submit` | Available as a nonterminal handoff to downstream verification; it does not approve or close work. |
 
@@ -270,6 +270,11 @@ same ID is a conflict. The expected project revision is checked before Boreal
 records the finish intent. If a concurrent write advances the project after
 that intent but before receipt admission, Boreal records a terminal conflict;
 refresh the project state and submit a new finish operation ID.
+If submission is rejected after receipt admission, the recorded result reports
+`submit_rejected` (or an operation-ID conflict) and retains the receipt;
+retrying the same close ID and payload returns that result without submitting
+again. If the service cannot establish whether submission committed, it leaves
+the outcome unresolved for operation readback instead of claiming rollback.
 
 ## Validation
 

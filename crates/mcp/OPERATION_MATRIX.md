@@ -131,14 +131,18 @@ durable operation identities. A lost response is reconciled with
 write identities. The real-daemon ignored journey exercises claim replay and
 changed-payload conflict using synthetic local service state and credentials.
 
-## Existing core lifecycle issue found during review
+## Finish-close recovery after receipt admission
 
-The current `finish_close` service can leave its durable parent operation in
-`Busy` if receipt admission succeeds and `prepare_finish` then fails (for
-example, an attempt lease expires in that interval). A retry can replay the
-receipt and reproduce the failure without writing the parent result operation.
-This is in the existing Project lifecycle service, outside the MCP-owned
-adapter contract and another lane's core ownership. `operation_status` reports
-the pending outcome, but MCP cannot resolve it. The service owner must define
-and implement terminal failure/reconciliation behavior before claiming this
-edge is fully recovered; this MCP change does not alter that contract.
+The Project finish-close service preserves the admitted receipt and its stable
+receipt operation ID if the later attempt submission is rejected. It writes a
+durable `finish_close.result` with `state=submit_rejected` or
+`state=submit_conflict`, identifies the failing stage and error, and includes
+the receipt and submit operation IDs. The parent intent remains `Busy` as the
+first half of the durable operation pair; `operation_status` resolves the
+result through the outer finish-close ID. Exact retries return that recorded
+result without attempting submission again. If submission committed but its
+reply was lost, the service checks the attempt operation journal and resumes
+from the existing operation. Replaying a receipt after process restart reuses
+its persisted creation timestamp so its immutable operation identity remains
+stable. Transient or uncertain outcomes are left unresolved rather than being
+reported as terminal failures.

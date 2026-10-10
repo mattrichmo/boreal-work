@@ -4928,12 +4928,46 @@ mod unix {
                         })
                     })
                     .transpose()?;
+                // Receipt insertion's immutable operation digest includes its
+                // creation timestamp. If the process stopped after the
+                // receipt transaction committed, exact finish replay must
+                // reuse that timestamp or the same receipt operation ID would
+                // look like a changed request instead of a safe readback.
+                let prior_receipt_operation = self
+                    .store
+                    .operation(receipt.operation_id.as_str())
+                    .map_err(map_store_error)?
+                    .filter(|operation| {
+                        operation.command == "receipt.insert"
+                            && operation.project_id == project.as_str()
+                    });
+                let receipt_created_at = prior_receipt_operation
+                    .map(|_| {
+                        self.store
+                            .read_receipt_operation(project.as_str(), receipt.operation_id.as_str())
+                    })
+                    .transpose()
+                    .map_err(map_store_error)?
+                    .flatten()
+                    .map(|existing| {
+                        super::super::parse_stamp_ms(&existing.receipt.created_at)
+                            .map(TimestampMs::from_millis)
+                            .ok_or_else(|| {
+                                CliError::with(
+                                    ErrorCode::ProtocolMismatch,
+                                    ApplicationOutcome::Failed,
+                                    "durable receipt has an invalid creation timestamp",
+                                )
+                            })
+                    })
+                    .transpose()?
+                    .unwrap_or_else(|| TimestampMs::from_millis(now_ms_u64()));
                 let receipt_result = app.record_receipt(
                     &actor,
                     Some(&session),
                     &receipt,
                     receipt_expected_revision,
-                    TimestampMs::from_millis(now_ms_u64()),
+                    receipt_created_at,
                 );
                 match receipt_result {
                     Ok(result) => result.replayed,
@@ -4956,19 +4990,91 @@ mod unix {
                 }
             };
             let adapter = SqliteAttemptAdapter::new(&self.store);
-            let submitted = app
-                .prepare_finish(
-                    &adapter,
-                    attempt_request_from_data(
-                        data,
-                        &project,
-                        &work_id,
-                        &attempt,
-                        fence,
-                        &sub_operation(operation, "submit"),
-                    )?,
-                )
-                .map_err(map_application_error)?;
+            let submit_operation_id = sub_operation(operation, "submit");
+            let submit_request = attempt_request_from_data(
+                data,
+                &project,
+                &work_id,
+                &attempt,
+                fence,
+                &submit_operation_id,
+            )?;
+            let submitted = match app.prepare_finish(&adapter, submit_request.clone()) {
+                Ok(submitted) => submitted,
+                Err(error) => {
+                    let error = map_application_error(error);
+                    // Attempt state and its operation row commit atomically. A
+                    // readback distinguishes a known semantic rejection from
+                    // a commit whose reply was lost or whose outcome is still
+                    // uncertain; never write a terminal failure over a
+                    // possibly committed submit.
+                    let submit_readback = journal
+                        .readback(&submit_operation_id)
+                        .map_err(map_application_error)?
+                        .and_then(|readback| readback.operation);
+                    match submit_readback {
+                        Some(record)
+                            if super::super::finish_submit_operation_matches(
+                                &record,
+                                &submit_request,
+                            ) =>
+                        {
+                            match app.prepare_finish(&adapter, submit_request) {
+                                Ok(submitted) => submitted,
+                                Err(_) => {
+                                    return Err(CliError::with(
+                                        ErrorCode::UnknownOutcome,
+                                        ApplicationOutcome::Unknown,
+                                        format!(
+                                            "finish_close submit {} is durably recorded but its current state could not be reconciled; use operation show",
+                                            submit_operation_id
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        Some(record)
+                            if matches!(
+                                error.outcome,
+                                ApplicationOutcome::Rejected | ApplicationOutcome::Conflict
+                            ) =>
+                        {
+                            let conflict = CliError::with(
+                                ErrorCode::OperationConflict,
+                                ApplicationOutcome::Conflict,
+                                "finish_close submit operation ID is already bound to a different mutation",
+                            );
+                            super::super::persist_finish_submit_failure(
+                                &finish_context,
+                                conflict.outcome,
+                                conflict.code,
+                                &receipt,
+                                receipt_replayed,
+                                &submit_operation_id,
+                                Some(&record),
+                            )?;
+                            return Err(conflict);
+                        }
+                        None if matches!(
+                            error.outcome,
+                            ApplicationOutcome::Rejected | ApplicationOutcome::Conflict
+                        ) =>
+                        {
+                            super::super::persist_finish_submit_failure(
+                                &finish_context,
+                                error.outcome,
+                                error.code,
+                                &receipt,
+                                receipt_replayed,
+                                &submit_operation_id,
+                                None,
+                            )?;
+                            return Err(error);
+                        }
+                        _ => return Err(error),
+                    }
+                }
+            };
             let summary_result = app
                 .record_summary(
                     &actor,
@@ -8590,6 +8696,378 @@ mod tests {
             .expect("result operation reads")
             .expect("result operation exists");
         assert_eq!(result.command, "finish_close.result");
+        let _ = fs::remove_file(db);
+    }
+
+    fn external_finish_fixture(kind: &str) -> (PathBuf, ServiceCommandHandler, Value) {
+        let db = temp_path(kind);
+        let store = seed_store(&db);
+        let source_operation = format!("op_{kind}_source");
+        let (_catalog, source_version_id) =
+            capture_service_test_source(&store, "service-project", &source_operation);
+        let revision = store.project_revision("service-project").unwrap().0;
+        let attempt_id = format!("attempt-{kind}");
+        let session_id = format!("session-{kind}");
+        let now = now_ms_u64();
+        let claim = json!({
+            "command": "claim",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": session_id,
+            "attempt_id": attempt_id,
+            "claimed_at": stamp(now),
+            "lease_deadline": stamp(now + 60_000),
+            "hard_deadline": stamp(now + 120_000),
+            "expected_revision": revision,
+            "source_version_id": source_version_id,
+            "config_identity": "config-finish-v1",
+        });
+        let mut handler = make_handler(store);
+        handler
+            .claim(&claim, &format!("op_{kind}_claim"))
+            .expect("finish fixture claim succeeds");
+        handler
+            .start(
+                &json!({
+                    "command": "start",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": session_id,
+                    "attempt_id": attempt_id,
+                    "fence": 1,
+                }),
+                &format!("op_{kind}_start"),
+            )
+            .expect("finish fixture attempt starts");
+
+        let receipt_id = format!("receipt-{kind}");
+        let receipt_operation = format!("op-receipt-{kind}");
+        let finish = json!({
+            "command": "finish_close",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": session_id,
+            "attempt_id": attempt_id,
+            "fence": 1,
+            "expected_revision": handler.store.project_revision("service-project").unwrap().0,
+            "summary_body": "Completed deterministic finish fixture.",
+            "receipt": {
+                "schema_version": "boreal.receipt.v1",
+                "receipt_id": receipt_id,
+                "operation_id": receipt_operation,
+                "subject": {"work_id": "service-work", "attempt_id": attempt_id, "fence": 1, "gate_id": "verification"},
+                "executable": "printf",
+                "argv": ["printf", "ok"],
+                "cwd": ".",
+                "exit_code": 0,
+                "started_at": "unix-ms:1",
+                "ended_at": "unix-ms:2",
+                "source_snapshot_hash": source_version_id,
+                "config_identity": "config-finish-v1",
+                "environment_fingerprint": "env-1",
+                "output_digest": "digest-1",
+                "output_ref": null,
+                "coverage": {"kind": "verification", "profile_id": "focused", "profile_version": "1"},
+                "attestation": "external_attested",
+                "result": "passed",
+                "retention": null,
+            }
+        });
+        (db, handler, finish)
+    }
+
+    fn admit_finish_receipt_before_interruption(
+        handler: &ServiceCommandHandler,
+        finish: &Value,
+        operation: &str,
+    ) -> boreal_domain::ReceiptId {
+        let project = ProjectId::new("service-project");
+        let actor = finish["actor_id"].as_str().unwrap();
+        let session = finish["session_id"].as_str().unwrap();
+        let work_id = finish["work_id"].as_str().unwrap();
+        let attempt = finish["attempt_id"].as_str().unwrap();
+        let fence = finish["fence"].as_u64().unwrap();
+        let expected_revision = finish["expected_revision"].as_u64();
+        let receipt_dto: boreal_protocol::models::ReceiptDto =
+            serde_json::from_value(finish["receipt"].clone()).unwrap();
+        let receipt = super::super::receipt_from_dto(receipt_dto).unwrap();
+        let summary_body = finish["summary_body"].as_str().unwrap().to_owned();
+        let request_digest =
+            super::super::finish_close_request_digest(super::super::FinishCloseDigestInput {
+                project: &project,
+                work_id,
+                attempt,
+                fence,
+                actor,
+                session,
+                expected_revision,
+                receipt: &receipt,
+                summary_body: &summary_body,
+            });
+        let identity = IdentityStore::new(&handler.store)
+            .context(project.as_str())
+            .expect("finish fixture has a project identity");
+        let app = WorkApplication::new(&handler.store);
+        let journal = app.authenticated_operation_journal(&identity);
+        let result_operation = super::super::finish_result_operation_id(operation);
+        let context = super::super::FinishCloseJournalContext {
+            journal: &journal,
+            operation,
+            project: &project,
+            actor,
+            session,
+            attempt,
+            fence,
+            expected_revision,
+            request_digest: &request_digest,
+            result_operation: &result_operation,
+        };
+        super::super::ensure_finish_parent_intent(&context)
+            .expect("finish intent is durable before the interrupted receipt step");
+        let receipt_expected_revision = expected_revision.map(|revision| revision + 1);
+        app.record_receipt(
+            actor,
+            Some(session),
+            &receipt,
+            receipt_expected_revision,
+            TimestampMs::from_millis(now_ms_u64()),
+        )
+        .expect("receipt is durable before simulated process interruption");
+        receipt.receipt_id
+    }
+
+    #[test]
+    fn service_finish_close_records_receipt_before_restart_and_resumes_exact_request() {
+        let (db, handler, finish) = external_finish_fixture("finish-interrupt");
+        let operation = "op_finish_interrupted_after_receipt";
+        let receipt_id = admit_finish_receipt_before_interruption(&handler, &finish, operation);
+        let receipt_before = handler
+            .store
+            .receipt(receipt_id.as_str())
+            .expect("receipt read succeeds")
+            .expect("admitted receipt survives interruption");
+        let parent = handler
+            .store
+            .operation(operation)
+            .expect("parent operation read succeeds")
+            .expect("finish intent survives interruption");
+        assert_eq!(parent.outcome, boreal_store::OperationOutcome::Busy);
+        assert!(handler
+            .store
+            .operation(&format!("{operation}:result"))
+            .expect("result read succeeds")
+            .is_none());
+
+        drop(handler);
+        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+            .expect("service database reopens after simulated interruption");
+        let mut handler = make_handler(store);
+        let resumed = handler
+            .finish_close(&finish, operation)
+            .expect("exact retry resumes the durable finish after restart");
+        assert_eq!(resumed.0, ApplicationOutcome::Rejected);
+        assert_eq!(resumed.2.as_ref().unwrap()["receipt_replayed"], true);
+        assert_eq!(
+            resumed.2.as_ref().unwrap()["receipt_id"],
+            receipt_id.as_str()
+        );
+        assert_eq!(
+            handler
+                .store
+                .receipt(receipt_id.as_str())
+                .expect("receipt read succeeds")
+                .expect("receipt remains durable"),
+            receipt_before
+        );
+
+        let operation_show = super::super::operation_show_result(
+            &ParsedCommand {
+                path: vec!["operation".into(), "show".into()],
+                options: CliOptions {
+                    project: Some("service-project".into()),
+                    positionals: vec![operation.into()],
+                    ..CliOptions::default()
+                },
+            },
+            &handler.store,
+        )
+        .expect("operation readback resolves the result operation");
+        assert_eq!(operation_show.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            operation_show.data.unwrap()["receipt_id"],
+            receipt_id.as_str()
+        );
+        let replay = handler
+            .finish_close(&finish, operation)
+            .expect("exact result replay does not create another receipt or finish");
+        assert_eq!(replay.2.unwrap()["receipt_id"], receipt_id.as_str());
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_finish_close_resumes_committed_submit_after_restart() {
+        let (db, handler, finish) = external_finish_fixture("finish-submit-interrupt");
+        let operation = "op_finish_interrupted_after_submit";
+        let receipt_id = admit_finish_receipt_before_interruption(&handler, &finish, operation);
+        let project = ProjectId::new("service-project");
+        let work_id = finish["work_id"].as_str().unwrap();
+        let attempt_id = AttemptId::new(finish["attempt_id"].as_str().unwrap());
+        let actor = finish["actor_id"].as_str().unwrap();
+        let harness = finish["harness_id"].as_str().unwrap();
+        let session = finish["session_id"].as_str().unwrap();
+        let fence = Fence::new(finish["fence"].as_u64().unwrap());
+        let submit_operation = super::sub_operation(operation, "submit");
+        let request_digest = canonical_request_digest(
+            "attempt.transition/v1",
+            json!({
+                "project_id": project.as_str(),
+                "work_id": work_id,
+                "attempt_id": attempt_id.as_str(),
+                "actor_id": actor,
+                "harness_id": harness,
+                "session_id": session,
+                "fence": fence.get(),
+            }),
+        );
+        let submit_request = AttemptRequest::new(
+            project,
+            WorkId::new(work_id),
+            attempt_id,
+            ActorId::new(actor),
+            Some(HarnessId::new(harness)),
+            Some(SessionId::new(session)),
+            fence,
+            OperationId::new(&submit_operation),
+            request_digest,
+            TimestampMs::from_millis(now_ms_u64()),
+        );
+        WorkApplication::new(&handler.store)
+            .prepare_finish(&SqliteAttemptAdapter::new(&handler.store), submit_request)
+            .expect("attempt submit commits before simulated response loss");
+        let submit_before = handler
+            .store
+            .operation(&submit_operation)
+            .expect("submit operation read succeeds")
+            .expect("attempt submit is durable before interruption");
+
+        drop(handler);
+        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+            .expect("service database reopens after simulated submit response loss");
+        let mut handler = make_handler(store);
+        let resumed = handler
+            .finish_close(&finish, operation)
+            .expect("exact retry resumes from the committed submit");
+        assert_eq!(resumed.2.as_ref().unwrap()["receipt_replayed"], true);
+        assert_eq!(
+            resumed.2.as_ref().unwrap()["receipt_id"],
+            receipt_id.as_str()
+        );
+        assert_eq!(
+            handler
+                .store
+                .operation(&submit_operation)
+                .expect("submit replay read succeeds")
+                .expect("submit operation remains durable"),
+            submit_before
+        );
+        let result_operation = handler
+            .store
+            .operation(&format!("{operation}:result"))
+            .expect("finish result read succeeds")
+            .expect("finish result is recorded after submit reconciliation");
+        assert_eq!(result_operation.command, "finish_close.result");
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_finish_close_durably_reconciles_submit_rejection_after_receipt() {
+        let (db, mut handler, finish) = external_finish_fixture("finish-expired");
+        let operation = "op_finish_submit_expired";
+        let attempt_id = finish["attempt_id"].as_str().unwrap();
+        let expired_at = now_ms_u64().saturating_sub(1);
+        let claimed_at = expired_at.saturating_sub(60_000);
+        handler
+            .store
+            .execute_batch(&format!(
+                "UPDATE attempt SET claimed_at = '{}', lease_deadline = '{}' WHERE attempt_id = '{attempt_id}';\
+                 UPDATE reservation SET lease_deadline = '{}' WHERE attempt_id = '{attempt_id}';",
+                stamp(claimed_at),
+                stamp(expired_at),
+                stamp(expired_at)
+            ))
+            .expect("synthetic fixture expires the attempt after start");
+
+        let error = handler
+            .finish_close(&finish, operation)
+            .expect_err("submit must reject the expired attempt after receipt admission");
+        assert_eq!(error.code, ErrorCode::LeaseExpired);
+        let receipt_id = finish["receipt"]["receipt_id"].as_str().unwrap();
+        let receipt = handler
+            .store
+            .receipt(receipt_id)
+            .expect("receipt read succeeds")
+            .expect("receipt remains durable despite submit rejection");
+        assert_eq!(receipt.result, boreal_store::ReceiptOutcome::Passed);
+        assert_eq!(receipt.operation_id, finish["receipt"]["operation_id"]);
+
+        let result_operation = handler
+            .store
+            .operation(&format!("{operation}:result"))
+            .expect("result operation read succeeds")
+            .expect("submit rejection is durably terminal");
+        assert_eq!(result_operation.command, "finish_close.result");
+        assert_eq!(
+            result_operation.outcome,
+            boreal_store::OperationOutcome::Rejected
+        );
+        let result_json: Value = serde_json::from_str(&result_operation.result_json).unwrap();
+        assert_eq!(result_json["close"]["state"], "submit_rejected");
+        assert_eq!(result_json["close"]["stage"], "attempt_submit");
+        assert_eq!(result_json["close"]["error_code"], "lease_expired");
+        assert_eq!(result_json["close"]["receipt_id"], receipt_id);
+        assert_eq!(
+            result_json["close"]["receipt_operation_id"],
+            finish["receipt"]["operation_id"]
+        );
+        assert_eq!(result_json["close"]["receipt_recorded"], true);
+        assert_eq!(
+            handler
+                .store
+                .operation(operation)
+                .expect("parent read succeeds")
+                .expect("parent intent remains in the result pair")
+                .outcome,
+            boreal_store::OperationOutcome::Busy
+        );
+
+        drop(handler);
+        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+            .expect("service database reopens after terminal submit rejection");
+        let mut handler = make_handler(store);
+        let replay = handler
+            .finish_close(&finish, operation)
+            .expect("exact retry reads the durable rejection without resubmitting");
+        assert_eq!(replay.0, ApplicationOutcome::Rejected);
+        assert_eq!(replay.2.as_ref().unwrap()["state"], "submit_rejected");
+        assert_eq!(replay.2.as_ref().unwrap()["receipt_id"], receipt_id);
+
+        let mut changed = finish.clone();
+        changed["summary_body"] = json!("changed payload cannot reuse the finish ID");
+        let changed_error = handler
+            .finish_close(&changed, operation)
+            .expect_err("changed payload conflicts with the immutable parent intent");
+        assert_eq!(changed_error.code, ErrorCode::OperationConflict);
+        assert!(handler
+            .store
+            .receipt(receipt_id)
+            .expect("receipt read succeeds")
+            .is_some());
         let _ = fs::remove_file(db);
     }
 

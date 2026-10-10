@@ -9263,6 +9263,72 @@ fn persist_finish_receipt_rejection(
     )
 }
 
+/// Record a terminal submit rejection only after its atomic attempt operation
+/// has been read back as absent. The receipt is already a committed Boreal
+/// fact at this point, so preserve its stable operation and receipt IDs in the
+/// finish result instead of clearing the parent intent or implying rollback.
+fn persist_finish_submit_failure(
+    context: &FinishCloseJournalContext<'_, '_>,
+    outcome: ApplicationOutcome,
+    error_code: ErrorCode,
+    receipt: &ReceiptPayload,
+    receipt_replayed: bool,
+    submit_operation_id: &str,
+    conflicting_operation: Option<&OperationRecord>,
+) -> Result<(), CliError> {
+    let (state, reason) = match outcome {
+        ApplicationOutcome::Rejected => {
+            ("submit_rejected", "attempt_submit_rejected_after_receipt")
+        }
+        ApplicationOutcome::Conflict => (
+            "submit_conflict",
+            "attempt_submit_operation_conflict_after_receipt",
+        ),
+        _ => return Ok(()),
+    };
+    append_finish_result_operation(
+        context,
+        outcome,
+        &json!({
+            "state": state,
+            "stage": "attempt_submit",
+            "reason": reason,
+            "error_code": error_code.as_str(),
+            "submit_operation_id": submit_operation_id,
+            "receipt_recorded": true,
+            "receipt_id": receipt.receipt_id.as_str(),
+            "receipt_operation_id": receipt.operation_id.as_str(),
+            "receipt_result": finish_receipt_result_name(receipt.result),
+            "receipt_attestation": finish_attestation_name(receipt.attestation),
+            "receipt_replayed": receipt_replayed,
+            "conflicting_operation": conflicting_operation.map(|record| json!({
+                "operation_id": record.operation_id.as_str(),
+                "command": record.command.as_str(),
+                "outcome": format!("{:?}", record.outcome).to_ascii_lowercase(),
+            })),
+        }),
+    )
+}
+
+fn finish_submit_operation_matches(
+    operation: &OperationRecord,
+    request: &boreal_application::AttemptRequest,
+) -> bool {
+    operation.operation_id == request.operation_id.as_str()
+        && operation.project_id == request.project_id.as_str()
+        && operation.command == "attempt.submit"
+        && operation.actor_id == request.actor_id.as_str()
+        && operation.session_id.as_deref()
+            == request.session_id.as_ref().map(|value| value.as_str())
+        && operation.attempt_id.as_deref() == Some(request.attempt_id.as_str())
+        && operation.fence == Some(request.fence.get())
+        && operation.request_digest == request.request_digest
+        && matches!(
+            operation.outcome,
+            StoreOperationOutcome::Changed | StoreOperationOutcome::Unchanged
+        )
+}
+
 fn store_revision(store: &SqliteStore, project: &ProjectId) -> Result<u64, CliError> {
     store
         .project_revision(project.as_str())
