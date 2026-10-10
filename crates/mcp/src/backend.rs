@@ -134,7 +134,11 @@ impl BorealBackend {
     pub fn capabilities(&self, principal: &AuthenticatedPrincipal) -> Value {
         let global_read = principal.has_scope(SCOPE_GLOBAL_READ) && self.config.global.is_some();
         let project_read = principal.has_scope(SCOPE_PROJECT_READ);
-        let project_write = principal.has_scope(SCOPE_PROJECT_WRITE);
+        // Project work writes rely on the same durable operation readback
+        // path that clients use to reconcile a lost response. A token with
+        // only the write scope cannot safely discover whether a mutation
+        // committed, so the effective grant requires Project read as well.
+        let project_write = project_read && principal.has_scope(SCOPE_PROJECT_WRITE);
         // These operations depend on operation readback for safe recovery.
         // Report them only when the authenticated token has both the narrow
         // write grant and the Project read grant used by that recovery path.
@@ -1195,6 +1199,11 @@ impl BorealBackend {
         required_scope: &'static str,
     ) -> Result<String, AdapterError> {
         validate_identifier(project_id, "project_id")?;
+        if required_scope == SCOPE_PROJECT_WRITE && !principal.has_scope(SCOPE_PROJECT_READ) {
+            return Err(AdapterError::PermissionDenied {
+                scope: SCOPE_PROJECT_READ,
+            });
+        }
         if !principal.has_scope(required_scope) || !principal.project_ids.contains(project_id) {
             return Err(AdapterError::PermissionDenied {
                 scope: required_scope,
@@ -2013,6 +2022,7 @@ mod tests {
 
         let mut write_without_read = principal.clone();
         write_without_read.scopes.remove(SCOPE_PROJECT_READ);
+        write_without_read.scopes.insert(SCOPE_PROJECT_WRITE.into());
         write_without_read
             .scopes
             .insert(SCOPE_PROJECT_EVIDENCE_WRITE.into());
@@ -2020,9 +2030,16 @@ mod tests {
             .scopes
             .insert(SCOPE_PROJECT_FINISH_CLOSE.into());
         let restricted_capabilities = backend.capabilities(&write_without_read);
+        assert_eq!(
+            restricted_capabilities["projects"][0]["write_available"],
+            json!(false)
+        );
         let restricted_tools = restricted_capabilities["projects"][0]["tools"]
             .as_array()
             .unwrap();
+        assert!(!restricted_tools
+            .iter()
+            .any(|tool| tool == "project_work_edit"));
         assert!(!restricted_tools
             .iter()
             .any(|tool| tool == "project_evidence_add"));
@@ -2069,6 +2086,30 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             finish_without_read,
+            AdapterError::PermissionDenied {
+                scope: SCOPE_PROJECT_READ
+            }
+        ));
+
+        let work_write_without_read = backend
+            .project_work_edit(
+                &write_without_read,
+                WorkEditInput {
+                    project_id: "project-a".into(),
+                    work_id: "work-a".into(),
+                    operation_id: "op_work_without_read".into(),
+                    expected_revision: 1,
+                    title: Some("Synthetic edit".into()),
+                    description: None,
+                    parent_id: None,
+                    priority: None,
+                    dispatch_policy: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            work_write_without_read,
             AdapterError::PermissionDenied {
                 scope: SCOPE_PROJECT_READ
             }

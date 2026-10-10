@@ -6433,16 +6433,22 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             // Witnessed receipts are already authoritative facts created by
             // evidence run. Direct closeout may read them back, but may never
             // import a second witnessed fact through the external-ingest API.
-            let durable = store
-                .receipt(receipt.receipt_id.as_str())
-                .map_err(map_store_error)?
-                .ok_or_else(|| {
-                    CliError::with(
+            let durable = match store.receipt(receipt.receipt_id.as_str()) {
+                Ok(Some(durable)) => durable,
+                Ok(None) => {
+                    persist_finish_receipt_rejection(
+                        &finish_context,
+                        ApplicationOutcome::Rejected,
+                        ErrorCode::ReceiptInvalid,
+                    )?;
+                    return Err(CliError::with(
                         ErrorCode::ReceiptInvalid,
                         ApplicationOutcome::Rejected,
                         "witnessed receipt is not durably readable; use service readback",
-                    )
-                })?;
+                    ));
+                }
+                Err(error) => return Err(map_store_error(error)),
+            };
             let durable_result_matches = match receipt.result {
                 ReceiptResult::Passed => durable.result == ReceiptOutcome::Passed,
                 ReceiptResult::Failed => durable.result == ReceiptOutcome::Failed,
@@ -6462,6 +6468,11 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
                 || durable.attestation != ReceiptAttestation::BorealWitnessed
                 || !durable_result_matches
             {
+                persist_finish_receipt_rejection(
+                    &finish_context,
+                    ApplicationOutcome::Rejected,
+                    ErrorCode::ReceiptInvalid,
+                )?;
                 return Err(CliError::with(
                     ErrorCode::ReceiptInvalid,
                     ApplicationOutcome::Rejected,
@@ -6474,6 +6485,11 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             let error = map_application_error(error);
             if error.code == ErrorCode::StaleRevision {
                 persist_finish_revision_conflict(&finish_context)?;
+            } else if matches!(
+                error.outcome,
+                ApplicationOutcome::Rejected | ApplicationOutcome::Conflict
+            ) {
+                persist_finish_receipt_rejection(&finish_context, error.outcome, error.code)?;
             }
             return Err(error);
         }
@@ -9226,6 +9242,27 @@ fn persist_finish_revision_conflict(
     )
 }
 
+fn persist_finish_receipt_rejection(
+    context: &FinishCloseJournalContext<'_, '_>,
+    outcome: ApplicationOutcome,
+    error_code: ErrorCode,
+) -> Result<(), CliError> {
+    let (state, reason) = match outcome {
+        ApplicationOutcome::Rejected => ("rejected", "receipt_record_rejected"),
+        ApplicationOutcome::Conflict => ("conflict", "receipt_record_conflict"),
+        _ => return Ok(()),
+    };
+    append_finish_result_operation(
+        context,
+        outcome,
+        &json!({
+            "state": state,
+            "reason": reason,
+            "error_code": error_code.as_str(),
+        }),
+    )
+}
+
 fn store_revision(store: &SqliteStore, project: &ProjectId) -> Result<u64, CliError> {
     store
         .project_revision(project.as_str())
@@ -11574,6 +11611,77 @@ mod tests {
             "Finish remains open pending the required checkpoint.",
         )
         .expect("summary writes");
+
+        // A structurally valid external receipt can still be stale relative
+        // to the current attempt source. That rejection must be a durable
+        // terminal readback, so retrying its original operation ID does not
+        // leave the finish parent permanently pending.
+        let valid_receipt_contents =
+            fs::read_to_string(&receipt_path).expect("valid receipt is readable");
+        let mut stale_source_receipt: Value =
+            serde_json::from_str(&valid_receipt_contents).expect("valid receipt is JSON");
+        stale_source_receipt["source_snapshot_hash"] = json!(format!("sha256:{}", "0".repeat(64)));
+        fs::write(
+            &receipt_path,
+            serde_json::to_string(&stale_source_receipt).expect("stale receipt serializes"),
+        )
+        .expect("stale receipt writes");
+        let fence_arg = fence.to_string();
+        let invalid_finish_args = || {
+            args(&[
+                "agent",
+                "finish",
+                "w",
+                "--close",
+                "--project",
+                "p",
+                "--actor",
+                actor,
+                "--session",
+                "s",
+                "--attempt",
+                attempt_id,
+                "--fence",
+                &fence_arg,
+                "--receipt",
+                &receipt_file,
+                "--summary",
+                &summary_file,
+                "--db",
+                &db,
+                "--operation-id",
+                "op-cli-invalid-source",
+            ])
+        };
+        let invalid_error =
+            run(&invalid_finish_args()).expect_err("a stale source receipt is rejected");
+        assert_eq!(invalid_error.code, ErrorCode::ReceiptSourceMismatch);
+        let store = SqliteStore::open(&db_path, PRODUCTION_SCHEMA)
+            .expect("database opens after deterministic rejection");
+        let terminal_result = store
+            .operation("op-cli-invalid-source:result")
+            .expect("terminal result lookup succeeds")
+            .expect("terminal result operation exists");
+        assert_eq!(terminal_result.outcome, StoreOperationOutcome::Rejected);
+        let terminal_payload: Value =
+            serde_json::from_str(&terminal_result.result_json).expect("result is valid JSON");
+        assert_eq!(
+            terminal_payload["close"]["error_code"],
+            "receipt_source_mismatch"
+        );
+        assert!(store
+            .receipt("receipt-cli-finish")
+            .expect("invalid receipt lookup succeeds")
+            .is_none());
+        drop(store);
+        let replay = run(&invalid_finish_args())
+            .expect("the same operation reads back its terminal rejection");
+        assert_eq!(replay.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            replay.data.expect("rejected result data")["error_code"],
+            "receipt_source_mismatch"
+        );
+        fs::write(&receipt_path, valid_receipt_contents).expect("valid receipt is restored");
 
         let finish_result = run(&args(&[
             "agent",

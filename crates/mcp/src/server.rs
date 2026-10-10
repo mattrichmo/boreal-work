@@ -1573,10 +1573,11 @@ mod tests {
         let scope = match token {
             "synthetic-evidence" => "boreal:project:read boreal:project:evidence-write",
             "synthetic-finish" => "boreal:project:read boreal:project:finish-close",
+            "synthetic-write-only" => "boreal:project:work-write",
             _ => "boreal:project:read",
         };
         Json(json!({
-            "active": matches!(token, "synthetic-valid" | "synthetic-evidence" | "synthetic-finish"),
+            "active": matches!(token, "synthetic-valid" | "synthetic-evidence" | "synthetic-finish" | "synthetic-write-only"),
             "sub": "alice",
             "iss": provider_config.issuer,
             "aud": [provider_config.resource_uri],
@@ -1662,6 +1663,7 @@ mod tests {
                     projects: BTreeSet::from(["project-a".into()]),
                     scopes: BTreeSet::from([
                         SCOPE_PROJECT_READ.into(),
+                        SCOPE_PROJECT_WRITE.into(),
                         SCOPE_PROJECT_EVIDENCE_WRITE.into(),
                         SCOPE_PROJECT_FINISH_CLOSE.into(),
                     ]),
@@ -1771,6 +1773,35 @@ mod tests {
         assert!(finish_list_body.contains("project_finish_close"));
         assert!(!finish_list_body.contains("project_evidence_add"));
         assert!(!finish_list_body.contains("project_work_edit"));
+
+        // OAuth token scopes are intersected with the server policy. A
+        // work-write-only token must not retain an unusable or unrecoverable
+        // mutation grant when Project read is absent from the token itself.
+        let write_only_list = post_mcp(
+            &client,
+            &endpoint,
+            "synthetic-write-only",
+            json!({"jsonrpc":"2.0","id":7,"method":"tools/list","params":{"_meta":client_meta()}}),
+        )
+        .await;
+        assert_eq!(write_only_list.status(), StatusCode::OK);
+        let write_only_list_body = write_only_list.text().await.unwrap();
+        assert!(!write_only_list_body.contains("project_work_show"));
+        assert!(!write_only_list_body.contains("project_work_edit"));
+
+        let write_only_edit = post_mcp(
+            &client,
+            &endpoint,
+            "synthetic-write-only",
+            json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"_meta":client_meta(),"name":"project_work_edit","arguments":{"project_id":"project-a","work_id":"work-1","operation_id":"op_write_only","expected_revision":1,"title":"Synthetic edit"}}}),
+        )
+        .await;
+        assert_eq!(write_only_edit.status(), StatusCode::OK);
+        let write_only_edit_body = write_only_edit.text().await.unwrap();
+        assert!(
+            write_only_edit_body.contains("requires boreal:project:read"),
+            "{write_only_edit_body}"
+        );
 
         let denied = post_mcp(&client, &endpoint, "synthetic-valid", json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":client_meta(),"name":"project_work_show","arguments":{"project_id":"project-b","work_id":"work-1"}}})).await;
         assert_eq!(denied.status(), StatusCode::OK);

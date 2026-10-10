@@ -4941,6 +4941,15 @@ mod unix {
                         let error = map_application_error(error);
                         if error.code == ErrorCode::StaleRevision {
                             super::super::persist_finish_revision_conflict(&finish_context)?;
+                        } else if matches!(
+                            error.outcome,
+                            ApplicationOutcome::Rejected | ApplicationOutcome::Conflict
+                        ) {
+                            super::super::persist_finish_receipt_rejection(
+                                &finish_context,
+                                error.outcome,
+                                error.code,
+                            )?;
                         }
                         return Err(error);
                     }
@@ -8465,7 +8474,7 @@ mod tests {
         handler
             .start(&start, "op_service_finish_start")
             .expect("service start succeeds");
-        let finish = json!({
+        let mut finish = json!({
             "command": "finish_close",
             "project_id": "service-project",
             "work_id": "service-work",
@@ -8512,6 +8521,37 @@ mod tests {
             .operation("op_service_stale_finish_close")
             .expect("stale parent lookup succeeds")
             .is_none());
+
+        let mut invalid_receipt_finish = finish.clone();
+        invalid_receipt_finish["receipt"]["source_snapshot_hash"] =
+            json!(format!("sha256:{}", "0".repeat(64)));
+        let invalid_receipt_error = handler
+            .finish_close(&invalid_receipt_finish, "op_service_invalid_receipt_finish")
+            .expect_err("a mismatched receipt source is rejected");
+        assert_eq!(invalid_receipt_error.code, ErrorCode::ReceiptSourceMismatch);
+        let invalid_replay = handler
+            .finish_close(&invalid_receipt_finish, "op_service_invalid_receipt_finish")
+            .expect("the terminal receipt rejection is durably read back");
+        assert_eq!(invalid_replay.0, ApplicationOutcome::Rejected);
+        let invalid_data = invalid_replay.2.expect("rejected finish data");
+        assert_eq!(invalid_data["state"], "rejected");
+        assert_eq!(invalid_data["reason"], "receipt_record_rejected");
+        assert_eq!(invalid_data["error_code"], "receipt_source_mismatch");
+        let invalid_result = handler
+            .store
+            .operation("op_service_invalid_receipt_finish:result")
+            .expect("rejected result lookup succeeds")
+            .expect("rejected result operation exists");
+        assert_eq!(
+            invalid_result.outcome,
+            boreal_store::OperationOutcome::Rejected
+        );
+
+        // The rejected attempt advanced the audit revision but did not mutate
+        // the attempt or admit the bad receipt. Use the current revision for a
+        // separate valid finish operation below.
+        finish["expected_revision"] =
+            json!(handler.store.project_revision("service-project").unwrap().0);
 
         let result = handler
             .finish_close(&finish, "op_service_finish_close")
