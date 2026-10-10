@@ -1962,19 +1962,163 @@ mod tests {
 
     #[tokio::test]
     async fn stdio_transport_serves_mcp_tool_calls_over_jsonrpc_lines() {
+        use boreal_protocol::{
+            schema, ApplicationOutcome, Envelope, TransportOutcome, API_VERSION,
+        };
+        use boreal_service::{JsonResponse, TransportConfig, UnixSocketServer};
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{SystemTime, UNIX_EPOCH},
+        };
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        struct TempRoot(PathBuf);
+        impl Drop for TempRoot {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        struct EnvGuard {
+            name: String,
+            previous: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                if let Some(value) = self.previous.take() {
+                    std::env::set_var(&self.name, value);
+                } else {
+                    std::env::remove_var(&self.name);
+                }
+            }
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let root = TempRoot(std::env::temp_dir().join(format!(
+            "boreal-mcp-stdio-claim-{}-{nonce}",
+            std::process::id()
+        )));
+        fs::create_dir_all(&root.0).expect("private test root creates");
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700))
+            .expect("test root is private");
+        let project_socket = root.0.join("project.sock");
+        let service = UnixSocketServer::bind(&project_socket, TransportConfig::default())
+            .expect("synthetic Project service socket binds locally");
+        fs::set_permissions(&project_socket, fs::Permissions::from_mode(0o600))
+            .expect("synthetic Project socket is private");
+        let credential_env = format!(
+            "BOREAL_MCP_STDIO_CREDENTIAL_{}_{}",
+            std::process::id(),
+            nonce
+        );
+        let _credential_guard = EnvGuard {
+            name: credential_env.clone(),
+            previous: std::env::var_os(&credential_env),
+        };
+        std::env::set_var(&credential_env, "synthetic-project-credential");
+
+        let expected_claim = json!({
+            "project_id": "project-a",
+            "work_id": "work-a",
+            "attempt_id": "attempt-wire-claim",
+            "actor_id": "local-agent",
+            "harness_id": "mcp",
+            "session_id": "session-ended",
+            "expected_revision": 7,
+            "lease_ttl_ms": 60_000,
+            "hard_time_limit_ms": 300_000,
+            "source_version_id": "source-v1",
+            "config_identity": "config-v1",
+        });
+        let claim_digest = boreal_application::canonical_request_digest(
+            "attempt.claim/v1",
+            expected_claim.clone(),
+        );
+        let service_thread = std::thread::spawn(move || {
+            service
+                .serve_once(|request| {
+                    let payload: Value = serde_json::from_str(request.payload())
+                        .expect("MCP Project request is JSON");
+                    let operation_id = payload["operation_id"]
+                        .as_str()
+                        .expect("Project read has its own operation identity");
+                    assert_eq!(payload["data"]["command"], "operation_show");
+                    assert_eq!(payload["data"]["target_operation_id"], "op_mcp_wire_claim");
+                    assert_eq!(
+                        payload["data"]["credential_ref"],
+                        "synthetic-project-credential"
+                    );
+                    let response = Envelope {
+                        api_version: API_VERSION.into(),
+                        schema_version: schema::ENVELOPE.into(),
+                        operation_id: operation_id.to_owned(),
+                        revision: Some(12),
+                        as_of: "unix-ms:1".into(),
+                        next_status_change_at: None,
+                        transport: TransportOutcome::Ok,
+                        outcome: ApplicationOutcome::Unchanged,
+                        data: Some(json!({
+                            "operation": {
+                                "operation_id": "op_mcp_wire_claim",
+                                "project_id": "project-a",
+                                "command": "work.claim",
+                                "actor_id": "local-agent",
+                                "session_id": "session-ended",
+                                "attempt_id": "attempt-wire-claim",
+                                "fence": 1,
+                                "request_digest": claim_digest,
+                                "outcome": "changed",
+                                "result": {"attempt_id": "attempt-wire-claim", "fence": 1},
+                                "revision": 8,
+                            },
+                            "execution": null,
+                            "external_job": null,
+                            "recovery_obligations": [],
+                            "receipt_id": null,
+                            "receipt": null,
+                            "readback_required": false,
+                        })),
+                        detail_ref: None,
+                        error: None,
+                    };
+                    let transport = json!({
+                        "api_version": "2",
+                        "schema_version": schema::ENVELOPE,
+                        "operation_id": operation_id,
+                        "data": response,
+                    });
+                    Ok(JsonResponse::success(
+                        request.request_id().to_owned(),
+                        serde_json::to_string(&transport).expect("Project response serializes"),
+                    )
+                    .expect("Project response is a valid service frame"))
+                })
+                .expect("synthetic Project service handles claim readback");
+        });
 
         let config = McpConfig {
             version: 1,
             global: None,
-            projects: BTreeMap::new(),
+            projects: BTreeMap::from([(
+                "project-a".into(),
+                ProjectEndpoint {
+                    socket: project_socket,
+                    credential_env_by_actor: BTreeMap::from([(
+                        "local-agent".into(),
+                        credential_env,
+                    )]),
+                },
+            )]),
             principals: BTreeMap::new(),
             stdio_profiles: BTreeMap::from([(
                 "local".into(),
                 Policy {
                     actor_id: "local-agent".into(),
-                    projects: BTreeSet::new(),
-                    scopes: BTreeSet::new(),
+                    projects: BTreeSet::from(["project-a".into()]),
+                    scopes: BTreeSet::from([SCOPE_PROJECT_READ.into(), SCOPE_PROJECT_WRITE.into()]),
                 },
             )]),
             http: None,
@@ -2016,6 +2160,30 @@ mod tests {
                     }
                 }),
             ),
+            (
+                3,
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":3,
+                    "method":"tools/call",
+                    "params":{
+                        "_meta":client_meta(),
+                        "name":"project_work_claim",
+                        "arguments":{
+                            "project_id":"project-a",
+                            "work_id":"work-a",
+                            "operation_id":"op_mcp_wire_claim",
+                            "attempt_id":"attempt-wire-claim",
+                            "session_id":"session-ended",
+                            "source_version_id":"source-v1",
+                            "config_identity":"config-v1",
+                            "expected_revision":7,
+                            "lease_ttl_ms":60000,
+                            "time_limit_ms":300000
+                        }
+                    }
+                }),
+            ),
         ] {
             let mut encoded = serde_json::to_vec(&message).expect("MCP request serializes");
             encoded.push(b'\n');
@@ -2053,9 +2221,21 @@ mod tests {
                     json!(["stdio", "streamable_http"])
                 );
                 assert_eq!(capabilities["global"]["available"], false);
+            } else if id == 3 {
+                let result_text = response["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("claim replay returns a text block");
+                let claim_result: Value =
+                    serde_json::from_str(result_text).expect("claim result is JSON");
+                assert_eq!(claim_result["outcome"], "unchanged");
+                assert_eq!(claim_result["data"]["replayed"], true);
+                assert_eq!(claim_result["data"]["attempt_id"], "attempt-wire-claim");
             }
         }
 
+        service_thread
+            .join()
+            .expect("synthetic Project service thread joins");
         server_task.abort();
         let _ = server_task.await;
     }

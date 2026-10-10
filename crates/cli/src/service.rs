@@ -4246,12 +4246,6 @@ mod unix {
 
         pub(super) fn claim(&mut self, data: &Value, operation: &str) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
-            validate_source_context(
-                &self.store,
-                &project,
-                optional_string(data, "source_version_id")?.as_deref(),
-                data.get("config_identity").and_then(Value::as_str),
-            )?;
             let work_id = string(data, "work_id")?;
             let actor = string(data, "actor_id")?;
             let harness = string(data, "harness_id")?;
@@ -4277,13 +4271,24 @@ mod unix {
                 hard_time_limit_ms,
             )?;
             let app = WorkApplication::new(&self.store);
-            // Resolve the project/work FK path before attempting session
-            // registration. Actor FK validation remains inside the atomic
-            // registration transaction, before its session insert.
-            app.show_work(&project, &work_id)
-                .map_err(map_application_error)?;
             let expected_revision = optional_u64(data, "expected_revision")?;
             let existing_operation = self.store.operation(operation).map_err(map_store_error)?;
+            if existing_operation.is_none() {
+                // Resolve the project/work FK path before attempting session
+                // registration. Actor FK validation remains inside the
+                // atomic registration transaction before its session insert.
+                app.show_work(&project, &work_id)
+                    .map_err(map_application_error)?;
+                // Availability is an admission-time condition. Do not let a
+                // later source change invalidate the readback of a committed
+                // claim with the same durable operation identity.
+                validate_source_context(
+                    &self.store,
+                    &project,
+                    optional_string(data, "source_version_id")?.as_deref(),
+                    data.get("config_identity").and_then(Value::as_str),
+                )?;
+            }
             let claim_revision = if let Some(existing) = existing_operation {
                 // The effective revision may have been advanced by the
                 // service's implicit session registration. Reuse the value
@@ -5309,25 +5314,15 @@ mod unix {
             expected_revision: Option<u64>,
         ) -> Result<Option<u64>, CliError> {
             let app = WorkApplication::new(&self.store);
-            let request = SessionRegistrationRequest {
-                project_id: project.clone(),
-                session_id: SessionId::new(session),
-                actor_id: ActorId::new(actor),
-                harness_id: HarnessId::new(harness),
-                operation_id: OperationId::new(sub_operation(operation, "session")),
-                request_digest: canonical_request_digest(
-                    "session.register/v1",
-                    json!({
-                        "project_id": project.as_str(),
-                        "session_id": session,
-                        "actor_id": actor,
-                        "harness_id": harness,
-                        "started_at": started_at.as_millis(),
-                    }),
-                ),
-                expected_project_revision: expected_revision,
+            let mut request = SessionRegistrationRequest::new(
+                project.clone(),
+                SessionId::new(session),
+                ActorId::new(actor),
+                HarnessId::new(harness),
+                OperationId::new(sub_operation(operation, "session")),
                 started_at,
-            };
+            );
+            request.expected_project_revision = expected_revision;
             let result = app
                 .register_session(&request)
                 .map_err(map_application_error)?;
@@ -7860,6 +7855,19 @@ mod tests {
             .claim(&data, "op_cli_claim_deterministic")
             .expect("session-bound claim succeeds");
         assert_eq!(result.0, ApplicationOutcome::Changed);
+        let mut registration_retry = SessionRegistrationRequest::new(
+            ProjectId::new("service-project"),
+            SessionId::new("session-deterministic"),
+            ActorId::new(DEFAULT_ACTOR),
+            HarnessId::new(DEFAULT_HARNESS),
+            OperationId::new("op_cli_claim_deterministic_session"),
+            TimestampMs::from_millis(9_999),
+        );
+        registration_retry.expected_project_revision = Some(revision);
+        let registration_replay = WorkApplication::new(&handler.store)
+            .register_session(&registration_retry)
+            .expect("concurrent session registration shares a stable identity");
+        assert!(!registration_replay.changed);
         let session = handler
             .store
             .session("service-project", "session-deterministic")
