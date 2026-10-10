@@ -162,11 +162,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
+name = "boreal-application"
+version = "0.2.1"
+dependencies = [
+ "boreal-domain",
+ "boreal-memory",
+ "boreal-migration",
+ "boreal-source",
+ "boreal-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "boreal-domain"
+version = "0.2.1"
+
+[[package]]
 name = "boreal-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
  "axum-server",
+ "boreal-application",
  "boreal-protocol",
  "boreal-service",
  "futures-util",
@@ -186,6 +204,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "boreal-memory"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "boreal-migration"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "boreal-protocol"
 version = "0.2.1"
 dependencies = [
@@ -196,6 +230,23 @@ dependencies = [
 [[package]]
 name = "boreal-service"
 version = "0.2.1"
+
+[[package]]
+name = "boreal-source"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "boreal-store"
+version = "0.2.1"
+dependencies = [
+ "boreal-domain",
+ "libsqlite3-sys",
+ "serde_json",
+]
 
 [[package]]
 name = "bumpalo"
@@ -901,6 +952,17 @@ name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+
+[[package]]
+name = "libsqlite3-sys"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "litemap"
@@ -1969,6 +2031,12 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "walkdir"

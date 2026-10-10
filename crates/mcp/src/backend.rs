@@ -152,7 +152,7 @@ impl BorealBackend {
             "unavailable": [
                 "source and memory content reads await the digest-verified bounded-read service contract",
                 "artifact body reads are not exposed",
-                "Global writes, Send, and machine administration are not exposed"
+                "Global writes, Send, evidence submission, review decisions, operator hold resolution, and machine administration are not exposed"
             ],
         })
     }
@@ -231,6 +231,51 @@ impl BorealBackend {
             .await
     }
 
+    pub async fn project_review_list(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        project_id: String,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Value, AdapterError> {
+        let project_id = self.authorize_project(principal, &project_id, SCOPE_PROJECT_READ)?;
+        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+            return Err(AdapterError::InvalidInput {
+                field: "limit",
+                reason: "must be from 1 to 50",
+            });
+        }
+        if offset > MAX_PAGE_OFFSET {
+            return Err(AdapterError::InvalidInput {
+                field: "offset",
+                reason: "must be at most 100000",
+            });
+        }
+        let operation_id = next_read_operation_id();
+        let mut data = self.project_common(principal, &project_id, &operation_id)?;
+        data["command"] = json!("review_list");
+        data["limit"] = json!(limit);
+        data["offset"] = json!(offset);
+        self.project_call(&project_id, operation_id, data, false)
+            .await
+    }
+
+    pub async fn project_review_show(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        project_id: String,
+        review_id: String,
+    ) -> Result<Value, AdapterError> {
+        let project_id = self.authorize_project(principal, &project_id, SCOPE_PROJECT_READ)?;
+        validate_identifier(&review_id, "review_id")?;
+        let operation_id = next_read_operation_id();
+        let mut data = self.project_common(principal, &project_id, &operation_id)?;
+        data["command"] = json!("review_show");
+        data["review_id"] = json!(review_id);
+        self.project_call(&project_id, operation_id, data, false)
+            .await
+    }
+
     pub async fn project_operation_status(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -244,6 +289,412 @@ impl BorealBackend {
         data["command"] = json!("operation_show");
         data["target_operation_id"] = json!(target_operation_id);
         self.project_call(&project_id, operation_id, data, false)
+            .await
+    }
+
+    /// Call the existing Project guide/next/resume service routes for a stable,
+    /// client-selected session identity. The service still binds the actor from
+    /// the authenticated principal and validates all attempt ownership.
+    pub async fn project_agent_context(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: ProjectAgentContextInput,
+        command: &'static str,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_READ)?;
+        if !matches!(command, "guide" | "next" | "resume") {
+            return Err(AdapterError::ProtocolMismatch);
+        }
+        validate_identifier(&input.session_id, "session_id")?;
+        if let Some(work_id) = input.work_id.as_deref() {
+            validate_identifier(work_id, "work_id")?;
+        }
+        if let Some(attempt_id) = input.attempt_id.as_deref() {
+            validate_identifier(attempt_id, "attempt_id")?;
+        }
+        let operation_id = next_read_operation_id();
+        let mut data = self.project_common_for_session(
+            principal,
+            &project_id,
+            &operation_id,
+            &input.session_id,
+        )?;
+        data["command"] = json!(command);
+        data["work_id"] = input.work_id.map_or(Value::Null, Value::String);
+        data["attempt_id"] = input.attempt_id.map_or(Value::Null, Value::String);
+        self.project_call(&project_id, operation_id, data, false)
+            .await
+    }
+
+    /// Register a caller's stable Project session through Boreal's existing
+    /// session service command. The session ID is an audit label, not proof of
+    /// the authenticated actor.
+    pub async fn project_session_start(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: ProjectSessionStartInput,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_WRITE)?;
+        validate_identifier(&input.session_id, "session_id")?;
+        validate_operation_id(&input.operation_id)?;
+        if input.expected_revision == 0 {
+            return Err(AdapterError::InvalidInput {
+                field: "expected_revision",
+                reason: "must be a positive committed revision",
+            });
+        }
+        let operation_id = input.operation_id.clone();
+        let mut data = self.project_common_for_session(
+            principal,
+            &project_id,
+            &operation_id,
+            &input.session_id,
+        )?;
+        data["command"] = json!("session_start");
+        data["expected_revision"] = json!(input.expected_revision);
+        self.project_call(&project_id, operation_id, data, true)
+            .await
+    }
+
+    /// End the caller's server-bound session through Boreal's existing
+    /// session contract. This records the boundary; it does not invent or
+    /// publish a handoff summary.
+    pub async fn project_session_end(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: ProjectSessionEndInput,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_WRITE)?;
+        validate_identifier(&input.session_id, "session_id")?;
+        validate_operation_id(&input.operation_id)?;
+        if input.expected_revision == 0 {
+            return Err(AdapterError::InvalidInput {
+                field: "expected_revision",
+                reason: "must be a positive committed revision",
+            });
+        }
+        let operation_id = input.operation_id.clone();
+        let mut data = self.project_common_for_session(
+            principal,
+            &project_id,
+            &operation_id,
+            &input.session_id,
+        )?;
+        data["command"] = json!("session_end");
+        data["expected_revision"] = json!(input.expected_revision);
+        self.project_call(&project_id, operation_id, data, true)
+            .await
+    }
+
+    /// Create a work item through the existing Project application command.
+    /// The server supplies the actor and harness from the authenticated policy.
+    pub async fn project_work_create(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: WorkCreateInput,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_WRITE)?;
+        validate_identifier(&input.session_id, "session_id")?;
+        if let Some(work_id) = input.work_id.as_deref() {
+            validate_identifier(work_id, "work_id")?;
+        }
+        if let Some(parent_id) = input.parent_id.as_deref() {
+            validate_identifier(parent_id, "parent_id")?;
+        }
+        if !matches!(input.kind.as_str(), "milestone" | "sprint" | "task") {
+            return Err(AdapterError::InvalidInput {
+                field: "kind",
+                reason: "must be milestone, sprint, or task",
+            });
+        }
+        if input.title.trim().is_empty() || input.title.len() > MAX_TEXT_BYTES {
+            return Err(AdapterError::InvalidInput {
+                field: "title",
+                reason: "must be non-empty and at most 4096 bytes",
+            });
+        }
+        if input.description.len() > MAX_TEXT_BYTES {
+            return Err(AdapterError::InvalidInput {
+                field: "description",
+                reason: "must be at most 4096 bytes",
+            });
+        }
+        if input
+            .dispatch_policy
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "automatic" | "operator_only" | "paused"))
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "dispatch_policy",
+                reason: "must be automatic, operator_only, or paused",
+            });
+        }
+        if input
+            .hold
+            .as_deref()
+            .is_some_and(|value| validate_external_identity(value, "hold").is_err())
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "hold",
+                reason: "must be a bounded non-empty identifier without control characters",
+            });
+        }
+        if input
+            .profile
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "focused" | "reviewed"))
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "profile",
+                reason: "must be focused or reviewed",
+            });
+        }
+        validate_operation_id(&input.operation_id)?;
+        if input.expected_revision == 0 {
+            return Err(AdapterError::InvalidInput {
+                field: "expected_revision",
+                reason: "must be a positive committed revision",
+            });
+        }
+        let operation_id = input.operation_id.clone();
+        let mut data = self.project_common_for_session(
+            principal,
+            &project_id,
+            &operation_id,
+            &input.session_id,
+        )?;
+        data["command"] = json!("create_work");
+        data["work_id"] = input.work_id.map_or(Value::Null, Value::String);
+        data["kind"] = json!(input.kind);
+        data["parent_id"] = input.parent_id.map_or(Value::Null, Value::String);
+        data["title"] = json!(input.title);
+        data["description"] = json!(input.description);
+        data["priority"] = json!(input.priority);
+        data["dispatch"] = json!(input.dispatch_policy.unwrap_or_else(|| "automatic".into()));
+        data["hold"] = input.hold.map_or(Value::Null, Value::String);
+        data["profile"] = json!(input.profile.unwrap_or_else(|| "focused".into()));
+        data["profile_version"] = json!("1");
+        data["expected_revision"] = json!(input.expected_revision);
+        self.project_call(&project_id, operation_id, data, true)
+            .await
+    }
+
+    /// Record a bounded, reason-coded wait using Boreal's existing work hold
+    /// contract. Resolving an operator-owned hold is not exposed here.
+    pub async fn project_work_wait(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: WorkWaitInput,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_WRITE)?;
+        validate_identifier(&input.work_id, "work_id")?;
+        validate_external_identity(&input.reason_code, "reason_code")?;
+        validate_operation_id(&input.operation_id)?;
+        if input.expected_revision == 0 {
+            return Err(AdapterError::InvalidInput {
+                field: "expected_revision",
+                reason: "must be a positive committed revision",
+            });
+        }
+        let operation_id = input.operation_id.clone();
+        let mut data = self.project_common(principal, &project_id, &operation_id)?;
+        data["command"] = json!("work_hold_add");
+        data["work_id"] = json!(input.work_id);
+        data["reason_code"] = json!(input.reason_code);
+        data["expected_revision"] = json!(input.expected_revision);
+        self.project_call(&project_id, operation_id, data, true)
+            .await
+    }
+
+    /// Start or resume one task through the existing atomic agent.start route.
+    /// A caller supplies only a stable session label and source/configuration
+    /// identities from the current guide; actor and project authority remain
+    /// server-bound.
+    pub async fn project_agent_start(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: AgentStartInput,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_WRITE)?;
+        validate_identifier(&input.session_id, "session_id")?;
+        if let Some(work_id) = input.work_id.as_deref() {
+            validate_identifier(work_id, "work_id")?;
+        }
+        if let Some(attempt_id) = input.attempt_id.as_deref() {
+            validate_identifier(attempt_id, "attempt_id")?;
+        }
+        if input.fence.is_some_and(|fence| fence == 0)
+            || input.attempt_id.is_some() != input.fence.is_some()
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "attempt_id or fence",
+                reason: "attempt_id and a positive fence must be supplied together",
+            });
+        }
+        validate_external_identity(&input.source_version_id, "source_version_id")?;
+        validate_external_identity(&input.config_identity, "config_identity")?;
+        validate_operation_id(&input.operation_id)?;
+        if input.expected_revision == 0 {
+            return Err(AdapterError::InvalidInput {
+                field: "expected_revision",
+                reason: "must be a positive committed revision",
+            });
+        }
+        if input
+            .lease_ttl_ms
+            .is_some_and(|value| !(5_000..=3_600_000).contains(&value))
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "lease_ttl_ms",
+                reason: "must be from 5000 to 3600000",
+            });
+        }
+        if input
+            .time_limit_ms
+            .is_some_and(|value| !(30_000..=86_400_000).contains(&value))
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "time_limit_ms",
+                reason: "must be from 30000 to 86400000",
+            });
+        }
+        let operation_id = input.operation_id.clone();
+        let mut data = self.project_common_for_session(
+            principal,
+            &project_id,
+            &operation_id,
+            &input.session_id,
+        )?;
+        data["command"] = json!("start");
+        data["work_id"] = input.work_id.map_or(Value::Null, Value::String);
+        data["attempt_id"] = input.attempt_id.map_or(Value::Null, Value::String);
+        data["fence"] = input.fence.map_or(Value::Null, |value| json!(value));
+        data["source_version_id"] = json!(input.source_version_id);
+        data["config_identity"] = json!(input.config_identity);
+        data["expected_revision"] = json!(input.expected_revision);
+        data["lease_ttl_ms"] = input.lease_ttl_ms.map_or(Value::Null, |value| json!(value));
+        data["hard_time_limit_ms"] = input
+            .time_limit_ms
+            .map_or(Value::Null, |value| json!(value));
+        self.project_call(&project_id, operation_id, data, true)
+            .await
+    }
+
+    /// Record progress through Boreal's typed CompletionCommandDto route.
+    pub async fn project_work_checkpoint(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: WorkCheckpointInput,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_WRITE)?;
+        validate_identifier(&input.session_id, "session_id")?;
+        validate_identifier(&input.work_id, "work_id")?;
+        validate_operation_id(&input.operation_id)?;
+        if input.expected_revision == 0 {
+            return Err(AdapterError::InvalidInput {
+                field: "expected_revision",
+                reason: "must be a positive committed revision",
+            });
+        }
+        if input.reason.trim().is_empty() || input.reason.len() > MAX_TEXT_BYTES {
+            return Err(AdapterError::InvalidInput {
+                field: "reason",
+                reason: "must be non-empty and at most 4096 bytes",
+            });
+        }
+        let operation_id = input.operation_id.clone();
+        let mut data = self.project_common_for_session(
+            principal,
+            &project_id,
+            &operation_id,
+            &input.session_id,
+        )?;
+        data["command"] = json!("completion");
+        data["completion"] = json!({
+            "kind": "work.checkpoint",
+            "work_id": input.work_id,
+            "expected_revision": input.expected_revision,
+            "expected_entity_revision": input.expected_entity_revision,
+            "expected_proof_revision": input.expected_proof_revision,
+            "reason": input.reason,
+            "confirmed": input.confirmed,
+        });
+        self.project_call(&project_id, operation_id, data, true)
+            .await
+    }
+
+    /// Submit an attempt for downstream verification or explicitly release it.
+    /// Final acceptance/review decisions are not exposed by this adapter.
+    pub async fn project_attempt_transition(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: AttemptTransitionInput,
+        command: &'static str,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_WRITE)?;
+        validate_identifier(&input.session_id, "session_id")?;
+        validate_identifier(&input.work_id, "work_id")?;
+        validate_identifier(&input.attempt_id, "attempt_id")?;
+        validate_operation_id(&input.operation_id)?;
+        if input.fence == 0 || input.expected_revision == 0 {
+            return Err(AdapterError::InvalidInput {
+                field: "fence or expected_revision",
+                reason: "fence and expected_revision must be positive",
+            });
+        }
+        if matches!(command, "release" | "submit")
+            && input
+                .reason
+                .as_ref()
+                .is_some_and(|reason| reason.len() > MAX_TEXT_BYTES)
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "reason",
+                reason: "must be at most 4096 bytes",
+            });
+        }
+        if !matches!(command, "submit" | "release" | "heartbeat" | "renew") {
+            return Err(AdapterError::ProtocolMismatch);
+        }
+        if matches!(command, "heartbeat" | "renew")
+            && input
+                .lease_ttl_ms
+                .is_some_and(|value| !(5_000..=3_600_000).contains(&value))
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "lease_ttl_ms",
+                reason: "must be from 5000 to 3600000",
+            });
+        }
+        if command == "renew" && input.lease_ttl_ms.is_none() {
+            return Err(AdapterError::InvalidInput {
+                field: "lease_ttl_ms",
+                reason: "is required for lease renewal",
+            });
+        }
+        let operation_id = input.operation_id.clone();
+        let mut data = self.project_common_for_session(
+            principal,
+            &project_id,
+            &operation_id,
+            &input.session_id,
+        )?;
+        data["command"] = json!(command);
+        data["work_id"] = json!(input.work_id);
+        data["attempt_id"] = json!(input.attempt_id);
+        data["fence"] = json!(input.fence);
+        data["expected_revision"] = json!(input.expected_revision);
+        data["reason"] = input.reason.map_or(Value::Null, Value::String);
+        data["lease_ttl_ms"] = input.lease_ttl_ms.map_or(Value::Null, |value| json!(value));
+        self.project_call(&project_id, operation_id, data, true)
             .await
     }
 
@@ -351,6 +802,56 @@ impl BorealBackend {
                 reason: "must be from 30000 to 86400000",
             });
         }
+        let request_digest = boreal_application::canonical_request_digest(
+            "attempt.claim/v1",
+            json!({
+                "project_id": project_id,
+                "work_id": input.work_id,
+                "attempt_id": input.attempt_id,
+                "actor_id": principal.actor_id,
+                "harness_id": "mcp",
+                "session_id": input.session_id,
+                "expected_revision": input.expected_revision,
+                "lease_ttl_ms": input.lease_ttl_ms,
+                "hard_time_limit_ms": input.time_limit_ms,
+                "source_version_id": input.source_version_id,
+                "config_identity": input.config_identity,
+            }),
+        );
+        match self
+            .project_operation_status(principal, project_id.clone(), input.operation_id.clone())
+            .await
+        {
+            Ok(status) => {
+                let operation = &status["data"]["operation"];
+                if !operation.is_null() {
+                    return self.claim_operation_replay(
+                        principal,
+                        &input,
+                        &request_digest,
+                        operation,
+                    );
+                }
+            }
+            Err(AdapterError::UnknownOutcome {
+                readback: Some(readback),
+                ..
+            }) if readback["operation"].is_null() => {}
+            Err(AdapterError::Application { error, .. })
+                if error.code == boreal_protocol::ErrorCode::NotFound => {}
+            Err(AdapterError::UnknownOutcome {
+                readback: Some(readback),
+                ..
+            }) if !readback["operation"].is_null() => {
+                return self.claim_operation_replay(
+                    principal,
+                    &input,
+                    &request_digest,
+                    &readback["operation"],
+                );
+            }
+            Err(error) => return Err(error),
+        }
         let operation_id = input.operation_id.clone();
         let mut data = self.project_common(principal, &project_id, &operation_id)?;
         data["command"] = json!("claim");
@@ -366,8 +867,87 @@ impl BorealBackend {
         if let Some(value) = input.time_limit_ms {
             data["time_limit_ms"] = json!(value);
         }
-        self.project_call(&project_id, operation_id, data, true)
+        match self
+            .project_call(&project_id, operation_id, data, true)
             .await
+        {
+            Err(error @ AdapterError::Application { .. })
+                if matches!(
+                    &error,
+                    AdapterError::Application { error, .. }
+                        if error.code == boreal_protocol::ErrorCode::ClaimConflict
+                ) =>
+            {
+                match self
+                    .project_operation_status(
+                        principal,
+                        project_id.clone(),
+                        input.operation_id.clone(),
+                    )
+                    .await
+                {
+                    Ok(status) if !status["data"]["operation"].is_null() => self
+                        .claim_operation_replay(
+                            principal,
+                            &input,
+                            &request_digest,
+                            &status["data"]["operation"],
+                        ),
+                    _ => Err(error),
+                }
+            }
+            result => result,
+        }
+    }
+
+    fn claim_operation_replay(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: &WorkClaimInput,
+        request_digest: &str,
+        operation: &Value,
+    ) -> Result<Value, AdapterError> {
+        let matches_request = operation["operation_id"] == input.operation_id
+            && operation["project_id"] == input.project_id
+            && operation["command"] == "work.claim"
+            && operation["actor_id"] == principal.actor_id
+            && operation["session_id"] == input.session_id
+            && operation["attempt_id"] == input.attempt_id
+            && operation["request_digest"] == request_digest
+            && operation["result"]["attempt_id"] == input.attempt_id
+            && operation["fence"] == operation["result"]["fence"];
+        if !matches_request {
+            return Err(AdapterError::Application {
+                operation_id: input.operation_id.clone(),
+                outcome: ApplicationOutcome::Conflict,
+                error: ProtocolError::new(
+                    boreal_protocol::ErrorCode::ClaimConflict,
+                    "durable operation ID is already bound to another immutable claim request",
+                    false,
+                ),
+                revision: operation["revision"].as_u64(),
+            });
+        }
+        if !matches!(operation["outcome"].as_str(), Some("changed" | "unchanged")) {
+            return Err(AdapterError::UnknownOutcome {
+                operation_id: input.operation_id.clone(),
+                readback: Some(operation.clone()),
+                protocol_error: None,
+            });
+        }
+        let mut result = operation["result"].clone();
+        let Some(result_object) = result.as_object_mut() else {
+            return Err(AdapterError::ProtocolMismatch);
+        };
+        result_object.insert("replayed".into(), json!(true));
+        Ok(json!({
+            "api_version": API_VERSION,
+            "schema_version": boreal_protocol::schema::ENVELOPE,
+            "operation_id": input.operation_id,
+            "revision": operation["revision"],
+            "outcome": "unchanged",
+            "data": result,
+        }))
     }
 
     pub async fn global_page(
@@ -471,6 +1051,17 @@ impl BorealBackend {
         project_id: &str,
         operation_id: &str,
     ) -> Result<Value, AdapterError> {
+        let session_id = format!("mcp-{}", principal.actor_id);
+        self.project_common_for_session(principal, project_id, operation_id, &session_id)
+    }
+
+    fn project_common_for_session(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        project_id: &str,
+        operation_id: &str,
+        session_id: &str,
+    ) -> Result<Value, AdapterError> {
         let endpoint = self
             .config
             .projects
@@ -491,7 +1082,7 @@ impl BorealBackend {
             "actor_id": principal.actor_id,
             "credential_ref": credential,
             "harness_id": "mcp",
-            "session_id": format!("mcp-{}", principal.actor_id),
+            "session_id": session_id,
             "operation_id": operation_id,
         }))
     }
@@ -606,6 +1197,111 @@ pub struct WorkClaimInput {
     pub expected_revision: u64,
     pub lease_ttl_ms: Option<u64>,
     pub time_limit_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectAgentContextInput {
+    pub project_id: String,
+    /// Stable per-agent execution identity, not an authorization credential.
+    pub session_id: String,
+    pub work_id: Option<String>,
+    pub attempt_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStartInput {
+    pub project_id: String,
+    /// Reuse this ID for resume; choose a distinct ID for concurrent workers.
+    pub session_id: String,
+    /// Omit to let Boreal's authoritative selector choose ready work.
+    pub work_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub fence: Option<u64>,
+    /// Copy the active source and configuration identities from the guide.
+    pub source_version_id: String,
+    pub config_identity: String,
+    pub expected_revision: u64,
+    pub operation_id: String,
+    pub lease_ttl_ms: Option<u64>,
+    pub time_limit_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkCheckpointInput {
+    pub project_id: String,
+    pub session_id: String,
+    pub work_id: String,
+    pub expected_revision: u64,
+    pub expected_entity_revision: u64,
+    pub expected_proof_revision: u64,
+    pub reason: String,
+    pub confirmed: bool,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptTransitionInput {
+    pub project_id: String,
+    pub session_id: String,
+    pub work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub expected_revision: u64,
+    pub operation_id: String,
+    pub reason: Option<String>,
+    pub lease_ttl_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSessionStartInput {
+    pub project_id: String,
+    /// Stable execution label, not an authorization credential.
+    pub session_id: String,
+    pub expected_revision: u64,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSessionEndInput {
+    pub project_id: String,
+    /// End only the session associated with the authenticated actor.
+    pub session_id: String,
+    pub expected_revision: u64,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkCreateInput {
+    pub project_id: String,
+    pub session_id: String,
+    pub work_id: Option<String>,
+    pub kind: String,
+    pub parent_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub priority: u8,
+    pub dispatch_policy: Option<String>,
+    pub hold: Option<String>,
+    pub profile: Option<String>,
+    pub expected_revision: u64,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkWaitInput {
+    pub project_id: String,
+    pub work_id: String,
+    pub reason_code: String,
+    pub expected_revision: u64,
+    pub operation_id: String,
 }
 
 #[cfg(unix)]
@@ -922,10 +1618,28 @@ fn project_tool_names(read: bool, write: bool) -> Vec<&'static str> {
             "project_work_show",
             "project_source_list",
             "operation_status",
+            "project_agent_guide",
+            "project_agent_next",
+            "project_agent_resume",
+            "project_review_list",
+            "project_review_show",
         ]);
     }
     if write {
-        result.extend(["project_work_edit", "project_work_claim"]);
+        result.extend([
+            "project_work_edit",
+            "project_work_claim",
+            "project_session_start",
+            "project_session_end",
+            "project_work_create",
+            "project_work_wait",
+            "project_agent_start",
+            "project_work_checkpoint",
+            "project_attempt_submit",
+            "project_attempt_release",
+            "project_attempt_heartbeat",
+            "project_attempt_renew",
+        ]);
     }
     result
 }
@@ -1093,8 +1807,14 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires a freshly built bwrk binary; run the documented daemon regression command"]
-    async fn project_status_and_operation_readback_accept_a_real_disposable_daemon() {
-        use std::os::unix::net::UnixStream;
+    async fn project_work_journey_and_lost_reply_reconcile_with_real_daemon() {
+        use std::{
+            io::{Read, Write},
+            os::unix::{
+                fs::PermissionsExt,
+                net::{UnixListener, UnixStream},
+            },
+        };
 
         struct TempRoot(PathBuf);
         impl Drop for TempRoot {
@@ -1170,7 +1890,8 @@ mod tests {
         let db = root.0.join(".boreal/boreal.sqlite");
         let socket = root.0.join(".boreal/mcp-project.sock");
         let project_id = "mcp-daemon-project";
-        let actor_id = "mcp-daemon-agent";
+        let actor_id = "mcp-daemon-operator";
+        let worker_id = "mcp-daemon-worker";
         let target_operation_id = "op_mcp_daemon_session";
         run_cli(
             &binary,
@@ -1186,7 +1907,7 @@ mod tests {
             ],
             &db,
         );
-        run_cli(
+        let session_result = run_cli(
             &binary,
             &root.0,
             &[
@@ -1197,7 +1918,7 @@ mod tests {
                 "--actor",
                 actor_id,
                 "--harness",
-                "mcp-daemon-test",
+                "mcp",
                 "--session",
                 "mcp-daemon-session",
                 "--operation-id",
@@ -1206,6 +1927,81 @@ mod tests {
             &db,
         );
 
+        let session_revision = session_result["revision"]
+            .as_u64()
+            .expect("session registration returns a revision");
+        let source_path = root.0.join("mcp-source.txt");
+        fs::write(&source_path, "synthetic MCP daemon source\n")
+            .expect("synthetic source file is created");
+        let source_result = run_cli(
+            &binary,
+            &root.0,
+            &[
+                "source",
+                "add",
+                project_id,
+                "--input",
+                source_path.to_str().expect("temp source path is UTF-8"),
+                "--origin",
+                "synthetic-mcp-test",
+                "--actor",
+                actor_id,
+                "--harness",
+                "mcp",
+                "--session",
+                "mcp-daemon-session",
+                "--expected-revision",
+                &session_revision.to_string(),
+                "--operation-id",
+                "op_mcp_daemon_source_add",
+            ],
+            &db,
+        );
+        let source_version_id = source_result["data"]["source"]["source_version_id"]
+            .as_str()
+            .or_else(|| source_result["data"]["source_version_id"].as_str())
+            .expect("source registration returns its immutable version ID")
+            .to_owned();
+        let enrollment = run_cli(
+            &binary,
+            &root.0,
+            &[
+                "auth",
+                "key",
+                "--project",
+                project_id,
+                "--actor",
+                worker_id,
+                "--actor-role",
+                "agent",
+            ],
+            &db,
+        );
+        let enrollment_path = enrollment["data"]["enrollment_path"]
+            .as_str()
+            .expect("auth key returns the private synthetic enrollment path");
+        let _grant = run_cli(
+            &binary,
+            &root.0,
+            &[
+                "auth",
+                "grant",
+                "--project",
+                project_id,
+                "--actor",
+                actor_id,
+                "--input",
+                enrollment_path,
+                "--expected-revision",
+                &source_result["revision"].as_u64().unwrap().to_string(),
+                "--reason",
+                "disposable MCP integration fixture",
+                "--yes",
+                "--operation-id",
+                "op_mcp_daemon_worker_grant",
+            ],
+            &db,
+        );
         let credential = fs::read_dir(root.0.join(".boreal/credentials"))
             .expect("project credential directory exists")
             .filter_map(Result::ok)
@@ -1214,12 +2010,27 @@ mod tests {
             .find(|file| file["actor_id"] == actor_id)
             .and_then(|file| file["credential"].as_str().map(str::to_owned))
             .expect("project setup created a local actor credential");
+        let worker_credential = fs::read_dir(root.0.join(".boreal/credentials"))
+            .expect("project credential directory exists")
+            .filter_map(Result::ok)
+            .map(|entry| fs::read(entry.path()).expect("project credential file reads"))
+            .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .find(|file| file["actor_id"] == worker_id)
+            .and_then(|file| file["credential"].as_str().map(str::to_owned))
+            .expect("auth key created a local worker credential");
         let credential_env = format!("BOREAL_MCP_DAEMON_CREDENTIAL_{}", std::process::id());
+        let worker_credential_env =
+            format!("BOREAL_MCP_DAEMON_WORKER_CREDENTIAL_{}", std::process::id());
         let env_guard = EnvGuard {
             name: credential_env.clone(),
             previous: std::env::var_os(&credential_env),
         };
+        let _worker_env_guard = EnvGuard {
+            name: worker_credential_env.clone(),
+            previous: std::env::var_os(&worker_credential_env),
+        };
         std::env::set_var(&credential_env, credential);
+        std::env::set_var(&worker_credential_env, worker_credential);
 
         let mut service = ChildGuard(
             Command::new(&binary)
@@ -1228,7 +2039,7 @@ mod tests {
                 .arg(&db)
                 .args(["--socket"])
                 .arg(&socket)
-                .args(["--max-requests", "2", "--json"])
+                .args(["--json"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -1252,7 +2063,7 @@ mod tests {
         }
         assert!(ready, "disposable Project daemon did not bind its socket");
 
-        let credential_name = credential_env;
+        let credential_name = credential_env.clone();
         let config = Arc::new(McpConfig {
             version: 1,
             global: None,
@@ -1260,7 +2071,10 @@ mod tests {
                 project_id.into(),
                 ProjectEndpoint {
                     socket: socket.clone(),
-                    credential_env_by_actor: BTreeMap::from([(actor_id.into(), credential_name)]),
+                    credential_env_by_actor: BTreeMap::from([
+                        (actor_id.into(), credential_name),
+                        (worker_id.into(), worker_credential_env.clone()),
+                    ]),
                 },
             )]),
             principals: BTreeMap::new(),
@@ -1271,10 +2085,20 @@ mod tests {
         let policy = Policy {
             actor_id: actor_id.into(),
             projects: BTreeSet::from([project_id.into()]),
-            scopes: BTreeSet::from([SCOPE_PROJECT_READ.into()]),
+            scopes: BTreeSet::from([SCOPE_PROJECT_READ.into(), SCOPE_PROJECT_WRITE.into()]),
         };
         let principal = AuthenticatedPrincipal::from_stdio_policy("test-agent", &policy, &config);
         let backend = BorealBackend::new(config);
+        let worker_policy = Policy {
+            actor_id: worker_id.into(),
+            projects: BTreeSet::from([project_id.into()]),
+            scopes: BTreeSet::from([SCOPE_PROJECT_READ.into(), SCOPE_PROJECT_WRITE.into()]),
+        };
+        let worker_principal = AuthenticatedPrincipal::from_stdio_policy(
+            "test-worker",
+            &worker_policy,
+            &backend.config,
+        );
 
         let status = backend
             .project_status(&principal, project_id.into(), 10, 0)
@@ -1282,6 +2106,121 @@ mod tests {
             .expect("MCP Project status reads the real daemon envelope");
         assert_eq!(status["outcome"], "unchanged");
         assert!(status["data"].is_object());
+
+        let session = backend
+            .project_session_start(
+                &principal,
+                ProjectSessionStartInput {
+                    project_id: project_id.into(),
+                    session_id: "mcp-create-session".into(),
+                    expected_revision: status["revision"].as_u64().unwrap(),
+                    operation_id: "op_mcp_create_session".into(),
+                },
+            )
+            .await
+            .expect("MCP registers a server-bound Project session");
+        assert_eq!(session["outcome"], "changed");
+
+        let created = backend
+            .project_work_create(
+                &principal,
+                WorkCreateInput {
+                    project_id: project_id.into(),
+                    session_id: "mcp-create-session".into(),
+                    work_id: Some("mcp-tool-work".into()),
+                    kind: "task".into(),
+                    parent_id: None,
+                    title: "Task created through MCP".into(),
+                    description: "synthetic daemon integration fixture".into(),
+                    priority: 2,
+                    dispatch_policy: Some("automatic".into()),
+                    hold: None,
+                    profile: Some("focused".into()),
+                    expected_revision: session["revision"].as_u64().unwrap(),
+                    operation_id: "op_mcp_work_create".into(),
+                },
+            )
+            .await
+            .expect("MCP creates work through the existing Project service");
+        assert_eq!(created["outcome"], "changed");
+        assert_eq!(created["data"]["work_id"], "mcp-tool-work");
+
+        let wait_work = backend
+            .project_work_create(
+                &principal,
+                WorkCreateInput {
+                    project_id: project_id.into(),
+                    session_id: "mcp-create-session".into(),
+                    work_id: Some("mcp-wait-work".into()),
+                    kind: "task".into(),
+                    parent_id: None,
+                    title: "Task waiting on external input".into(),
+                    description: "synthetic wait fixture".into(),
+                    priority: 1,
+                    dispatch_policy: Some("operator_only".into()),
+                    hold: None,
+                    profile: Some("focused".into()),
+                    expected_revision: created["revision"].as_u64().unwrap(),
+                    operation_id: "op_mcp_wait_task_create".into(),
+                },
+            )
+            .await
+            .expect("MCP creates a separate wait fixture");
+        let wait_recorded = backend
+            .project_work_wait(
+                &principal,
+                WorkWaitInput {
+                    project_id: project_id.into(),
+                    work_id: "mcp-wait-work".into(),
+                    reason_code: "external_input_required".into(),
+                    expected_revision: wait_work["revision"].as_u64().unwrap(),
+                    operation_id: "op_mcp_wait_record".into(),
+                },
+            )
+            .await
+            .expect("MCP records a reason-coded Project wait through Boreal");
+        assert_eq!(wait_recorded["outcome"], "changed");
+        assert_eq!(
+            wait_recorded["data"]["hard_holds"],
+            json!(["external_input_required"])
+        );
+
+        let edit = WorkEditInput {
+            project_id: project_id.into(),
+            work_id: "mcp-tool-work".into(),
+            operation_id: "op_mcp_work_edit".into(),
+            expected_revision: wait_recorded["revision"].as_u64().unwrap(),
+            title: Some("Edited once through MCP".into()),
+            description: None,
+            parent_id: None,
+            priority: None,
+            dispatch_policy: None,
+        };
+        let first_edit = backend
+            .project_work_edit(&principal, edit.clone())
+            .await
+            .expect("MCP edits through the existing revisioned service");
+        assert_eq!(first_edit["outcome"], "changed");
+        assert_eq!(first_edit["data"]["title"], "Edited once through MCP");
+
+        let replayed_edit = backend
+            .project_work_edit(&principal, edit.clone())
+            .await
+            .expect("same operation ID safely replays the edit");
+        assert_eq!(replayed_edit["outcome"], "unchanged");
+
+        let stale_edit = WorkEditInput {
+            operation_id: "op_mcp_stale_work_edit".into(),
+            title: Some("This stale edit must not win".into()),
+            ..edit
+        };
+        match backend.project_work_edit(&principal, stale_edit).await {
+            Err(AdapterError::Application { outcome, error, .. }) => {
+                assert_eq!(outcome, ApplicationOutcome::Conflict);
+                assert_eq!(error.code, boreal_protocol::ErrorCode::StaleRevision);
+            }
+            other => panic!("stale edit was not returned as a revision conflict: {other:?}"),
+        }
 
         let operation = backend
             .project_operation_status(&principal, project_id.into(), target_operation_id.into())
@@ -1293,25 +2232,229 @@ mod tests {
             target_operation_id
         );
 
-        for _ in 0..200 {
-            if service
-                .0
-                .try_wait()
-                .expect("daemon process status reads")
-                .is_some()
-            {
-                break;
+        let current = backend
+            .project_status(&principal, project_id.into(), 10, 0)
+            .await
+            .expect("current revision reads before claim");
+        let claim = WorkClaimInput {
+            project_id: project_id.into(),
+            work_id: "mcp-tool-work".into(),
+            operation_id: "op_mcp_work_claim".into(),
+            attempt_id: "mcp-tool-attempt".into(),
+            session_id: "mcp-worker-session".into(),
+            source_version_id: source_version_id.clone(),
+            config_identity: "mcp-test-config-v1".into(),
+            expected_revision: current["revision"].as_u64().unwrap(),
+            lease_ttl_ms: Some(60_000),
+            time_limit_ms: Some(300_000),
+        };
+        let claimed = backend
+            .project_work_claim(&worker_principal, claim.clone())
+            .await
+            .expect("MCP claims eligible work through Boreal");
+        assert_eq!(claimed["outcome"], "changed");
+        assert_eq!(claimed["data"]["attempt_id"], "mcp-tool-attempt");
+        let replayed_claim = backend
+            .project_work_claim(&worker_principal, claim.clone())
+            .await
+            .expect("exact claim retry reads back the durable result");
+        assert_eq!(replayed_claim["outcome"], "unchanged");
+        assert_eq!(replayed_claim["data"]["replayed"], true);
+        assert_eq!(replayed_claim["data"]["attempt_id"], "mcp-tool-attempt");
+        let mismatched_claim = WorkClaimInput {
+            config_identity: "different-config/v1".into(),
+            ..claim
+        };
+        match backend
+            .project_work_claim(&worker_principal, mismatched_claim)
+            .await
+        {
+            Err(AdapterError::Application { outcome, error, .. }) => {
+                assert_eq!(outcome, ApplicationOutcome::Conflict);
+                assert_eq!(error.code, boreal_protocol::ErrorCode::ClaimConflict);
+                assert!(error.message.contains("another immutable claim request"));
             }
-            thread::sleep(Duration::from_millis(10));
+            other => panic!("operation ID reuse with changed payload was not rejected: {other:?}"),
         }
-        assert!(
-            service
-                .0
-                .try_wait()
-                .expect("daemon exits after request limit")
-                .is_some(),
-            "disposable Project daemon handled two MCP reads and then stopped"
+        let claim_readback = backend
+            .project_operation_status(
+                &worker_principal,
+                project_id.into(),
+                "op_mcp_work_claim".into(),
+            )
+            .await
+            .expect("claim status reads back the first durable outcome");
+        assert_eq!(
+            claim_readback["data"]["operation"]["attempt_id"],
+            "mcp-tool-attempt"
         );
+
+        let attempt_context = backend
+            .project_agent_context(
+                &worker_principal,
+                ProjectAgentContextInput {
+                    project_id: project_id.into(),
+                    session_id: "mcp-worker-session".into(),
+                    work_id: Some("mcp-tool-work".into()),
+                    attempt_id: Some("mcp-tool-attempt".into()),
+                },
+                "guide",
+            )
+            .await
+            .expect("MCP guide reads the claimed attempt context");
+        assert!(attempt_context["data"].is_object());
+
+        let start = AgentStartInput {
+            project_id: project_id.into(),
+            session_id: "mcp-worker-session".into(),
+            work_id: Some("mcp-tool-work".into()),
+            attempt_id: Some("mcp-tool-attempt".into()),
+            fence: claimed["data"]["fence"].as_u64(),
+            source_version_id,
+            config_identity: "mcp-test-config-v1".into(),
+            expected_revision: claimed["revision"].as_u64().unwrap(),
+            operation_id: "op_mcp_agent_start".into(),
+            lease_ttl_ms: None,
+            time_limit_ms: None,
+        };
+        let started = backend
+            .project_agent_start(&worker_principal, start.clone())
+            .await
+            .expect("MCP starts the claimed attempt through Boreal's atomic route");
+        assert_eq!(started["outcome"], "changed");
+        assert_eq!(started["data"]["phase"], "running");
+        let replayed_start = backend
+            .project_agent_start(&worker_principal, start)
+            .await
+            .expect("same start operation safely reads back its outcome");
+        assert_eq!(replayed_start["outcome"], "unchanged");
+        assert_eq!(replayed_start["data"]["attempt_id"], "mcp-tool-attempt");
+
+        let submitted = backend
+            .project_attempt_transition(
+                &worker_principal,
+                AttemptTransitionInput {
+                    project_id: project_id.into(),
+                    session_id: "mcp-worker-session".into(),
+                    work_id: "mcp-tool-work".into(),
+                    attempt_id: "mcp-tool-attempt".into(),
+                    fence: claimed["data"]["fence"].as_u64().unwrap(),
+                    expected_revision: started["revision"].as_u64().unwrap(),
+                    operation_id: "op_mcp_attempt_submit".into(),
+                    reason: Some("ready for downstream verification".into()),
+                    lease_ttl_ms: None,
+                },
+                "submit",
+            )
+            .await
+            .expect("MCP submits the active attempt for downstream verification");
+        assert_eq!(submitted["outcome"], "changed");
+        assert_eq!(submitted["data"]["phase"], "verifying");
+
+        let post_start = backend
+            .project_status(&principal, project_id.into(), 10, 0)
+            .await
+            .expect("post-start revision is available for the recovery write");
+
+        // This same-tree Unix proxy lets the real service commit a write while
+        // dropping only its response to the MCP backend, then forwards exact
+        // operation readback normally on the next connection.
+        let proxy_socket = root.0.join(".boreal/mcp-project-proxy.sock");
+        let proxy_listener = UnixListener::bind(&proxy_socket)
+            .expect("temporary owner-only MCP response-loss proxy binds");
+        fs::set_permissions(&proxy_socket, fs::Permissions::from_mode(0o600))
+            .expect("proxy socket is owner-only");
+        let upstream_socket = socket.clone();
+        let proxy_thread = thread::spawn(move || {
+            for request_number in 0..2 {
+                let (mut downstream, _) = proxy_listener.accept().expect("proxy accepts MCP call");
+                let mut prefix = [0_u8; 4];
+                downstream
+                    .read_exact(&mut prefix)
+                    .expect("MCP request frame length arrives");
+                let mut request_body = vec![0; u32::from_be_bytes(prefix) as usize];
+                downstream
+                    .read_exact(&mut request_body)
+                    .expect("MCP request body arrives");
+                let mut upstream = UnixStream::connect(&upstream_socket)
+                    .expect("proxy forwards to the real disposable daemon");
+                upstream.write_all(&prefix).expect("upstream frame starts");
+                upstream
+                    .write_all(&request_body)
+                    .expect("upstream receives exact MCP payload");
+                let mut response_prefix = [0_u8; 4];
+                upstream
+                    .read_exact(&mut response_prefix)
+                    .expect("real daemon completed and returned a response");
+                let mut response_body = vec![0; u32::from_be_bytes(response_prefix) as usize];
+                upstream
+                    .read_exact(&mut response_body)
+                    .expect("real daemon response body arrives");
+                if request_number == 1 {
+                    downstream
+                        .write_all(&response_prefix)
+                        .expect("operation readback response length forwards");
+                    downstream
+                        .write_all(&response_body)
+                        .expect("operation readback response forwards");
+                }
+            }
+        });
+        let proxy_config = Arc::new(McpConfig {
+            version: 1,
+            global: None,
+            projects: BTreeMap::from([(
+                project_id.into(),
+                ProjectEndpoint {
+                    socket: proxy_socket,
+                    credential_env_by_actor: BTreeMap::from([
+                        (actor_id.into(), credential_env),
+                        (worker_id.into(), worker_credential_env),
+                    ]),
+                },
+            )]),
+            principals: BTreeMap::new(),
+            stdio_profiles: BTreeMap::new(),
+            http: None,
+        });
+        proxy_config
+            .validate()
+            .expect("temporary proxy binding is valid");
+        let proxy_backend = BorealBackend::new(proxy_config);
+        let uncertain_operation = "op_mcp_lost_reply_edit";
+        let lost_reply = proxy_backend
+            .project_work_edit(
+                &principal,
+                WorkEditInput {
+                    project_id: project_id.into(),
+                    work_id: "mcp-tool-work".into(),
+                    operation_id: uncertain_operation.into(),
+                    expected_revision: post_start["revision"].as_u64().unwrap(),
+                    title: Some("Committed despite a lost response".into()),
+                    description: None,
+                    parent_id: None,
+                    priority: None,
+                    dispatch_policy: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            lost_reply,
+            AdapterError::UnknownOutcome { ref operation_id, .. }
+                if operation_id == uncertain_operation
+        ));
+        let recovery = proxy_backend
+            .project_operation_status(&principal, project_id.into(), uncertain_operation.into())
+            .await
+            .expect("same operation ID reads back the committed write");
+        assert_eq!(
+            recovery["data"]["operation"]["operation_id"],
+            uncertain_operation
+        );
+        proxy_thread.join().expect("proxy forwards both operations");
+        drop(service);
         drop(env_guard);
+        drop(_worker_env_guard);
     }
 }

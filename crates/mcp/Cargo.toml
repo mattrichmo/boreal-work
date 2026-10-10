@@ -12,6 +12,7 @@ description = "Scoped MCP adapters for Boreal's existing local services"
 [dependencies]
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
+boreal-application = { path = "../application" }
 boreal-protocol = { path = "../protocol" }
 boreal-service = { path = "../service" }
 futures-util = "0.3"

@@ -25,7 +25,11 @@ use tracing::{info, warn};
 
 use crate::{
     auth::{AuthError, AuthenticatedPrincipal, OAuthIntrospector},
-    backend::{AdapterError, BorealBackend, WorkClaimInput, WorkEditInput},
+    backend::{
+        AdapterError, AgentStartInput, AttemptTransitionInput, BorealBackend,
+        ProjectAgentContextInput, ProjectSessionEndInput, ProjectSessionStartInput,
+        WorkCheckpointInput, WorkClaimInput, WorkCreateInput, WorkEditInput, WorkWaitInput,
+    },
     config::{HttpConfig, McpConfig, SCOPE_GLOBAL_READ, SCOPE_PROJECT_READ, SCOPE_PROJECT_WRITE},
     MAX_HTTP_BODY_BYTES, MAX_TOOL_INPUT_BYTES, MAX_TOOL_OUTPUT_BYTES,
 };
@@ -341,6 +345,87 @@ impl BorealMcpServer {
     }
 
     #[tool(
+        name = "project_review_list",
+        description = "Read one bounded page of review records for an explicitly selected Project.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_review_list(
+        &self,
+        Parameters(input): Parameters<ProjectPageInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .project_review_list(
+                        principal,
+                        input.project_id.clone(),
+                        input.limit.unwrap_or(20),
+                        input.offset.unwrap_or(0),
+                    )
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_review_list",
+            SCOPE_PROJECT_READ,
+            None,
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_review_show",
+        description = "Read one review record and its bounded evidence metadata from an explicitly selected Project.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_review_show(
+        &self,
+        Parameters(input): Parameters<ProjectReviewShowInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .project_review_show(
+                        principal,
+                        input.project_id.clone(),
+                        input.review_id.clone(),
+                    )
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_review_show",
+            SCOPE_PROJECT_READ,
+            None,
+            result,
+        )
+    }
+
+    #[tool(
         name = "operation_status",
         description = "Read back one original durable operation outcome after a timeout or lost response. It does not retry the operation.",
         annotations(
@@ -459,6 +544,393 @@ impl BorealMcpServer {
             result,
         )
     }
+
+    #[tool(
+        name = "project_agent_guide",
+        description = "Read Boreal's current guided Project context for this stable session. The response includes the current obligations and safe next action.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_agent_guide(
+        &self,
+        Parameters(input): Parameters<ProjectAgentContextInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.project_agent_context_tool(input, context, "guide", "project_agent_guide")
+            .await
+    }
+
+    #[tool(
+        name = "project_agent_next",
+        description = "Ask Boreal for the next guided Project action under the existing workflow and required gates.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_agent_next(
+        &self,
+        Parameters(input): Parameters<ProjectAgentContextInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.project_agent_context_tool(input, context, "next", "project_agent_next")
+            .await
+    }
+
+    #[tool(
+        name = "project_agent_resume",
+        description = "Read Boreal's recovery guidance for an existing attempt in this explicitly selected Project.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_agent_resume(
+        &self,
+        Parameters(input): Parameters<ProjectAgentContextInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.project_agent_context_tool(input, context, "resume", "project_agent_resume")
+            .await
+    }
+
+    #[tool(
+        name = "project_session_start",
+        description = "Register a stable Project session for the authenticated Boreal actor using an expected revision and durable operation ID.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_session_start(
+        &self,
+        Parameters(input): Parameters<ProjectSessionStartInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let operation_id = input.operation_id.clone();
+        let result = match &principal {
+            Ok(principal) => self.backend.project_session_start(principal, input).await,
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_session_start",
+            SCOPE_PROJECT_WRITE,
+            Some(&operation_id),
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_session_end",
+        description = "End the selected session owned by the authenticated Boreal actor with an expected revision and durable operation ID.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_session_end(
+        &self,
+        Parameters(input): Parameters<ProjectSessionEndInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let operation_id = input.operation_id.clone();
+        let result = match &principal {
+            Ok(principal) => self.backend.project_session_end(principal, input).await,
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_session_end",
+            SCOPE_PROJECT_WRITE,
+            Some(&operation_id),
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_work_create",
+        description = "Create a Project work item through Boreal with an active session, expected revision, and durable operation ID.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_work_create(
+        &self,
+        Parameters(input): Parameters<WorkCreateInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let operation_id = input.operation_id.clone();
+        let result = match &principal {
+            Ok(principal) => self.backend.project_work_create(principal, input).await,
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_work_create",
+            SCOPE_PROJECT_WRITE,
+            Some(&operation_id),
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_work_wait",
+        description = "Record a reason-coded hold or wait on Project work through Boreal with an expected revision and durable operation ID.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_work_wait(
+        &self,
+        Parameters(input): Parameters<WorkWaitInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let operation_id = input.operation_id.clone();
+        let result = match &principal {
+            Ok(principal) => self.backend.project_work_wait(principal, input).await,
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_work_wait",
+            SCOPE_PROJECT_WRITE,
+            Some(&operation_id),
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_agent_start",
+        description = "Start or resume one eligible Project attempt through Boreal's atomic claim, accept, and start service route.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_agent_start(
+        &self,
+        Parameters(input): Parameters<AgentStartInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let operation_id = input.operation_id.clone();
+        let result = match &principal {
+            Ok(principal) => self.backend.project_agent_start(principal, input).await,
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_agent_start",
+            SCOPE_PROJECT_WRITE,
+            Some(&operation_id),
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_work_checkpoint",
+        description = "Record a confirmed Project checkpoint through Boreal's typed completion service contract.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_work_checkpoint(
+        &self,
+        Parameters(input): Parameters<WorkCheckpointInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let operation_id = input.operation_id.clone();
+        let result = match &principal {
+            Ok(principal) => self.backend.project_work_checkpoint(principal, input).await,
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_work_checkpoint",
+            SCOPE_PROJECT_WRITE,
+            Some(&operation_id),
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_attempt_submit",
+        description = "Submit a fenced Project attempt to Boreal for downstream verification. This does not make a review or final acceptance decision.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_attempt_submit(
+        &self,
+        Parameters(input): Parameters<AttemptTransitionInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.project_attempt_transition_tool(input, context, "submit", "project_attempt_submit")
+            .await
+    }
+
+    #[tool(
+        name = "project_attempt_release",
+        description = "Release the authenticated actor's fenced Project attempt with an optional reason.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_attempt_release(
+        &self,
+        Parameters(input): Parameters<AttemptTransitionInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.project_attempt_transition_tool(input, context, "release", "project_attempt_release")
+            .await
+    }
+
+    #[tool(
+        name = "project_attempt_heartbeat",
+        description = "Renew the lease of the authenticated actor's fenced Project attempt through Boreal.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_attempt_heartbeat(
+        &self,
+        Parameters(input): Parameters<AttemptTransitionInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.project_attempt_transition_tool(
+            input,
+            context,
+            "heartbeat",
+            "project_attempt_heartbeat",
+        )
+        .await
+    }
+
+    #[tool(
+        name = "project_attempt_renew",
+        description = "Renew the lease and optional time limit of the authenticated actor's fenced Project attempt through Boreal.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_attempt_renew(
+        &self,
+        Parameters(input): Parameters<AttemptTransitionInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.project_attempt_transition_tool(input, context, "renew", "project_attempt_renew")
+            .await
+    }
+
+    async fn project_agent_context_tool(
+        &self,
+        input: ProjectAgentContextInput,
+        context: RequestContext<RoleServer>,
+        command: &'static str,
+        tool_name: &'static str,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .project_agent_context(principal, input, command)
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(principal, tool_name, SCOPE_PROJECT_READ, None, result)
+    }
+
+    async fn project_attempt_transition_tool(
+        &self,
+        input: AttemptTransitionInput,
+        context: RequestContext<RoleServer>,
+        command: &'static str,
+        tool_name: &'static str,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let operation_id = input.operation_id.clone();
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .project_attempt_transition(principal, input, command)
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            tool_name,
+            SCOPE_PROJECT_WRITE,
+            Some(&operation_id),
+            result,
+        )
+    }
 }
 
 #[tool_handler]
@@ -542,6 +1014,13 @@ struct ProjectPageInput {
 struct ProjectWorkShowInput {
     project_id: String,
     work_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProjectReviewShowInput {
+    project_id: String,
+    review_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]

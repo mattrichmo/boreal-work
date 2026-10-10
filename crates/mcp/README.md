@@ -5,8 +5,8 @@ Unix-socket services. The SQLite databases remain with the Boreal host. Run
 the MCP server as the same operating-system user that owns those private
 service sockets and credentials.
 
-The package is intentionally a nested Cargo workspace until the CLI and
-integration owners accept shared manifest and command wiring. Build it with:
+The server stays in a focused nested Cargo package and ships as the standalone
+`boreal-mcp` command. Build it with:
 
 ```sh
 cargo build --release --manifest-path crates/mcp/Cargo.toml
@@ -24,6 +24,13 @@ boreal-mcp status --config /absolute/path/mcp.toml
 Stdio reserves stdout for MCP protocol messages; logs and errors go to stderr.
 Use the stdio command from a local MCP client. The profile name selects a
 server-side allowlist; the client cannot choose its own Boreal actor or scopes.
+Install the binary beside the host's Boreal tools with
+`cargo install --path crates/mcp --locked`. The root `bwrk mcp` wrapper and shared workspace wiring
+are part of the CLI integration handoff below.
+
+The adapter pins MCP protocol `2026-07-28` and Rust SDK `rmcp 3.5.1`. It uses
+that version's `server/discover` lifecycle, so MCP clients must support this
+protocol version; the older `initialize` handshake is not enabled.
 
 ## Configuration
 
@@ -139,9 +146,24 @@ on each call:
 | `project_status` | Project read | Bounded status page |
 | `project_work_show` | Project read | Read a work item |
 | `project_source_list` | Project read | Bounded source metadata list |
+| `project_review_list` | Project read | Bounded review records page |
+| `project_review_show` | Project read | One review and bounded evidence metadata |
 | `operation_status` | Project read | Reconcile an existing durable operation ID |
+| `project_agent_guide` | Project read | Read current workflow context and obligations |
+| `project_agent_next` | Project read | Get Boreal's next safe action |
+| `project_agent_resume` | Project read | Read recovery guidance for an attempt |
+| `project_session_start` | Project work-write | Register a server-bound actor session |
+| `project_session_end` | Project work-write | End the authenticated actor's session |
+| `project_work_create` | Project work-write | Create a task or planning container through the application service |
 | `project_work_edit` | Project work-write | Existing edit command with expected revision and operation ID |
 | `project_work_claim` | Project work-write | Existing claim command with expected revision, attempt/session/source/config identities and operation ID |
+| `project_work_wait` | Project work-write | Record a reason-coded work hold |
+| `project_agent_start` | Project work-write | Atomic claim, accept, and start or resume |
+| `project_work_checkpoint` | Project work-write | Record a confirmed typed checkpoint |
+| `project_attempt_heartbeat` | Project work-write | Heartbeat a fenced attempt |
+| `project_attempt_renew` | Project work-write | Renew a fenced attempt lease |
+| `project_attempt_submit` | Project work-write | Submit for downstream verification |
+| `project_attempt_release` | Project work-write | Release a fenced attempt with an optional reason |
 
 Tool input is capped at 16 KiB, service frames at 128 KiB, inline tool output
 at 64 KiB, page size at 50 rows and backend concurrency at 32 calls. A write
@@ -149,16 +171,33 @@ timeout returns an unknown outcome with the original operation ID. Read
 `operation_status` before retrying; MCP request IDs are not used as write
 identity. Expected revisions preserve Boreal conflict handling.
 
+Claim retries are compared with Boreal's durable canonical request digest. An
+exact retry returns the original claim result as unchanged; reusing that
+operation ID with a different payload returns a conflict. The adapter reads
+the original operation through the Project service before dispatching a retry.
+
 `tools/list` is filtered for the authenticated principal's actual grants and
 project bindings. Its response is marked private with a zero cache lifetime so
 one principal's view cannot be reused for another principal.
 
-Global writes, Send/Intake, task creation, claim release/heartbeat, waits,
-artifact/evidence mutation, workflow/review actions, source/memory body reads,
-and machine administration are not exposed by this initial adapter. They
-remain unavailable until their actual Boreal contracts are integrated. There
-is no generic shell, SQL, arbitrary filesystem or URL-fetch tool. Artifact
-bodies are not returned.
+Global writes, Send/Intake, operator hold resolution, artifact/evidence
+mutation, workflow/review decisions, source/memory body reads, and machine
+administration are not exposed. Evidence submission and review decisions remain
+gated until Boreal has a separate, explicit authorization contract for them.
+`project_attempt_submit` hands work to downstream verification; it does not
+approve or close it. `project_session_end` records a session boundary; it does
+not create a handoff summary. There is no generic shell, SQL, arbitrary
+filesystem or URL-fetch tool. Artifact bodies are not returned.
+
+For `project_agent_guide`, `project_agent_next`, and `project_agent_resume`,
+provide a stable `session_id`. It is an audit/context label and does not prove
+caller identity; the server derives the actor from the authenticated profile or
+OAuth subject mapping. Use a distinct session ID per concurrent worker and
+reuse it only when continuing that worker's own attempt. `project_agent_start`
+uses Boreal's selector when `work_id` is omitted and requires the current
+`source_version_id`, `config_identity`, expected revision, and a durable
+operation ID. On an uncertain write, read `operation_status` for that same ID
+before retrying.
 
 ## Validation
 
@@ -169,31 +208,31 @@ cargo test --manifest-path crates/mcp/Cargo.toml --lib
 ```
 
 The real-daemon regression starts a disposable `bwrk service run` process over
-a temporary project database and checks both `project_status` and
-`operation_status`. Build the current CLI binary first, then run the daemon
-test explicitly:
+a temporary project database and checks status, work edits, claim/replay,
+revision conflicts, and operation readback after a deliberately dropped
+response. Build the current CLI binary first, then run the daemon test
+explicitly:
 
 ```sh
 cargo build -p boreal-cli --bin bwrk
 BWRK_BIN="$PWD/target/debug/bwrk" cargo test \
   --manifest-path crates/mcp/Cargo.toml --lib \
-  backend::tests::project_status_and_operation_readback_accept_a_real_disposable_daemon \
+  backend::tests::project_work_journey_and_lost_reply_reconcile_with_real_daemon \
   -- --ignored --exact
 ```
 
 The test creates and removes only synthetic local project data and credentials;
 it does not contact an external provider or expose a listener.
 
-## Integration handoff
+## CLI integration handoff
 
-This package intentionally does not change the root Cargo workspace, the
-`bwrk` command tree, `Cargo.lock`, or Project TUI integration. The integration
-owner can add the member/build target and expose a `bwrk mcp` wrapper after
-reviewing the isolated executable and its dependency lockfile; adding it to the
-root workspace requires removing this package's nested `[workspace]` marker
-and reconciling the root lockfile. The package
-depends on the current local `boreal-protocol` and `boreal-service` crates, and
-routes existing Global and Project commands through their private Unix sockets.
+The `boreal-mcp` executable is installable beside the host's existing Boreal
+tools. The root `bwrk mcp` wrapper and root workspace membership are held for
+the CLI integration owner to wire and qualify; that change requires removing
+this package's nested `[workspace]` marker and reconciling the root lockfile.
+The package depends on the current local `boreal-application`,
+`boreal-protocol`, and `boreal-service` crates, and routes existing Global and
+Project commands through their private Unix sockets.
 The current baseline does not provide actor-aware Global writes or
 digest-verified source/memory content reads. Avoid adding duplicate command
 implementations in the adapter.
