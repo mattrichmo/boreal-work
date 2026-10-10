@@ -4283,39 +4283,52 @@ mod unix {
             app.show_work(&project, &work_id)
                 .map_err(map_application_error)?;
             let expected_revision = optional_u64(data, "expected_revision")?;
-            let registered_revision = match app.session_for_claim(
-                &project,
-                &SessionId::new(&session),
-                &ActorId::new(&actor),
-                &HarnessId::new(&harness),
-            ) {
-                // `session start` is the normal explicit lifecycle. Claiming
-                // work on that same active session must not try to register
-                // it again under the claim's derived operation ID.
-                Ok(_) => Some(match expected_revision {
-                    Some(revision) => revision,
-                    None => {
-                        self.store
-                            .project_revision(project.as_str())
-                            .map_err(map_store_error)?
-                            .0
-                    }
-                }),
-                Err(ApplicationError::Store(boreal_store::StoreError::NotFound {
-                    entity: "session",
-                    ..
-                })) => self.register_session(
+            let existing_operation = self.store.operation(operation).map_err(map_store_error)?;
+            let claim_revision = if let Some(existing) = existing_operation {
+                // The effective revision may have been advanced by the
+                // service's implicit session registration. Reuse the value
+                // recorded with the claim so replay identity remains stable
+                // after that write (and after the session has since ended).
+                existing.expected_revision
+            } else {
+                match app.session_for_claim(
                     &project,
-                    &actor,
-                    &harness,
-                    &session,
-                    operation,
-                    claimed_at,
-                    expected_revision,
-                )?,
-                // Preserve ownership, harness, active-state, and storage
-                // errors rather than treating them as a missing session.
-                Err(error) => return Err(map_application_error(error)),
+                    &SessionId::new(&session),
+                    &ActorId::new(&actor),
+                    &HarnessId::new(&harness),
+                ) {
+                    // `session start` is the normal explicit lifecycle.
+                    // Omitted revisions stay omitted for these sessions;
+                    // an explicit revision still gets the store's CAS check.
+                    Ok(record) => {
+                        let registration_operation = sub_operation(operation, "session");
+                        if record.registration_operation_id.as_deref()
+                            == Some(registration_operation.as_str())
+                        {
+                            // A concurrent retry can observe the session
+                            // created by this claim before the claim itself
+                            // commits. Its revision is durable and stable.
+                            Some(record.revision)
+                        } else {
+                            expected_revision
+                        }
+                    }
+                    Err(ApplicationError::Store(boreal_store::StoreError::NotFound {
+                        entity: "session",
+                        ..
+                    })) => self.register_session(
+                        &project,
+                        &actor,
+                        &harness,
+                        &session,
+                        operation,
+                        claimed_at,
+                        expected_revision,
+                    )?,
+                    // Preserve ownership, harness, active-state, and storage
+                    // errors rather than treating them as a missing session.
+                    Err(error) => return Err(map_application_error(error)),
+                }
             };
             let result = app
                 .claim_with_context(
@@ -4327,7 +4340,7 @@ mod unix {
                     &string(data, "attempt_id")?,
                     operation,
                     &claim_digest,
-                    registered_revision,
+                    claim_revision,
                     &stamp(claimed_at.as_millis()),
                     &stamp(deadlines.lease_deadline.as_millis()),
                     &stamp(deadlines.hard_deadline.as_millis()),
@@ -4337,10 +4350,17 @@ mod unix {
                         .unwrap_or("unknown"),
                 )
                 .map_err(map_application_error)?;
-            let adapter = SqliteAttemptAdapter::new(&self.store);
-            let snapshot = adapter
-                .current_attempt(&project, &AttemptId::new(result.value.attempt_id.clone()))
-                .map_err(|error| map_application_error(ApplicationError::from(error)))?;
+            let snapshot = self
+                .store
+                .attempt_record_by_id(project.as_str(), &result.value.attempt_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| {
+                    CliError::with(
+                        ErrorCode::NotFound,
+                        ApplicationOutcome::Failed,
+                        "claim operation refers to a missing attempt readback",
+                    )
+                })?;
             Ok((
                 if result.changed {
                     ApplicationOutcome::Changed
@@ -4352,9 +4372,9 @@ mod unix {
                     "attempt_id": result.value.attempt_id,
                     "fence": result.value.fence,
                     "phase": "claimed",
-                    "lease_deadline": stamp(snapshot.lease_deadline.as_millis()),
-                    "hard_deadline": stamp(snapshot.hard_deadline.as_millis()),
-                    "session_id": snapshot.session_id.as_ref().map(|value| value.as_str()),
+                    "lease_deadline": snapshot.lease_deadline,
+                    "hard_deadline": snapshot.hard_deadline,
+                    "session_id": snapshot.session_id,
                     "replayed": result.value.replayed,
                 })),
             ))
@@ -7921,6 +7941,11 @@ mod tests {
             .claim(&claim, "op_cli_claim_explicit_session")
             .expect("claim reuses the already registered active session");
         assert_eq!(claimed.0, ApplicationOutcome::Changed);
+        assert!(handler
+            .store
+            .operation("op_cli_claim_explicit_session")
+            .expect("claim operation read succeeds")
+            .is_some());
 
         let session = handler
             .store
@@ -7943,6 +7968,95 @@ mod tests {
             Some("session-explicitly-started")
         );
         assert_eq!(attempt.actor_id, DEFAULT_ACTOR);
+
+        let released = application_envelope(
+            &mut handler,
+            "op_cli_release_explicit_session",
+            json!({
+                "command": "release",
+                "project_id": "service-project",
+                "work_id": "service-work",
+                "actor_id": DEFAULT_ACTOR,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": "session-explicitly-started",
+                "attempt_id": "attempt-explicit-session",
+                "fence": attempt.fence,
+            }),
+        );
+        assert_eq!(released.outcome, ApplicationOutcome::Changed);
+        let end_revision = handler
+            .store
+            .project_revision("service-project")
+            .expect("project revision is readable after release")
+            .0;
+        let ended = application_envelope(
+            &mut handler,
+            "op_cli_end_explicit_session",
+            json!({
+                "command": "session_end",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": "session-explicitly-started",
+                "expected_revision": end_revision,
+            }),
+        );
+        assert_eq!(ended.outcome, ApplicationOutcome::Changed, "{ended:?}");
+
+        let replayed = handler
+            .claim(&claim, "op_cli_claim_explicit_session")
+            .expect("committed claim replays after its session has ended");
+        assert_eq!(replayed.0, ApplicationOutcome::Unchanged);
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_claim_replay_without_expected_revision_keeps_its_original_identity() {
+        let db = temp_path("claim-replay-omitted-revision.sqlite");
+        let store = seed_store(&db);
+        let (_catalog, source_version_id) =
+            capture_service_test_source(&store, "service-project", "op_claim_replay_source");
+        let revision = store.project_revision("service-project").unwrap().0;
+        let mut handler = make_handler(store);
+        let started = application_envelope(
+            &mut handler,
+            "op_cli_session_start_replay",
+            json!({
+                "command": "session_start",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": "session-claim-replay",
+                "expected_revision": revision,
+            }),
+        );
+        assert_eq!(started.outcome, ApplicationOutcome::Changed);
+
+        let claim = json!({
+            "command": "claim",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-claim-replay",
+            "attempt_id": "attempt-claim-replay",
+            "source_version_id": source_version_id,
+            "config_identity": "config/claim-replay-test-v1",
+        });
+        let first = handler
+            .claim(&claim, "op_cli_claim_omitted_revision")
+            .expect("claim succeeds without an expected revision");
+        assert_eq!(first.0, ApplicationOutcome::Changed);
+        let replay = handler
+            .claim(&claim, "op_cli_claim_omitted_revision")
+            .expect("claim retry uses its original durable operation identity");
+        assert_eq!(replay.0, ApplicationOutcome::Unchanged);
+        let operation = handler
+            .store
+            .operation("op_cli_claim_omitted_revision")
+            .expect("claim operation read succeeds")
+            .expect("claim operation is durable");
+        assert_eq!(operation.expected_revision, None);
         let _ = fs::remove_file(db);
     }
 
