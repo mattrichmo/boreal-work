@@ -5,10 +5,6 @@ edition = "2021"
 license = "MIT"
 description = "Scoped MCP adapters for Boreal's existing local services"
 
-# This adapter is intentionally kept outside the workspace until the CLI and
-# integration owners accept the shared manifest/command wiring.
-[workspace]
-
 [dependencies]
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }

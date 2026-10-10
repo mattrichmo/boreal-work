@@ -98,6 +98,10 @@ Usage:
   bwrk commands [PATH] [--json]
   bwrk help [PATH] [--json]
   bwrk version [--json]
+  bwrk mcp start --config FILE
+  bwrk mcp serve --config FILE --transport stdio --profile NAME
+  bwrk mcp serve --config FILE --transport http
+  bwrk mcp status --config FILE
   bwrk workflows list [--json]
   bwrk workflows show WORKFLOW_REF [--json]
   bwrk init [PROJECT_DIR] [--project ID] [--interactive|--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
@@ -386,6 +390,9 @@ impl Default for CliResult {
 
 fn main() -> ExitCode {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|arg| arg == "mcp") {
+        return run_mcp(&args[1..]);
+    }
     if args.is_empty() {
         println!("{HELP}");
         return ExitCode::SUCCESS;
@@ -533,6 +540,16 @@ fn main() -> ExitCode {
                 eprintln!("error [{}]: {}", error.code, error.message);
             }
             ExitCode::from(error.exit)
+        }
+    }
+}
+
+fn run_mcp(args: &[String]) -> ExitCode {
+    match boreal_mcp::run_cli(args, "bwrk mcp") {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("bwrk mcp: {error}");
+            ExitCode::FAILURE
         }
     }
 }

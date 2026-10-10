@@ -51,7 +51,9 @@ cd boreal-work
 cargo install --path crates/cli --bin bwrk --locked
 ```
 
-This installs only `bwrk`; use the install command above to build and install the CLI with its compiled dashboard.
+This installs one `bwrk` binary with the project CLI, compiled dashboard, and
+scoped MCP commands. Use `bwrk mcp --help` for server syntax and the
+[MCP setup guide](crates/mcp/README.md) for transport and authorization setup.
 
 ## Workflows
 
@@ -76,6 +78,10 @@ For example, `bwrk help work claim` shows the current claim syntax. The project 
 ```sh
 bwrk dashboard global
 ```
+
+The source-installed `bwrk` also includes the scoped MCP server commands. See
+the [MCP setup guide](crates/mcp/README.md) for private config and transport
+requirements; `bwrk commands mcp` lists the installed MCP command syntax.
 
 Command availability can vary by build, so consult the installed CLI's command list.
 

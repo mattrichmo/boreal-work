@@ -5,28 +5,39 @@ Unix-socket services. The SQLite databases remain with the Boreal host. Run
 the MCP server as the same operating-system user that owns those private
 service sockets and credentials.
 
-The server stays in a focused nested Cargo package and ships as the standalone
-`boreal-mcp` command. Build it with:
+The server stays in a focused crate in the root Cargo workspace. The installed
+`bwrk` CLI exposes `mcp` commands, and the crate also builds a standalone
+`boreal-mcp` executable. Build and install the first-class CLI with:
 
 ```sh
-cargo build --release --manifest-path crates/mcp/Cargo.toml
+cargo build --release -p boreal-cli --bin bwrk
+cargo install --path crates/cli --bin bwrk --locked
 ```
 
-This produces `target/release/boreal-mcp` in the package workspace (Cargo may
-use a configured shared target directory). The executable has three commands:
+The CLI command surface is:
 
 ```text
-boreal-mcp serve --config /absolute/path/mcp.toml --transport stdio --profile personal
-boreal-mcp serve --config /absolute/path/mcp.toml --transport http
-boreal-mcp status --config /absolute/path/mcp.toml
+bwrk mcp start --config /absolute/path/mcp.toml
+bwrk mcp serve --config /absolute/path/mcp.toml --transport stdio --profile personal
+bwrk mcp serve --config /absolute/path/mcp.toml --transport http
+bwrk mcp status --config /absolute/path/mcp.toml
 ```
 
 Stdio reserves stdout for MCP protocol messages; logs and errors go to stderr.
 Use the stdio command from a local MCP client. The profile name selects a
 server-side allowlist; the client cannot choose its own Boreal actor or scopes.
-Install the binary beside the host's Boreal tools with
-`cargo install --path crates/mcp --locked`. The root `bwrk mcp` wrapper and shared workspace wiring
-are part of the CLI integration handoff below.
+`start` runs the configured authenticated Streamable HTTP server in the
+foreground; it does not create a daemon. `serve` selects stdio or HTTP
+explicitly. The standalone executable remains available for clients that
+launch MCP servers directly:
+
+```sh
+cargo install --path crates/mcp --locked
+boreal-mcp serve --config /absolute/path/mcp.toml --transport stdio --profile personal
+```
+
+`bwrk mcp status` emits the normal Boreal JSON envelope. The standalone
+`boreal-mcp status` command emits the status object directly.
 
 The adapter pins MCP protocol `2026-07-28` and Rust SDK `rmcp 3.5.1`. It uses
 that version's `server/discover` lifecycle, so MCP clients must support this
@@ -189,6 +200,25 @@ approve or close it. `project_session_end` records a session boundary; it does
 not create a handoff summary. There is no generic shell, SQL, arbitrary
 filesystem or URL-fetch tool. Artifact bodies are not returned.
 
+## Accepted feature matrix and service mapping
+
+| Capability | MCP surface | Existing Boreal route or method | Status and boundary |
+| --- | --- | --- | --- |
+| Discovery | MCP `server/discover`, `tools/list`, `boreal_capabilities` | RMCP `ServerHandler::discover` / `BorealBackend::capabilities` | Available; discovery is server metadata and does not enumerate unbound projects. |
+| Guide | `project_agent_guide` | Project service `command=guide` → `ServiceCommandHandler::guidance("guide")` | Available for an explicitly bound project and stable session label. |
+| Next | `project_agent_next` | Project service `command=next` → `ServiceCommandHandler::guidance("next")` | Available through the existing guidance selector. |
+| Resume context | `project_agent_resume` | Project service `command=resume` → `ServiceCommandHandler::guidance("resume")` | Available as read-only recovery guidance. |
+| Start or resume attempt | `project_agent_start` | Project service `command=start` → `ServiceCommandHandler::start`; uses `WorkApplication::claim`, `accept`, and `start` | Available as the existing atomic route; the MCP adapter does not create a second lifecycle. |
+| Work checkpoint | `project_work_checkpoint` | Project service `command=completion` → `completion_commands::apply` → `WorkApplication::complete` with `CompletionCommandDto(kind="work.checkpoint")` | Available as a typed checkpoint. It is not an evidence receipt or a finish decision. |
+| Evidence receipt/run | No MCP tool | Existing service methods `evidence_add` and `evidence_run`; receipt storage uses `WorkApplication::record_receipt` | Service routes exist, but MCP wrappers and a dedicated evidence grant do not. Evidence execution can invoke configured verifier work, so this remains unavailable until the authorization decision is made. |
+| Final finish | No MCP tool | Existing `finish_close` service method validates receipt and summary, records the receipt, prepares finish, and records summary | Service route exists, but there is no MCP wrapper or separate finish/evidence permission. Final closeout remains unavailable under the current grants. |
+| Release | `project_attempt_release` | Project service `command=release` → `ServiceCommandHandler::release` → `WorkApplication::release` | Available with explicit attempt ID, fence, expected revision, and operation ID. |
+| Submit for verification | `project_attempt_submit` | Project service `command=submit` → `WorkApplication::submit` | Available as a nonterminal handoff to downstream verification; it does not approve or close work. |
+
+Review listing/details are read-only. No review decision or operator hold
+resolution tool is exposed. Adding those tools would require stronger grants
+than the current `boreal:project:work-write` permission.
+
 For `project_agent_guide`, `project_agent_next`, and `project_agent_resume`,
 provide a stable `session_id`. It is an audit/context label and does not prove
 caller identity; the server derives the actor from the authenticated profile or
@@ -204,7 +234,7 @@ before retrying.
 Run the MCP unit and synthetic HTTP-auth tests from the repository root:
 
 ```sh
-cargo test --manifest-path crates/mcp/Cargo.toml --lib
+cargo test -p boreal-mcp --lib
 ```
 
 The real-daemon regression starts a disposable `bwrk service run` process over
@@ -216,7 +246,7 @@ explicitly:
 ```sh
 cargo build -p boreal-cli --bin bwrk
 BWRK_BIN="$PWD/target/debug/bwrk" cargo test \
-  --manifest-path crates/mcp/Cargo.toml --lib \
+  -p boreal-mcp --lib \
   backend::tests::project_work_journey_and_lost_reply_reconcile_with_real_daemon \
   -- --ignored --exact
 ```
@@ -224,15 +254,13 @@ BWRK_BIN="$PWD/target/debug/bwrk" cargo test \
 The test creates and removes only synthetic local project data and credentials;
 it does not contact an external provider or expose a listener.
 
-## CLI integration handoff
+## CLI integration
 
-The `boreal-mcp` executable is installable beside the host's existing Boreal
-tools. The root `bwrk mcp` wrapper and root workspace membership are held for
-the CLI integration owner to wire and qualify; that change requires removing
-this package's nested `[workspace]` marker and reconciling the root lockfile.
-The package depends on the current local `boreal-application`,
-`boreal-protocol`, and `boreal-service` crates, and routes existing Global and
-Project commands through their private Unix sockets.
+The `bwrk mcp start|serve|status` commands and workspace membership use the
+same `boreal-mcp` library and configuration as the standalone executable. The
+package depends on the current local `boreal-application`, `boreal-protocol`,
+and `boreal-service` crates, and routes existing Global and Project commands
+through their private Unix sockets.
 The current baseline does not provide actor-aware Global writes or
 digest-verified source/memory content reads. Avoid adding duplicate command
 implementations in the adapter.

@@ -6,11 +6,13 @@
 
 mod auth;
 mod backend;
+mod cli;
 mod config;
 mod server;
 
 pub use auth::{AuthError, AuthenticatedPrincipal, OAuthIntrospector};
 pub use backend::{AdapterError, BorealBackend};
+pub use cli::run_cli;
 pub use config::{
     ConfigError, GlobalEndpoint, HttpConfig, IntrospectionConfig, McpConfig, Policy,
     ProjectEndpoint, TlsConfig,
