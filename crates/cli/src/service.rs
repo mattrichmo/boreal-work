@@ -4282,15 +4282,41 @@ mod unix {
             // registration transaction, before its session insert.
             app.show_work(&project, &work_id)
                 .map_err(map_application_error)?;
-            let registered_revision = self.register_session(
+            let expected_revision = optional_u64(data, "expected_revision")?;
+            let registered_revision = match app.session_for_claim(
                 &project,
-                &actor,
-                &harness,
-                &session,
-                operation,
-                claimed_at,
-                optional_u64(data, "expected_revision")?,
-            )?;
+                &SessionId::new(&session),
+                &ActorId::new(&actor),
+                &HarnessId::new(&harness),
+            ) {
+                // `session start` is the normal explicit lifecycle. Claiming
+                // work on that same active session must not try to register
+                // it again under the claim's derived operation ID.
+                Ok(_) => Some(match expected_revision {
+                    Some(revision) => revision,
+                    None => {
+                        self.store
+                            .project_revision(project.as_str())
+                            .map_err(map_store_error)?
+                            .0
+                    }
+                }),
+                Err(ApplicationError::Store(boreal_store::StoreError::NotFound {
+                    entity: "session",
+                    ..
+                })) => self.register_session(
+                    &project,
+                    &actor,
+                    &harness,
+                    &session,
+                    operation,
+                    claimed_at,
+                    expected_revision,
+                )?,
+                // Preserve ownership, harness, active-state, and storage
+                // errors rather than treating them as a missing session.
+                Err(error) => return Err(map_application_error(error)),
+            };
             let result = app
                 .claim_with_context(
                     &project,
@@ -7827,6 +7853,95 @@ mod tests {
             .expect("attempt read succeeds")
             .expect("claim persisted its attempt");
         assert_eq!(attempt.session_id.as_deref(), Some("session-deterministic"));
+        assert_eq!(attempt.actor_id, DEFAULT_ACTOR);
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_claim_reuses_an_explicitly_started_session() {
+        let db = temp_path("claim-started-session.sqlite");
+        let store = seed_store(&db);
+        let (_catalog, source_version_id) =
+            capture_service_test_source(&store, "service-project", "op_claim_started_source");
+        let revision = store.project_revision("service-project").unwrap().0;
+        let mut handler = make_handler(store);
+
+        let started = application_envelope(
+            &mut handler,
+            "op_cli_session_start_existing",
+            json!({
+                "command": "session_start",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": "session-explicitly-started",
+                "expected_revision": revision,
+            }),
+        );
+        assert_eq!(started.outcome, ApplicationOutcome::Changed);
+        let registration_operation = started.data.as_ref().unwrap()["registration_operation_id"]
+            .as_str()
+            .expect("explicit session start returns its durable registration operation")
+            .to_owned();
+        let claim_revision = started
+            .revision
+            .expect("session start returns its revision");
+
+        let claim = json!({
+            "command": "claim",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-explicitly-started",
+            "attempt_id": "attempt-explicit-session",
+            "expected_revision": claim_revision,
+            "source_version_id": source_version_id,
+            "config_identity": "config/explicit-session-test-v1",
+        });
+        let stale_claim = json!({
+            "command": "claim",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-explicitly-started",
+            "attempt_id": "attempt-stale-explicit-session",
+            "expected_revision": claim_revision.saturating_sub(1),
+            "source_version_id": source_version_id,
+            "config_identity": "config/explicit-session-test-v1",
+        });
+        let stale = handler
+            .claim(&stale_claim, "op_cli_claim_stale_explicit_session")
+            .expect_err("an explicit session does not bypass expected-revision checks");
+        assert_eq!(stale.code, ErrorCode::StaleRevision);
+        assert_eq!(stale.outcome, ApplicationOutcome::Conflict);
+
+        let claimed = handler
+            .claim(&claim, "op_cli_claim_explicit_session")
+            .expect("claim reuses the already registered active session");
+        assert_eq!(claimed.0, ApplicationOutcome::Changed);
+
+        let session = handler
+            .store
+            .session("service-project", "session-explicitly-started")
+            .expect("session read succeeds")
+            .expect("explicit session remains registered");
+        assert_eq!(
+            session.registration_operation_id.as_deref(),
+            Some(registration_operation.as_str())
+        );
+        assert_eq!(session.actor_id, DEFAULT_ACTOR);
+        assert_eq!(session.harness_id, DEFAULT_HARNESS);
+        let attempt = handler
+            .store
+            .current_attempt_for_work("service-project", "service-work")
+            .expect("attempt read succeeds")
+            .expect("claim persisted its attempt");
+        assert_eq!(
+            attempt.session_id.as_deref(),
+            Some("session-explicitly-started")
+        );
         assert_eq!(attempt.actor_id, DEFAULT_ACTOR);
         let _ = fs::remove_file(db);
     }

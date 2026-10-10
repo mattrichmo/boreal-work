@@ -40,8 +40,9 @@ boreal-mcp serve --config /absolute/path/mcp.toml --transport stdio --profile pe
 `boreal-mcp status` command emits the status object directly.
 
 The adapter pins MCP protocol `2026-07-28` and Rust SDK `rmcp 3.5.1`. It uses
-that version's `server/discover` lifecycle, so MCP clients must support this
-protocol version; the older `initialize` handshake is not enabled.
+that version's `server/discover` lifecycle with per-request metadata, so MCP
+clients must support this protocol version; the older `initialize` handshake
+is not enabled.
 
 ## Configuration
 
@@ -287,6 +288,10 @@ the reason each omitted family stays unavailable.
 ```sh
 cargo test -p boreal-mcp --lib
 ```
+
+The library suite exercises stdio JSON-lines discovery/tool calls with a local
+profile, plus a loopback Streamable HTTP Global page request against a
+disposable SQLite Global application with synthetic authorization.
 
 The real-daemon regression starts a disposable `bwrk service run` process over
 a temporary project database and checks status, work edits, claim/replay,

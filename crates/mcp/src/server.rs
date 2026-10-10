@@ -16,7 +16,7 @@ use rmcp::{
         ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
     },
     service::{RequestContext, RoleServer},
-    tool, tool_handler, tool_router, ServerHandler, ServiceExt,
+    tool, tool_handler, tool_router, ServerHandler,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1521,10 +1521,11 @@ pub async fn run_stdio(config: McpConfig, profile_name: &str) -> Result<(), Stri
     let config = Arc::new(config);
     let server = BorealMcpServer::stdio(config, profile_name)?;
     let transport = rmcp::transport::io::stdio();
-    let running = server
-        .serve(transport)
-        .await
-        .map_err(|error| format!("cannot start MCP stdio transport: {error}"))?;
+    // Protocol 2026-07-28 uses per-request metadata and `server/discover`,
+    // without the legacy `initialize` handshake. `ServiceExt::serve` waits
+    // for that legacy handshake, so stdio uses the SDK's direct server mode.
+    let running =
+        rmcp::service::serve_directly::<rmcp::RoleServer, _, _, _, _>(server, transport, None);
     let result = running
         .waiting()
         .await
@@ -1916,10 +1917,11 @@ mod tests {
             "synthetic-evidence" => "boreal:project:read boreal:project:evidence-write",
             "synthetic-finish" => "boreal:project:read boreal:project:finish-close",
             "synthetic-write-only" => "boreal:project:work-write",
+            "synthetic-global" => "boreal:global:read",
             _ => "boreal:project:read",
         };
         Json(json!({
-            "active": matches!(token, "synthetic-valid" | "synthetic-evidence" | "synthetic-finish" | "synthetic-write-only"),
+            "active": matches!(token, "synthetic-valid" | "synthetic-evidence" | "synthetic-finish" | "synthetic-write-only" | "synthetic-global"),
             "sub": "alice",
             "iss": provider_config.issuer,
             "aud": [provider_config.resource_uri],
@@ -1956,6 +1958,292 @@ mod tests {
             "io.modelcontextprotocol/clientInfo": {"name":"synthetic-client","version":"1"},
             "io.modelcontextprotocol/clientCapabilities": {}
         })
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_serves_mcp_tool_calls_over_jsonrpc_lines() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let config = McpConfig {
+            version: 1,
+            global: None,
+            projects: BTreeMap::new(),
+            principals: BTreeMap::new(),
+            stdio_profiles: BTreeMap::from([(
+                "local".into(),
+                Policy {
+                    actor_id: "local-agent".into(),
+                    projects: BTreeSet::new(),
+                    scopes: BTreeSet::new(),
+                },
+            )]),
+            http: None,
+        };
+        config.validate().expect("disposable stdio policy is valid");
+        let server = BorealMcpServer::stdio(Arc::new(config), "local")
+            .expect("the configured local profile builds a server");
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        let running = rmcp::service::serve_directly::<rmcp::RoleServer, _, _, _, _>(
+            server,
+            (server_read, server_write),
+            None,
+        );
+        let server_task = tokio::spawn(running.waiting());
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut client_read = BufReader::new(client_read);
+
+        for (id, message) in [
+            (
+                1,
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":1,
+                    "method":"server/discover",
+                    "params":{"_meta":client_meta()}
+                }),
+            ),
+            (
+                2,
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":2,
+                    "method":"tools/call",
+                    "params":{
+                        "_meta":client_meta(),
+                        "name":"boreal_capabilities",
+                        "arguments":{}
+                    }
+                }),
+            ),
+        ] {
+            let mut encoded = serde_json::to_vec(&message).expect("MCP request serializes");
+            encoded.push(b'\n');
+            client_write
+                .write_all(&encoded)
+                .await
+                .expect("stdio client writes one JSON-RPC line");
+            client_write.flush().await.expect("stdio request flushes");
+
+            let mut line = String::new();
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client_read.read_line(&mut line),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "stdio MCP server did not answer request {id}; service task finished: {}",
+                    server_task.is_finished()
+                )
+            });
+            read.expect("stdio client reads the server response");
+            let response: Value = serde_json::from_str(&line).expect("server response is JSON");
+            assert_eq!(response["jsonrpc"], "2.0");
+            assert_eq!(response["id"], id);
+            assert!(response.get("error").is_none(), "{response}");
+            if id == 2 {
+                let result_text = response["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("capabilities tool returns a text block");
+                let capabilities: Value =
+                    serde_json::from_str(result_text).expect("capabilities result is JSON");
+                assert_eq!(
+                    capabilities["transport"],
+                    json!(["stdio", "streamable_http"])
+                );
+                assert_eq!(capabilities["global"]["available"], false);
+            }
+        }
+
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn http_global_page_without_query_reaches_the_real_global_application() {
+        use boreal_protocol::{
+            global_manager::{GlobalManagerRequest, REQUEST_SCHEMA},
+            schema, ApplicationOutcome, Envelope, TransportOutcome, API_VERSION,
+        };
+        use boreal_service::{JsonResponse, TransportConfig, UnixSocketServer};
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            path::PathBuf,
+            thread,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        struct TempRoot(PathBuf);
+        impl Drop for TempRoot {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let root = TempRoot(std::env::temp_dir().join(format!(
+            "boreal-mcp-global-page-{}-{nonce}",
+            std::process::id()
+        )));
+        fs::create_dir_all(&root.0).expect("disposable Global root is created");
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700))
+            .expect("disposable Global root is private");
+        let database = root.0.join("global.sqlite");
+        // This is the real Global application/store, initialized with its
+        // disposable empty portfolio. No provider data or production path is
+        // involved in the request.
+        drop(
+            boreal_application::GlobalManagerApplication::open(&database)
+                .expect("disposable Global database opens"),
+        );
+        let global_socket = root.0.join("global.sock");
+        let global_server = UnixSocketServer::bind(&global_socket, TransportConfig::default())
+            .expect("disposable Global service socket binds locally");
+        fs::set_permissions(&global_socket, fs::Permissions::from_mode(0o600))
+            .expect("disposable Global service socket is private");
+        let database_for_service = database.clone();
+        let global_service = thread::spawn(move || {
+            let app = boreal_application::GlobalManagerApplication::open(database_for_service)
+                .expect("Global service opens its disposable store");
+            global_server
+                .serve_once(|request| {
+                    let parsed: GlobalManagerRequest =
+                        serde_json::from_str(request.payload()).expect("Global request decodes");
+                    assert_eq!(parsed.schema_version, REQUEST_SCHEMA);
+                    parsed
+                        .validate()
+                        .expect("Global service accepts the wire payload");
+                    let data = app
+                        .execute(&parsed.command, &parsed.payload, &parsed.operation_id)
+                        .expect("real Global application returns the requested page");
+                    let envelope = Envelope {
+                        api_version: API_VERSION.into(),
+                        schema_version: schema::ENVELOPE.into(),
+                        operation_id: parsed.operation_id,
+                        revision: data.get("revision").and_then(Value::as_u64),
+                        as_of: "unix-ms:1".into(),
+                        next_status_change_at: None,
+                        transport: TransportOutcome::Ok,
+                        outcome: ApplicationOutcome::Unchanged,
+                        data: Some(data),
+                        detail_ref: None,
+                        error: None,
+                    };
+                    Ok(JsonResponse::success(
+                        request.request_id().to_owned(),
+                        serde_json::to_string(&envelope).expect("Global envelope serializes"),
+                    )
+                    .expect("Global response is a valid service response"))
+                })
+                .expect("Global service handles one local page request");
+        });
+
+        let mcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("disposable HTTP MCP listener binds loopback");
+        let mcp_addr = mcp_listener.local_addr().unwrap();
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("synthetic introspection listener binds loopback");
+        let provider_addr = provider_listener.local_addr().unwrap();
+        let issuer = format!("http://{provider_addr}/issuer");
+        let resource_uri = format!("http://{mcp_addr}/mcp");
+        let mut http = http_config();
+        http.bind = mcp_addr;
+        http.resource_uri = Url::parse(&resource_uri).unwrap();
+        http.introspection.endpoint =
+            Url::parse(&format!("http://{provider_addr}/introspect")).unwrap();
+        http.introspection.issuer = Url::parse(&issuer).unwrap();
+        http.authorization_servers = vec![Url::parse(&issuer).unwrap()];
+        http.allowed_hosts = vec![mcp_addr.to_string()];
+
+        let provider_router = Router::new()
+            .route("/introspect", axum::routing::post(synthetic_introspection))
+            .with_state(SyntheticProviderConfig {
+                resource_uri,
+                issuer,
+            });
+        let provider_task = tokio::spawn(async move {
+            axum::serve(provider_listener, provider_router)
+                .await
+                .unwrap()
+        });
+
+        let mut mcp_config = config(http.clone());
+        mcp_config.global = Some(GlobalEndpoint {
+            socket: global_socket,
+        });
+        mcp_config.projects.clear();
+        mcp_config.principals = BTreeMap::from([(
+            "alice".into(),
+            Policy {
+                actor_id: "global-reader".into(),
+                projects: BTreeSet::new(),
+                scopes: BTreeSet::from([SCOPE_GLOBAL_READ.into()]),
+            },
+        )]);
+        mcp_config
+            .validate()
+            .expect("Global-only HTTP policy is valid");
+        let introspector =
+            OAuthIntrospector::with_secret(&mcp_config, &http, "synthetic-secret".into())
+                .expect("synthetic introspector is configured");
+        let router = build_http_router_with_introspector(Arc::new(mcp_config), http, introspector);
+        let mcp_task =
+            tokio::spawn(async move { axum::serve(mcp_listener, router).await.unwrap() });
+        let endpoint = format!("http://{mcp_addr}/mcp");
+        let client = reqwest::Client::new();
+
+        let discovery = post_mcp(
+            &client,
+            &endpoint,
+            "synthetic-global",
+            json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":client_meta()}}),
+        )
+        .await;
+        assert_eq!(discovery.status(), StatusCode::OK);
+        let page_response = post_mcp(
+            &client,
+            &endpoint,
+            "synthetic-global",
+            json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "_meta":client_meta(),
+                    "name":"global_page",
+                    "arguments":{"collection":"items"}
+                }
+            }),
+        )
+        .await;
+        let page_status = page_response.status();
+        let page_body = page_response.text().await.unwrap();
+        assert_eq!(page_status, StatusCode::OK, "{page_body}");
+        let protocol_response: Value = serde_json::from_str(&page_body).unwrap();
+        let content = protocol_response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("successful Global page returns a text block");
+        let page: Value = serde_json::from_str(content).expect("Global page body is JSON");
+        assert_eq!(page["outcome"], "unchanged");
+        assert_eq!(page["data"]["collection"], "items");
+        assert_eq!(page["data"]["rows"], json!([]));
+        assert_eq!(page["data"]["total"], 0);
+
+        global_service
+            .join()
+            .expect("real Global service thread completes");
+        mcp_task.abort();
+        let _ = mcp_task.await;
+        provider_task.abort();
+        let _ = provider_task.await;
     }
 
     #[tokio::test]

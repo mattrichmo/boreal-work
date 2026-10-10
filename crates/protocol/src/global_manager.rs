@@ -15,11 +15,11 @@ pub const LINKED_JOB_SHOW_COMMAND: &str = "linked job show";
 #[serde(deny_unknown_fields)]
 pub struct GlobalDetailPageRequest {
     pub collection: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default)]
     pub include_archived: bool,
@@ -250,5 +250,25 @@ mod tests {
         assert!(request(LINKED_JOB_SHOW_COMMAND, json!({"job_id":" "}))
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn absent_global_detail_page_filters_are_omitted_from_the_wire_payload() {
+        let payload = serde_json::to_value(GlobalDetailPageRequest {
+            collection: "items".into(),
+            project_id: None,
+            query: None,
+            kind: None,
+            include_archived: false,
+            limit: Some(20),
+            offset: Some(0),
+        })
+        .expect("global detail page request serializes");
+
+        assert_eq!(payload["collection"], "items");
+        assert!(payload.get("project_id").is_none());
+        assert!(payload.get("query").is_none());
+        assert!(payload.get("kind").is_none());
+        assert!(request(DETAIL_PAGE_COMMAND, payload).validate().is_ok());
     }
 }

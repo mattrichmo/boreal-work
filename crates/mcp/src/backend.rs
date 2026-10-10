@@ -3334,6 +3334,19 @@ mod tests {
             .project_status(&principal, project_id.into(), 10, 0)
             .await
             .expect("current revision reads before claim");
+        let worker_session = backend
+            .project_session_start(
+                &worker_principal,
+                ProjectSessionStartInput {
+                    project_id: project_id.into(),
+                    session_id: "mcp-worker-session".into(),
+                    expected_revision: current["revision"].as_u64().unwrap(),
+                    operation_id: "op_mcp_worker_session_start".into(),
+                },
+            )
+            .await
+            .expect("MCP explicitly starts the worker session before claim");
+        assert_eq!(worker_session["outcome"], "changed");
         let claim = WorkClaimInput {
             project_id: project_id.into(),
             work_id: "mcp-tool-work".into(),
@@ -3342,7 +3355,7 @@ mod tests {
             session_id: "mcp-worker-session".into(),
             source_version_id: source_version_id.clone(),
             config_identity: "mcp-test-config-v1".into(),
-            expected_revision: current["revision"].as_u64().unwrap(),
+            expected_revision: worker_session["revision"].as_u64().unwrap(),
             lease_ttl_ms: Some(60_000),
             time_limit_ms: Some(300_000),
         };
