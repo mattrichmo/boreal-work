@@ -151,7 +151,7 @@ impl BorealBackend {
             "transport": ["stdio", "streamable_http"],
             "global": {
                 "available": global_read,
-                "tools": if global_read { vec!["global_page"] } else { Vec::<&str>::new() },
+                "tools": if global_read { vec!["global_page", "global_history"] } else { Vec::<&str>::new() },
                 "write_tools": [],
                 "send": "unavailable: no actor-aware Global service mutation contract is wired"
             },
@@ -164,7 +164,7 @@ impl BorealBackend {
                 "tools": project_tool_names(project_read, project_write, evidence_write, finish_close),
             })).collect::<Vec<_>>(),
             "unavailable": [
-                "source and memory content reads await the digest-verified bounded-read service contract",
+                "full source and memory bodies are not exposed; indexed search returns only bounded excerpts",
                 "artifact body reads are not exposed",
                 "Global writes and Send are not exposed",
                 "evidence execution, review decisions, operator hold resolution, and machine administration are not exposed"
@@ -217,6 +217,68 @@ impl BorealBackend {
             .await
     }
 
+    /// Read the existing revision-consistent descendant rollup for one
+    /// explicitly selected Project container.
+    pub async fn project_work_rollup(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        project_id: String,
+        container_id: String,
+    ) -> Result<Value, AdapterError> {
+        let project_id = self.authorize_project(principal, &project_id, SCOPE_PROJECT_READ)?;
+        validate_identifier(&container_id, "container_id")?;
+        let operation_id = next_read_operation_id();
+        let mut data = self.project_common(principal, &project_id, &operation_id)?;
+        data["command"] = json!("container_rollup");
+        data["work_id"] = json!(container_id);
+        self.project_call(&project_id, operation_id, data, false)
+            .await
+    }
+
+    /// Read Boreal's canonical dependency tree or cycle diagnostics for one
+    /// explicitly selected Project.
+    pub async fn project_dependency_graph(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        project_id: String,
+        view: &str,
+    ) -> Result<Value, AdapterError> {
+        let project_id = self.authorize_project(principal, &project_id, SCOPE_PROJECT_READ)?;
+        let command = match view {
+            "tree" => "dependency_tree",
+            "cycles" => "dependency_cycles",
+            _ => {
+                return Err(AdapterError::InvalidInput {
+                    field: "view",
+                    reason: "must be tree or cycles",
+                })
+            }
+        };
+        let operation_id = next_read_operation_id();
+        let mut data = self.project_common(principal, &project_id, &operation_id)?;
+        data["command"] = json!(command);
+        self.project_call(&project_id, operation_id, data, false)
+            .await
+    }
+
+    /// Read one exact Project session binding using the authenticated actor
+    /// context and Boreal's existing session service route.
+    pub async fn project_session_show(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        project_id: String,
+        session_id: String,
+    ) -> Result<Value, AdapterError> {
+        let project_id = self.authorize_project(principal, &project_id, SCOPE_PROJECT_READ)?;
+        validate_identifier(&session_id, "session_id")?;
+        let operation_id = next_read_operation_id();
+        let mut data =
+            self.project_common_for_session(principal, &project_id, &operation_id, &session_id)?;
+        data["command"] = json!("session_show");
+        self.project_call(&project_id, operation_id, data, false)
+            .await
+    }
+
     pub async fn project_source_list(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -242,6 +304,79 @@ impl BorealBackend {
         data["command"] = json!("source_list");
         data["limit"] = json!(limit);
         data["offset"] = json!(offset);
+        let mut response = self
+            .project_call(&project_id, operation_id, data, false)
+            .await?;
+        redact_source_paths(&mut response, true)?;
+        Ok(response)
+    }
+
+    /// Search the Project's bounded source index through the existing
+    /// source_search service route. Local origin strings are removed from the
+    /// returned excerpts; stable source and citation identities remain.
+    pub async fn project_source_search(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        project_id: String,
+        query: String,
+        limit: u32,
+    ) -> Result<Value, AdapterError> {
+        let project_id = self.authorize_project(principal, &project_id, SCOPE_PROJECT_READ)?;
+        validate_search_query(&query, "query", 512)?;
+        validate_retrieval_limit(limit)?;
+        let operation_id = next_read_operation_id();
+        let mut data = self.project_common(principal, &project_id, &operation_id)?;
+        data["command"] = json!("source_search");
+        data["query"] = json!(query);
+        data["limit"] = json!(limit);
+        let mut response = self
+            .project_call(&project_id, operation_id, data, false)
+            .await?;
+        redact_source_paths(&mut response, false)?;
+        Ok(response)
+    }
+
+    /// Search immutable published memory excerpts using the existing
+    /// memory_command service contract. Draft bodies and filesystem paths are
+    /// not returned by this typed search tool.
+    pub async fn project_memory_search(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        input: ProjectMemorySearchInput,
+    ) -> Result<Value, AdapterError> {
+        let project_id =
+            self.authorize_project(principal, &input.project_id, SCOPE_PROJECT_READ)?;
+        if let Some(query) = input.text.as_deref() {
+            validate_search_query(query, "text", 512)?;
+        }
+        if let Some(entry_id) = input.entry_id.as_deref() {
+            validate_identifier(entry_id, "entry_id")?;
+        }
+        if let Some(source_version_id) = input.source_version_id.as_deref() {
+            validate_identifier(source_version_id, "source_version_id")?;
+        }
+        if input.text.is_none() && input.entry_id.is_none() && input.source_version_id.is_none() {
+            return Err(AdapterError::InvalidInput {
+                field: "search selector",
+                reason: "provide text, entry_id, or source_version_id",
+            });
+        }
+        validate_retrieval_limit(input.limit)?;
+        let operation_id = next_read_operation_id();
+        let mut data = self.project_common(principal, &project_id, &operation_id)?;
+        data["command"] = json!("memory_command");
+        data["memory"] = json!({
+            "expected_revision": null,
+            "confirmed": false,
+            "change": {
+                "kind": "search",
+                "text": input.text,
+                "entry_id": input.entry_id,
+                "source_version_id": input.source_version_id,
+                "requested_git_revision": null,
+                "limit": input.limit,
+            }
+        });
         self.project_call(&project_id, operation_id, data, false)
             .await
     }
@@ -305,20 +440,7 @@ impl BorealBackend {
         data["target_operation_id"] = json!(target_operation_id);
         self.project_call(&project_id, operation_id, data, false)
             .await
-            .map_err(|error| match error {
-                AdapterError::Application {
-                    outcome,
-                    error,
-                    revision,
-                    ..
-                } => AdapterError::Application {
-                    operation_id: target_operation_id,
-                    outcome,
-                    error,
-                    revision,
-                },
-                other => other,
-            })
+            .map_err(|error| operation_status_error(&target_operation_id, error))
     }
 
     /// Call the existing Project guide/next/resume service routes for a stable,
@@ -1131,14 +1253,49 @@ impl BorealBackend {
         principal: &AuthenticatedPrincipal,
         collection: String,
         query: Option<String>,
+        project_id: Option<String>,
+        kind: Option<String>,
         limit: u32,
         offset: u64,
     ) -> Result<Value, AdapterError> {
         self.authorize_global(principal)?;
-        if !matches!(collection.as_str(), "projects" | "items" | "notes") {
+        if !matches!(
+            collection.as_str(),
+            "projects"
+                | "items"
+                | "notes"
+                | "statuses"
+                | "relationships"
+                | "note_links"
+                | "status_history"
+        ) {
             return Err(AdapterError::InvalidInput {
                 field: "collection",
-                reason: "must be projects, items, or notes",
+                reason: "collection is not available through the bounded Global read surface",
+            });
+        }
+        if project_id
+            .as_deref()
+            .is_some_and(|value| validate_identifier(value, "management_project_id").is_err())
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "management_project_id",
+                reason: "must be a non-empty identifier of at most 128 bytes",
+            });
+        }
+        if kind.is_some() && collection != "items" {
+            return Err(AdapterError::InvalidInput {
+                field: "kind",
+                reason: "is only supported for items",
+            });
+        }
+        if kind
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "task" | "subtask" | "milestone"))
+        {
+            return Err(AdapterError::InvalidInput {
+                field: "kind",
+                reason: "must be task, subtask, or milestone",
             });
         }
         if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
@@ -1162,9 +1319,9 @@ impl BorealBackend {
         let request_id = next_read_operation_id();
         let payload = GlobalDetailPageRequest {
             collection,
-            project_id: None,
+            project_id,
             query,
-            kind: None,
+            kind,
             include_archived: false,
             limit: Some(limit),
             offset: Some(offset),
@@ -1183,6 +1340,64 @@ impl BorealBackend {
         let encoded =
             serde_json::to_string(&request).map_err(|_| AdapterError::ProtocolMismatch)?;
         let response = self.global_call(encoded, request_id.clone()).await?;
+        let size = serde_json::to_vec(&response)
+            .map_err(|_| AdapterError::ProtocolMismatch)?
+            .len();
+        if size > MAX_TOOL_OUTPUT_BYTES {
+            return Err(AdapterError::OutputTooLarge { bytes: size });
+        }
+        Ok(response)
+    }
+
+    /// Read bounded installation-wide activity through the existing Global
+    /// manager service, optionally filtered to one management project or item.
+    pub async fn global_history(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        management_project_id: Option<String>,
+        entity_id: Option<String>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Value, AdapterError> {
+        self.authorize_global(principal)?;
+        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+            return Err(AdapterError::InvalidInput {
+                field: "limit",
+                reason: "must be from 1 to 50",
+            });
+        }
+        if offset > MAX_PAGE_OFFSET {
+            return Err(AdapterError::InvalidInput {
+                field: "offset",
+                reason: "must be at most 100000",
+            });
+        }
+        if let Some(value) = management_project_id.as_deref() {
+            validate_identifier(value, "management_project_id")?;
+        }
+        if let Some(value) = entity_id.as_deref() {
+            validate_identifier(value, "entity_id")?;
+        }
+        let operation_id = next_read_operation_id();
+        let request = GlobalManagerRequest {
+            api_version: API_VERSION.into(),
+            schema_version: REQUEST_SCHEMA.into(),
+            operation_id: operation_id.clone(),
+            command: "history".into(),
+            payload: json!({
+                "limit": limit,
+                "offset": offset,
+                "project_id": management_project_id,
+                "entity_id": entity_id,
+            }),
+        };
+        request.validate().map_err(|_| AdapterError::InvalidInput {
+            field: "Global request",
+            reason: "does not satisfy the versioned Global service contract",
+        })?;
+        let encoded =
+            serde_json::to_string(&request).map_err(|_| AdapterError::ProtocolMismatch)?;
+        let response = self.global_call(encoded, operation_id).await?;
         let size = serde_json::to_vec(&response)
             .map_err(|_| AdapterError::ProtocolMismatch)?
             .len();
@@ -1378,6 +1593,18 @@ pub struct WorkClaimInput {
     pub expected_revision: u64,
     pub lease_ttl_ms: Option<u64>,
     pub time_limit_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMemorySearchInput {
+    pub project_id: String,
+    /// Bounded full-text search over immutable published memory.
+    pub text: Option<String>,
+    pub entry_id: Option<String>,
+    pub source_version_id: Option<String>,
+    /// Maximum number of bounded excerpts to return (1–20).
+    pub limit: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -1778,6 +2005,34 @@ fn validate_identifier(value: &str, field: &'static str) -> Result<(), AdapterEr
     }
 }
 
+fn validate_search_query(
+    value: &str,
+    field: &'static str,
+    max_bytes: usize,
+) -> Result<(), AdapterError> {
+    if !value.trim().is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+    {
+        Ok(())
+    } else {
+        Err(AdapterError::InvalidInput {
+            field,
+            reason:
+                "must be non-empty, contain no control characters, and fit the bounded query size",
+        })
+    }
+}
+
+fn validate_retrieval_limit(limit: u32) -> Result<(), AdapterError> {
+    if (1..=20).contains(&limit) {
+        Ok(())
+    } else {
+        Err(AdapterError::InvalidInput {
+            field: "limit",
+            reason: "must be from 1 to 20",
+        })
+    }
+}
+
 fn validate_external_identity(value: &str, field: &'static str) -> Result<(), AdapterError> {
     if !value.trim().is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control) {
         Ok(())
@@ -1821,6 +2076,55 @@ fn next_read_operation_id() -> String {
     )
 }
 
+fn operation_status_error(target_operation_id: &str, error: AdapterError) -> AdapterError {
+    match error {
+        AdapterError::Application {
+            outcome,
+            error,
+            revision,
+            ..
+        } => AdapterError::Application {
+            operation_id: target_operation_id.to_owned(),
+            outcome,
+            error,
+            revision,
+        },
+        AdapterError::UnknownOutcome {
+            readback,
+            protocol_error,
+            ..
+        } => AdapterError::UnknownOutcome {
+            // The synthetic service query has its own request ID, but callers
+            // must reconcile the durable operation they originally supplied.
+            operation_id: target_operation_id.to_owned(),
+            readback,
+            protocol_error,
+        },
+        other => other,
+    }
+}
+
+fn redact_source_paths(
+    response: &mut Value,
+    remove_catalog_root: bool,
+) -> Result<(), AdapterError> {
+    let Some(data) = response.get_mut("data").and_then(Value::as_object_mut) else {
+        return Err(AdapterError::ProtocolMismatch);
+    };
+    if remove_catalog_root {
+        data.remove("catalog_root");
+    }
+    let Some(items) = data.get_mut("items").and_then(Value::as_array_mut) else {
+        return Err(AdapterError::ProtocolMismatch);
+    };
+    for item in items {
+        if let Some(object) = item.as_object_mut() {
+            object.remove("origin");
+        }
+    }
+    Ok(())
+}
+
 fn project_tool_names(
     read: bool,
     write: bool,
@@ -1832,7 +2136,12 @@ fn project_tool_names(
         result.extend([
             "project_status",
             "project_work_show",
+            "project_work_rollup",
+            "project_dependency_graph",
+            "project_session_show",
             "project_source_list",
+            "project_source_search",
+            "project_memory_search",
             "operation_status",
             "project_agent_guide",
             "project_agent_next",
@@ -1930,6 +2239,60 @@ mod tests {
         (BorealBackend::new(config), principal)
     }
 
+    fn global_read_principal(backend: &BorealBackend) -> AuthenticatedPrincipal {
+        let policy = Policy {
+            actor_id: "agent-a".into(),
+            projects: BTreeSet::new(),
+            scopes: BTreeSet::from([SCOPE_GLOBAL_READ.into()]),
+        };
+        AuthenticatedPrincipal::from_stdio_policy("global-test", &policy, &backend.config)
+    }
+
+    #[test]
+    fn unknown_operation_readback_keeps_the_requested_durable_identity() {
+        let error = operation_status_error(
+            "op_claim_to_reconcile",
+            AdapterError::UnknownOutcome {
+                operation_id: "op_mcp_read_3_4_5".into(),
+                readback: Some(json!({"operation": {"outcome": "unknown"}})),
+                protocol_error: None,
+            },
+        );
+        match error {
+            AdapterError::UnknownOutcome {
+                operation_id,
+                readback,
+                ..
+            } => {
+                assert_eq!(operation_id, "op_claim_to_reconcile");
+                assert_eq!(readback.unwrap()["operation"]["outcome"], "unknown");
+            }
+            other => panic!("unknown operation outcome changed shape: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_reads_redact_local_catalog_and_origin_paths() {
+        let mut response = json!({
+            "data": {
+                "catalog_root": "/home/synthetic/project/.boreal/source",
+                "items": [{
+                    "source_version_id": "source-v1",
+                    "origin": "/home/synthetic/private.txt",
+                    "content_digest": "digest"
+                }]
+            }
+        });
+        redact_source_paths(&mut response, true).unwrap();
+        assert!(response["data"].get("catalog_root").is_none());
+        assert!(response["data"]["items"][0].get("origin").is_none());
+        assert_eq!(
+            response["data"]["items"][0]["source_version_id"],
+            "source-v1"
+        );
+        assert!(!response.to_string().contains("/home/synthetic"));
+    }
+
     #[tokio::test]
     async fn project_selection_is_explicit_and_scoped_before_socket_access() {
         let (backend, principal) = test_backend();
@@ -1946,6 +2309,101 @@ mod tests {
             error,
             AdapterError::InvalidInput { field: "limit", .. }
         ));
+        let error = backend
+            .project_dependency_graph(&principal, "project-a".into(), "admin")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AdapterError::InvalidInput { field: "view", .. }
+        ));
+        let error = backend
+            .project_session_show(&principal, "project-b".into(), "session-1".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AdapterError::PermissionDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn global_page_rejects_path_bearing_collections() {
+        let (backend, _) = test_backend();
+        let principal = global_read_principal(&backend);
+        let error = backend
+            .global_page(&principal, "associations".into(), None, None, None, 20, 0)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AdapterError::InvalidInput {
+                field: "collection",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn global_history_rejects_unbounded_page_arguments_before_socket_access() {
+        let (backend, _) = test_backend();
+        let principal = global_read_principal(&backend);
+        let error = backend
+            .global_history(&principal, None, None, 51, 0)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AdapterError::InvalidInput { field: "limit", .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn knowledge_search_inputs_are_bounded_and_need_a_selector() {
+        let (backend, principal) = test_backend();
+        let error = backend
+            .project_source_search(&principal, "project-a".into(), " \n".into(), 10)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AdapterError::InvalidInput { field: "query", .. }
+        ));
+        let error = backend
+            .project_memory_search(
+                &principal,
+                ProjectMemorySearchInput {
+                    project_id: "project-a".into(),
+                    text: None,
+                    entry_id: None,
+                    source_version_id: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AdapterError::InvalidInput {
+                field: "search selector",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn capability_inventory_advertises_the_new_bound_tools() {
+        let (backend, principal) = test_backend();
+        let capabilities = backend.capabilities(&principal);
+        let tools = capabilities["projects"][0]["tools"].as_array().unwrap();
+        for name in [
+            "project_work_claim",
+            "project_work_rollup",
+            "project_dependency_graph",
+            "project_session_show",
+            "project_source_search",
+            "project_memory_search",
+        ] {
+            assert!(tools.iter().any(|value| value == name), "missing {name}");
+        }
+        assert!(tools.iter().any(|value| value == "project_work_edit"));
     }
 
     #[tokio::test]
@@ -2717,11 +3175,107 @@ mod tests {
             lease_ttl_ms: Some(60_000),
             time_limit_ms: Some(300_000),
         };
+        // The proxy forwards the preflight operation read, lets the real
+        // daemon commit the claim, then drops just that write response. The
+        // final request is the client's operation-status reconciliation.
+        let claim_proxy_socket = root.0.join(".boreal/mcp-claim-proxy.sock");
+        let claim_proxy_listener = UnixListener::bind(&claim_proxy_socket)
+            .expect("temporary owner-only claim proxy binds");
+        fs::set_permissions(&claim_proxy_socket, fs::Permissions::from_mode(0o600))
+            .expect("claim proxy socket is owner-only");
+        let claim_upstream_socket = socket.clone();
+        let claim_proxy_thread = thread::spawn(move || {
+            for request_number in 0..3 {
+                let (mut downstream, _) = claim_proxy_listener
+                    .accept()
+                    .expect("claim proxy accepts MCP request");
+                let mut prefix = [0_u8; 4];
+                downstream
+                    .read_exact(&mut prefix)
+                    .expect("claim MCP request frame length arrives");
+                let mut request_body = vec![0; u32::from_be_bytes(prefix) as usize];
+                downstream
+                    .read_exact(&mut request_body)
+                    .expect("claim MCP request body arrives");
+                let mut upstream = UnixStream::connect(&claim_upstream_socket)
+                    .expect("claim proxy reaches the disposable daemon");
+                upstream
+                    .write_all(&prefix)
+                    .expect("upstream claim frame starts");
+                upstream
+                    .write_all(&request_body)
+                    .expect("upstream receives exact claim request");
+                let mut response_prefix = [0_u8; 4];
+                upstream
+                    .read_exact(&mut response_prefix)
+                    .expect("real daemon returns claim response");
+                let mut response_body = vec![0; u32::from_be_bytes(response_prefix) as usize];
+                upstream
+                    .read_exact(&mut response_body)
+                    .expect("real daemon claim response body arrives");
+                if request_number != 1 {
+                    downstream
+                        .write_all(&response_prefix)
+                        .expect("claim preflight or readback response length forwards");
+                    downstream
+                        .write_all(&response_body)
+                        .expect("claim preflight or readback response forwards");
+                }
+            }
+        });
+        let claim_proxy_config = Arc::new(McpConfig {
+            version: 1,
+            global: None,
+            projects: BTreeMap::from([(
+                project_id.into(),
+                ProjectEndpoint {
+                    socket: claim_proxy_socket,
+                    credential_env_by_actor: BTreeMap::from([(
+                        worker_id.into(),
+                        worker_credential_env.clone(),
+                    )]),
+                },
+            )]),
+            principals: BTreeMap::new(),
+            stdio_profiles: BTreeMap::new(),
+            http: None,
+        });
+        claim_proxy_config
+            .validate()
+            .expect("claim response-loss proxy binding is valid");
+        let claim_proxy_backend = BorealBackend::new(claim_proxy_config);
+        let lost_claim = claim_proxy_backend
+            .project_work_claim(&worker_principal, claim.clone())
+            .await
+            .expect_err("dropped claim response is reported as an unknown outcome");
+        assert!(matches!(
+            lost_claim,
+            AdapterError::UnknownOutcome { ref operation_id, .. }
+                if operation_id == "op_mcp_work_claim"
+        ));
+        let claim_readback = claim_proxy_backend
+            .project_operation_status(
+                &worker_principal,
+                project_id.into(),
+                "op_mcp_work_claim".into(),
+            )
+            .await
+            .expect("operation status reconciles the exact lost claim response");
+        assert_eq!(
+            claim_readback["data"]["operation"]["attempt_id"],
+            "mcp-tool-attempt"
+        );
+        assert_eq!(claim_readback["data"]["operation"]["outcome"], "changed");
+        claim_proxy_thread
+            .join()
+            .expect("claim proxy forwards preflight and durable readback");
+
         let claimed = backend
             .project_work_claim(&worker_principal, claim.clone())
             .await
-            .expect("MCP claims eligible work through Boreal");
-        assert_eq!(claimed["outcome"], "changed");
+            .expect("exact retry reads back the committed claim without duplication");
+        assert_eq!(claimed["outcome"], "unchanged");
+        assert_eq!(claimed["data"]["replayed"], true);
         assert_eq!(claimed["data"]["attempt_id"], "mcp-tool-attempt");
         let replayed_claim = backend
             .project_work_claim(&worker_principal, claim.clone())
@@ -2745,17 +3299,26 @@ mod tests {
             }
             other => panic!("operation ID reuse with changed payload was not rejected: {other:?}"),
         }
-        let claim_readback = backend
-            .project_operation_status(
-                &worker_principal,
-                project_id.into(),
-                "op_mcp_work_claim".into(),
-            )
-            .await
-            .expect("claim status reads back the first durable outcome");
-        assert_eq!(
-            claim_readback["data"]["operation"]["attempt_id"],
-            "mcp-tool-attempt"
+        let competing_claim = WorkClaimInput {
+            project_id: project_id.into(),
+            work_id: "mcp-tool-work".into(),
+            operation_id: "op_mcp_competing_claim".into(),
+            attempt_id: "mcp-competing-attempt".into(),
+            session_id: "mcp-create-session".into(),
+            source_version_id: source_version_id.clone(),
+            config_identity: "mcp-test-config-v1".into(),
+            expected_revision: claimed["revision"].as_u64().unwrap(),
+            lease_ttl_ms: Some(60_000),
+            time_limit_ms: Some(300_000),
+        };
+        assert!(
+            matches!(
+                backend
+                    .project_work_claim(&principal, competing_claim)
+                    .await,
+                Err(AdapterError::Application { .. })
+            ),
+            "a second authenticated actor must not claim an already-owned attempt"
         );
 
         let attempt_context = backend

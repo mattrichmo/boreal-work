@@ -108,9 +108,11 @@ reachability value means start or repair that Boreal service before MCP use.
 ## Scope and HTTP security
 
 Global is this installation's portfolio, and has a separate `boreal:global:read`
-grant. Each Project is separately bound in `[projects.<id>]`, and every
-principal/profile must separately list its allowed Project IDs. Knowing a
-project ID does not authorize it. Supported grants are:
+grant. `global_page.management_project_id` filters a Global management project;
+it is not an execution workspace selector. Each Project is separately bound
+in `[projects.<id>]`, and every principal/profile must separately list its
+allowed Project IDs. Knowing a project ID does not authorize it. Supported
+grants are:
 
 * `boreal:global:read`
 * `boreal:project:read`
@@ -162,10 +164,16 @@ on each call:
 | Tool | Scope | Existing service operation |
 | --- | --- | --- |
 | `boreal_capabilities` | authenticated | Shows only explicit bindings and configured capabilities |
-| `global_page` | Global read | Bounded Global detail page for projects, items, or notes |
+| `global_page` | Global read | Bounded Global page for projects, items, notes, statuses, relationships, note links, or status history |
+| `global_history` | Global read | Bounded Global activity history, optionally filtered by a management project or item |
 | `project_status` | Project read | Bounded status page |
 | `project_work_show` | Project read | Read a work item |
-| `project_source_list` | Project read | Bounded source metadata list |
+| `project_work_rollup` | Project read | Read an existing container rollup |
+| `project_dependency_graph` | Project read | Read the dependency tree or cycle diagnostics |
+| `project_session_show` | Project read | Read one exact Project session binding |
+| `project_source_list` | Project read | Bounded source metadata list with catalog and origin paths removed |
+| `project_source_search` | Project read | Search the existing source index for bounded excerpts; local origin strings are omitted |
+| `project_memory_search` | Project read | Search immutable published memory for bounded excerpts and citations |
 | `project_review_list` | Project read | Bounded review records page |
 | `project_review_show` | Project read | One review and bounded evidence metadata |
 | `operation_status` | Project read | Reconcile an existing durable operation ID |
@@ -187,6 +195,12 @@ on each call:
 | `project_evidence_add` | Project evidence-write | Import a typed Boreal receipt through `evidence_add`; the durable operation ID must equal `receipt.operation_id` |
 | `project_finish_close` | Project finish-close | Submit a typed receipt and inline summary to the existing finish-close service under a durable close operation ID |
 
+`global_page` accepts only the seven collection names in its tool schema. Its
+optional `management_project_id` is a Global portfolio filter. `kind` is
+available only for Global items. Source and published-memory searches return at
+most 20 results; excerpts are capped by the existing service at 1 KiB and 512
+bytes respectively.
+
 Tool input is capped at 16 KiB, service frames at 128 KiB, inline tool output
 at 64 KiB, page size at 50 rows and backend concurrency at 32 calls. A write
 timeout returns an unknown outcome with the original operation ID. Read
@@ -203,8 +217,11 @@ project bindings. Its response is marked private with a zero cache lifetime so
 one principal's view cannot be reused for another principal.
 
 Global writes, Send/Intake, operator hold resolution, evidence execution,
-workflow/review decisions, source/memory body reads, and machine
-administration are not exposed. `project_evidence_add` imports a typed receipt;
+workflow/review decisions, full source/memory bodies, and machine
+administration are not exposed. `global_page` excludes associations because
+they contain filesystem paths and excludes imported database snapshots. It
+omits Global note bodies and project/item descriptions. `project_evidence_add`
+imports a typed receipt;
 it does not run a verifier. The verifier-capable `evidence_run` service route
 has no MCP wrapper. `project_finish_close` calls Boreal's existing closeout
 route, which validates the receipt, attempt, fence, summary, and gates; Boreal
@@ -258,6 +275,10 @@ refresh the project state and submit a new finish operation ID.
 
 Run the MCP unit and synthetic HTTP-auth tests from the repository root:
 
+See [OPERATION_MATRIX.md](OPERATION_MATRIX.md) for the supported Project and
+Global CLI/service route inventory, the MCP mapping for each route family, and
+the reason each omitted family stays unavailable.
+
 ```sh
 cargo test -p boreal-mcp --lib
 ```
@@ -265,8 +286,9 @@ cargo test -p boreal-mcp --lib
 The real-daemon regression starts a disposable `bwrk service run` process over
 a temporary project database and checks status, work edits, claim/replay,
 revision conflicts, scoped synthetic receipt import, finish-close gate
-rejection/replay, and operation readback after deliberately dropped edit and
-finish responses. The receipts use synthetic `external_attested` fixtures;
+rejection/replay, and operation readback after deliberately dropped claim,
+edit, and finish responses. It also checks a competing actor cannot claim
+already-claimed work. The receipts use synthetic `external_attested` fixtures;
 the test does not run a verifier. Build the current CLI binary first, then run
 the daemon test explicitly:
 

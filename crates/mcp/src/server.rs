@@ -28,8 +28,8 @@ use crate::{
     backend::{
         AdapterError, AgentStartInput, AttemptTransitionInput, BorealBackend,
         ProjectAgentContextInput, ProjectEvidenceAddInput, ProjectFinishCloseInput,
-        ProjectSessionEndInput, ProjectSessionStartInput, WorkCheckpointInput, WorkClaimInput,
-        WorkCreateInput, WorkEditInput, WorkWaitInput,
+        ProjectMemorySearchInput, ProjectSessionEndInput, ProjectSessionStartInput,
+        WorkCheckpointInput, WorkClaimInput, WorkCreateInput, WorkEditInput, WorkWaitInput,
     },
     config::{
         HttpConfig, McpConfig, SCOPE_GLOBAL_READ, SCOPE_PROJECT_EVIDENCE_WRITE,
@@ -106,7 +106,12 @@ impl BorealMcpServer {
 
     fn success(value: Value) -> CallToolResult {
         match serde_json::to_string(&value) {
-            Ok(encoded) => CallToolResult::success(vec![ContentBlock::text(encoded)]),
+            Ok(encoded) if encoded.len() <= MAX_TOOL_OUTPUT_BYTES => {
+                CallToolResult::success(vec![ContentBlock::text(encoded)])
+            }
+            Ok(encoded) => tool_error(AdapterError::OutputTooLarge {
+                bytes: encoded.len(),
+            }),
             Err(_) => tool_error(AdapterError::ProtocolMismatch),
         }
     }
@@ -196,7 +201,7 @@ impl BorealMcpServer {
 
     #[tool(
         name = "global_page",
-        description = "Read one bounded page of Global projects, items, or notes. Global is this Boreal installation's portfolio and requires an explicit Global read grant.",
+        description = "Read one bounded page of an allowlisted Global management collection. Global is this Boreal installation's portfolio and requires an explicit Global read grant.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -218,8 +223,10 @@ impl BorealMcpServer {
                 self.backend
                     .global_page(
                         principal,
-                        input.collection.clone(),
+                        input.collection.as_str().to_owned(),
                         input.query.clone(),
+                        input.management_project_id.clone(),
+                        input.kind.clone(),
                         input.limit.unwrap_or(20),
                         input.offset.unwrap_or(0),
                     )
@@ -228,6 +235,162 @@ impl BorealMcpServer {
             Err(error) => Err(error.clone()),
         };
         self.finish(principal, "global_page", SCOPE_GLOBAL_READ, None, result)
+    }
+
+    #[tool(
+        name = "global_history",
+        description = "Read bounded Global activity history, optionally filtered by a Global management project or item ID.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn global_history(
+        &self,
+        Parameters(input): Parameters<GlobalHistoryInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .global_history(
+                        principal,
+                        input.management_project_id.clone(),
+                        input.entity_id.clone(),
+                        input.limit.unwrap_or(20),
+                        input.offset.unwrap_or(0),
+                    )
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(principal, "global_history", SCOPE_GLOBAL_READ, None, result)
+    }
+
+    #[tool(
+        name = "project_work_rollup",
+        description = "Read a bounded, revision-consistent rollup for a container in one explicitly selected Project workspace.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_work_rollup(
+        &self,
+        Parameters(input): Parameters<ProjectWorkRollupInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .project_work_rollup(
+                        principal,
+                        input.project_id.clone(),
+                        input.container_id.clone(),
+                    )
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_work_rollup",
+            SCOPE_PROJECT_READ,
+            None,
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_dependency_graph",
+        description = "Read Boreal's canonical dependency tree or cycle diagnostics for one explicitly selected Project workspace.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_dependency_graph(
+        &self,
+        Parameters(input): Parameters<ProjectDependencyGraphInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .project_dependency_graph(
+                        principal,
+                        input.project_id.clone(),
+                        input.view.as_str(),
+                    )
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_dependency_graph",
+            SCOPE_PROJECT_READ,
+            None,
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_session_show",
+        description = "Read one exact session binding from an explicitly selected Project workspace.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_session_show(
+        &self,
+        Parameters(input): Parameters<ProjectSessionShowInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .project_session_show(
+                        principal,
+                        input.project_id.clone(),
+                        input.session_id.clone(),
+                    )
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_session_show",
+            SCOPE_PROJECT_READ,
+            None,
+            result,
+        )
     }
 
     #[tool(
@@ -342,6 +505,92 @@ impl BorealMcpServer {
         self.finish(
             principal,
             "project_source_list",
+            SCOPE_PROJECT_READ,
+            None,
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_source_search",
+        description = "Search an explicitly selected Project's bounded source index and return short excerpts with stable citation identities. Local source origin strings are omitted.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_source_search(
+        &self,
+        Parameters(input): Parameters<ProjectSourceSearchInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .project_source_search(
+                        principal,
+                        input.project_id.clone(),
+                        input.query.clone(),
+                        input.limit.unwrap_or(10),
+                    )
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_source_search",
+            SCOPE_PROJECT_READ,
+            None,
+            result,
+        )
+    }
+
+    #[tool(
+        name = "project_memory_search",
+        description = "Search only immutable published Project memory and return bounded excerpts with source citations and content digests. Draft bodies are not returned.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn project_memory_search(
+        &self,
+        Parameters(input): Parameters<ProjectMemorySearchToolInput>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let principal = self.principal(&context);
+        if let Err(error) = Self::check_input(&input) {
+            return tool_error(error);
+        }
+        let result = match &principal {
+            Ok(principal) => {
+                self.backend
+                    .project_memory_search(
+                        principal,
+                        ProjectMemorySearchInput {
+                            project_id: input.project_id.clone(),
+                            text: input.text.clone(),
+                            entry_id: input.entry_id.clone(),
+                            source_version_id: input.source_version_id.clone(),
+                            limit: input.limit.unwrap_or(10),
+                        },
+                    )
+                    .await
+            }
+            Err(error) => Err(error.clone()),
+        };
+        self.finish(
+            principal,
+            "project_memory_search",
             SCOPE_PROJECT_READ,
             None,
             result,
@@ -1079,10 +1328,48 @@ impl ServerHandler for BorealMcpServer {
 #[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct GlobalPageInput {
-    collection: String,
+    collection: GlobalCollection,
     query: Option<String>,
+    /// Global management project ID, not a Project execution workspace ID.
+    management_project_id: Option<String>,
+    kind: Option<String>,
     limit: Option<u32>,
     offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GlobalHistoryInput {
+    management_project_id: Option<String>,
+    entity_id: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum GlobalCollection {
+    Projects,
+    Items,
+    Notes,
+    Statuses,
+    Relationships,
+    NoteLinks,
+    StatusHistory,
+}
+
+impl GlobalCollection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Projects => "projects",
+            Self::Items => "items",
+            Self::Notes => "notes",
+            Self::Statuses => "statuses",
+            Self::Relationships => "relationships",
+            Self::NoteLinks => "note_links",
+            Self::StatusHistory => "status_history",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
@@ -1095,9 +1382,64 @@ struct ProjectPageInput {
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ProjectSourceSearchInput {
+    project_id: String,
+    query: String,
+    limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProjectMemorySearchToolInput {
+    project_id: String,
+    text: Option<String>,
+    entry_id: Option<String>,
+    source_version_id: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProjectWorkShowInput {
     project_id: String,
     work_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProjectWorkRollupInput {
+    project_id: String,
+    container_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProjectDependencyGraphInput {
+    project_id: String,
+    view: DependencyGraphView,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum DependencyGraphView {
+    Tree,
+    Cycles,
+}
+
+impl DependencyGraphView {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Tree => "tree",
+            Self::Cycles => "cycles",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProjectSessionShowInput {
+    project_id: String,
+    session_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize, rmcp::schemars::JsonSchema)]
@@ -1736,6 +2078,18 @@ mod tests {
         assert_eq!(listed.status(), StatusCode::OK);
         let listed_body = listed.text().await.unwrap();
         assert!(listed_body.contains("project_work_show"), "{listed_body}");
+        assert!(
+            listed_body.contains("project_dependency_graph"),
+            "{listed_body}"
+        );
+        assert!(
+            listed_body.contains("project_source_search"),
+            "{listed_body}"
+        );
+        assert!(
+            listed_body.contains("project_memory_search"),
+            "{listed_body}"
+        );
         assert!(listed_body.contains("boreal_capabilities"), "{listed_body}");
         assert!(!listed_body.contains("global_page"), "{listed_body}");
         assert!(!listed_body.contains("project_work_edit"), "{listed_body}");
@@ -1833,6 +2187,34 @@ mod tests {
             metadata.as_str(),
             "http://127.0.0.1:8765/.well-known/oauth-protected-resource/mcp"
         );
+    }
+
+    #[test]
+    fn global_page_schema_allows_only_bounded_path_free_collections() {
+        for collection in [
+            "projects",
+            "items",
+            "notes",
+            "statuses",
+            "relationships",
+            "note_links",
+            "status_history",
+        ] {
+            let parsed: GlobalPageInput = serde_json::from_value(json!({
+                "collection": collection,
+                "management_project_id": "portfolio-a",
+                "limit": 20,
+                "offset": 0
+            }))
+            .unwrap();
+            assert_eq!(parsed.collection.as_str(), collection);
+        }
+        for collection in ["associations", "imported_history", "arbitrary"] {
+            assert!(serde_json::from_value::<GlobalPageInput>(json!({
+                "collection": collection
+            }))
+            .is_err());
+        }
     }
 
     #[test]
@@ -1947,6 +2329,21 @@ mod tests {
         assert_eq!(data["readback"]["operation"]["state"], "committed");
         assert_eq!(data["readback_required"], true);
         assert_eq!(data["recovery"]["action"], "read_operation_status");
+    }
+
+    #[test]
+    fn successful_tool_result_is_bounded_at_the_adapter_boundary() {
+        let result = BorealMcpServer::success(json!({
+            "large": "x".repeat(MAX_TOOL_OUTPUT_BYTES + 1)
+        }));
+        assert_eq!(result.is_error, Some(true));
+        let ContentBlock::Text(content) = &result.content[0] else {
+            panic!("error content is not text");
+        };
+        assert!(content.text.len() <= MAX_TOOL_OUTPUT_BYTES);
+        let data: Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(data["error"], "boreal_mcp");
+        assert!(data["message"].as_str().unwrap().contains("bytes"));
     }
 
     #[test]
