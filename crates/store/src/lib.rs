@@ -6214,9 +6214,9 @@ impl SqliteStore {
                 actual: attempt.session_id.unwrap_or_default(),
             });
         }
-        if let Some(session_id) = session_id {
-            self.session_for_claim(project_id, session_id, actor_id, harness_id)?;
-        }
+        // A replay returns an already committed claim. The original session
+        // must still match the durable attempt identity above, but it need not
+        // remain active after the operation completed.
         Ok(ClaimResult {
             operation_id: operation.operation_id.clone(),
             attempt_id: attempt_id.to_owned(),
@@ -6247,6 +6247,26 @@ impl SqliteStore {
             });
         }
         Ok(attempt)
+    }
+
+    /// Reads an attempt by its durable identity, including terminal attempts.
+    /// The project check prevents this historical readback from becoming a
+    /// cross-workspace lookup primitive.
+    pub fn attempt_record_by_id(
+        &self,
+        project_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<AttemptRecord>, StoreError> {
+        let Some(attempt) = self.attempt_record(attempt_id, false)? else {
+            return Ok(None);
+        };
+        if attempt.project_id != project_id {
+            return Err(StoreError::WrongSubject {
+                expected: project_id.to_owned(),
+                actual: attempt.project_id,
+            });
+        }
+        Ok(Some(attempt))
     }
 
     fn current_attempts_for_project(
@@ -8589,6 +8609,49 @@ impl SqliteStore {
     ) -> Result<OperationReadback, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = self.append_identity_operation_audit_in_transaction(context, operation, audit);
+        match result {
+            Ok(value) => {
+                self.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Appends an identity-bound operation and audit event only when the
+    /// project still has the caller's expected revision. The revision check
+    /// and append share one immediate transaction. Exact operation replays
+    /// are returned before checking the current revision, so a lost response
+    /// remains safely recoverable after the original append advanced it.
+    pub fn append_identity_operation_audit_at_revision(
+        &self,
+        context: &identity::IdentityContext,
+        operation: OperationRecord,
+        audit: AuditEventRecord,
+        expected_revision: u64,
+    ) -> Result<OperationReadback, StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let identity = operations::OperationIdentity::from_record(
+                &operation,
+                Some((audit.subject_type.clone(), audit.subject_id.clone())),
+            );
+            let journal = operations::OperationJournal::new(self);
+            if let Some(readback) = journal.replay_in_context(context, &identity)? {
+                return Ok(readback);
+            }
+            let actual_revision = self.project_revision(&operation.project_id)?.0;
+            if actual_revision != expected_revision {
+                return Err(StoreError::StaleRevision {
+                    expected: expected_revision,
+                    actual: actual_revision,
+                });
+            }
+            self.append_identity_operation_audit_in_transaction(context, operation, audit)
+        })();
         match result {
             Ok(value) => {
                 self.execute_batch("COMMIT")?;

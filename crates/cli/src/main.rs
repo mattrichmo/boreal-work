@@ -98,6 +98,10 @@ Usage:
   bwrk commands [PATH] [--json]
   bwrk help [PATH] [--json]
   bwrk version [--json]
+  bwrk mcp start --config FILE
+  bwrk mcp serve --config FILE --transport stdio --profile NAME
+  bwrk mcp serve --config FILE --transport http
+  bwrk mcp status --config FILE
   bwrk workflows list [--json]
   bwrk workflows show WORKFLOW_REF [--json]
   bwrk init [PROJECT_DIR] [--project ID] [--interactive|--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
@@ -386,6 +390,9 @@ impl Default for CliResult {
 
 fn main() -> ExitCode {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|arg| arg == "mcp") {
+        return run_mcp(&args[1..]);
+    }
     if args.is_empty() {
         println!("{HELP}");
         return ExitCode::SUCCESS;
@@ -533,6 +540,16 @@ fn main() -> ExitCode {
                 eprintln!("error [{}]: {}", error.code, error.message);
             }
             ExitCode::from(error.exit)
+        }
+    }
+}
+
+fn run_mcp(args: &[String]) -> ExitCode {
+    match boreal_mcp::run_cli(args, "bwrk mcp") {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("bwrk mcp: {error}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -4676,6 +4693,22 @@ fn operation_show_result(
         .transpose()
         .map_err(map_store_error)?
         .flatten();
+    if operation
+        .as_ref()
+        .is_some_and(|record| record.command == "finish_close")
+    {
+        if let Some(identity) = identity.as_ref() {
+            let app = WorkApplication::new(store);
+            let journal = app.authenticated_operation_journal(identity);
+            if let Some(result) = finish_result_readback(
+                &journal,
+                operation_id,
+                &finish_result_operation_id(operation_id),
+            )? {
+                return Ok(result);
+            }
+        }
+    }
     let recovery_obligations = store
         .list_unresolved_recovery_obligations(&project, None, 500)
         .map_err(map_store_error)?
@@ -4911,12 +4944,17 @@ fn receipt_record_json(receipt: &ReceiptRecord) -> Result<Value, CliError> {
         .gate_id
         .as_deref()
         .ok_or_else(|| receipt_readback_mismatch("durable receipt is missing its indexed gate"))?;
-    if indexed_gate_id != subject_gate_id {
+    let scoped_gate_prefix = format!("{}:", receipt.work_id);
+    let scoped_subject_gate = if subject_gate_id.starts_with(&scoped_gate_prefix) {
+        subject_gate_id.to_owned()
+    } else {
+        format!("{scoped_gate_prefix}{subject_gate_id}")
+    };
+    if indexed_gate_id != subject_gate_id && indexed_gate_id != scoped_subject_gate {
         return Err(receipt_readback_mismatch(
             "durable receipt subject gate does not match its indexed gate",
         ));
     }
-    let scoped_gate_prefix = format!("{}:", receipt.work_id);
     let wire_gate_id = subject_gate_id
         .strip_prefix(&scoped_gate_prefix)
         .unwrap_or(subject_gate_id);
@@ -6395,16 +6433,22 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             // Witnessed receipts are already authoritative facts created by
             // evidence run. Direct closeout may read them back, but may never
             // import a second witnessed fact through the external-ingest API.
-            let durable = store
-                .receipt(receipt.receipt_id.as_str())
-                .map_err(map_store_error)?
-                .ok_or_else(|| {
-                    CliError::with(
+            let durable = match store.receipt(receipt.receipt_id.as_str()) {
+                Ok(Some(durable)) => durable,
+                Ok(None) => {
+                    persist_finish_receipt_rejection(
+                        &finish_context,
+                        ApplicationOutcome::Rejected,
+                        ErrorCode::ReceiptInvalid,
+                    )?;
+                    return Err(CliError::with(
                         ErrorCode::ReceiptInvalid,
                         ApplicationOutcome::Rejected,
                         "witnessed receipt is not durably readable; use service readback",
-                    )
-                })?;
+                    ));
+                }
+                Err(error) => return Err(map_store_error(error)),
+            };
             let durable_result_matches = match receipt.result {
                 ReceiptResult::Passed => durable.result == ReceiptOutcome::Passed,
                 ReceiptResult::Failed => durable.result == ReceiptOutcome::Failed,
@@ -6424,6 +6468,11 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
                 || durable.attestation != ReceiptAttestation::BorealWitnessed
                 || !durable_result_matches
             {
+                persist_finish_receipt_rejection(
+                    &finish_context,
+                    ApplicationOutcome::Rejected,
+                    ErrorCode::ReceiptInvalid,
+                )?;
                 return Err(CliError::with(
                     ErrorCode::ReceiptInvalid,
                     ApplicationOutcome::Rejected,
@@ -6432,7 +6481,18 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             }
             true
         }
-        Err(error) => return Err(map_application_error(error)),
+        Err(error) => {
+            let error = map_application_error(error);
+            if error.code == ErrorCode::StaleRevision {
+                persist_finish_revision_conflict(&finish_context)?;
+            } else if matches!(
+                error.outcome,
+                ApplicationOutcome::Rejected | ApplicationOutcome::Conflict
+            ) {
+                persist_finish_receipt_rejection(&finish_context, error.outcome, error.code)?;
+            }
+            return Err(error);
+        }
     };
     let submitted = app
         .prepare_finish(
@@ -8943,40 +9003,42 @@ fn ensure_finish_parent_intent(
         "readback_required": true,
     })
     .to_string();
-    journal
-        .append(
-            OperationRecord {
-                operation_id: operation.to_owned(),
-                project_id: project.as_str().to_owned(),
-                command: "finish_close".to_owned(),
-                actor_id: actor.to_owned(),
-                session_id: Some(session.to_owned()),
-                expected_revision,
-                attempt_id: Some(attempt.to_owned()),
-                fence: Some(fence),
-                request_digest: request_digest.to_owned(),
-                outcome: StoreOperationOutcome::Busy,
-                result_json: payload.clone(),
-                revision: 0,
-                created_at: created_at.clone(),
-                completed_at: None,
-            },
-            AuditEventRecord {
-                project_id: project.as_str().to_owned(),
-                revision: 0,
-                operation_id: operation.to_owned(),
-                event_type: "close.requested".to_owned(),
-                subject_type: "attempt".to_owned(),
-                subject_id: attempt.to_owned(),
-                actor_id: actor.to_owned(),
-                session_id: Some(session.to_owned()),
-                fence: Some(fence),
-                as_of: created_at,
-                payload_json: payload,
-            },
-        )
-        .map(|_| ())
-        .map_err(map_application_error)
+    let operation_record = OperationRecord {
+        operation_id: operation.to_owned(),
+        project_id: project.as_str().to_owned(),
+        command: "finish_close".to_owned(),
+        actor_id: actor.to_owned(),
+        session_id: Some(session.to_owned()),
+        expected_revision,
+        attempt_id: Some(attempt.to_owned()),
+        fence: Some(fence),
+        request_digest: request_digest.to_owned(),
+        outcome: StoreOperationOutcome::Busy,
+        result_json: payload.clone(),
+        revision: 0,
+        created_at: created_at.clone(),
+        completed_at: None,
+    };
+    let audit_record = AuditEventRecord {
+        project_id: project.as_str().to_owned(),
+        revision: 0,
+        operation_id: operation.to_owned(),
+        event_type: "close.requested".to_owned(),
+        subject_type: "attempt".to_owned(),
+        subject_id: attempt.to_owned(),
+        actor_id: actor.to_owned(),
+        session_id: Some(session.to_owned()),
+        fence: Some(fence),
+        as_of: created_at,
+        payload_json: payload,
+    };
+    let appended = match expected_revision {
+        Some(expected_revision) => {
+            journal.append_at_revision(operation_record, audit_record, expected_revision)
+        }
+        None => journal.append(operation_record, audit_record),
+    };
+    appended.map(|_| ()).map_err(map_application_error)
 }
 
 fn finish_result_from_operation(operation: &OperationRecord) -> Result<CliResult, CliError> {
@@ -9165,6 +9227,106 @@ fn append_finish_result_operation(
         )
         .map(|_| ())
         .map_err(map_application_error)
+}
+
+fn persist_finish_revision_conflict(
+    context: &FinishCloseJournalContext<'_, '_>,
+) -> Result<(), CliError> {
+    append_finish_result_operation(
+        context,
+        ApplicationOutcome::Conflict,
+        &json!({
+            "state": "conflict",
+            "reason": "project_revision_changed_after_finish_intent",
+        }),
+    )
+}
+
+fn persist_finish_receipt_rejection(
+    context: &FinishCloseJournalContext<'_, '_>,
+    outcome: ApplicationOutcome,
+    error_code: ErrorCode,
+) -> Result<(), CliError> {
+    let (state, reason) = match outcome {
+        ApplicationOutcome::Rejected => ("rejected", "receipt_record_rejected"),
+        ApplicationOutcome::Conflict => ("conflict", "receipt_record_conflict"),
+        _ => return Ok(()),
+    };
+    append_finish_result_operation(
+        context,
+        outcome,
+        &json!({
+            "state": state,
+            "reason": reason,
+            "error_code": error_code.as_str(),
+        }),
+    )
+}
+
+/// Record a terminal submit rejection only after its atomic attempt operation
+/// has been read back as absent. The receipt is already a committed Boreal
+/// fact at this point, so preserve its stable operation and receipt IDs in the
+/// finish result instead of clearing the parent intent or implying rollback.
+fn persist_finish_submit_failure(
+    context: &FinishCloseJournalContext<'_, '_>,
+    outcome: ApplicationOutcome,
+    error_code: ErrorCode,
+    receipt: &ReceiptPayload,
+    receipt_replayed: bool,
+    submit_operation_id: &str,
+    conflicting_operation: Option<&OperationRecord>,
+) -> Result<(), CliError> {
+    let (state, reason) = match outcome {
+        ApplicationOutcome::Rejected => {
+            ("submit_rejected", "attempt_submit_rejected_after_receipt")
+        }
+        ApplicationOutcome::Conflict => (
+            "submit_conflict",
+            "attempt_submit_operation_conflict_after_receipt",
+        ),
+        _ => return Ok(()),
+    };
+    append_finish_result_operation(
+        context,
+        outcome,
+        &json!({
+            "state": state,
+            "stage": "attempt_submit",
+            "reason": reason,
+            "error_code": error_code.as_str(),
+            "submit_operation_id": submit_operation_id,
+            "receipt_recorded": true,
+            "receipt_id": receipt.receipt_id.as_str(),
+            "receipt_operation_id": receipt.operation_id.as_str(),
+            "receipt_result": finish_receipt_result_name(receipt.result),
+            "receipt_attestation": finish_attestation_name(receipt.attestation),
+            "receipt_replayed": receipt_replayed,
+            "conflicting_operation": conflicting_operation.map(|record| json!({
+                "operation_id": record.operation_id.as_str(),
+                "command": record.command.as_str(),
+                "outcome": format!("{:?}", record.outcome).to_ascii_lowercase(),
+            })),
+        }),
+    )
+}
+
+fn finish_submit_operation_matches(
+    operation: &OperationRecord,
+    request: &boreal_application::AttemptRequest,
+) -> bool {
+    operation.operation_id == request.operation_id.as_str()
+        && operation.project_id == request.project_id.as_str()
+        && operation.command == "attempt.submit"
+        && operation.actor_id == request.actor_id.as_str()
+        && operation.session_id.as_deref()
+            == request.session_id.as_ref().map(|value| value.as_str())
+        && operation.attempt_id.as_deref() == Some(request.attempt_id.as_str())
+        && operation.fence == Some(request.fence.get())
+        && operation.request_digest == request.request_digest
+        && matches!(
+            operation.outcome,
+            StoreOperationOutcome::Changed | StoreOperationOutcome::Unchanged
+        )
 }
 
 fn store_revision(store: &SqliteStore, project: &ProjectId) -> Result<u64, CliError> {
@@ -11515,6 +11677,77 @@ mod tests {
             "Finish remains open pending the required checkpoint.",
         )
         .expect("summary writes");
+
+        // A structurally valid external receipt can still be stale relative
+        // to the current attempt source. That rejection must be a durable
+        // terminal readback, so retrying its original operation ID does not
+        // leave the finish parent permanently pending.
+        let valid_receipt_contents =
+            fs::read_to_string(&receipt_path).expect("valid receipt is readable");
+        let mut stale_source_receipt: Value =
+            serde_json::from_str(&valid_receipt_contents).expect("valid receipt is JSON");
+        stale_source_receipt["source_snapshot_hash"] = json!(format!("sha256:{}", "0".repeat(64)));
+        fs::write(
+            &receipt_path,
+            serde_json::to_string(&stale_source_receipt).expect("stale receipt serializes"),
+        )
+        .expect("stale receipt writes");
+        let fence_arg = fence.to_string();
+        let invalid_finish_args = || {
+            args(&[
+                "agent",
+                "finish",
+                "w",
+                "--close",
+                "--project",
+                "p",
+                "--actor",
+                actor,
+                "--session",
+                "s",
+                "--attempt",
+                attempt_id,
+                "--fence",
+                &fence_arg,
+                "--receipt",
+                &receipt_file,
+                "--summary",
+                &summary_file,
+                "--db",
+                &db,
+                "--operation-id",
+                "op-cli-invalid-source",
+            ])
+        };
+        let invalid_error =
+            run(&invalid_finish_args()).expect_err("a stale source receipt is rejected");
+        assert_eq!(invalid_error.code, ErrorCode::ReceiptSourceMismatch);
+        let store = SqliteStore::open(&db_path, PRODUCTION_SCHEMA)
+            .expect("database opens after deterministic rejection");
+        let terminal_result = store
+            .operation("op-cli-invalid-source:result")
+            .expect("terminal result lookup succeeds")
+            .expect("terminal result operation exists");
+        assert_eq!(terminal_result.outcome, StoreOperationOutcome::Rejected);
+        let terminal_payload: Value =
+            serde_json::from_str(&terminal_result.result_json).expect("result is valid JSON");
+        assert_eq!(
+            terminal_payload["close"]["error_code"],
+            "receipt_source_mismatch"
+        );
+        assert!(store
+            .receipt("receipt-cli-finish")
+            .expect("invalid receipt lookup succeeds")
+            .is_none());
+        drop(store);
+        let replay = run(&invalid_finish_args())
+            .expect("the same operation reads back its terminal rejection");
+        assert_eq!(replay.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            replay.data.expect("rejected result data")["error_code"],
+            "receipt_source_mismatch"
+        );
+        fs::write(&receipt_path, valid_receipt_contents).expect("valid receipt is restored");
 
         let finish_result = run(&args(&[
             "agent",

@@ -41,6 +41,9 @@ struct GapSpec {
 // Keep this list close to the dispatch boundary. The registry is a product
 // contract, not a copy of the aspirational command-plan document.
 const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {path:"mcp start",syntax:"bwrk mcp start --config FILE",action:"mutate",output:"mcp_server",direct:true,service:false,summary:"start the configured authenticated Streamable HTTP MCP server in the foreground"},
+    CommandSpec {path:"mcp serve",syntax:"bwrk mcp serve --config FILE --transport (stdio|http) [--profile NAME]",action:"mutate",output:"mcp_server",direct:true,service:false,summary:"serve the explicitly configured MCP transport and scope policy"},
+    CommandSpec {path:"mcp status",syntax:"bwrk mcp status --config FILE",action:"read",output:"mcp_status",direct:true,service:false,summary:"validate MCP configuration and report scopes and local service reachability"},
     CommandSpec {path:"merge show",syntax:"bwrk merge show [--project PROJECT] --input PATH [--limit N] [--offset N] [--json]",action:"read",output:"maintenance_annotations",direct:true,service:true,summary:"inspect retained lineage and versioned summaries"},
     CommandSpec {path:"compact show",syntax:"bwrk compact show [--project PROJECT] --input PATH [--limit N] [--offset N] [--json]",action:"read",output:"maintenance_annotations",direct:true,service:true,summary:"inspect retained lineage and versioned summaries"},
     CommandSpec {path:"install status",syntax:"bwrk install status [--json]",action:"read",output:"installation",direct:true,service:false,summary:"inspect running binary and PATH conflicts"},
@@ -2963,6 +2966,34 @@ fn version_result() -> Result<CliResult, CliError> {
 }
 
 fn command_json(command: &CommandSpec) -> Value {
+    let mcp_host_command = command.path.starts_with("mcp ");
+    let behavior = if mcp_host_command {
+        json!({
+            "read_only": command.action == "read",
+            "writes_state": false,
+            "writes_canonical_state": false,
+            "writes_generated_artifact": false,
+            "requires_expected_revision": false,
+            "requires_confirmation": false,
+            "concurrency_control": "configured_transport_and_host_authentication",
+            "preserves_history": false,
+            "starts_foreground_server": matches!(command.path, "mcp start" | "mcp serve"),
+        })
+    } else {
+        json!({"read_only":command.action=="read","writes_state":command.action!="read","writes_canonical_state":command.action!="read","writes_generated_artifact":command.action=="read" && command.syntax.contains("--out"),"requires_expected_revision":command.syntax.contains("--expected-revision"),"requires_confirmation":command.syntax.contains("--yes"),"concurrency_control":if command.action=="read" {"revisioned_snapshot"}else{"application_rechecks_revision_and_ownership"},"preserves_history":true})
+    };
+    let example_description = match command.path {
+        "mcp start" => {
+            "Run the authenticated Streamable HTTP server from a private MCP configuration."
+        }
+        "mcp serve" => {
+            "Use stdio with a named local profile or the configured Streamable HTTP transport."
+        }
+        "mcp status" => {
+            "Validate private configuration and inspect configured scope and socket reachability."
+        }
+        _ => "Bind PROJECT and revision/fence values from the current project briefing.",
+    };
     json!({
         "path": command.path,
         "syntax": command.syntax,
@@ -2977,10 +3008,10 @@ fn command_json(command: &CommandSpec) -> Value {
         "availability": "available",
         "kind": "command",
         "summary": command.summary,
-        "behavior": {"read_only":command.action=="read","writes_state":command.action!="read","writes_canonical_state":command.action!="read","writes_generated_artifact":command.action=="read" && command.syntax.contains("--out"),"requires_expected_revision":command.syntax.contains("--expected-revision"),"requires_confirmation":command.syntax.contains("--yes"),"concurrency_control":if command.action=="read" {"revisioned_snapshot"}else{"application_rechecks_revision_and_ownership"},"preserves_history":true},
+        "behavior": behavior,
         "flags": flag_metadata(command),
         "input_schema": input_schema(command.path),
-        "examples": [{"argv_template":command.syntax,"description":"Bind PROJECT and revision/fence values from the current project briefing."}],
+        "examples": [{"argv_template":command.syntax,"description":example_description}],
         "envelope_schema": schema::ENVELOPE,
         "output_kind":command.output,
     })
@@ -3622,6 +3653,25 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn mcp_host_commands_are_advertised_under_the_public_namespace() {
+        let result = registry_result(Some("mcp")).unwrap();
+        let data = result.data.unwrap();
+        let available = data["available"].as_array().expect("MCP command entries");
+        assert_eq!(available.len(), 3);
+        let start = available
+            .iter()
+            .find(|entry| entry["path"] == "mcp start")
+            .expect("MCP start command");
+        assert_eq!(start["availability"], "available");
+        assert_eq!(start["adapters"]["direct"], true);
+        assert_eq!(start["behavior"]["writes_canonical_state"], false);
+        assert_eq!(start["behavior"]["starts_foreground_server"], true);
+        assert!(available.iter().any(|entry| entry["path"] == "mcp serve"));
+        assert!(available.iter().any(|entry| entry["path"] == "mcp status"));
+        assert!(data["unavailable_routes"].as_array().unwrap().is_empty());
     }
 
     #[test]

@@ -17,6 +17,7 @@ boreal-application = { path = "../application" }
 boreal-domain = { path = "../domain" }
 boreal-migration = { path = "../migration" }
 boreal-memory = { path = "../memory" }
+boreal-mcp = { path = "../mcp" }
 boreal-protocol = { path = "../protocol" }
 boreal-service = { path = "../service" }
 boreal-source = { path = "../source" }
