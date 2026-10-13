@@ -1,0 +1,57 @@
+{
+  "fixture_id": "bw-s12-t01.operations.v1",
+  "operation_show_request": {
+    "project_id": "project_demo",
+    "target_operation_id": "op_create_work_01"
+  },
+  "readback_data": {
+    "operation": {
+      "operation_id": "op_create_work_01",
+      "project_id": "project_demo",
+      "command": "create_work",
+      "actor_id": "actor_agent_01",
+      "session_id": "session_agent_01",
+      "attempt_id": null,
+      "fence": null,
+      "request_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "outcome": "changed",
+      "result": {"work_id":"work_task_01"},
+      "revision": 43,
+      "created_at": "2026-09-14T22:20:00Z",
+      "completed_at": "2026-09-14T22:20:00Z"
+    },
+    "execution": null,
+    "external_job": null,
+    "recovery_obligations": [],
+    "receipt_id": null,
+    "receipt": null,
+    "readback_required": false
+  },
+  "status_page_pagination_excerpt": {
+    "complete_response": false,
+    "limit": 4,
+    "offset": 0,
+    "total": 9,
+    "has_more": true,
+    "next_offset": 4,
+    "returned_rows": 4
+  },
+  "typed_outcomes": [
+    {"api_version":"2","schema_version":"boreal.protocol.envelope.v1","operation_id":"op_s12_changed","revision":43,"as_of":"2026-09-14T22:20:00Z","next_status_change_at":null,"transport":"ok","outcome":"changed","data":{"work_id":"work_task_01"},"detail_ref":null,"error":null},
+    {"api_version":"2","schema_version":"boreal.protocol.envelope.v1","operation_id":"op_s12_unchanged","revision":43,"as_of":"2026-09-14T22:20:00Z","next_status_change_at":null,"transport":"ok","outcome":"unchanged","data":{},"detail_ref":null,"error":null},
+    {"api_version":"2","schema_version":"boreal.protocol.envelope.v1","operation_id":"op_s12_rejected","revision":null,"as_of":"2026-09-14T22:20:00Z","next_status_change_at":null,"transport":"ok","outcome":"rejected","data":null,"detail_ref":null,"error":{"code":"invalid_argument","message":"invalid fixture request","retryable":false}},
+    {"api_version":"2","schema_version":"boreal.protocol.envelope.v1","operation_id":"op_s12_conflict","revision":43,"as_of":"2026-09-14T22:20:00Z","next_status_change_at":null,"transport":"ok","outcome":"conflict","data":null,"detail_ref":null,"error":{"code":"revision_conflict","message":"fixture revision conflict","retryable":false,"expected_revision":42,"observed_revision":43}},
+    {"api_version":"2","schema_version":"boreal.protocol.envelope.v1","operation_id":"op_s12_busy","revision":null,"as_of":"2026-09-14T22:20:00Z","next_status_change_at":null,"transport":"ok","outcome":"busy","data":null,"detail_ref":null,"error":{"code":"service_busy","message":"fixture service busy","retryable":true,"retry_after_ms":100}},
+    {"api_version":"2","schema_version":"boreal.protocol.envelope.v1","operation_id":"op_s12_failed","revision":null,"as_of":"2026-09-14T22:20:00Z","next_status_change_at":null,"transport":"ok","outcome":"failed","data":null,"detail_ref":null,"error":{"code":"protocol_mismatch","message":"fixture failure","retryable":false}},
+    {"api_version":"2","schema_version":"boreal.protocol.envelope.v1","operation_id":"op_s12_unknown","revision":43,"as_of":"2026-09-14T22:20:00Z","next_status_change_at":null,"transport":"ok","outcome":"unknown","data":{"readback_required":true},"detail_ref":null,"error":{"code":"unknown_outcome","message":"read operation_id before retry","retryable":false,"readback_required":true,"operation_id":"op_s12_unknown"}}
+  ],
+  "contract_status": {
+    "operation_identity_and_readback": "implemented",
+    "operation_result_shape": "partial",
+    "reason": "Operation readback combines operation, execution, external-job, recovery, and receipt details; not every source has every section, and finish-close may return a partial readback.",
+    "offset_paging": "implemented",
+    "cursor_paging": "unsupported",
+    "cursor_paging_reason": "Current status and source list parsers accept offset pagination; cursor is not the callable shape.",
+    "unknown_outcome": "readback_required_before_retry"
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "fixture_id": "bw-s12-t01.general-work.v1",
+  "routes": [
+    {
+      "path": "work create",
+      "parser_registry": "implemented",
+      "direct_cli": "implemented",
+      "service_dispatch": "implemented",
+      "application": "WorkApplication::create_work_as_session_checked",
+      "contract_status": "implemented"
+    },
+    {
+      "path": "work edit",
+      "parser_registry": "implemented",
+      "direct_cli": "implemented",
+      "service_dispatch": "implemented",
+      "application": "WorkApplication::edit_work_as",
+      "contract_status": "implemented"
+    },
+    {
+      "path": "work claim",
+      "parser_registry": "implemented",
+      "direct_cli": "implemented",
+      "service_dispatch": "implemented",
+      "application": "WorkApplication::claim_with_context",
+      "contract_status": "implemented"
+    }
+  ],
+  "create_work_service_data": {
+    "command": "create_work",
+    "project_id": "project_demo",
+    "kind": "task",
+    "parent_id": null,
+    "title": "Implement bounded parser",
+    "description": "Add the parser and its focused documentation.",
+    "priority": 2,
+    "dispatch": "automatic",
+    "hold": null,
+    "profile": "focused",
+    "profile_version": "1",
+    "actor_id": "actor_agent_01",
+    "session_id": "session_agent_01",
+    "expected_revision": 42
+  },
+  "work_edit_service_data": {
+    "project_id": "project_demo",
+    "work_id": "work_task_01",
+    "actor_id": "actor_agent_01",
+    "title": "Implement bounded parser",
+    "description": "Add the parser and its focused documentation.",
+    "priority": 2,
+    "dispatch_policy": "automatic",
+    "expected_revision": 42
+  },
+  "claim_input_binding": {
+    "source_version_id": "source_version_01",
+    "config_identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "request_validation": {
+    "create_work_dto": "private_cli_service_dto",
+    "fixture_check": "json_shape_and_observed_fields_only",
+    "limitation": "The CLI service request DTO is not exported from boreal-protocol and is outside this task's write set; this fixture does not create a second protocol DTO."
+  },
+  "v4_optional_contracts": {
+    "deliverable_requirements": {
+      "status": "unavailable",
+      "reason": "The callable work create/edit DTOs have no requirement collection or typed deliverable schema."
+    },
+    "accepted_input_schema": {
+      "status": "partial",
+      "reason": "Claim/start binds one source_version_id and config_identity; no callable multi-input requirement, role, or access-scope schema is present."
+    },
+    "output_submission_and_inspection": {
+      "status": "unavailable",
+      "reason": "No public general-work artifact submission or typed output-inspection route is registered."
+    }
+  },
+  "contract_status": "implemented_fields_are_limited_to_the_callable_create_edit_and_claim_routes"
+}

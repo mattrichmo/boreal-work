@@ -1,0 +1,33 @@
+{
+  "fixture_id": "bw-s12-t01.identity.v1",
+  "route_context": {
+    "project_id": "project_demo",
+    "actor_id": "actor_agent_01",
+    "harness_id": "harness_codex",
+    "session_id": "session_agent_01",
+    "expected_revision": 42
+  },
+  "attempt": {
+    "attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+    "fence": 7,
+    "phase": "running",
+    "actor_id": "actor_agent_01",
+    "harness_id": "harness_codex",
+    "session_id": "session_agent_01",
+    "lease_deadline": "2026-09-14T22:34:00Z",
+    "hard_deadline": "2026-09-15T00:04:00Z"
+  },
+  "proof_subject": {
+    "work_id": "work_task_01",
+    "attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+    "fence": 7,
+    "gate_id": "gate_verification_01"
+  },
+  "mutation_identity": ["operation_id", "expected_revision", "attempt_id", "fence"],
+  "contract_status": {
+    "project_actor_session_context": "implemented",
+    "attempt_fence_identity": "implemented",
+    "proof_subject_binding": "implemented",
+    "authority": "The authenticated service/application owns actor authorization, project revision checks, attempt lifecycle, and fence validation. Identity fields in this fixture are data for those checks, not client authority."
+  }
+}

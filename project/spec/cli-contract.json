@@ -3,7 +3,7 @@
   "contract": "boreal.cli.v1",
   "program": "bwrk",
   "protocol_version": "2",
-  "status": "frozen behavioral fixture; current implementation notes are scoped to the dashboard slice",
+  "status": "historical v1/v2 CLI contract fixture; current callable status for BW-S12-T01 routes is recorded in bw_s12_t01_callable_contract",
   "json_rule": "Every command invoked with --json returns boreal.protocol.envelope.v1. Human output is a rendering of the same DTO and never a second transition path.",
   "grammar": {
     "invocation": "bwrk [GLOBAL_OPTIONS] PATH [PATH_OPTIONS] [--json]",
@@ -307,5 +307,72 @@
     "receipt": "protocol/receipt-success.json",
     "gate_diagnostics": "protocol/gate-diagnostics.json",
     "errors": "protocol/error-registry.json"
+  },
+  "bw_s12_t01_callable_contract": {
+    "contract_revision": "BW-S12-T01.v1",
+    "protocol_version": "2",
+    "envelope_schema": "boreal.protocol.envelope.v1",
+    "status_values": ["implemented", "partial", "unavailable", "unsupported"],
+    "status_meaning": {
+      "implemented": "The command registry, parser/dispatcher and named application path are present at the listed boundary.",
+      "partial": "A direct route exists but service parity or the broader V4 contract is missing.",
+      "unavailable": "No callable route or typed contract is exposed for the listed behavior.",
+      "unsupported": "The current route explicitly rejects or does not support this behavior."
+    },
+    "fixtures": {
+      "capabilities_version": "workflows/capabilities.json.fixture",
+      "identity_attempt_proof": "workflows/identity.json.fixture",
+      "general_work": "workflows/general-work.json.fixture",
+      "artifacts_acceptance": "workflows/artifacts-acceptance.json.fixture",
+      "operation_readback_paging_outcomes": "workflows/operations.json.fixture"
+    },
+    "route_inventory": [
+      {"path": "work create", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::create_work_as_session_checked", "callable_fields": ["project_id", "kind", "parent_id", "title", "description", "priority", "dispatch", "hold", "profile", "profile_version", "actor_id", "session_id", "expected_revision"]},
+      {"path": "work edit", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::edit_work_as", "callable_fields": ["project_id", "work_id", "actor_id", "parent_id", "title", "description", "priority", "dispatch_policy", "expected_revision"]},
+      {"path": "work claim", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::claim_with_context", "callable_fields": ["project_id", "work_id", "actor_id", "harness_id", "session_id", "attempt_id", "operation_id", "expected_revision", "source_version_id", "config_identity", "lease_ttl_ms", "hard_time_limit_ms"]},
+      {"path": "source add", "status": "implemented", "direct_cli": true, "service": true, "application": "source capture and registration", "result_identity": ["project_id", "source_version_id", "content_digest", "media_type", "byte_count", "availability", "parser_identity"]},
+      {"path": "source list", "status": "implemented", "direct_cli": true, "service": true, "paging": ["limit", "offset", "total", "has_more"]},
+      {"path": "source show", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05", "reason": "The command registry marks this route unavailable to service dispatch."},
+      {"path": "source verify", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05", "reason": "The command registry marks this route unavailable to service dispatch."},
+      {"path": "evidence add", "status": "implemented", "direct_cli": true, "service": true, "result_identity": ["work_id", "attempt_id", "fence", "gate_id", "operation_id", "receipt_id"]},
+      {"path": "evidence run", "status": "implemented", "direct_cli": true, "service": true, "result_identity": ["work_id", "attempt_id", "fence", "gate_id", "operation_id", "receipt_id"]},
+      {"path": "review approve", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::complete", "required_decision_revisions": ["expected_revision", "expected_entity_revision", "expected_proof_revision"]},
+      {"path": "operation show", "status": "implemented", "direct_cli": true, "service": true, "readback": ["operation", "execution", "external_job", "recovery_obligations", "receipt", "readback_required"]},
+      {"path": "intake capture", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05"},
+      {"path": "intake bucket", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05"},
+      {"path": "general-work deliverable requirements", "status": "unavailable", "reason": "Callable create/edit request schemas contain no requirement collection."},
+      {"behavior": "general-work artifact submission and typed inspection", "status": "unavailable", "reason": "No public submission or typed output-inspection route is registered."}
+    ],
+    "authority_boundaries": {
+      "project_work": "The project application/store owns work transitions, expected project revisions, session binding and attempt fencing.",
+      "execution": "Claim/start binds one source_version_id and config_identity; evidence receipts are gate- and attempt-scoped. These do not define arbitrary deliverable acceptance.",
+      "human_acceptance": "review.approve uses CompletionCommandDto revision bindings and authenticated actor/session policy.",
+      "global_management": "Global registry/guidance paths remain a separate authority surface; global recommendations do not grant project-work mutation authority.",
+      "maintenance": "Operation readback and maintenance inspection report durable operation state; they do not complete or accept work."
+    },
+    "v4_optional_contracts": {
+      "deliverable_requirement_schema": "unavailable",
+      "accepted_input_bundle_schema": "partial",
+      "source_version_identity": "implemented",
+      "generic_output_submission_identity": "unavailable",
+      "typed_output_inspection": "unavailable",
+      "gate_receipt_proof": "implemented",
+      "review_decision": "implemented",
+      "generic_human_deliverable_acceptance": "unavailable"
+    },
+    "known_mismatches": [
+      "The legacy work list grammar above advertises --cursor; the current callable work list and status snapshots use offset pagination.",
+      "The historical grammar and core additions contain planned routes that are not evidence of parser, dispatch, or application support; use route_inventory and the executable registry for current status.",
+      "The create_work request DTO is private to CLI service code; its fixture is structurally checked against observed fields, not decoded as a boreal-protocol public type.",
+      "The workflow-package validator discovers only package JSON assets and its fixed manifest; these five .json.fixture files are intentionally validated by protocol tests and are not embedded workflow assets."
+    ],
+    "handoffs": [
+      {"owner": "BW-S12-T02", "scope": "Define and implement typed deliverable requirements and accepted-input planning/template semantics."},
+      {"owner": "BW-S12-T03", "scope": "Define requirement coverage, immutable submissions, typed inspection proof and acceptance/review binding."},
+      {"owner": "BW-S12-T04", "scope": "Define portable input/output artifact identity, storage, access scope and recovery."},
+      {"owner": "BW-S12-T05", "scope": "Restore service parity and guidance for direct-only source show/verify and intake capture/bucket routes; reconcile current command fixtures with callable routes."},
+      {"owner": "BW-S13-T01", "scope": "Define date/wait planning contracts, which are not part of these callable general-work schemas."},
+      {"owner": "BW-S13-T02", "scope": "Consume versioned service contracts from the TUI; this task adds no separate TUI DTO."}
+    ]
   }
 }

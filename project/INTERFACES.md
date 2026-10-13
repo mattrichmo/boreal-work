@@ -150,3 +150,50 @@ process per route refresh. The TUI must display `queued`, `claimed`,
 mutation loop with the same request types as
 CLI clients. A manual refresh returns a current revision or a precise stale/
 unavailable indication.
+
+## BW-S12-T01 callable contract status
+
+The command families above preserve historical intent. For the routes covered
+by BW-S12-T01, the checked callable surface and five decoder fixtures are
+indexed in [`spec/cli-contract.json`](spec/cli-contract.json) and stored under
+`spec/workflows/*.json.fixture`. These `.json.fixture` files are protocol
+contract fixtures, not embedded workflow-package assets.
+
+The current protocol offer is API `2` with envelope schema
+`boreal.protocol.envelope.v1`; it advertises no optional capabilities. A
+capability intersection is version negotiation only and grants no authority.
+The service authenticates actor identity and the application/store own project
+revision checks, session binding, lifecycle transitions and attempt fencing.
+An existing attempt is identified by work, attempt, fence and session. Gate
+receipts bind work, attempt, fence and gate; operation IDs remain the mutation
+readback key.
+
+`work create`, `work edit`, `work claim`, source intake/list, evidence add/run,
+review approval and operation readback have checked direct and service paths
+as recorded in the CLI contract. Source show/verify and intake capture/bucket
+are direct CLI routes without service parity. Source and status list routes use
+`limit`/`offset` paging; the legacy cursor spelling above is not the current
+callable paging shape. `operation show` can return operation, execution,
+external-job, recovery and receipt details; the sections are optional, and a
+finish-close recovery may be partial.
+
+Current source-version identity and gate-receipt proof are callable. Review
+approval has a typed decision DTO with project, entity and proof revision
+bindings; actor authorization comes from the authenticated service session.
+General-work create/edit does not expose deliverable requirement schemas,
+artifact submission identity or typed output inspection. A claim binds one
+source version and config identity, but there is no accepted-input bundle
+schema. These V4 additions remain unavailable or partial until the named
+BW-S12-T02/T03/T04 owners implement their contracts and the BW-S12-T05 owner
+restores service parity for direct-only source and intake routes. S13 owns
+date/wait and TUI contract work.
+
+The `create_work` service request decoder is private to the CLI service. The
+general-work fixture checks its JSON shape and observed fields but is not
+decoded as a public protocol DTO; exposing a typed request requires a single
+versioned protocol owner rather than a duplicate test-only DTO.
+
+Global management, project work, execution proof and maintenance/readback
+remain separate authorities: global guidance is advisory, project mutations
+are application-owned, receipts are attempt/gate-scoped, and operation
+readback reports durable state without accepting work.

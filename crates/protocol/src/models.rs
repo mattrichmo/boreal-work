@@ -472,6 +472,197 @@ mod tests {
         assert_eq!(doctor.project_id.as_deref(), Some("project-1"));
         assert_eq!(doctor.actor_id, None);
     }
+
+    #[test]
+    fn bw_s12_capability_fixture_negotiates_only_advertised_v2_features() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../project/spec/workflows/capabilities.json.fixture"
+        ))
+        .unwrap();
+        let offer: crate::CapabilitySet =
+            serde_json::from_value(fixture["protocol_offer"].clone()).unwrap();
+        let peer: crate::CapabilitySet =
+            serde_json::from_value(fixture["peer_offer"].clone()).unwrap();
+        let negotiated = offer.negotiate(&peer).unwrap();
+        assert_eq!(negotiated.api_version, "2");
+        assert_eq!(negotiated.schema_version, "boreal.protocol.envelope.v1");
+        assert!(negotiated.capabilities.is_empty());
+        assert_eq!(
+            fixture["contract_status"]["optional_v4_capabilities"],
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn bw_s12_cli_contract_indexes_the_five_external_fixtures() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../../project/spec/cli-contract.json")).unwrap();
+        let fixtures = &contract["bw_s12_t01_callable_contract"]["fixtures"];
+        let expected = [
+            "workflows/capabilities.json.fixture",
+            "workflows/identity.json.fixture",
+            "workflows/general-work.json.fixture",
+            "workflows/artifacts-acceptance.json.fixture",
+            "workflows/operations.json.fixture",
+        ];
+        let declared = fixtures
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(declared.len(), expected.len());
+        for path in expected {
+            assert!(declared.contains(&path));
+        }
+    }
+
+    #[test]
+    fn bw_s12_identity_fixture_keeps_project_session_attempt_and_proof_bound() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../project/spec/workflows/identity.json.fixture"
+        ))
+        .unwrap();
+        let context: RouteContextDto =
+            serde_json::from_value(fixture["route_context"].clone()).unwrap();
+        let attempt: AttemptDto = serde_json::from_value(fixture["attempt"].clone()).unwrap();
+        let proof: ReceiptSubjectDto =
+            serde_json::from_value(fixture["proof_subject"].clone()).unwrap();
+        assert_eq!(context.project_id, "project_demo");
+        assert_eq!(context.actor_id, "actor_agent_01");
+        assert_eq!(context.session_id.as_deref(), Some("session_agent_01"));
+        assert_eq!(context.expected_revision, Some(42));
+        assert_eq!(attempt.fence, 7);
+        assert_eq!(attempt.attempt_id, proof.attempt_id);
+        assert_eq!(attempt.fence, proof.fence);
+        assert_eq!(attempt.session_id.as_deref(), context.session_id.as_deref());
+    }
+
+    #[test]
+    fn bw_s12_general_work_fixture_marks_untyped_v4_fields_unavailable() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../project/spec/workflows/general-work.json.fixture"
+        ))
+        .unwrap();
+        let create = &fixture["create_work_service_data"];
+        let edit = &fixture["work_edit_service_data"];
+        assert_eq!(create["command"], "create_work");
+        assert_eq!(create["profile"], "focused");
+        assert_eq!(create["profile_version"], "1");
+        assert_eq!(create["expected_revision"], 42);
+        assert_eq!(edit["work_id"], "work_task_01");
+        assert_eq!(edit["expected_revision"], 42);
+        assert_eq!(
+            fixture["claim_input_binding"]["source_version_id"],
+            "source_version_01"
+        );
+        assert_eq!(
+            fixture["v4_optional_contracts"]["deliverable_requirements"]["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            fixture["v4_optional_contracts"]["accepted_input_schema"]["status"],
+            "partial"
+        );
+        assert_eq!(
+            fixture["v4_optional_contracts"]["output_submission_and_inspection"]["status"],
+            "unavailable"
+        );
+        assert!(create.get("deliverable_requirements").is_none());
+        assert!(create.get("accepted_inputs").is_none());
+    }
+
+    #[test]
+    fn bw_s12_artifact_fixture_decodes_receipt_and_human_review_contracts() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../project/spec/workflows/artifacts-acceptance.json.fixture"
+        ))
+        .unwrap();
+        let receipt: ReceiptDto = serde_json::from_value(fixture["receipt"].clone()).unwrap();
+        let review: CompletionCommandDto =
+            serde_json::from_value(fixture["human_acceptance"]["request"].clone()).unwrap();
+        let source = fixture["source_version"].as_object().unwrap();
+        let mut source_fields = source.keys().map(String::as_str).collect::<Vec<_>>();
+        source_fields.sort_unstable();
+        assert_eq!(
+            source_fields,
+            [
+                "availability",
+                "byte_count",
+                "content_digest",
+                "media_type",
+                "origin",
+                "parser_identity",
+                "project_id",
+                "source_version_id",
+            ]
+        );
+        assert_eq!(
+            receipt.subject.attempt_id,
+            "attempt_01J8V2ATTEMPT00000000001"
+        );
+        assert_eq!(receipt.subject.fence, 7);
+        assert_eq!(receipt.result, "passed");
+        assert_eq!(review.kind, "review.approve");
+        assert_eq!(review.expected_entity_revision, 12);
+        assert_eq!(review.expected_proof_revision, 9);
+        assert_eq!(
+            fixture["human_acceptance"]["contract_status"],
+            "implemented"
+        );
+        assert_eq!(
+            fixture["v4_optional_contracts"]["generic_deliverable_submission_identity"],
+            "unavailable"
+        );
+        assert_eq!(
+            fixture["v4_optional_contracts"]["typed_output_inspection"],
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn bw_s12_operation_fixture_validates_envelopes_readback_and_offset_page() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../project/spec/workflows/operations.json.fixture"
+        ))
+        .unwrap();
+        assert_eq!(
+            fixture["operation_show_request"]["target_operation_id"],
+            "op_create_work_01"
+        );
+        assert_eq!(fixture["readback_data"]["readback_required"], false);
+        let page = &fixture["status_page_pagination_excerpt"];
+        assert_eq!(page["complete_response"], false);
+        assert_eq!(page["limit"], 4);
+        assert_eq!(page["offset"], 0);
+        assert_eq!(page["returned_rows"], 4);
+        assert_eq!(page["has_more"], true);
+        assert_eq!(page["next_offset"], 4);
+
+        let outcomes = fixture["typed_outcomes"].as_array().unwrap();
+        let envelopes = outcomes
+            .iter()
+            .cloned()
+            .map(|value| {
+                let envelope: crate::Envelope<serde_json::Value> =
+                    serde_json::from_value(value).unwrap();
+                envelope.validate().unwrap();
+                envelope
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(envelopes.len(), 7);
+        assert_eq!(envelopes[0].outcome, crate::ApplicationOutcome::Changed);
+        assert_eq!(envelopes[1].outcome, crate::ApplicationOutcome::Unchanged);
+        assert_eq!(envelopes[2].outcome, crate::ApplicationOutcome::Rejected);
+        assert_eq!(envelopes[3].outcome, crate::ApplicationOutcome::Conflict);
+        assert_eq!(envelopes[4].outcome, crate::ApplicationOutcome::Busy);
+        assert_eq!(envelopes[5].outcome, crate::ApplicationOutcome::Failed);
+        assert_eq!(envelopes[6].outcome, crate::ApplicationOutcome::Unknown);
+        assert_eq!(
+            envelopes[6].error.as_ref().unwrap().readback_required,
+            Some(true)
+        );
+    }
 }
 
 /// Explicit optimistic binding for immutable completion decisions. Caller and

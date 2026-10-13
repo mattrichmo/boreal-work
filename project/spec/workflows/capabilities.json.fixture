@@ -1,0 +1,23 @@
+{
+  "fixture_id": "bw-s12-t01.capabilities.v1",
+  "protocol_offer": {
+    "api_versions": ["2"],
+    "schema_versions": ["boreal.protocol.envelope.v1"],
+    "capabilities": []
+  },
+  "peer_offer": {
+    "api_versions": ["2"],
+    "schema_versions": ["boreal.protocol.envelope.v1"],
+    "capabilities": []
+  },
+  "negotiated": {
+    "api_version": "2",
+    "schema_version": "boreal.protocol.envelope.v1",
+    "capabilities": []
+  },
+  "contract_status": {
+    "protocol_v2_envelope_v1": "implemented",
+    "optional_v4_capabilities": "unavailable",
+    "meaning": "The current capability offer advertises versions only; an empty capability set grants no optional feature or authority."
+  }
+}
