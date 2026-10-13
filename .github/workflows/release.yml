@@ -1,0 +1,121 @@
+name: Release package candidates
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }} candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install target and TypeScript compiler
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup target add "$TARGET"
+          npm install --global typescript@5.8.3
+
+      - name: Build release candidate
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          output_dir="$RUNNER_TEMP/boreal-release"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            python3 scripts/release/build_release.py \
+              --version "$version" \
+              --target "$TARGET" \
+              --output-dir "$output_dir"
+          else
+            python3 scripts/release/build_release.py \
+              --target "$TARGET" \
+              --output-dir "$output_dir"
+          fi
+
+      - name: Retain target archive and release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: boreal-package-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/boreal-release/bwrk-v*-*.tar.gz
+            ${{ runner.temp }}/boreal-release/bwrk-v*-*.release.json
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble:
+    name: Assemble candidate download layout
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download target artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: boreal-package-*-${{ github.run_id }}
+          path: ${{ runner.temp }}/boreal-release-candidate
+          merge-multiple: true
+
+      - name: Write combined SHA256SUMS
+        env:
+          RELEASE_CANDIDATE_DIR: ${{ runner.temp }}/boreal-release-candidate
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          output = Path(os.environ["RELEASE_CANDIDATE_DIR"])
+          archives = sorted(output.glob("bwrk-v*.tar.gz"))
+          if not archives:
+              raise SystemExit("release candidate contains no archives")
+          entries = []
+          for archive in archives:
+              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              entries.append(f"{digest}  {archive.name}")
+          (output / "SHA256SUMS").write_text("\n".join(entries) + "\n", encoding="utf-8")
+          PY
+
+      - name: Retain combined candidate layout
+        uses: actions/upload-artifact@v4
+        with:
+          name: boreal-release-candidates-${{ github.run_id }}
+          path: ${{ runner.temp }}/boreal-release-candidate/*
+          if-no-files-found: error
+          retention-days: 14

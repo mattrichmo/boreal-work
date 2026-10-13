@@ -7,9 +7,11 @@ effect. Installation automatically provisions a separate per-user global
 manager SQLite database, including CLI-only installations. The global manager
 is independent of the installation prefix and any project folder. Source
 builds are supported on Apple Silicon and Intel macOS and x86_64 Linux.
-Published v0.2.1 archives cover Apple Silicon macOS and x86_64 Linux; Linux
-ARM64 and Windows remain unsupported until their transport and SQLite runtime
-builds are verified.
+The release workflow builds candidate archives for macOS ARM64, macOS x86-64,
+and Linux x86-64. These workflow artifacts are qualification inputs; they are
+not published releases or platform-support claims. Published v0.2.1 archives
+cover Apple Silicon macOS and x86_64 Linux. Linux ARM64 and Windows remain
+unsupported until their transport and SQLite runtime builds are verified.
 
 The CLI works without Node.js. The project and Global dashboards require
 Node.js 20 through 26 and report an actionable error before starting their
@@ -21,7 +23,7 @@ or a command name. JSON snapshots remain usable without Node.js.
 
 ## Install or update from GitHub
 
-For Apple Silicon macOS and x86_64 Linux, use the prebuilt release installer. It fetches the installer from `main`, selects the compatible archive from the latest GitHub release, verifies the archive against `SHA256SUMS`, and installs it under `~/.local`. The current release, v0.2.1, includes those two platform archives. Installation does not use GitHub Actions or modify project databases.
+For Apple Silicon macOS and x86_64 Linux, use the prebuilt release installer. It fetches the installer from `main`, selects the compatible archive from the latest GitHub release, verifies the archive against `SHA256SUMS`, and installs it under `~/.local`. The current release, v0.2.1, includes those two platform archives. The release workflow retains candidate packages as workflow artifacts and does not publish GitHub Releases. The install process does not invoke GitHub Actions or modify project databases.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --yes
@@ -36,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/m
 
 ### Source-build fallback
 
-Intel macOS does not have a prebuilt v0.2.1 archive. To build from source, use the explicit option below. This requires Git, Rust/Cargo, Node.js 20 through 26, npm, Python 3, and `tsc`. Use `--ref REF` to pin a source branch or tag.
+Intel macOS does not have a published prebuilt archive. Candidate artifacts from the release workflow are not a substitute for target install and launch qualification. Until that qualification is accepted and a release is published, build from source using the explicit option below. This requires Git, Rust/Cargo, Node.js 20 through 26, npm, Python 3, and `tsc`. Use `--ref REF` to pin a source branch or tag.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --from-source --yes
