@@ -120,6 +120,14 @@ pub(crate) fn attention_summary(
     let mut personal_summary = empty_attention(personal);
     populate_attention_details(state, None, &mut personal_summary, time)?;
 
+    // Preserve the legacy snapshot path while keeping Personal first-class.
+    // This compatibility entry is only a projection: totals and page bounds
+    // continue to describe actual projects, and a real `personal` project ID
+    // always takes precedence.
+    if personal.open > 0 && !project_ids.iter().any(|id| id == "personal") {
+        project_summaries.insert("personal".into(), personal_summary.clone());
+    }
+
     let projects_sampled = included.len() as u64;
     let projects_truncated = projects_sampled < projects_total;
     Ok(json!({
@@ -403,4 +411,92 @@ fn bound_text(value: &str, maximum_bytes: usize) -> String {
         end -= 1;
     }
     format!("{}…", &value[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attention_summary;
+    use crate::GlobalCivilTimeContext;
+    use serde_json::{json, Value};
+
+    fn status(project_id: Option<&str>) -> Value {
+        json!({
+            "project_id": project_id,
+            "status_id": "open",
+            "category": "open",
+            "label": "Open",
+        })
+    }
+
+    fn task(project_id: Option<&str>, id: &str, due_at: &str) -> Value {
+        json!({
+            "id": id,
+            "project_id": project_id,
+            "parent_id": null,
+            "kind": "task",
+            "title": id,
+            "status_id": "open",
+            "due_at": due_at,
+            "priority": 0,
+            "position": 0,
+            "archived": false,
+        })
+    }
+
+    #[test]
+    fn personal_summary_has_legacy_projects_alias_without_changing_project_totals() {
+        let state = json!({
+            "projects": [],
+            "items": [task(None, "personal-action", "2999-01-01")],
+            "statuses": [status(None)],
+            "relationships": [],
+        });
+        let summary =
+            attention_summary(&state, &[], &GlobalCivilTimeContext::system().unwrap()).unwrap();
+
+        assert_eq!(summary["personal"]["open"], 1);
+        assert_eq!(
+            summary["personal"]["next_action"]["item_id"],
+            "personal-action"
+        );
+        assert_eq!(summary["projects"]["personal"], summary["personal"]);
+        assert_eq!(summary["projects_total"], 0);
+        assert_eq!(summary["projects_limit"], 0);
+        assert_eq!(summary["projects_has_more"], false);
+    }
+
+    #[test]
+    fn real_personal_project_id_is_not_overwritten_by_legacy_alias() {
+        let state = json!({
+            "projects": [{"id":"personal", "archived":false}],
+            "items": [
+                task(Some("personal"), "project-action", "2999-01-01"),
+                task(None, "personal-action", "1900-01-01"),
+            ],
+            "statuses": [status(Some("personal")), status(None)],
+            "relationships": [],
+        });
+        let summary = attention_summary(
+            &state,
+            &["personal".into()],
+            &GlobalCivilTimeContext::system().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(summary["projects_total"], 1);
+        assert_eq!(summary["projects_limit"], 1);
+        assert_eq!(summary["projects"].as_object().unwrap().len(), 1);
+        assert_eq!(summary["projects"]["personal"]["open"], 1);
+        assert_eq!(summary["projects"]["personal"]["later"], 1);
+        assert_eq!(
+            summary["projects"]["personal"]["next_action"]["item_id"],
+            "project-action"
+        );
+        assert_eq!(summary["personal"]["open"], 1);
+        assert_eq!(summary["personal"]["overdue"], 1);
+        assert_eq!(
+            summary["personal"]["next_action"]["item_id"],
+            "personal-action"
+        );
+    }
 }
