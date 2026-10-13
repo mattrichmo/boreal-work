@@ -2413,95 +2413,17 @@ fn attention_summary(state: &Value, selected_project_ids: &[String]) -> Value {
         if archived.contains(project_id.as_str()) {
             continue;
         }
-        let mut active_items = arr(state, "items")
-            .iter()
-            .filter(|item| {
-                item["project_id"] == project_id.as_str()
-                    && item["archived"] != true
-                    && !matches!(item_category(state, item), "completed" | "cancelled")
-            })
-            .collect::<Vec<_>>();
-        let mut actions = active_items
-            .iter()
-            .copied()
-            .filter(|item| {
-                matches!(item["kind"].as_str(), Some("task" | "subtask"))
-                    && matches!(item_category(state, item), "open" | "active")
-            })
-            .collect::<Vec<_>>();
-        actions.sort_by(|left, right| {
-            let due_key = |item: &Value| {
-                item["due_at"]
-                    .as_str()
-                    .and_then(utc_date_from_iso)
-                    .unwrap_or_else(|| "9999-99-99".into())
-            };
-            due_key(left)
-                .cmp(&due_key(right))
-                .then_with(|| {
-                    right["priority"]
-                        .as_u64()
-                        .unwrap_or(0)
-                        .cmp(&left["priority"].as_u64().unwrap_or(0))
-                })
-                .then_with(|| {
-                    left["position"]
-                        .as_i64()
-                        .unwrap_or(0)
-                        .cmp(&right["position"].as_i64().unwrap_or(0))
-                })
-                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
-        });
-        if let Some(item) = actions.first() {
-            let status_id = item["status_id"].as_str().unwrap_or_default();
-            let label = arr(state, "statuses")
-                .iter()
-                .find(|status| {
-                    status["project_id"].as_str() == Some(project_id)
-                        && status["status_id"] == status_id
-                })
-                .and_then(|status| status["label"].as_str())
-                .unwrap_or(status_id);
-            summary["next_action"] = json!({"item_id":item["id"],"title":bound_text(item["title"].as_str().unwrap_or_default(),160),"due_at":item["due_at"],"priority":item["priority"],"status_id":status_id,"status_label":bound_text(label,160),"kind":item["kind"]});
-        }
-        let mut milestones = active_items
-            .drain(..)
-            .filter(|item| item["kind"] == "milestone")
-            .collect::<Vec<_>>();
-        milestones.sort_by(|left, right| {
-            let due_key = |item: &Value| {
-                item["due_at"]
-                    .as_str()
-                    .and_then(utc_date_from_iso)
-                    .unwrap_or_else(|| "9999-99-99".into())
-            };
-            due_key(left)
-                .cmp(&due_key(right))
-                .then_with(|| {
-                    left["position"]
-                        .as_i64()
-                        .unwrap_or(0)
-                        .cmp(&right["position"].as_i64().unwrap_or(0))
-                })
-                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
-        });
-        if let Some(milestone) = milestones.first() {
-            let children = arr(state, "items")
-                .iter()
-                .filter(|child| {
-                    child["parent_id"] == milestone["id"]
-                        && child["project_id"] == project_id.as_str()
-                        && child["archived"] != true
-                })
-                .collect::<Vec<_>>();
-            let completed = children
-                .iter()
-                .filter(|child| item_category(state, child) == "completed")
-                .count();
-            summary["next_milestone"] = json!({"item_id":milestone["id"],"title":bound_text(milestone["title"].as_str().unwrap_or_default(),160),"due_at":milestone["due_at"],"completed_children":completed,"total_children":children.len()});
-        }
+        populate_attention_details(state, Some(project_id), summary);
     }
-    let projects_sampled = projects.len() as u64;
+    if personal["open"].as_u64().unwrap_or(0) > 0 {
+        populate_attention_details(state, None, &mut personal);
+        // Keep the established snapshot key for existing clients while also
+        // exposing personal attention explicitly outside the project totals.
+        projects
+            .entry("personal".to_owned())
+            .or_insert_with(|| personal.clone());
+    }
+    let projects_sampled = included_project_ids.len() as u64;
     let projects_truncated = projects_sampled < projects_total;
     json!({
         "portfolio":{"open":portfolio[0],"waiting":portfolio[1],"overdue":portfolio[2],"unscheduled":portfolio[3],"due_today":portfolio[4]},
@@ -2516,6 +2438,97 @@ fn attention_summary(state: &Value, selected_project_ids: &[String]) -> Value {
 
 fn empty_project_attention() -> Value {
     json!({"open":0,"waiting":0,"overdue":0,"unscheduled":0,"due_today":0,"next_action":null,"next_milestone":null})
+}
+
+fn populate_attention_details(state: &Value, project_id: Option<&str>, summary: &mut Value) {
+    let owns = |item: &Value| match project_id {
+        Some(project_id) => item["project_id"].as_str() == Some(project_id),
+        None => item["project_id"].is_null(),
+    };
+    let mut active_items = arr(state, "items")
+        .iter()
+        .filter(|item| {
+            owns(item)
+                && item["archived"] != true
+                && !matches!(item_category(state, item), "completed" | "cancelled")
+        })
+        .collect::<Vec<_>>();
+    let mut actions = active_items
+        .iter()
+        .copied()
+        .filter(|item| {
+            matches!(item["kind"].as_str(), Some("task" | "subtask"))
+                && matches!(item_category(state, item), "open" | "active")
+        })
+        .collect::<Vec<_>>();
+    actions.sort_by(|left, right| {
+        let due_key = |item: &Value| {
+            item["due_at"]
+                .as_str()
+                .and_then(utc_date_from_iso)
+                .unwrap_or_else(|| "9999-99-99".into())
+        };
+        due_key(left)
+            .cmp(&due_key(right))
+            .then_with(|| {
+                right["priority"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .cmp(&left["priority"].as_u64().unwrap_or(0))
+            })
+            .then_with(|| {
+                left["position"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .cmp(&right["position"].as_i64().unwrap_or(0))
+            })
+            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+    });
+    if let Some(item) = actions.first() {
+        let status_id = item["status_id"].as_str().unwrap_or_default();
+        let label = arr(state, "statuses")
+            .iter()
+            .find(|status| {
+                status["project_id"].as_str() == project_id && status["status_id"] == status_id
+            })
+            .and_then(|status| status["label"].as_str())
+            .unwrap_or(status_id);
+        summary["next_action"] = json!({"item_id":item["id"],"title":bound_text(item["title"].as_str().unwrap_or_default(),160),"due_at":item["due_at"],"priority":item["priority"],"status_id":status_id,"status_label":bound_text(label,160),"kind":item["kind"]});
+    }
+    let mut milestones = active_items
+        .drain(..)
+        .filter(|item| item["kind"] == "milestone")
+        .collect::<Vec<_>>();
+    milestones.sort_by(|left, right| {
+        let due_key = |item: &Value| {
+            item["due_at"]
+                .as_str()
+                .and_then(utc_date_from_iso)
+                .unwrap_or_else(|| "9999-99-99".into())
+        };
+        due_key(left)
+            .cmp(&due_key(right))
+            .then_with(|| {
+                left["position"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .cmp(&right["position"].as_i64().unwrap_or(0))
+            })
+            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+    });
+    if let Some(milestone) = milestones.first() {
+        let children = arr(state, "items")
+            .iter()
+            .filter(|child| {
+                child["parent_id"] == milestone["id"] && owns(child) && child["archived"] != true
+            })
+            .collect::<Vec<_>>();
+        let completed = children
+            .iter()
+            .filter(|child| item_category(state, child) == "completed")
+            .count();
+        summary["next_milestone"] = json!({"item_id":milestone["id"],"title":bound_text(milestone["title"].as_str().unwrap_or_default(),160),"due_at":milestone["due_at"],"completed_children":completed,"total_children":children.len()});
+    }
 }
 
 fn detail_row_order_key(collection: &str, row: &Value) -> String {
@@ -3539,6 +3552,35 @@ mod global_attention_page_tests {
             assert_eq!(stale["has_more"], false);
             assert!(stale["next_offset"].is_null());
         }
+
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn personal_attention_keeps_legacy_snapshot_summary() {
+        let path = database_path();
+        let app = GlobalManagerApplication::open(&path).unwrap();
+        let item = call(
+            &app,
+            "todo add",
+            json!({"title":"Personal action","due_at":"2099-01-01"}),
+            "personal-action",
+        );
+
+        let snapshot = call(&app, "snapshot", json!({}), "personal-snapshot");
+        assert_eq!(snapshot["totals"]["projects"], 0);
+        assert_eq!(snapshot["attention"]["projects_total"], 0);
+        assert_eq!(snapshot["attention"]["personal"]["open"], 1);
+        assert_eq!(
+            snapshot["attention"]["personal"]["next_action"]["item_id"],
+            item["id"]
+        );
+        assert_eq!(snapshot["attention"]["projects"]["personal"]["open"], 1);
+        assert_eq!(
+            snapshot["attention"]["projects"]["personal"]["next_action"]["item_id"],
+            item["id"]
+        );
 
         drop(app);
         let _ = std::fs::remove_file(path);
