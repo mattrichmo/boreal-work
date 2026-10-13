@@ -6,6 +6,7 @@ use serde_json::Value;
 pub const REQUEST_SCHEMA: &str = "boreal.global.request.v1";
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 pub const DETAIL_PAGE_COMMAND: &str = "detail page";
+pub const ATTENTION_PAGE_COMMAND: &str = "attention page";
 pub const LINKED_PAGE_COMMAND: &str = "linked page";
 pub const LINKED_JOB_SHOW_COMMAND: &str = "linked job show";
 
@@ -27,6 +28,30 @@ pub struct GlobalDetailPageRequest {
     pub limit: Option<u32>,
     #[serde(default)]
     pub offset: Option<u64>,
+    /// Revision returned by the preceding page. A mismatch requires a fresh
+    /// snapshot before continuing an offset cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+}
+
+/// Deterministic, revision-bound page request for per-project attention.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalAttentionPageRequest {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+}
+
+/// One project's bounded summary in a complete attention page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalProjectAttention {
+    pub project_id: String,
+    pub attention: Value,
 }
 
 /// Common page envelope; collection specific rows remain versioned DTO values.
@@ -40,6 +65,12 @@ pub struct GlobalPage<T> {
     pub has_more: bool,
     pub next_offset: Option<u64>,
     pub revision: u64,
+    /// True when the caller's expected revision no longer matches the
+    /// current snapshot; discard the cursor and resnapshot.
+    #[serde(default)]
+    pub resnapshot_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -202,6 +233,15 @@ impl GlobalManagerRequest {
             {
                 return Err("detail page limit must be from 1 to 200".into());
             }
+        } else if self.command == ATTENTION_PAGE_COMMAND {
+            let request: GlobalAttentionPageRequest = serde_json::from_value(self.payload.clone())
+                .map_err(|error| format!("invalid attention page request: {error}"))?;
+            if request
+                .limit
+                .is_some_and(|limit| !(1..=200).contains(&limit))
+            {
+                return Err("attention page limit must be from 1 to 200".into());
+            }
         } else if self.command == LINKED_JOB_SHOW_COMMAND {
             let request: GlobalLinkedJobShowRequest = serde_json::from_value(self.payload.clone())
                 .map_err(|error| format!("invalid linked job request: {error}"))?;
@@ -262,6 +302,7 @@ mod tests {
             include_archived: false,
             limit: Some(20),
             offset: Some(0),
+            expected_revision: Some(12),
         })
         .expect("global detail page request serializes");
 
@@ -270,5 +311,23 @@ mod tests {
         assert!(payload.get("query").is_none());
         assert!(payload.get("kind").is_none());
         assert!(request(DETAIL_PAGE_COMMAND, payload).validate().is_ok());
+    }
+
+    #[test]
+    fn attention_pages_are_versioned_and_bounded() {
+        assert!(request(
+            ATTENTION_PAGE_COMMAND,
+            json!({"limit":200,"offset":400,"expected_revision":12})
+        )
+        .validate()
+        .is_ok());
+        assert!(request(ATTENTION_PAGE_COMMAND, json!({"limit":201}))
+            .validate()
+            .is_err());
+        assert!(
+            request(ATTENTION_PAGE_COMMAND, json!({"expected_revision":-1}))
+                .validate()
+                .is_err()
+        );
     }
 }
