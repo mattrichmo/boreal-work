@@ -10,12 +10,78 @@
     {"path": "review approve", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
     {"behavior": "general-work deliverable artifact submission", "public_route": "unavailable", "contract_status": "unavailable"}
   ],
+  "contract_only_schemas": {
+    "callable": false,
+    "status": "frozen_contract_not_callable",
+    "reason": "BW-S12-T01 freezes these versioned request and outcome shapes. The S12-T02/T03/T04 owners still need to implement storage, application policy and callable routes.",
+    "artifact_submission": {
+      "schema_version": "boreal.artifact_submission.v1",
+      "submission_id": "submission_01",
+      "project_id": "project_demo",
+      "work_id": "work_task_01",
+      "attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+      "fence": 7,
+      "requirement_revision": 3,
+      "profile_id": "validated-deliverables",
+      "profile_version": "1",
+      "requirement_key": "final_brief",
+      "artifacts": [{
+        "project_id": "project_demo",
+        "source_version_id": "source_version_02",
+        "content_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "media_type": "text/markdown",
+        "byte_count": 512,
+        "availability": "available"
+      }],
+      "artifact_set_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "artifact_inspection": {
+      "schema_version": "boreal.artifact_inspection.v1",
+      "inspection_id": "inspection_01",
+      "submission_id": "submission_01",
+      "artifact_set_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "requirement_revision": 3,
+      "validator_id": "boreal.structural-inspector",
+      "validator_version": "1",
+      "outcome": "passed",
+      "observed_artifact_count": 1,
+      "checks": [{"criterion_id":"non_empty","outcome":"passed","reason_code":null}]
+    },
+    "acceptance_request": {
+      "schema_version": "boreal.artifact_acceptance.v1",
+      "work_id": "work_task_01",
+      "expected_project_revision": 47,
+      "expected_work_revision": 13,
+      "expected_requirement_revision": 3,
+      "expected_proof_revision": 10,
+      "submission_id": "submission_01",
+      "artifact_set_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "decision": "approved",
+      "reason": "The exact submitted brief meets the agreed review criteria."
+    },
+    "acceptance_readback": {
+      "schema_version": "boreal.artifact_acceptance.v1",
+      "decision_id": "decision_01",
+      "work_id": "work_task_01",
+      "submission_id": "submission_01",
+      "artifact_set_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "requirement_revision": 3,
+      "decision": "approved",
+      "actor_id": "reviewer_01",
+      "actor_role": "reviewer",
+      "reviewer_independent": true,
+      "decided_at": "2026-10-13T16:00:00Z",
+      "reason": "The exact submitted brief meets the agreed review criteria."
+    }
+  },
   "profile_registry": {
     "contract_revision": "boreal.acceptance_profile_registry.v1",
+    "availability": "focused_and_reviewed_are_existing_profiles; remaining profiles are frozen contract-only profiles",
     "profiles": [
       {
         "id": "focused",
         "version": "1",
+        "availability": "existing_callable_profile",
         "required_gates": [
           {"id": "checkpoint", "kind": "checkpoint"},
           {"id": "verification", "kind": "verification"},
@@ -26,6 +92,7 @@
       {
         "id": "reviewed",
         "version": "1",
+        "availability": "existing_callable_profile",
         "required_gates": [
           {"id": "checkpoint", "kind": "checkpoint"},
           {"id": "verification", "kind": "verification"},
@@ -37,6 +104,7 @@
       {
         "id": "general-attestation",
         "version": "1",
+        "availability": "frozen_contract_not_callable",
         "required_gates": [{"id": "summary", "kind": "summary"}],
         "required_typed_facts": ["completion_attestation/1"],
         "deliverable_rule": "No required deliverables may be declared; optional outputs may be absent and remain visible.",
@@ -45,6 +113,7 @@
       {
         "id": "validated-deliverables",
         "version": "1",
+        "availability": "frozen_contract_not_callable",
         "required_gates": [{"id": "summary", "kind": "summary"}],
         "required_typed_facts": ["artifact_inspection/1"],
         "deliverable_rule": "Every required deliverable must have exact current-attempt submission coverage and pass its declared type, cardinality, availability, and bounded criteria.",
@@ -53,6 +122,7 @@
       {
         "id": "reviewed-artifacts",
         "version": "1",
+        "availability": "frozen_contract_not_callable",
         "required_gates": [
           {"id": "summary", "kind": "summary"},
           {"id": "artifact_review", "kind": "review"}
@@ -122,9 +192,9 @@
   "v4_optional_contracts": {
     "immutable_source_input_identity": "implemented",
     "gate_receipt_and_attempt_proof": "implemented",
-    "generic_deliverable_submission_identity": "unavailable",
-    "typed_output_inspection": "unavailable",
+    "generic_deliverable_submission_identity": {"status":"unavailable","schema_status":"frozen_contract_not_callable"},
+    "typed_output_inspection": {"status":"unavailable","schema_status":"frozen_contract_not_callable"},
     "requirement_coverage_for_deliverables": "unavailable",
-    "generic_human_acceptance_of_deliverables": "unavailable"
+    "generic_human_acceptance_of_deliverables": {"status":"unavailable","schema_status":"frozen_contract_not_callable"}
   }
 }

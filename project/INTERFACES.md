@@ -180,13 +180,24 @@ finish-close recovery may be partial.
 Current source-version identity and gate-receipt proof are callable. Review
 approval has a typed decision DTO with project, entity and proof revision
 bindings; actor authorization comes from the authenticated service session.
-General-work create/edit does not expose deliverable requirement schemas,
-artifact submission identity or typed output inspection. A claim binds one
-source version and config identity, but there is no accepted-input bundle
-schema. These V4 additions remain unavailable or partial until the named
-BW-S12-T02/T03/T04 owners implement their contracts and the BW-S12-T05 owner
+General-work create/edit does not expose callable deliverable requirement
+schemas, artifact submission identity or typed output inspection. A claim
+binds one source version and config identity, but there is no callable
+accepted-input bundle. BW-S12-T01 now freezes additive, strict protocol
+schemas and examples for requirements, accepted input bundles, attempt-bound
+submissions, automated inspection facts, and revision-bound human acceptance.
+These schemas are explicitly contract-only: they are not registered routes or
+capabilities and do not imply that storage, validation or authorization exists.
+The BW-S12-T02/T03/T04 owners implement the respective behavior; BW-S12-T05
 restores service parity for direct-only source and intake routes. S13 owns
 date/wait and TUI contract work.
+
+Artifact inspections are attributable observations over an exact submitted
+artifact-set digest. They are not command receipts and do not establish
+subjective quality or human acceptance. Acceptance requests bind expected
+project, work, requirement and proof revisions plus the exact submission;
+actor and role are supplied by the authenticated service session, and
+authoritative readback records the resulting identity and time.
 
 The `create_work` service request decoder is private to the CLI service. The
 general-work fixture checks its JSON shape and observed fields but is not

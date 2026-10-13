@@ -309,7 +309,8 @@
     "errors": "protocol/error-registry.json"
   },
   "bw_s12_t01_callable_contract": {
-    "contract_revision": "BW-S12-T01.v1",
+    "contract_revision": "BW-S12-T01.v2",
+    "general_work_contract_revision": "4",
     "protocol_version": "2",
     "envelope_schema": "boreal.protocol.envelope.v1",
     "status_values": ["implemented", "partial", "unavailable", "unsupported"],
@@ -325,6 +326,23 @@
       "general_work": "workflows/general-work.json.fixture",
       "artifacts_acceptance": "workflows/artifacts-acceptance.json.fixture",
       "operation_readback_paging_outcomes": "workflows/operations.json.fixture"
+    },
+    "contract_only_general_work_schemas": {
+      "callable": false,
+      "unknown_fields": "strictly rejected by the frozen payload DTOs",
+      "schemas": {
+        "deliverable_requirement": "boreal.deliverable_requirement.v1",
+        "accepted_input_bundle": "boreal.accepted_input_bundle.v1",
+        "artifact_submission": "boreal.artifact_submission.v1",
+        "artifact_inspection": "boreal.artifact_inspection.v1",
+        "artifact_acceptance_request_and_readback": "boreal.artifact_acceptance.v1"
+      },
+      "handoff": {
+        "BW-S12-T02": ["deliverable_requirement.v1", "accepted_input_bundle.v1"],
+        "BW-S12-T03": ["artifact_submission.v1", "artifact_inspection.v1", "artifact_acceptance.v1"],
+        "BW-S12-T04": ["project-scoped immutable artifact identity", "portable source/blob bytes"]
+      },
+      "authority_rule": "The authenticated service session supplies actor and role. Artifact inspection is an observation, never a command execution receipt or human decision."
     },
     "route_inventory": [
       {"path": "work create", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::create_work_as_session_checked", "callable_fields": ["project_id", "kind", "parent_id", "title", "description", "priority", "dispatch", "hold", "profile", "profile_version", "actor_id", "session_id", "expected_revision"]},

@@ -611,13 +611,118 @@ mod tests {
             "implemented"
         );
         assert_eq!(
-            fixture["v4_optional_contracts"]["generic_deliverable_submission_identity"],
+            fixture["v4_optional_contracts"]["generic_deliverable_submission_identity"]["status"],
             "unavailable"
         );
         assert_eq!(
-            fixture["v4_optional_contracts"]["typed_output_inspection"],
+            fixture["v4_optional_contracts"]["typed_output_inspection"]["status"],
             "unavailable"
         );
+    }
+
+    #[test]
+    fn bw_s12_contract_only_general_work_schemas_decode_and_reject_unknown_fields() {
+        let general: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../project/spec/workflows/general-work.json.fixture"
+        ))
+        .unwrap();
+        let schemas = &general["contract_only_schemas"];
+        let requirement: DeliverableRequirementDto =
+            serde_json::from_value(schemas["deliverable_requirement"].clone()).unwrap();
+        let input_bundle: AcceptedInputBundleDto =
+            serde_json::from_value(schemas["accepted_input_bundle"].clone()).unwrap();
+        assert_eq!(
+            requirement.schema_version,
+            DELIVERABLE_REQUIREMENT_SCHEMA_VERSION
+        );
+        assert_eq!(requirement.min_count, 1);
+        assert_eq!(requirement.max_count, 1);
+        assert_eq!(
+            input_bundle.schema_version,
+            ACCEPTED_INPUT_BUNDLE_SCHEMA_VERSION
+        );
+        assert_eq!(input_bundle.bindings[0].role, AcceptedInputRoleDto::Brief);
+        assert_eq!(
+            input_bundle.bindings[0].access_scope,
+            ArtifactAccessScopeDto::AcceptedResultOnly
+        );
+
+        let artifacts: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../project/spec/workflows/artifacts-acceptance.json.fixture"
+        ))
+        .unwrap();
+        let schemas = &artifacts["contract_only_schemas"];
+        let submission: ArtifactSubmissionDto =
+            serde_json::from_value(schemas["artifact_submission"].clone()).unwrap();
+        let inspection: ArtifactInspectionFactDto =
+            serde_json::from_value(schemas["artifact_inspection"].clone()).unwrap();
+        let request: ArtifactAcceptanceRequestDto =
+            serde_json::from_value(schemas["acceptance_request"].clone()).unwrap();
+        let readback: ArtifactAcceptanceReadbackDto =
+            serde_json::from_value(schemas["acceptance_readback"].clone()).unwrap();
+        assert_eq!(
+            submission.schema_version,
+            ARTIFACT_SUBMISSION_SCHEMA_VERSION
+        );
+        assert_eq!(submission.fence, 7);
+        assert_eq!(
+            inspection.schema_version,
+            ARTIFACT_INSPECTION_SCHEMA_VERSION
+        );
+        assert_eq!(inspection.outcome, ArtifactCheckOutcomeDto::Passed);
+        assert_eq!(request.schema_version, ARTIFACT_ACCEPTANCE_SCHEMA_VERSION);
+        assert_eq!(request.decision, ArtifactAcceptanceDecisionDto::Approved);
+        assert_eq!(readback.actor_role, "reviewer");
+        assert!(readback.reviewer_independent);
+        assert_eq!(schemas["callable"], false);
+
+        for (name, mut payload) in [
+            (
+                "requirement",
+                general["contract_only_schemas"]["deliverable_requirement"].clone(),
+            ),
+            (
+                "submission",
+                artifacts["contract_only_schemas"]["artifact_submission"].clone(),
+            ),
+            (
+                "inspection",
+                artifacts["contract_only_schemas"]["artifact_inspection"].clone(),
+            ),
+            (
+                "acceptance request",
+                artifacts["contract_only_schemas"]["acceptance_request"].clone(),
+            ),
+            (
+                "acceptance readback",
+                artifacts["contract_only_schemas"]["acceptance_readback"].clone(),
+            ),
+        ] {
+            payload["unexpected_client_field"] = serde_json::json!("not accepted");
+            let result = match name {
+                "requirement" => serde_json::from_value::<DeliverableRequirementDto>(payload)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                "submission" => serde_json::from_value::<ArtifactSubmissionDto>(payload)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                "inspection" => serde_json::from_value::<ArtifactInspectionFactDto>(payload)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                "acceptance request" => {
+                    serde_json::from_value::<ArtifactAcceptanceRequestDto>(payload)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                }
+                _ => serde_json::from_value::<ArtifactAcceptanceReadbackDto>(payload)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+            };
+            assert!(
+                result.is_err(),
+                "unknown fields must fail closed for {name}"
+            );
+        }
     }
 
     #[test]
@@ -687,6 +792,195 @@ pub struct CompletionCommandDto {
     #[serde(default)]
     pub expires_at_ms: Option<u64>,
     pub confirmed: bool,
+}
+
+/// Contract-only general-work schemas frozen by BW-S12-T01. These values are
+/// deliberately not advertised as callable routes until the owning S12 task
+/// implements and wires the corresponding application operation.
+pub const DELIVERABLE_REQUIREMENT_SCHEMA_VERSION: &str = "boreal.deliverable_requirement.v1";
+pub const ACCEPTED_INPUT_BUNDLE_SCHEMA_VERSION: &str = "boreal.accepted_input_bundle.v1";
+pub const ARTIFACT_SUBMISSION_SCHEMA_VERSION: &str = "boreal.artifact_submission.v1";
+pub const ARTIFACT_INSPECTION_SCHEMA_VERSION: &str = "boreal.artifact_inspection.v1";
+pub const ARTIFACT_ACCEPTANCE_SCHEMA_VERSION: &str = "boreal.artifact_acceptance.v1";
+
+/// A small, typed set of structural checks. Passing these checks says nothing
+/// about subjective quality, authorship, legal rights, or human approval.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeliverableCriterionDto {
+    NonEmpty,
+    MinimumBytes { value: u64 },
+    MaximumBytes { value: u64 },
+    DigestPresent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliverableRequirementDto {
+    pub schema_version: String,
+    pub requirement_key: String,
+    pub purpose: String,
+    pub required: bool,
+    pub allowed_media_types: Vec<String>,
+    pub min_count: u32,
+    pub max_count: u32,
+    pub criteria: Vec<DeliverableCriterionDto>,
+}
+
+/// Content identity is project-scoped and digest/version bound. The path or
+/// display name used to locate bytes is intentionally not part of identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactVersionIdentityDto {
+    pub project_id: String,
+    pub source_version_id: String,
+    pub content_digest: String,
+    pub media_type: String,
+    pub byte_count: u64,
+    pub availability: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptedInputRoleDto {
+    Brief,
+    Reference,
+    Source,
+    AcceptedOutput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactAccessScopeDto {
+    ProjectScoped,
+    AcceptedResultOnly,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedInputBindingDto {
+    pub input_key: String,
+    pub role: AcceptedInputRoleDto,
+    pub required: bool,
+    pub access_scope: ArtifactAccessScopeDto,
+    pub artifact: ArtifactVersionIdentityDto,
+    #[serde(default)]
+    pub accepted_result: Option<AcceptedResultIdentityDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedResultIdentityDto {
+    pub producer_work_id: String,
+    pub decision_id: String,
+    pub submission_id: String,
+    pub artifact_set_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedInputBundleDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub bindings: Vec<AcceptedInputBindingDto>,
+    pub bundle_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSubmissionDto {
+    pub schema_version: String,
+    pub submission_id: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub requirement_revision: u64,
+    pub profile_id: String,
+    pub profile_version: String,
+    pub requirement_key: String,
+    pub artifacts: Vec<ArtifactVersionIdentityDto>,
+    pub artifact_set_digest: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactCheckOutcomeDto {
+    Passed,
+    Failed,
+    Inconclusive,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactInspectionCheckDto {
+    pub criterion_id: String,
+    pub outcome: ArtifactCheckOutcomeDto,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+}
+
+/// An attributable, automated observation over exact submitted bytes; this
+/// must never be serialized or treated as a command execution receipt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactInspectionFactDto {
+    pub schema_version: String,
+    pub inspection_id: String,
+    pub submission_id: String,
+    pub artifact_set_digest: String,
+    pub requirement_revision: u64,
+    pub validator_id: String,
+    pub validator_version: String,
+    pub outcome: ArtifactCheckOutcomeDto,
+    pub observed_artifact_count: u32,
+    pub checks: Vec<ArtifactInspectionCheckDto>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactAcceptanceDecisionDto {
+    Approved,
+    Rejected,
+    ReturnForRevision,
+    Revoked,
+}
+
+/// A request binds a human decision to current immutable revisions. Actor and
+/// role are omitted because the authenticated service session supplies them.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAcceptanceRequestDto {
+    pub schema_version: String,
+    pub work_id: String,
+    pub expected_project_revision: u64,
+    pub expected_work_revision: u64,
+    pub expected_requirement_revision: u64,
+    pub expected_proof_revision: u64,
+    pub submission_id: String,
+    pub artifact_set_digest: String,
+    pub decision: ArtifactAcceptanceDecisionDto,
+    pub reason: String,
+}
+
+/// Authoritative acceptance readback. Actor, role and time are server-derived
+/// and the record names the exact submission reviewed.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAcceptanceReadbackDto {
+    pub schema_version: String,
+    pub decision_id: String,
+    pub work_id: String,
+    pub submission_id: String,
+    pub artifact_set_digest: String,
+    pub requirement_revision: u64,
+    pub decision: ArtifactAcceptanceDecisionDto,
+    pub actor_id: String,
+    pub actor_role: String,
+    pub reviewer_independent: bool,
+    pub decided_at: String,
+    pub reason: String,
 }
 
 /// Server-read identity boundary for cached snapshots and operation readback.
