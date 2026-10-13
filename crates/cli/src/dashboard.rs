@@ -7,6 +7,7 @@
 use super::*;
 use boreal_store::identity::IdentityStore;
 use std::{
+    ffi::OsStr,
     io::IsTerminal,
     process::{Child, ExitStatus},
     sync::atomic::{AtomicU64, Ordering},
@@ -41,6 +42,11 @@ enum TuiEntrypoint {
         source: PathBuf,
         tsconfig: PathBuf,
     },
+}
+
+struct DashboardTui {
+    entrypoint: TuiEntrypoint,
+    node: Option<PathBuf>,
 }
 
 #[cfg(unix)]
@@ -273,11 +279,17 @@ fn launch_dashboard(
 
     let executable = env::current_exe().map_err(process_error("locate the bwrk executable"))?;
     let current_dir = env::current_dir().map_err(process_error("resolve the working directory"))?;
-    let tui = locate_tui_entrypoint(
+    let entrypoint = locate_tui_entrypoint(
         &executable,
         &current_dir,
         env::var_os("BOREAL_TUI_ENTRYPOINT").map(PathBuf::from),
     )?;
+    let node = if tui_requires_node(&entrypoint) {
+        Some(resolve_node_runtime("BOREAL_NODE", "project dashboard")?)
+    } else {
+        None
+    };
+    let tui = DashboardTui { entrypoint, node };
     let _signals = signal::SignalGuard::install().map_err(|error| {
         CliError::with(
             ErrorCode::ServiceUnavailable,
@@ -379,7 +391,7 @@ fn launch_dashboard(
 #[cfg(unix)]
 fn spawn_dashboard_tui(
     parsed: &ParsedCommand,
-    tui: &TuiEntrypoint,
+    tui: &DashboardTui,
     service_socket: &Path,
     project: &str,
 ) -> Result<ManagedChild, CliError> {
@@ -429,7 +441,7 @@ fn spawn_dashboard_tui(
 #[cfg(unix)]
 fn run_existing_service_dashboard(
     parsed: &ParsedCommand,
-    tui: &TuiEntrypoint,
+    tui: &DashboardTui,
     database: &Path,
     project: &str,
     actor: &str,
@@ -778,12 +790,18 @@ fn executable_on_path(name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn command_for_tui(entrypoint: &TuiEntrypoint) -> Command {
-    match entrypoint {
+fn tui_requires_node(entrypoint: &TuiEntrypoint) -> bool {
+    matches!(
+        entrypoint,
+        TuiEntrypoint::JavaScript(_) | TuiEntrypoint::TypeScript { .. }
+    )
+}
+
+fn command_for_tui(tui: &DashboardTui) -> Command {
+    match &tui.entrypoint {
         TuiEntrypoint::Executable(path) => Command::new(path),
         TuiEntrypoint::JavaScript(path) => {
-            let mut command =
-                Command::new(env::var_os("BOREAL_NODE").unwrap_or_else(|| "node".into()));
+            let mut command = Command::new(tui.node.as_ref().expect("Node was preflighted"));
             command.arg(path);
             command
         }
@@ -792,11 +810,87 @@ fn command_for_tui(entrypoint: &TuiEntrypoint) -> Command {
             source,
             tsconfig,
         } => {
-            let mut command = Command::new(runner);
-            command.arg("--tsconfig").arg(tsconfig).arg(source);
+            let mut command = Command::new(tui.node.as_ref().expect("Node was preflighted"));
+            command
+                .arg(runner)
+                .arg("--tsconfig")
+                .arg(tsconfig)
+                .arg(source);
             command
         }
     }
+}
+
+fn resolve_node_runtime(variable: &str, dashboard: &str) -> Result<PathBuf, CliError> {
+    let requested = env::var_os(variable).unwrap_or_else(|| "node".into());
+    resolve_node_executable(&requested, variable, dashboard)
+}
+
+fn resolve_node_executable(
+    requested: &OsStr,
+    variable: &str,
+    dashboard: &str,
+) -> Result<PathBuf, CliError> {
+    let label = requested.to_string_lossy();
+    let output = Command::new(&requested)
+        .arg("--version")
+        .output()
+        .map_err(|error| {
+            node_runtime_error(
+                dashboard,
+                variable,
+                format!("could not run `{label} --version`: {error}"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(node_runtime_error(
+            dashboard,
+            variable,
+            format!(
+                "`{label} --version` exited with {}; stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+    let version_output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let version = version_output
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("(empty version output)");
+    if !supported_node_version(version) {
+        return Err(node_runtime_error(
+            dashboard,
+            variable,
+            format!("`{label}` reports unsupported version `{version}`"),
+        ));
+    }
+    Ok(PathBuf::from(requested))
+}
+
+fn supported_node_version(version: &str) -> bool {
+    version
+        .strip_prefix('v')
+        .unwrap_or(version)
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u64>().ok())
+        .is_some_and(|major| (20..27).contains(&major))
+}
+
+fn node_runtime_error(dashboard: &str, variable: &str, detail: String) -> CliError {
+    CliError::with(
+        ErrorCode::ServiceUnavailable,
+        ApplicationOutcome::Failed,
+        format!(
+            "{dashboard} requires Node.js 20–26; {detail}. Install a supported Node.js release or set {variable} to its executable. CLI commands and dashboard JSON snapshots do not require Node.js."
+        ),
+    )
 }
 
 #[cfg(unix)]
@@ -1292,6 +1386,47 @@ mod signal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_node_version_range_is_20_through_26() {
+        assert!(!supported_node_version("v19.9.0"));
+        assert!(supported_node_version("v20.0.0"));
+        assert!(supported_node_version("v26.8.2"));
+        assert!(!supported_node_version("v27.0.0"));
+        assert!(!supported_node_version("not-node"));
+        assert!(
+            node_runtime_error("project dashboard", "BOREAL_NODE", "missing".into())
+                .message
+                .contains("requires Node.js 20–26")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dashboard_node_preflight_runs_selected_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let suffix = DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!(
+            "boreal-dashboard-node-check-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let node = root.join("node");
+        fs::write(&node, "#!/bin/sh\nprintf 'v19.9.0\\n'\n").unwrap();
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = resolve_node_executable(node.as_os_str(), "BOREAL_NODE", "project dashboard")
+            .unwrap_err();
+        assert!(error.message.contains("unsupported version `v19.9.0`"));
+        assert!(error.message.contains("set BOREAL_NODE"));
+
+        fs::write(&node, "#!/bin/sh\nprintf 'v20.0.0\\n'\n").unwrap();
+        let resolved =
+            resolve_node_executable(node.as_os_str(), "BOREAL_NODE", "project dashboard").unwrap();
+        assert_eq!(resolved, node);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
