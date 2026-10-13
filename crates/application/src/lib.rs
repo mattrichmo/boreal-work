@@ -56,8 +56,8 @@ use boreal_store::{
 };
 pub use evidence::*;
 pub use guidance::{
-    guidance_subject, guide, guide_checked, guided_action, Directive, DirectiveSeverity,
-    DirectiveValidationError, GuidanceContext,
+    guidance_subject, guide, guide_checked, guided_action, guided_action_descriptor, Directive,
+    DirectiveSeverity, DirectiveValidationError, GuidanceContext,
 };
 pub use hierarchy::*;
 pub use intake::*;

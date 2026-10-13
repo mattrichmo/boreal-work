@@ -580,13 +580,13 @@ fn parse_asset(value: &Value, strict: bool) -> Result<WorkflowAsset, WorkflowAss
 
 fn require_exact_keys(
     object: &serde_json::Map<String, Value>,
-    expected: &[&str],
+    expected: &'static [&'static str],
     label: &str,
     strict: bool,
 ) -> Result<(), WorkflowAssetError> {
     reject_unknown_keys(object, expected, label)?;
     if strict {
-        if let Some(missing) = expected.iter().find(|key| !object.contains_key(*key)) {
+        if let Some(missing) = expected.iter().find(|key| !object.contains_key(**key)) {
             return Err(WorkflowAssetError::MissingField(*missing));
         }
     }
