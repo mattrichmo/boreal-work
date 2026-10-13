@@ -1442,3 +1442,50 @@ or promotion provenance.
    and the one-command `bwrk dashboard` experience.
 10. Negotiate work/status, cycle, recurrence, and intake capabilities
     independently so partial implementations cannot advertise false support.
+
+## 18. Work planning contracts and template prefixes
+
+Work may carry an optional immutable planning-contract snapshot. Each snapshot
+contains a bounded set of deliverable requirements and exact-version input
+references. A requirement has a stable key, purpose, output type, accepted
+media types, required/optional cardinality, and a bounded set of typed content
+criteria. The planning layer records requirements; acceptance and result
+validation remain separate versioned decisions.
+
+An input reference identifies exactly
+`(project_id, source_version_id, content_digest)` and adds a typed role
+(`context`, `accepted_input`, or `reference`) and access scope (`project` or
+`private`). A work-produced source may additionally pin
+`produced_by: { work_id, attempt_id, result_id }`. `result_id` is required
+whenever that producer tuple is present. The source/artifact layer owns bytes,
+availability, materialization, and provenance verification. Planning rows
+store no filesystem paths or copied bytes. T04 adapter integration should read
+the current contract together with its `project_revision`; the current source
+reference lookup is
+`planning_contracts_referencing_source(project_id, source_version_id,
+content_digest, expected_project_revision, limit, offset)`, which returns the
+observed project revision, exact digest filter, current per-work
+`contract_revision`, deterministic work-id ordering, total count, and the
+`has_more`/`next_offset` continuation.
+
+Template JSON schema 1 remains readable and produces empty requirement/input
+collections when those fields are absent. Schema 2 adds `deliverables` and
+`inputs` to each template item. Applying a template creates all work and
+planning snapshots in one transaction and binds the generated item-key map to
+the applied template id and version. Re-running an existing prefix remains a
+conflict unless the caller uses the explicit revision-bound amendment API.
+
+`WorkApplication::amend_template_prefix` accepts a complete newer template
+plan, the expected project revision, expected current template version, and
+the original prefix. The store rechecks both revisions inside one write
+transaction. It can update planning fields and add stable item keys, but it
+cannot remove keys or change an existing item's identity, kind, parent, or
+acceptance profile. Existing items must remain draft, have no attempt history,
+and still match their prefix ledger snapshot. Added-id collisions, stale state,
+or any invalid dependency/source reference reject the whole operation. Each
+successful amendment appends contract snapshots and prefix history and bumps
+the project once. The existing audit-event vocabulary does not yet contain a
+planning-amendment event, so the operation records the transition under
+`repair.correction` with template id/version and prefix in its payload. T05
+owns the callable parser/service route; this application API is the route seam
+and does not add a command outside the checked-in parser.
