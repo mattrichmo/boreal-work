@@ -1,6 +1,6 @@
 import type { Item, Note, Project, Status, Association, LinkedProject } from "./client.js";
 import { GlobalController, dailyClassification, isDone, isOverdue, type Row, type Route } from "./model.js";
-import { clip, fit, wrapWords } from "./terminal/cells.js";
+import { cellWidth, clip, fit, wrapWords } from "./terminal/cells.js";
 
 export const ROUTE_MENU: Array<[Route,string]> = [["overview","Home"],["projects","Projects"],["board","Board"],["list","List"],["todos","Today / open"],["notes","Notes"],["workflow","Workflow"],["links","Linked"],["planning","Plan"],["archive","Archive"],["history","History"],["inbox","Inbox"]];
 const routes=ROUTE_MENU;
@@ -39,7 +39,9 @@ function header(c:GlobalController,width:number,compact=false):string[]{
  const freshness=c.refreshing?"refreshing…":c.lastRefreshError?`stale · ${c.lastRefreshError}`:`fresh · ${sampled}`;
  const scope=c.projectId?`Project: ${p?.name??"unknown"}`:c.route==="inbox"?"Personal inbox + all project inboxes":"All projects";const civil=c.civilTime();const typedAttention=attention as Record<string,number>|undefined;const totalLabel=typedAttention?`${typedAttention.open??"?"} open · ${typedAttention.overdue??"?"} overdue · ${typedAttention.due_today??"?"} due today · ${typedAttention.waiting??"?"} waiting · ${typedAttention.unscheduled??"?"} unscheduled · ${typedAttention.later??"?"} later`:`visible sample ${scopedOpen.length} open · ${overdue.length} overdue`;const civilLabel=civil?`${civil.system_civil_date} ${civil.timezone}`:"civil time unavailable";
  const title=fit(`BOREAL  ${p?clip(p.name,width-20):c.route==="inbox"?"Personal inbox":"Portfolio"}  /  ${label(c.route)}${c.route==="todos"?` · ${c.todoFilter.replace("_"," ")}`:""}`,width);
- const context=fit(`${scope} · rev ${snap.revision} · ${civilLabel} · ${compact?freshness:`${totalLabel} · ${c.projects.length} projects · ${freshness}`}`,width);
+ const fullContext=`${scope} · rev ${snap.revision} · ${civilLabel} · ${totalLabel} · ${c.projects.length} projects · ${freshness}`;
+ const compactContext=`${scope} · rev ${snap.revision} · ${civilLabel} · ${freshness}`;
+ const context=fit(compact||cellWidth(fullContext)>width?compactContext:fullContext,width);
  const recovery=fit(`${c.notice||"↑↓ move · PgDn more · Enter inspect · ? help"}${c.searchQuery?` · Filter: ${c.searchQuery}`:""}${c.unresolvedOperation?`  ·  WRITE FROZEN: ${c.unresolvedOperation}`:""}`,width);
  return compact?[title,context,recovery]:[title,context,recovery,"─".repeat(width)];
 }
