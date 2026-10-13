@@ -32,6 +32,12 @@ pub const DEFAULT_MAX_PARSE_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_MAX_PARSE_CHUNKS: usize = 100_000;
 pub const DEFAULT_MAX_CHUNK_BYTES: usize = 16 * 1024;
 pub const DEFAULT_MAX_RETRIEVAL_EXCERPT_BYTES: usize = 4 * 1024;
+/// Default bound for an artifact returned inline or materialized by a client.
+/// Larger inputs remain capturable/searchable by an explicitly configured
+/// adapter, but are never expanded into an unbounded context response.
+pub const DEFAULT_MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_ARTIFACT_RELATIONSHIPS: usize = 100_000;
+pub const MAX_ARTIFACT_PROVENANCE_FIELD_BYTES: usize = 4 * 1024;
 const CATALOG_LOCK_WAIT: Duration = Duration::from_secs(10);
 /// Canonical content identity shared with the migration boundary.
 pub const DIGEST_ALGORITHM: &str = "sha256";
@@ -53,6 +59,108 @@ pub struct SourceVersion {
     pub content_digest: String,
     pub availability: Availability,
     pub parser_identity: Option<String>,
+}
+
+/// Immutable identity for source and generated artifact bytes. The digest is
+/// always checked against the catalog record before bytes are returned.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct SourceIdentity {
+    pub project_id: String,
+    pub source_version_id: String,
+    pub content_digest: String,
+}
+
+impl SourceIdentity {
+    pub fn from_version(version: &SourceVersion) -> Self {
+        Self {
+            project_id: version.project_id.clone(),
+            source_version_id: version.source_version_id.clone(),
+            content_digest: version.content_digest.clone(),
+        }
+    }
+}
+
+/// Relationship labels describe what a captured byte version is used for;
+/// they do not assert review, acceptance, publication, or deployment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ArtifactRole {
+    InputSource,
+    ProducedDeliverable,
+    ValidationEvidence,
+    AcceptedSubmission,
+    HandoffSummary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ArtifactScope {
+    Project,
+    Private,
+}
+
+/// Identity of the work result that produced an artifact. `result_id` is an
+/// immutable result/submission identity, never a path or current work status.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactProducer {
+    pub work_id: String,
+    pub attempt_id: String,
+    pub result_id: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactRightsProvenance {
+    pub attribution: Option<String>,
+    pub rights_statement: Option<String>,
+    pub license: Option<String>,
+}
+
+/// A durable, path-free association between a work/result and an exact source
+/// version. Rights and origin metadata remain reviewable alongside the bytes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactRelationship {
+    pub relationship_id: String,
+    pub source: SourceIdentity,
+    pub role: ArtifactRole,
+    pub scope: ArtifactScope,
+    pub requirement_key: Option<String>,
+    pub produced_by: Option<ArtifactProducer>,
+    pub rights: ArtifactRightsProvenance,
+    pub operation_id: String,
+    pub artifact_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactRelationshipInput {
+    pub relationship_id: String,
+    pub source: SourceIdentity,
+    pub role: ArtifactRole,
+    pub scope: ArtifactScope,
+    pub requirement_key: Option<String>,
+    pub produced_by: Option<ArtifactProducer>,
+    pub rights: ArtifactRightsProvenance,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactRelationshipReceipt {
+    pub relationship: ArtifactRelationship,
+    pub duplicate: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceReadback {
+    pub identity: SourceIdentity,
+    pub media_type: String,
+    pub byte_count: usize,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterializationReceipt {
+    pub identity: SourceIdentity,
+    /// Relative to the caller-authorized root; never used as durable identity.
+    pub relative_path: String,
+    pub byte_count: usize,
+    pub already_present: bool,
 }
 
 /// A complete source registration/capture intent.  The operation ID is owned
@@ -271,6 +379,13 @@ pub enum SourceError {
     EmptyOperation,
     OperationConflict,
     SourceMetadataConflict,
+    ArtifactTooLarge { actual: usize, limit: usize },
+    InvalidArtifactIdentity,
+    InvalidArtifactRelationship,
+    ArtifactRelationshipConflict,
+    TooManyArtifactRelationships,
+    InvalidMaterializationPath,
+    MaterializedArtifactConflict,
     Storage(String),
 }
 
@@ -298,6 +413,28 @@ impl fmt::Display for SourceError {
             }
             Self::SourceMetadataConflict => {
                 f.write_str("existing source version has different immutable metadata")
+            }
+            Self::ArtifactTooLarge { actual, limit } => write!(
+                f,
+                "artifact is {actual} bytes, above the configured {limit} byte bound"
+            ),
+            Self::InvalidArtifactIdentity => {
+                f.write_str("artifact source identity is invalid or has a different digest")
+            }
+            Self::InvalidArtifactRelationship => {
+                f.write_str("artifact relationship metadata is invalid or incomplete")
+            }
+            Self::ArtifactRelationshipConflict => {
+                f.write_str("artifact relationship identity was reused for different metadata")
+            }
+            Self::TooManyArtifactRelationships => {
+                f.write_str("artifact relationship limit has been reached")
+            }
+            Self::InvalidMaterializationPath => {
+                f.write_str("artifact destination must remain below the permitted root")
+            }
+            Self::MaterializedArtifactConflict => {
+                f.write_str("artifact destination already contains different bytes")
             }
             Self::Storage(message) => write!(f, "blob storage error: {message}"),
         }
@@ -463,11 +600,14 @@ fn write_temp_and_install(
 #[derive(Clone, Default)]
 struct CatalogState {
     versions: HashMap<(String, String), SourceVersion>,
+    artifact_relationships: HashMap<(String, String), ArtifactRelationship>,
     parse_records: HashMap<(String, String), ParseRecord>,
     indexes: HashMap<(String, String), IndexedSource>,
     capture_operations: HashMap<String, CaptureOperationRecord>,
+    artifact_operations: HashMap<String, ArtifactOperationRecord>,
     source_revision: u64,
     index_revision: u64,
+    artifact_revision: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -475,6 +615,13 @@ struct CaptureOperationRecord {
     request_digest: String,
     project_id: String,
     source_version_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ArtifactOperationRecord {
+    request_digest: String,
+    project_id: String,
+    relationship_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -515,12 +662,18 @@ struct ParsedIndex {
 #[derive(Serialize, Deserialize)]
 struct PersistedCatalogState {
     versions: Vec<SourceVersion>,
+    #[serde(default)]
+    artifact_relationships: Vec<ArtifactRelationship>,
     parse_records: Vec<PersistedParseRecord>,
     indexes: Vec<PersistedIndexedSource>,
     #[serde(default)]
     capture_operations: Vec<PersistedCaptureOperation>,
+    #[serde(default)]
+    artifact_operations: Vec<PersistedArtifactOperation>,
     source_revision: u64,
     index_revision: u64,
+    #[serde(default)]
+    artifact_revision: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -541,6 +694,12 @@ struct PersistedIndexedSource {
 struct PersistedCaptureOperation {
     operation_id: String,
     record: CaptureOperationRecord,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedArtifactOperation {
+    operation_id: String,
+    record: ArtifactOperationRecord,
 }
 
 pub struct SourceCatalog {
@@ -724,6 +883,259 @@ impl SourceCatalog {
         let stored = self.authorized_version(version)?;
         self.blobs
             .read_verified(&stored.content_digest, stored.byte_count)
+    }
+
+    /// Read one exact immutable byte version. Callers must provide all three
+    /// identity fields; a source ID alone is not enough to resolve an artifact
+    /// after a handoff or restore.
+    pub fn read_identity_bounded(
+        &self,
+        identity: &SourceIdentity,
+        max_bytes: usize,
+    ) -> Result<SourceReadback, SourceError> {
+        let _mutation_guard = lock(&self.mutation_lock)?;
+        self.reload_persistent_state()?;
+        self.read_identity_locked(identity, max_bytes)
+    }
+
+    fn read_identity_locked(
+        &self,
+        identity: &SourceIdentity,
+        max_bytes: usize,
+    ) -> Result<SourceReadback, SourceError> {
+        if max_bytes == 0 || max_bytes > DEFAULT_MAX_ARTIFACT_BYTES {
+            return Err(SourceError::InvalidArtifactIdentity);
+        }
+        validate_project_id(&identity.project_id)?;
+        if identity.source_version_id.trim().is_empty()
+            || digest_hex(&identity.content_digest).is_none()
+        {
+            return Err(SourceError::InvalidArtifactIdentity);
+        }
+        // The caller has refreshed the atomic catalog snapshot under this
+        // instance's mutation guard, so concurrent local mutations cannot be
+        // overwritten by an older disk snapshot during readback.
+        let version = lock(&self.state)?
+            .versions
+            .get(&(
+                identity.project_id.clone(),
+                identity.source_version_id.clone(),
+            ))
+            .cloned()
+            .ok_or(SourceError::ScopeViolation)?;
+        if version.content_digest != identity.content_digest {
+            return Err(SourceError::InvalidArtifactIdentity);
+        }
+        if version.byte_count > max_bytes {
+            return Err(SourceError::ArtifactTooLarge {
+                actual: version.byte_count,
+                limit: max_bytes,
+            });
+        }
+        let bytes = self
+            .blobs
+            .read_verified(&version.content_digest, version.byte_count)?;
+        if bytes.len() != version.byte_count || content_digest(&bytes) != identity.content_digest {
+            return Err(SourceError::DigestMismatch);
+        }
+        Ok(SourceReadback {
+            identity: SourceIdentity::from_version(&version),
+            media_type: version.media_type,
+            byte_count: bytes.len(),
+            bytes,
+        })
+    }
+
+    /// Record non-authoritative artifact lineage after verifying the exact
+    /// bytes. The source catalog records role and provenance; acceptance and
+    /// publication remain decisions of the work application/store.
+    pub fn record_artifact_relationship(
+        &self,
+        input: ArtifactRelationshipInput,
+    ) -> Result<ArtifactRelationshipReceipt, SourceError> {
+        validate_artifact_relationship(&input)?;
+        let request_digest = artifact_relationship_digest(&input)?;
+        let _mutation_guard = lock(&self.mutation_lock)?;
+        let _catalog_lock = self.acquire_persistent_lock()?;
+        self.reload_persistent_state()?;
+
+        let prior_operation = lock(&self.state)?
+            .artifact_operations
+            .get(&input.operation_id)
+            .cloned();
+        if let Some(existing) = prior_operation {
+            if existing.request_digest != request_digest
+                || existing.project_id != input.source.project_id
+                || existing.relationship_id != input.relationship_id
+            {
+                return Err(SourceError::OperationConflict);
+            }
+            let relationship = lock(&self.state)?
+                .artifact_relationships
+                .get(&(existing.project_id, existing.relationship_id))
+                .cloned()
+                .ok_or_else(|| {
+                    SourceError::Storage(
+                        "artifact operation references a missing relationship".to_owned(),
+                    )
+                })?;
+            self.read_identity_locked(&input.source, DEFAULT_MAX_ARTIFACT_BYTES)?;
+            return Ok(ArtifactRelationshipReceipt {
+                relationship,
+                duplicate: true,
+            });
+        }
+
+        let key = (
+            input.source.project_id.clone(),
+            input.relationship_id.clone(),
+        );
+        if lock(&self.state)?.artifact_relationships.contains_key(&key) {
+            return Err(SourceError::ArtifactRelationshipConflict);
+        }
+
+        self.read_identity_locked(&input.source, DEFAULT_MAX_ARTIFACT_BYTES)?;
+        let before = lock(&self.state)?.clone();
+        let relationship = {
+            let mut state = lock(&self.state)?;
+            if state.artifact_relationships.len() >= MAX_ARTIFACT_RELATIONSHIPS {
+                return Err(SourceError::TooManyArtifactRelationships);
+            }
+            state.artifact_revision = state.artifact_revision.saturating_add(1);
+            let relationship = ArtifactRelationship {
+                relationship_id: input.relationship_id.clone(),
+                source: input.source.clone(),
+                role: input.role,
+                scope: input.scope,
+                requirement_key: input.requirement_key.clone(),
+                produced_by: input.produced_by.clone(),
+                rights: input.rights.clone(),
+                operation_id: input.operation_id.clone(),
+                artifact_revision: state.artifact_revision,
+            };
+            state
+                .artifact_relationships
+                .insert(key, relationship.clone());
+            state.artifact_operations.insert(
+                input.operation_id.clone(),
+                ArtifactOperationRecord {
+                    request_digest,
+                    project_id: input.source.project_id.clone(),
+                    relationship_id: input.relationship_id.clone(),
+                },
+            );
+            relationship
+        };
+        if let Err(error) = self.persist_state() {
+            *lock(&self.state)? = before;
+            return Err(error);
+        }
+        Ok(ArtifactRelationshipReceipt {
+            relationship,
+            duplicate: false,
+        })
+    }
+
+    /// Exact relationship lookup avoids scanning a project's complete
+    /// artifact history when an adapter already has the stable identity.
+    pub fn show_artifact_relationship(
+        &self,
+        project_id: &str,
+        relationship_id: &str,
+    ) -> Result<Option<ArtifactRelationship>, SourceError> {
+        validate_project_id(project_id)?;
+        if !valid_artifact_key(relationship_id) {
+            return Err(SourceError::InvalidArtifactRelationship);
+        }
+        let _mutation_guard = lock(&self.mutation_lock)?;
+        self.reload_persistent_state()?;
+        Ok(lock(&self.state)?
+            .artifact_relationships
+            .get(&(project_id.to_owned(), relationship_id.to_owned()))
+            .cloned())
+    }
+
+    /// Verify and materialize bytes under an explicitly permitted root. The
+    /// stored relationship never includes the local root or the caller's
+    /// absolute destination path.
+    pub fn materialize_identity(
+        &self,
+        identity: &SourceIdentity,
+        permitted_root: &Path,
+        relative_path: &Path,
+        max_bytes: usize,
+    ) -> Result<MaterializationReceipt, SourceError> {
+        let readback = self.read_identity_bounded(identity, max_bytes)?;
+        validate_relative_materialization_path(relative_path)?;
+        let root = checked_materialization_root(permitted_root)?;
+        let destination = ensure_materialization_parent(&root, relative_path)?;
+        let relative = relative_path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(SourceError::InvalidMaterializationPath)
+            }
+            Ok(_) => {
+                let existing = fs::read(&destination).map_err(storage_error)?;
+                if existing.len() != readback.byte_count
+                    || content_digest(&existing) != identity.content_digest
+                {
+                    return Err(SourceError::MaterializedArtifactConflict);
+                }
+                return Ok(MaterializationReceipt {
+                    identity: identity.clone(),
+                    relative_path: relative,
+                    byte_count: readback.byte_count,
+                    already_present: true,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(storage_error(error)),
+        }
+
+        let parent = destination
+            .parent()
+            .ok_or(SourceError::InvalidMaterializationPath)?;
+        let temp = parent.join(format!(
+            ".boreal-artifact-{}-{unique}.tmp",
+            std::process::id(),
+            unique = unique_stamp()
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(storage_error)?;
+        let write_result = (|| {
+            file.write_all(&readback.bytes).map_err(storage_error)?;
+            file.sync_all().map_err(storage_error)?;
+            let verified = fs::read(&temp).map_err(storage_error)?;
+            verify_bytes(&identity.content_digest, readback.byte_count, &verified)?;
+            fs::hard_link(&temp, &destination).map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    SourceError::MaterializedArtifactConflict
+                } else {
+                    storage_error(error)
+                }
+            })?;
+            fs::remove_file(&temp).map_err(storage_error)?;
+            sync_directory(parent)?;
+            Ok::<(), SourceError>(())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+        Ok(MaterializationReceipt {
+            identity: identity.clone(),
+            relative_path: relative,
+            byte_count: readback.byte_count,
+            already_present: false,
+        })
     }
 
     pub fn availability(&self, version: &SourceVersion) -> Result<Availability, SourceError> {
@@ -1724,8 +2136,20 @@ fn persisted_state(state: &CatalogState) -> PersistedCatalogState {
             .cmp(&right.project_id)
             .then_with(|| left.source_version_id.cmp(&right.source_version_id))
     });
+    let mut artifact_relationships = state
+        .artifact_relationships
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    artifact_relationships.sort_by(|left, right| {
+        left.source
+            .project_id
+            .cmp(&right.source.project_id)
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
     PersistedCatalogState {
         versions,
+        artifact_relationships,
         parse_records,
         indexes,
         capture_operations: {
@@ -1740,21 +2164,42 @@ fn persisted_state(state: &CatalogState) -> PersistedCatalogState {
             operations.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
             operations
         },
+        artifact_operations: {
+            let mut operations = state
+                .artifact_operations
+                .iter()
+                .map(|(operation_id, record)| PersistedArtifactOperation {
+                    operation_id: operation_id.clone(),
+                    record: record.clone(),
+                })
+                .collect::<Vec<_>>();
+            operations.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+            operations
+        },
         source_revision: state.source_revision,
         index_revision: state.index_revision,
+        artifact_revision: state.artifact_revision,
     }
 }
 
 fn restore_catalog_state(bytes: &[u8]) -> Result<CatalogState, SourceError> {
     let persisted: PersistedCatalogState = serde_json::from_slice(bytes)
         .map_err(|error| SourceError::Storage(format!("catalog metadata is invalid: {error}")))?;
+    if persisted.artifact_relationships.len() > MAX_ARTIFACT_RELATIONSHIPS {
+        return Err(SourceError::Storage(
+            "catalog metadata exceeds the artifact relationship limit".to_owned(),
+        ));
+    }
     let mut state = CatalogState {
         versions: HashMap::new(),
+        artifact_relationships: HashMap::new(),
         parse_records: HashMap::new(),
         indexes: HashMap::new(),
         capture_operations: HashMap::new(),
+        artifact_operations: HashMap::new(),
         source_revision: persisted.source_revision,
         index_revision: persisted.index_revision,
+        artifact_revision: persisted.artifact_revision,
     };
     for version in persisted.versions {
         let key = (
@@ -1764,6 +2209,44 @@ fn restore_catalog_state(bytes: &[u8]) -> Result<CatalogState, SourceError> {
         if state.versions.insert(key, version).is_some() {
             return Err(SourceError::Storage(
                 "catalog metadata contains duplicate source versions".to_owned(),
+            ));
+        }
+    }
+    for relationship in persisted.artifact_relationships {
+        let input = relationship_input(&relationship);
+        validate_artifact_relationship(&input).map_err(|_| {
+            SourceError::Storage("catalog metadata has an invalid artifact relationship".to_owned())
+        })?;
+        let source = state
+            .versions
+            .get(&(
+                relationship.source.project_id.clone(),
+                relationship.source.source_version_id.clone(),
+            ))
+            .ok_or_else(|| {
+                SourceError::Storage(
+                    "artifact relationship references a missing source version".to_owned(),
+                )
+            })?;
+        if source.content_digest != relationship.source.content_digest
+            || relationship.artifact_revision == 0
+            || relationship.artifact_revision > state.artifact_revision
+        {
+            return Err(SourceError::Storage(
+                "artifact relationship identity or revision is inconsistent".to_owned(),
+            ));
+        }
+        let key = (
+            relationship.source.project_id.clone(),
+            relationship.relationship_id.clone(),
+        );
+        if state
+            .artifact_relationships
+            .insert(key, relationship)
+            .is_some()
+        {
+            return Err(SourceError::Storage(
+                "catalog metadata contains duplicate artifact relationships".to_owned(),
             ));
         }
     }
@@ -1794,7 +2277,50 @@ fn restore_catalog_state(bytes: &[u8]) -> Result<CatalogState, SourceError> {
             ));
         }
     }
+    for entry in persisted.artifact_operations {
+        let relationship = state
+            .artifact_relationships
+            .get(&(
+                entry.record.project_id.clone(),
+                entry.record.relationship_id.clone(),
+            ))
+            .ok_or_else(|| {
+                SourceError::Storage(
+                    "artifact operation references a missing relationship".to_owned(),
+                )
+            })?;
+        let input = relationship_input(relationship);
+        if relationship.operation_id != entry.operation_id
+            || artifact_relationship_digest(&input)? != entry.record.request_digest
+        {
+            return Err(SourceError::Storage(
+                "artifact operation identity does not match its relationship".to_owned(),
+            ));
+        }
+        if state
+            .artifact_operations
+            .insert(entry.operation_id, entry.record)
+            .is_some()
+        {
+            return Err(SourceError::Storage(
+                "catalog metadata contains duplicate artifact operations".to_owned(),
+            ));
+        }
+    }
     Ok(state)
+}
+
+fn relationship_input(relationship: &ArtifactRelationship) -> ArtifactRelationshipInput {
+    ArtifactRelationshipInput {
+        relationship_id: relationship.relationship_id.clone(),
+        source: relationship.source.clone(),
+        role: relationship.role,
+        scope: relationship.scope,
+        requirement_key: relationship.requirement_key.clone(),
+        produced_by: relationship.produced_by.clone(),
+        rights: relationship.rights.clone(),
+        operation_id: relationship.operation_id.clone(),
+    }
 }
 
 fn validate_optional_project(project_id: Option<&str>) -> Result<(), SourceError> {
@@ -1809,6 +2335,141 @@ fn validate_operation_id(operation_id: &str) -> Result<(), SourceError> {
         return Err(SourceError::EmptyOperation);
     }
     Ok(())
+}
+
+fn artifact_relationship_digest(input: &ArtifactRelationshipInput) -> Result<String, SourceError> {
+    let bytes = serde_json::to_vec(input).map_err(|error| {
+        SourceError::Storage(format!("artifact metadata encoding failed: {error}"))
+    })?;
+    Ok(content_digest(&bytes))
+}
+
+fn validate_artifact_relationship(input: &ArtifactRelationshipInput) -> Result<(), SourceError> {
+    validate_project_id(&input.source.project_id)?;
+    if !valid_artifact_segment(&input.source.source_version_id)
+        || digest_hex(&input.source.content_digest).is_none()
+        || !valid_artifact_key(&input.relationship_id)
+        || input
+            .requirement_key
+            .as_deref()
+            .is_some_and(|key| !valid_artifact_key(key))
+    {
+        return Err(SourceError::InvalidArtifactRelationship);
+    }
+    validate_operation_id(&input.operation_id)?;
+    match (input.role, input.produced_by.as_ref()) {
+        (
+            ArtifactRole::ProducedDeliverable
+            | ArtifactRole::ValidationEvidence
+            | ArtifactRole::AcceptedSubmission
+            | ArtifactRole::HandoffSummary,
+            None,
+        ) => return Err(SourceError::InvalidArtifactRelationship),
+        (_, Some(producer))
+            if !valid_provenance_id(&producer.work_id)
+                || !valid_provenance_id(&producer.attempt_id)
+                || !valid_provenance_id(&producer.result_id) =>
+        {
+            return Err(SourceError::InvalidArtifactRelationship)
+        }
+        _ => {}
+    }
+    for value in [
+        input.rights.attribution.as_deref(),
+        input.rights.rights_statement.as_deref(),
+        input.rights.license.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.len() > MAX_ARTIFACT_PROVENANCE_FIELD_BYTES || value.as_bytes().contains(&0) {
+            return Err(SourceError::InvalidArtifactRelationship);
+        }
+    }
+    Ok(())
+}
+
+/// Producer IDs are opaque application identities. They are bounded and
+/// NUL-free but are never used as paths or filesystem components.
+fn valid_provenance_id(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_ARTIFACT_PROVENANCE_FIELD_BYTES
+        && !value.as_bytes().contains(&0)
+}
+
+fn valid_artifact_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+fn valid_artifact_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+        })
+        && value.as_bytes()[0].is_ascii_lowercase()
+}
+
+fn validate_relative_materialization_path(path: &Path) -> Result<(), SourceError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(SourceError::InvalidMaterializationPath);
+    }
+    Ok(())
+}
+
+fn checked_materialization_root(root: &Path) -> Result<PathBuf, SourceError> {
+    let metadata = fs::symlink_metadata(root).map_err(storage_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(SourceError::InvalidMaterializationPath);
+    }
+    fs::canonicalize(root).map_err(storage_error)
+}
+
+fn ensure_materialization_parent(root: &Path, relative: &Path) -> Result<PathBuf, SourceError> {
+    let components = relative.components().collect::<Vec<_>>();
+    let (filename, parents) = components
+        .split_last()
+        .ok_or(SourceError::InvalidMaterializationPath)?;
+    let mut current = root.to_path_buf();
+    for component in parents {
+        let Component::Normal(name) = component else {
+            return Err(SourceError::InvalidMaterializationPath);
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(SourceError::InvalidMaterializationPath)
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(storage_error)?;
+            }
+            Err(error) => return Err(storage_error(error)),
+        }
+        if fs::canonicalize(&current)
+            .map_err(storage_error)?
+            .strip_prefix(root)
+            .is_err()
+        {
+            return Err(SourceError::InvalidMaterializationPath);
+        }
+    }
+    let Component::Normal(filename) = filename else {
+        return Err(SourceError::InvalidMaterializationPath);
+    };
+    current.push(filename);
+    Ok(current)
 }
 
 fn capture_request_digest(request: &SourceCaptureRequest) -> String {
@@ -2166,6 +2827,39 @@ const SHA256_ROUND_CONSTANTS: [u32; 64] = [
 mod tests {
     use super::*;
 
+    fn temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "boreal-source-{label}-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ))
+    }
+
+    fn producer() -> ArtifactProducer {
+        ArtifactProducer {
+            work_id: "work-7".into(),
+            attempt_id: "attempt-2".into(),
+            result_id: "result-9".into(),
+        }
+    }
+
+    fn relationship_input(identity: SourceIdentity) -> ArtifactRelationshipInput {
+        ArtifactRelationshipInput {
+            relationship_id: "relationship-9".into(),
+            source: identity,
+            role: ArtifactRole::ProducedDeliverable,
+            scope: ArtifactScope::Project,
+            requirement_key: Some("logo_final".into()),
+            produced_by: Some(producer()),
+            rights: ArtifactRightsProvenance {
+                attribution: Some("Created by the project worker".into()),
+                rights_statement: Some("Project-owned output".into()),
+                license: None,
+            },
+            operation_id: "op_artifact_relation_9".into(),
+        }
+    }
+
     #[test]
     fn sha256_matches_known_vectors() {
         assert_eq!(
@@ -2193,6 +2887,170 @@ mod tests {
             catalog.cite(&version, "line:1", &oversized),
             Err(SourceError::CitationTooLarge)
         );
+    }
+
+    #[test]
+    fn artifact_readback_checks_project_version_digest_and_inline_bound() {
+        let catalog = SourceCatalog::default();
+        let version = catalog
+            .capture("p1", "assets/logo.bin", b"\0\x01\xff", "image/png")
+            .unwrap();
+        let identity = SourceIdentity::from_version(&version);
+        let readback = catalog
+            .read_identity_bounded(&identity, DEFAULT_MAX_ARTIFACT_BYTES)
+            .unwrap();
+        assert_eq!(readback.bytes, b"\0\x01\xff");
+        assert_eq!(readback.media_type, "image/png");
+        assert_eq!(
+            catalog.read_identity_bounded(&identity, 2),
+            Err(SourceError::ArtifactTooLarge {
+                actual: 3,
+                limit: 2,
+            })
+        );
+
+        let mut wrong_digest = identity.clone();
+        wrong_digest.content_digest = content_digest(b"different");
+        assert_eq!(
+            catalog.read_identity_bounded(&wrong_digest, 10),
+            Err(SourceError::InvalidArtifactIdentity)
+        );
+        let mut wrong_project = identity;
+        wrong_project.project_id = "p2".into();
+        assert_eq!(
+            catalog.read_identity_bounded(&wrong_project, 10),
+            Err(SourceError::ScopeViolation)
+        );
+    }
+
+    #[test]
+    fn artifact_relationship_and_bytes_survive_restart_and_root_relocation() {
+        let tree = temp_path("relocation");
+        let original_source = tree.join("temporary/source");
+        let input_file = tree.join("caller-temp/logo.bin");
+        let relocated_source = tree.join("restored/source");
+        let destination_root = tree.join("allowed-output");
+        fs::create_dir_all(input_file.parent().unwrap()).unwrap();
+        fs::write(&input_file, b"\x89PNG\r\n\x1a\ncreative asset bytes").unwrap();
+        let bytes = fs::read(&input_file).unwrap();
+        fs::create_dir_all(&original_source).unwrap();
+
+        let identity = {
+            let catalog = SourceCatalog::with_persistent_filesystem(&original_source).unwrap();
+            let capture = catalog
+                .capture_with_operation(&SourceCaptureRequest::new(
+                    "op_capture_logo",
+                    "project-a",
+                    "assets/logo.png",
+                    "image/png",
+                    bytes.clone(),
+                ))
+                .unwrap();
+            let identity = SourceIdentity::from_version(&capture.source_version);
+            let relationship = catalog
+                .record_artifact_relationship(relationship_input(identity.clone()))
+                .unwrap();
+            assert!(!relationship.duplicate);
+            assert_eq!(
+                relationship.relationship.role,
+                ArtifactRole::ProducedDeliverable
+            );
+            assert_eq!(
+                relationship
+                    .relationship
+                    .produced_by
+                    .as_ref()
+                    .unwrap()
+                    .result_id,
+                "result-9"
+            );
+            let retry = catalog
+                .record_artifact_relationship(relationship_input(identity.clone()))
+                .unwrap();
+            assert!(retry.duplicate);
+            assert_eq!(
+                catalog
+                    .show_artifact_relationship("project-a", "relationship-9")
+                    .unwrap()
+                    .unwrap(),
+                relationship.relationship
+            );
+            identity
+        };
+        fs::remove_file(&input_file).unwrap();
+
+        fs::create_dir_all(&relocated_source).unwrap();
+        let original_catalog = SourceCatalog::with_persistent_filesystem(&original_source).unwrap();
+        let blob_path = FilesystemBlobStore::new(&original_source)
+            .blob_path(&identity.content_digest)
+            .unwrap();
+        let relocated_blob = FilesystemBlobStore::new(&relocated_source)
+            .blob_path(&identity.content_digest)
+            .unwrap();
+        fs::create_dir_all(relocated_blob.parent().unwrap()).unwrap();
+        fs::copy(&blob_path, &relocated_blob).unwrap();
+        fs::copy(
+            original_source.join("catalog.json"),
+            relocated_source.join("catalog.json"),
+        )
+        .unwrap();
+        drop(original_catalog);
+
+        let relocated = SourceCatalog::with_persistent_filesystem(&relocated_source).unwrap();
+        fs::create_dir_all(&destination_root).unwrap();
+        let relationship = relocated
+            .show_artifact_relationship("project-a", "relationship-9")
+            .unwrap();
+        assert_eq!(relationship.unwrap().source, identity);
+        let readback = relocated
+            .read_identity_bounded(&identity, DEFAULT_MAX_ARTIFACT_BYTES)
+            .unwrap();
+        assert_eq!(readback.bytes, bytes);
+        let receipt = relocated
+            .materialize_identity(
+                &identity,
+                &destination_root,
+                Path::new("deliverables/logo.png"),
+                DEFAULT_MAX_ARTIFACT_BYTES,
+            )
+            .unwrap();
+        assert_eq!(receipt.relative_path, "deliverables/logo.png");
+        assert!(!receipt.already_present);
+        let retry = relocated
+            .materialize_identity(
+                &identity,
+                &destination_root,
+                Path::new("deliverables/logo.png"),
+                DEFAULT_MAX_ARTIFACT_BYTES,
+            )
+            .unwrap();
+        assert!(retry.already_present);
+        let materialized = fs::read(destination_root.join("deliverables/logo.png")).unwrap();
+        assert_eq!(materialized.len(), readback.byte_count);
+        assert_eq!(content_digest(&materialized), identity.content_digest);
+
+        let _ = fs::remove_dir_all(tree);
+    }
+
+    #[test]
+    fn materialization_rejects_traversal_and_different_existing_bytes() {
+        let catalog = SourceCatalog::default();
+        let version = catalog
+            .capture("p1", "assets/a.bin", b"asset", "application/octet-stream")
+            .unwrap();
+        let identity = SourceIdentity::from_version(&version);
+        let root = temp_path("materialize");
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            catalog.materialize_identity(&identity, &root, Path::new("../outside.bin"), 100,),
+            Err(SourceError::InvalidMaterializationPath)
+        );
+        fs::write(root.join("asset.bin"), b"other").unwrap();
+        assert_eq!(
+            catalog.materialize_identity(&identity, &root, Path::new("asset.bin"), 100,),
+            Err(SourceError::MaterializedArtifactConflict)
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

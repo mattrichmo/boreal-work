@@ -19,6 +19,11 @@ import/grant semantics later; it must not happen through a global implicit
 search index. A runtime scratch entry may be compacted, but a failed attempt
 or evidence receipt is not scratch and cannot disappear with it.
 
+A fresh project's absent memory directory, or an empty `notes/` scaffold, is
+an explicit empty retrieval projection. It does not need to be initialized by
+a search. Once the scaffold contains a file, normal Git and manifest checks
+apply; unpublished or invalid files must not be hidden as an empty bank.
+
 ## Recommended publication model
 
 Treat Git as authoritative for **published curated memory**, and SQLite as
@@ -85,6 +90,13 @@ revisioned view, not another authoritative record.
 Raw source text is data, not an instruction to Boreal or the agent harness.
 Retrieval names source trust/authority separately from relevance. A model may
 summarize a source, but publication still requires a cited review operation.
+
+Keep recovery components distinct: SQLite contains live work and operational
+memory, the source catalog contains immutable bytes and artifact provenance,
+and Git contains published curated memory. An index is rebuildable, but a
+database-only restore cannot restore omitted source blobs. Report those
+citations as unavailable until the matching source identity and digest have
+been restored.
 
 An external Git edit to the memory branch is imported as a new published
 revision after schema, ID, citation, and path validation. Conflicting edits

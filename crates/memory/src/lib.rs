@@ -2260,6 +2260,15 @@ impl MemoryIndex {
 pub fn rebuild_index(root: impl AsRef<Path>, project_id: &str) -> Result<MemoryIndex, IndexError> {
     validate_segment(project_id)
         .map_err(|_| IndexError::InvalidQuery("unsafe project ID".into()))?;
+    if uninitialized_memory_root(root.as_ref())? {
+        let git_revision = "uninitialized".to_owned();
+        return Ok(MemoryIndex {
+            project_id: project_id.to_owned(),
+            index_revision: index_revision(project_id, &git_revision, &[]),
+            git_revision,
+            entries: Vec::new(),
+        });
+    }
     let root = MemoryRoot::new(root.as_ref().to_path_buf())
         .map_err(|_| IndexError::Import(ImportError::InvalidPath))?;
     let git_revision = git_checked_out_revision(&root.path).map_err(IndexError::Import)?;
@@ -2315,6 +2324,42 @@ pub fn rebuild_index(root: impl AsRef<Path>, project_id: &str) -> Result<MemoryI
         index_revision,
         entries,
     })
+}
+
+/// An absent memory root, or the exact empty scaffold created for one, is a
+/// valid empty projection for a fresh project. Nonempty uncommitted content is
+/// not hidden as empty memory; it continues through normal Git validation.
+fn uninitialized_memory_root(path: &Path) -> Result<bool, IndexError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(IndexError::Import(ImportError::Io(error.to_string()))),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(false);
+    }
+    let entries = fs::read_dir(path)
+        .map_err(|error| IndexError::Import(ImportError::Io(error.to_string())))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| IndexError::Import(ImportError::Io(error.to_string())))?;
+        if entry.file_name() != "notes" {
+            return Ok(false);
+        }
+        let notes_metadata = fs::symlink_metadata(entry.path())
+            .map_err(|error| IndexError::Import(ImportError::Io(error.to_string())))?;
+        if notes_metadata.file_type().is_symlink() || !notes_metadata.is_dir() {
+            return Ok(false);
+        }
+        if fs::read_dir(entry.path())
+            .map_err(|error| IndexError::Import(ImportError::Io(error.to_string())))?
+            .next()
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn index_revision(project_id: &str, git_revision: &str, entries: &[IndexedEntry]) -> String {
@@ -4561,6 +4606,45 @@ mod tests {
         let output = run_child(command, Duration::from_secs(1)).unwrap();
         assert!(output.status_success);
         assert_eq!(output.stdout, format!("{}\n", git_null_device()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fresh_project_memory_search_returns_an_explicit_empty_projection() {
+        let root = std::env::temp_dir().join(format!(
+            "boreal-memory-fresh-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        let index = rebuild_index(&root, "project-a").unwrap();
+        assert_eq!(index.git_revision(), "uninitialized");
+        assert_eq!(index.entry_count(), 0);
+        let query = RetrievalQuery::new("project-a").unwrap().with_text("logo");
+        let response = index.search(&query).unwrap();
+        assert!(response.hits.is_empty());
+        assert_eq!(response.git_revision, "uninitialized");
+        assert_eq!(response.lag, IndexLag::Current);
+        assert!(
+            !root.exists(),
+            "an empty search must not initialize storage"
+        );
+    }
+
+    #[test]
+    fn empty_memory_scaffold_is_empty_but_unpublished_files_are_not_hidden() {
+        let root = std::env::temp_dir().join(format!(
+            "boreal-memory-scaffold-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        fs::create_dir_all(root.join("notes")).unwrap();
+        let index = rebuild_index(&root, "project-a").unwrap();
+        assert_eq!(index.git_revision(), "uninitialized");
+
+        fs::write(root.join("notes/draft.md"), "unpublished human edit").unwrap();
+        let error = rebuild_index(&root, "project-a")
+            .expect_err("unpublished files must not be reported as empty memory");
+        assert!(error.to_string().contains("git"));
         let _ = fs::remove_dir_all(root);
     }
 }
