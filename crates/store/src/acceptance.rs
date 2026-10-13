@@ -239,10 +239,23 @@ mod typed_acceptance_tests {
             "../../../project/spec/schema-production.sql"
         ))
         .expect("production schema opens");
-        let database = DatabaseIdentity::new("typed-acceptance-db", 1).unwrap();
-        IdentityStore::new(&store)
-            .install(&database, "unix-ms:0")
-            .unwrap();
+        active_acceptance_work_in_store(store, profile_id, with_contract)
+    }
+
+    fn active_acceptance_work_in_store(
+        store: SqliteStore,
+        profile_id: &str,
+        with_contract: bool,
+    ) -> (SqliteStore, String, u64) {
+        let identities = IdentityStore::new(&store);
+        let database = match identities.database_identity() {
+            Ok(database) => database,
+            Err(_) => {
+                let database = DatabaseIdentity::new("typed-acceptance-db", 1).unwrap();
+                identities.install(&database, "unix-ms:0").unwrap();
+                database
+            }
+        };
         let workspace = WorkspaceBinding::new(
             "/tmp/boreal-typed-acceptance",
             "/tmp/boreal-typed-acceptance",
@@ -997,6 +1010,51 @@ mod typed_acceptance_tests {
             .unwrap();
         assert_eq!(readback.attestation, result.attestation);
         assert_eq!(readback.fact_schemas(), result.fact_schemas());
+    }
+
+    #[test]
+    fn typed_result_fact_and_operation_replay_survive_store_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "boreal-typed-acceptance-reopen-{}.sqlite",
+            std::process::id()
+        ));
+        let path_text = path.to_string_lossy().into_owned();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path_text}{suffix}"));
+        }
+        let store = SqliteStore::open(
+            &path,
+            include_str!("../../../project/spec/schema-production.sql"),
+        )
+        .unwrap();
+        let (store, attempt, fence) =
+            active_acceptance_work_in_store(store, "validated-deliverables", true);
+        let request = bind_request(&store, &attempt, fence, "op-reopen-result", false);
+        let first = store.bind_acceptance_result(&request).unwrap();
+        assert!(!first.replayed);
+        drop(store);
+
+        let reopened = SqliteStore::open(
+            &path,
+            include_str!("../../../project/spec/schema-production.sql"),
+        )
+        .unwrap();
+        let readback = reopened
+            .acceptance_result_for_operation("p1", "op-reopen-result")
+            .unwrap()
+            .expect("immutable result is visible after reopening the store");
+        assert_eq!(readback.result_id, first.result_id);
+        assert_eq!(readback.result_digest, first.result_digest);
+        assert_eq!(readback.fact_schemas(), first.fact_schemas());
+        assert_eq!(readback.outputs, first.outputs);
+        let replay = reopened.bind_acceptance_result(&request).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.result_id, first.result_id);
+        assert_eq!(replay.project_revision, first.project_revision);
+        drop(reopened);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path_text}{suffix}"));
+        }
     }
 
     #[test]
