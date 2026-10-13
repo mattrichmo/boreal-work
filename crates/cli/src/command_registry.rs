@@ -2231,7 +2231,7 @@ const COMMANDS: &[CommandSpec] = &[
         output: "machine_update",
         direct: true,
         service: false,
-        summary: "update a release-installed bwrk binary and its packaged TUI",
+        summary: "invoke the packaged updater for the current bwrk installation",
     },
     CommandSpec {
         path: "upgrade",
@@ -2240,7 +2240,7 @@ const COMMANDS: &[CommandSpec] = &[
         output: "machine_update",
         direct: true,
         service: false,
-        summary: "v1-compatible alias for the machine update operation",
+        summary: "v1-compatible spelling for the packaged machine updater",
     },
     CommandSpec {
         path: "backup",

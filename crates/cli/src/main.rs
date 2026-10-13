@@ -751,6 +751,14 @@ fn run_with_operation_at(
             message,
         ));
     }
+    if update::is_machine_route(&parsed) {
+        if let Some(selector) = update::explicit_authority_selector(args) {
+            return Err(CliError::invalid(format!(
+                "machine update does not accept {selector}; omit project, database, and service selectors"
+            )));
+        }
+        return service::run_update(&parsed, operation);
+    }
     if parsed.options.socket.is_some()
         && !setup::is_setup_command(&parsed.path)
         && !command_registry::is_registry_path(&parsed.path)
@@ -887,27 +895,6 @@ fn run_with_operation_at(
             return doctor_result(&parsed, &store);
         }
         return diagnostic_commands::run(&parsed, operation, &store);
-    }
-    if parsed.path.len() == 1 && matches!(parsed.path[0].as_str(), "update" | "upgrade") {
-        if parsed.options.socket.is_none() {
-            let context = project_context::resolve(&parsed)?;
-            let store = SqliteStore::open_read_only_for_diagnostics(&context.database)
-                .map_err(map_store_error)?;
-            project_context::validate_store(&context, &store)?;
-            credentials::authenticate(&parsed, &store)?;
-            require_operator(&store, &context.project_id, &parsed.options.actor)?;
-        }
-        if parsed.options.socket.is_some() {
-            if service::supports(&parsed) {
-                return service::request(&parsed, operation);
-            }
-            return Err(CliError::with(
-                ErrorCode::UnknownCommandNamespace,
-                ApplicationOutcome::Rejected,
-                "the requested update command is not available through the selected service socket",
-            ));
-        }
-        return service::run_update(&parsed, operation);
     }
     if matches!(parsed.path.as_slice(), [path] if path == "backup" || path == "restore") {
         if parsed.options.socket.is_some() {

@@ -12,6 +12,27 @@ use std::{env, path::PathBuf, process::Command};
 
 const MAX_UPDATE_IDENTITY_BYTES: usize = 4 * 1024;
 
+/// These public spellings update the running Boreal installation, so they
+/// must be dispatched before project context is discovered or authenticated.
+pub(crate) fn is_machine_route(parsed: &ParsedCommand) -> bool {
+    parsed.path.as_slice() == ["update"]
+        || (parsed.path.as_slice() == ["upgrade"] && parsed.options.machine)
+}
+
+/// Explicit project/service selectors have no meaning for a machine update
+/// and could otherwise make its authority depend on the caller's cwd.
+pub(crate) fn explicit_authority_selector(args: &[String]) -> Option<&'static str> {
+    [
+        "--project",
+        "--db",
+        "--socket",
+        "--project-root",
+        "--install-root",
+    ]
+    .into_iter()
+    .find(|selector| args.iter().any(|argument| argument.as_str() == *selector))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UpdateJobState {
     Registered,
