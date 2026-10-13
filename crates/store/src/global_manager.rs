@@ -7,6 +7,16 @@
 use super::{SqliteStore, StoreError, SQLITE_ROW};
 use serde_json::{json, Value};
 use std::path::Path;
+
+#[path = "global_backup.rs"]
+pub mod global_backup;
+pub use global_backup::{
+    inspect_global_backup_package, validate_global_backup_manifest, GlobalBackupInspection,
+    GlobalBackupManifest, GlobalBackupPackageReport,
+};
+
+pub(super) const GLOBAL_SCHEMA_ID: &str = "boreal.global";
+pub(super) const GLOBAL_SCHEMA_VERSION: u64 = 2;
 const GLOBAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS global_manager_state (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -101,7 +111,11 @@ impl GlobalManagerStore {
             let setup = (|| {
                 inner.execute_batch("CREATE TABLE global_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_id TEXT NOT NULL,schema_version INTEGER NOT NULL,database_id TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 0);")?;
                 inner.execute_batch(GLOBAL_SCHEMA)?;
-                let mut q = inner.prepare("INSERT INTO global_schema VALUES(1,'boreal.global',2,lower(hex(randomblob(16))),0)")?;
+                let mut q = inner.prepare(
+                    "INSERT INTO global_schema VALUES(1,?1,?2,lower(hex(randomblob(16))),0)",
+                )?;
+                q.bind_text(1, GLOBAL_SCHEMA_ID)?;
+                q.bind_i64(2, GLOBAL_SCHEMA_VERSION)?;
                 q.run()?;
                 let mut q = inner.prepare("INSERT INTO global_manager_state VALUES(1,?1)")?;
                 q.bind_text(1, EMPTY_STATE)?;
@@ -132,7 +146,9 @@ impl GlobalManagerStore {
             let schema_id = identity.column_text(0)?;
             let version = identity.column_i64(1)?;
             drop(identity);
-            if schema_id != "boreal.global" || !(1..=2).contains(&version) {
+            if schema_id != GLOBAL_SCHEMA_ID
+                || !(1..=GLOBAL_SCHEMA_VERSION as i64).contains(&version)
+            {
                 return Err(StoreError::Invalid(
                     "database is not a supported Boreal global database; it was left unchanged"
                         .into(),
@@ -165,8 +181,9 @@ impl GlobalManagerStore {
                 history.bind_text(2, &current_state)?;
                 history.bind_text(3, &now())?;
                 history.run()?;
-                let mut version_update =
-                    inner.prepare("UPDATE global_schema SET schema_version=2 WHERE singleton=1")?;
+                let mut version_update = inner
+                    .prepare("UPDATE global_schema SET schema_version=?1 WHERE singleton=1")?;
+                version_update.bind_i64(1, GLOBAL_SCHEMA_VERSION)?;
                 version_update.run()?;
                 Ok::<_, StoreError>(())
             })();
@@ -645,4 +662,163 @@ fn with_revision(mut value: Value, revision: u64) -> Value {
     }
     value["revision"] = json!(revision);
     value
+}
+
+#[cfg(test)]
+mod global_backup_tests {
+    use super::{
+        inspect_global_backup_package, validate_global_backup_manifest, GlobalManagerStore,
+    };
+    use crate::SqliteStore;
+    use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn physical_backup_captures_committed_wal_state_and_history() {
+        let root = unique_test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("global.sqlite");
+        let package = root.join("snapshot.global-backup");
+        let store = GlobalManagerStore::open(&source).unwrap();
+        assert_eq!(
+            store.inner.journal_mode().unwrap().to_ascii_lowercase(),
+            "wal"
+        );
+
+        store
+            .mutate(
+                "project add",
+                &json!({"id":"life"}),
+                "wal-backed-create-project",
+                |mut state, revision| {
+                    state["projects"]
+                        .as_array_mut()
+                        .expect("projects is an array")
+                        .push(json!({"id":"life","name":"Life"}));
+                    Ok((state, json!({"project_id":"life","revision":revision})))
+                },
+            )
+            .unwrap();
+
+        let wal_path = PathBuf::from(format!("{}-wal", source.display()));
+        assert!(
+            fs::metadata(&wal_path)
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false),
+            "the committed mutation should still be present in the live WAL"
+        );
+
+        let report = store.backup_package_to(&package).unwrap();
+        assert_eq!(report.manifest.revision, 1);
+        assert_eq!(report.manifest.source_schema_id, "boreal.global");
+        assert_eq!(
+            report.manifest.database_bytes,
+            fs::metadata(&report.database_path).unwrap().len()
+        );
+        assert!(report.backup.pages_copied > 0);
+
+        let inspected = inspect_global_backup_package(&package).unwrap();
+        assert_eq!(inspected.manifest, report.manifest);
+
+        let copied =
+            SqliteStore::open_connection(&report.database_path, crate::SQLITE_OPEN_READONLY)
+                .unwrap();
+        let mut snapshot = copied.prepare(
+            "SELECT s.state_json,g.revision FROM global_manager_state s CROSS JOIN global_schema g WHERE s.singleton=1 AND g.singleton=1",
+        ).unwrap();
+        assert_eq!(snapshot.step().unwrap(), super::SQLITE_ROW);
+        let state: serde_json::Value =
+            serde_json::from_str(&snapshot.column_text(0).unwrap()).unwrap();
+        assert_eq!(snapshot.column_u64(1).unwrap(), 1);
+        assert!(state["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["id"] == "life"));
+        drop(snapshot);
+        for table in [
+            "global_operation",
+            "global_audit",
+            "global_revision_snapshot",
+        ] {
+            let mut count = copied
+                .prepare(&format!("SELECT COUNT(*) FROM {table}"))
+                .unwrap();
+            assert_eq!(count.step().unwrap(), super::SQLITE_ROW);
+            assert_eq!(
+                count.column_u64(0).unwrap(),
+                1,
+                "{table} must be in the backup"
+            );
+        }
+
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manifest_validation_rejects_unsupported_and_tampered_packages() {
+        let root = unique_test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("global.sqlite");
+        let package = root.join("snapshot.global-backup");
+        let store = GlobalManagerStore::open(&source).unwrap();
+        let report = store.backup_package_to(&package).unwrap();
+        let valid = report.manifest.as_json();
+        assert_eq!(
+            validate_global_backup_manifest(&valid).unwrap(),
+            report.manifest
+        );
+
+        let mut unsupported = valid.clone();
+        unsupported["format_version"] = json!(99);
+        assert!(validate_global_backup_manifest(&unsupported).is_err());
+
+        let mut missing_runtime = valid;
+        missing_runtime
+            .as_object_mut()
+            .unwrap()
+            .remove("sqlite_runtime");
+        assert!(validate_global_backup_manifest(&missing_runtime).is_err());
+
+        let manifest_path = package.join("manifest.json");
+        let mut mismatched_identity = report.manifest.as_json();
+        mismatched_identity["database_id"] = json!("00000000000000000000000000000000");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&mismatched_identity).unwrap(),
+        )
+        .unwrap();
+        assert!(inspect_global_backup_package(&package).is_err());
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&report.manifest.as_json()).unwrap(),
+        )
+        .unwrap();
+
+        let mut database = fs::read(&report.database_path).unwrap();
+        database[0] ^= 1;
+        fs::write(&report.database_path, database).unwrap();
+        assert!(inspect_global_backup_package(&package).is_err());
+
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn unique_test_dir() -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "boreal-global-backup-test-{}-{timestamp}-{}",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 }
