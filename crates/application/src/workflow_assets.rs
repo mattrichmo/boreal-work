@@ -695,9 +695,19 @@ mod tests {
     #[test]
     fn embedded_package_is_versioned_and_resolves_all_assets() {
         let registry = WorkflowRegistry::embedded().unwrap();
+        let package: Value = serde_json::from_str(PACKAGE).unwrap();
+        let package_version = package
+            .get("package_version")
+            .and_then(Value::as_str)
+            .unwrap();
+        let package_assets = package.get("assets").and_then(Value::as_array).unwrap();
         assert_eq!(registry.package_id(), "boreal.core-workflows");
-        assert_eq!(registry.package_version(), "1.2.0");
-        assert_eq!(registry.assets().len(), 10);
+        assert_eq!(registry.package_version(), package_version);
+        assert_eq!(registry.assets().len(), package_assets.len());
+        for metadata in package_assets {
+            let reference = metadata.get("ref").and_then(Value::as_str).unwrap();
+            assert!(registry.get(reference).is_ok(), "asset {reference} resolves");
+        }
         let claim = registry.get("boreal.workflow.claim.v1").unwrap();
         assert!(claim
             .typed_inputs
