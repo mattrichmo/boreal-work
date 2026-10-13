@@ -730,6 +730,143 @@ pub(crate) fn snapshot_data(operation: &str) -> Result<Value, CliError> {
     Ok(data)
 }
 
+const GLOBAL_DETAIL_PAGE_SIZE: u64 = 200;
+pub(crate) const GLOBAL_DISCOVERY_ROW_LIMIT: usize = 1000;
+
+/// A bounded, revision-checked read over a detail-page collection. Global
+/// summaries intentionally cap their arrays, so discovery and diagnostics
+/// must use this read path when they need to account for every association.
+pub(crate) struct GlobalDetailRead {
+    pub(crate) rows: Vec<Value>,
+    pub(crate) total: u64,
+    pub(crate) revision: Option<u64>,
+    pub(crate) observed_revision: Option<u64>,
+    pub(crate) complete: bool,
+    pub(crate) stale: bool,
+    pub(crate) reason: Option<&'static str>,
+}
+
+pub(crate) fn read_global_detail_pages(
+    app: &GlobalManagerApplication,
+    collection: &str,
+    operation: &str,
+    row_limit: usize,
+    include_archived: bool,
+) -> Result<GlobalDetailRead, CliError> {
+    if row_limit == 0 {
+        return Err(CliError::invalid(
+            "global detail read limit must be greater than zero",
+        ));
+    }
+
+    let mut rows = Vec::new();
+    let mut offset = 0u64;
+    let mut revision = None;
+    let mut observed_revision = None;
+    let mut total = None;
+    let mut reason = None;
+    let mut stale = false;
+
+    loop {
+        let payload = json!({
+            "collection": collection,
+            "limit": GLOBAL_DETAIL_PAGE_SIZE,
+            "offset": offset,
+            "include_archived": include_archived,
+        });
+        let page = app
+            .execute(
+                "detail page",
+                &payload,
+                &format!("{operation}-detail-{collection}-{offset}"),
+            )
+            .map_err(global_error)?;
+        let page_revision = page
+            .get("revision")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::invalid("global detail page omitted its revision"))?;
+        if let Some(expected) = revision {
+            if page_revision != expected {
+                observed_revision = Some(page_revision);
+                stale = true;
+                reason = Some("global_revision_changed_during_enumeration");
+                break;
+            }
+        } else {
+            revision = Some(page_revision);
+        }
+
+        let page_total = page
+            .get("total")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::invalid("global detail page omitted its total"))?;
+        if let Some(expected) = total {
+            if page_total != expected {
+                stale = true;
+                reason = Some("global_total_changed_during_enumeration");
+                break;
+            }
+        } else {
+            total = Some(page_total);
+        }
+
+        let page_rows = page
+            .get("rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| CliError::invalid("global detail page omitted its rows"))?;
+        let remaining = row_limit.saturating_sub(rows.len());
+        rows.extend(page_rows.iter().take(remaining).cloned());
+        let has_more = page
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| CliError::invalid("global detail page omitted has_more"))?;
+        if rows.len() >= row_limit && page_total > rows.len() as u64 {
+            reason = Some("configured_global_detail_limit_reached");
+            break;
+        }
+        if !has_more {
+            if rows.len() as u64 != page_total {
+                reason = Some("global_detail_page_coverage_incomplete");
+            }
+            break;
+        }
+        if rows.len() >= row_limit {
+            reason = Some("configured_global_detail_limit_reached");
+            break;
+        }
+        let next_offset = page
+            .get("next_offset")
+            .and_then(Value::as_u64)
+            .filter(|next| *next > offset && *next <= page_total);
+        let Some(next_offset) = next_offset else {
+            stale = true;
+            reason = Some("global_detail_page_did_not_advance");
+            break;
+        };
+        if page_rows.is_empty() {
+            stale = true;
+            reason = Some("global_detail_page_did_not_advance");
+            break;
+        }
+        offset = next_offset;
+    }
+
+    let total = total.unwrap_or(0);
+    let complete = !stale && reason.is_none() && rows.len() as u64 == total;
+    if !complete && reason.is_none() {
+        reason = Some("configured_global_detail_limit_reached");
+    }
+    Ok(GlobalDetailRead {
+        rows,
+        total,
+        revision,
+        observed_revision,
+        complete,
+        stale,
+        reason,
+    })
+}
+
 pub(crate) fn execute_request(
     command: &str,
     payload: &Value,
@@ -1741,6 +1878,70 @@ fn linked_workspace_detail(
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn global_detail_reads_pass_summary_cap_and_mark_the_configured_limit_partial() {
+        let root = std::env::temp_dir().join(format!(
+            "boreal-global-detail-pages-{}-{}",
+            std::process::id(),
+            now_ms_u64()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let app = GlobalManagerApplication::open(root.join("global.sqlite")).unwrap();
+
+        for index in 0..105 {
+            let project_id = format!("management-{index:03}");
+            let operation = format!("detail-project-{index:03}");
+            app.execute(
+                "project add",
+                &json!({"project_id":project_id,"name":format!("Management {index}")}),
+                &operation,
+            )
+            .unwrap();
+            app.execute_with_workspace_resolver(
+                "project link",
+                &json!({"project_id":project_id,"path":format!("/workspace/{index}")}),
+                &format!("detail-link-{index:03}"),
+                |path| {
+                    Ok(ResolvedWorkspaceIdentity {
+                        project_id: format!("workspace-{index:03}"),
+                        path: path.to_owned(),
+                    })
+                },
+            )
+            .unwrap();
+        }
+
+        let summary = app
+            .execute("snapshot", &json!({}), "detail-summary-check")
+            .unwrap();
+        assert_eq!(summary["associations"].as_array().unwrap().len(), 100);
+
+        let complete =
+            read_global_detail_pages(&app, "associations", "detail-complete", 1000, false).unwrap();
+        assert!(complete.complete);
+        assert!(!complete.stale);
+        assert_eq!(complete.total, 105);
+        assert_eq!(complete.rows.len(), 105);
+        let complete_projects =
+            read_global_detail_pages(&app, "projects", "detail-projects", 1000, true).unwrap();
+        assert!(complete_projects.complete);
+        assert_eq!(complete_projects.total, 105);
+        assert_eq!(complete_projects.rows.len(), 105);
+
+        let partial =
+            read_global_detail_pages(&app, "associations", "detail-partial", 100, false).unwrap();
+        assert!(!partial.complete);
+        assert!(!partial.stale);
+        assert_eq!(partial.total, 105);
+        assert_eq!(partial.rows.len(), 100);
+        assert_eq!(
+            partial.reason,
+            Some("configured_global_detail_limit_reached")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn linked_failure_keeps_last_good_counts_and_updates_sample_age() {
