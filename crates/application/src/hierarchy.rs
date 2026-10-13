@@ -977,9 +977,9 @@ impl WorkApplication<'_> {
         })
     }
 
-    /// Apply a revision-checked hierarchy edit to both the canonical work row
-    /// and v3 node. The store derives the v3 parent from the supplied
-    /// canonical parent and validates the resulting forest before commit.
+    /// Apply a revision-checked hierarchy edit to canonical work and its v3
+    /// projection. Sprint parent edits also move projected child Tasks to the
+    /// new flattened Milestone parent atomically inside the store.
     pub fn edit_planning_work_v3(
         &self,
         scope: &PlanningScope,

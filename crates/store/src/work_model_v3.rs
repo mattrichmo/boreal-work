@@ -534,9 +534,10 @@ impl SqliteStore {
         )
     }
 
-    /// Persist a hierarchy edit together with its canonical schema-2 title
-    /// and parent. The v3 parent is always derived from the canonical parent
-    /// inside the same transaction, then the full v3 forest is revalidated.
+    /// Persist a hierarchy edit with its canonical schema-2 data. The v3
+    /// parent is derived inside the same transaction; editing a Sprint also
+    /// recomputes its child Tasks' flattened Milestone parents before the full
+    /// v3 forest is revalidated.
     pub fn edit_planning_work_v3(
         &self,
         context: &V3MutationContext,
@@ -618,6 +619,17 @@ impl SqliteStore {
                             entity: "work",
                             id: input.work_id.clone(),
                         })?;
+                if current_work.kind == "sprint" {
+                    if self
+                        .work_node_v3(&input.project_id, &input.work_id)?
+                        .is_some()
+                    {
+                        return Err(StoreError::Corrupt(
+                            "Sprint unexpectedly has a work-model/3 node".into(),
+                        ));
+                    }
+                    return self.edit_sprint_work_v3(input, &current_work);
+                }
                 let mut current_node = self
                     .work_node_v3(&input.project_id, &input.work_id)?
                     .ok_or_else(|| StoreError::NotFound {
@@ -785,6 +797,188 @@ impl SqliteStore {
                 update.run()
             },
         )
+    }
+
+    /// Edit a legacy Sprint through the v3 planning operation. A Sprint has no
+    /// v3 node, so moving it must update every projected child Task's flattened
+    /// Milestone parent in the same fact-mutation transaction.
+    fn edit_sprint_work_v3(
+        &self,
+        input: &PlanningWorkEditV3Input,
+        current_work: &super::WorkRecord,
+    ) -> Result<(), StoreError> {
+        if input.execution_mode.is_some() {
+            return Err(StoreError::Invalid(
+                "execution mode cannot be edited on a Sprint container".into(),
+            ));
+        }
+        let target_parent = input
+            .parent_id
+            .clone()
+            .unwrap_or_else(|| current_work.parent_id.clone());
+        let target_parent_id = target_parent
+            .as_deref()
+            .ok_or_else(|| StoreError::Invalid("Sprints require a Milestone parent".into()))?;
+        let parent = self
+            .work(&input.project_id, target_parent_id)?
+            .ok_or_else(|| StoreError::Invalid("Sprint parent is not in this project".into()))?;
+        if parent.kind != "milestone" {
+            return Err(StoreError::Invalid(
+                "Sprint parent must be a Milestone".into(),
+            ));
+        }
+        let parent_node = self
+            .work_node_v3(&input.project_id, target_parent_id)?
+            .ok_or_else(|| {
+                StoreError::Invalid("Sprint parent Milestone is missing its v3 projection".into())
+            })?;
+        if parent_node.decomposition_kind != "milestone"
+            || parent_node.execution_mode != "container"
+        {
+            return Err(StoreError::Invalid(
+                "Sprint parent must be a v3 Milestone container".into(),
+            ));
+        }
+        let sprint = work_item_from_record(current_work, target_parent.clone())?;
+        let parent_item = work_item_from_record(&parent, parent.parent_id.clone())?;
+        boreal_domain::validate_parent(&sprint, Some(&parent_item))
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+
+        let mut child_ids = Vec::new();
+        let mut children = self.prepare(
+            "SELECT work_id FROM work_item
+             WHERE project_id = ?1 AND parent_id = ?2 AND kind = 'task'
+             ORDER BY work_id",
+        )?;
+        children.bind_text(1, &input.project_id)?;
+        children.bind_text(2, &input.work_id)?;
+        while children.step()? == SQLITE_ROW {
+            child_ids.push(children.column_text(0)?);
+        }
+        let moving = target_parent != current_work.parent_id;
+        if moving {
+            let old_milestone_id = current_work.parent_id.as_deref().ok_or_else(|| {
+                StoreError::Corrupt("Sprint has no canonical Milestone parent".into())
+            })?;
+            for child_id in &child_ids {
+                let child_node =
+                    self.work_node_v3(&input.project_id, child_id)?
+                        .ok_or_else(|| {
+                            StoreError::Invalid(format!(
+                            "cannot move Sprint while nested Task {child_id} has no v3 projection"
+                        ))
+                        })?;
+                if child_node.decomposition_kind != "task"
+                    || child_node.parent_id.as_deref() != Some(old_milestone_id)
+                {
+                    return Err(StoreError::Corrupt(format!(
+                        "nested Task {child_id} does not project under the Sprint's current Milestone"
+                    )));
+                }
+            }
+        }
+
+        let mut update_work = self.prepare(
+            "UPDATE work_item
+             SET parent_id = ?1, title = ?2, description = ?3,
+                 priority = ?4, dispatch_policy = ?5, updated_at = ?6
+             WHERE project_id = ?7 AND work_id = ?8",
+        )?;
+        update_work.bind_optional_text(1, target_parent.as_deref())?;
+        update_work.bind_text(2, input.title.as_deref().unwrap_or(&current_work.title))?;
+        update_work.bind_text(
+            3,
+            input
+                .description
+                .as_deref()
+                .unwrap_or(&current_work.description),
+        )?;
+        update_work.bind_i64(
+            4,
+            u64::from(input.priority.unwrap_or(current_work.priority)),
+        )?;
+        update_work.bind_text(
+            5,
+            input
+                .dispatch_policy
+                .as_deref()
+                .unwrap_or(&current_work.dispatch_policy),
+        )?;
+        update_work.bind_text(6, &input.updated_at)?;
+        update_work.bind_text(7, &input.project_id)?;
+        update_work.bind_text(8, &input.work_id)?;
+        update_work.run()?;
+
+        if moving {
+            for child_id in child_ids {
+                let mut update_child = self.prepare(
+                    "UPDATE work_node_v3
+                     SET parent_id = ?1, updated_at = ?2
+                     WHERE project_id = ?3 AND work_id = ?4",
+                )?;
+                update_child.bind_text(1, target_parent_id)?;
+                update_child.bind_text(2, &input.updated_at)?;
+                update_child.bind_text(3, &input.project_id)?;
+                update_child.bind_text(4, &child_id)?;
+                update_child.run()?;
+            }
+        }
+        self.validate_work_model_v3_forest(&input.project_id)
+    }
+
+    /// Rebuild and validate the current projected forest against canonical
+    /// work rows after a multi-row parent change, before the transaction can
+    /// commit.
+    fn validate_work_model_v3_forest(&self, project_id: &str) -> Result<(), StoreError> {
+        let mut nodes = Vec::new();
+        for record in self.work_nodes_v3(project_id)? {
+            let work = self.work(project_id, &record.work_id)?.ok_or_else(|| {
+                StoreError::Corrupt(format!(
+                    "v3 hierarchy node {} has no canonical work row",
+                    record.work_id
+                ))
+            })?;
+            let kind = match (work.kind.as_str(), record.decomposition_kind.as_str()) {
+                ("milestone", "milestone") => {
+                    boreal_domain::work_model_v3::DecompositionKind::Milestone
+                }
+                ("task", "task") => boreal_domain::work_model_v3::DecompositionKind::Task,
+                _ => {
+                    return Err(StoreError::Corrupt(format!(
+                        "v3 hierarchy node {} disagrees with its canonical work kind",
+                        record.work_id
+                    )))
+                }
+            };
+            let execution_mode = match record.execution_mode.as_str() {
+                "direct" => boreal_domain::work_model_v3::ExecutionMode::Direct,
+                "container" => boreal_domain::work_model_v3::ExecutionMode::Container,
+                _ => {
+                    return Err(StoreError::Corrupt(format!(
+                        "v3 hierarchy node {} has an unknown execution mode",
+                        record.work_id
+                    )))
+                }
+            };
+            let domain_work = work_item_from_record(&work, work.parent_id.clone())?;
+            let expected_parent = self.v3_parent_for_work(&domain_work)?;
+            if record.parent_id != expected_parent {
+                return Err(StoreError::Corrupt(format!(
+                    "v3 hierarchy node {} disagrees with its canonical parent",
+                    record.work_id
+                )));
+            }
+            nodes.push(boreal_domain::work_model_v3::WorkNode {
+                id: boreal_domain::WorkId::new(record.work_id),
+                project_id: boreal_domain::ProjectId::new(project_id.to_owned()),
+                kind,
+                execution_mode,
+                parent_id: record.parent_id.map(boreal_domain::WorkId::new),
+                title: work.title,
+            });
+        }
+        boreal_domain::work_model_v3::validate_decomposition(&nodes)
+            .map_err(|error| StoreError::Invalid(error.to_string()))
     }
 
     /// Resolve the additive parent from the canonical work parent while
