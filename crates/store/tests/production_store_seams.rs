@@ -1,17 +1,21 @@
 //! Focused coverage for the bounded PF-S02-T02 store seams.
 //!
-//! All behavior assertions execute against the real public `boreal_store`
-//! module exports and the schema-v2 SQLite adapter.  The transaction seam is
-//! intentionally exercised through its non-owning root-mutation adapter so a
-//! nested `BEGIN IMMEDIATE` path would fail this target.
+//! Behavior assertions execute against the real public `boreal_store` module
+//! exports. Most seam cases use the schema-v2 compatibility adapter; the work
+//! projection regression uses the production schema and its projection trigger.
+//! The transaction seam is intentionally exercised through its non-owning
+//! root-mutation adapter so a nested `BEGIN IMMEDIATE` path would fail this target.
 
-use boreal_domain::{GateKind, GateState};
+use boreal_domain::{GateKind, GateState, WorkItem, WorkKind};
 use boreal_store::{
-    acceptance, execution, operations, profiles, transactions, EvidenceExecutionAdmissionRequest,
-    GateStateUpdateRequest, SqliteStore, StoreError,
+    acceptance, execution,
+    identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
+    operations, profiles, transactions, EvidenceExecutionAdmissionRequest, GateStateUpdateRequest,
+    PlannedWorkV3Input, SessionRegistrationRequest, SqliteStore, StoreError, V3MutationContext,
 };
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 
 fn store() -> SqliteStore {
     SqliteStore::open_in_memory(SCHEMA).expect("schema opens")
@@ -331,4 +335,93 @@ fn acceptance_seam_reads_pinned_gate_and_exact_binding() {
     let mut changed = binding.clone();
     changed.fence = 2;
     assert!(!binding.matches(&changed));
+}
+
+#[test]
+fn production_schema_work_creation_reuses_triggered_projection() {
+    let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema opens");
+    let database =
+        DatabaseIdentity::new("work-projection-test-db", 1).expect("database identity is valid");
+    IdentityStore::new(&store)
+        .install(&database, "unix-ms:0")
+        .expect("database identity installs");
+    let binding = WorkspaceBinding::new(
+        "/tmp/boreal-work-projection-test",
+        "/tmp/boreal-work-projection-test",
+        "sha256:work-projection-binding",
+    )
+    .expect("workspace binding is valid");
+    store
+        .initialize_project_with_workspace(
+            "p1",
+            "operator-1",
+            "operator",
+            "boreal-key-v1:sha256:work-projection-credential",
+            "Operator",
+            "op-project-init",
+            "sha256:op-project-init",
+            &database,
+            &binding,
+            "unix-ms:1",
+        )
+        .expect("identity-bound project initializes");
+    let revision = store.project_revision("p1").expect("revision reads").0;
+    store
+        .register_session(SessionRegistrationRequest {
+            project_id: "p1".to_owned(),
+            session_id: "session-1".to_owned(),
+            actor_id: "operator-1".to_owned(),
+            harness_id: "production-store-seams".to_owned(),
+            operation_id: "op-session-register".to_owned(),
+            request_digest: "sha256:op-session-register".to_owned(),
+            expected_project_revision: Some(revision),
+            started_at: "unix-ms:2".to_owned(),
+        })
+        .expect("project session registers");
+
+    for (work_id, execution_mode) in [("first-task", "direct"), ("container-task", "container")] {
+        let expected_revision = store.project_revision("p1").expect("revision reads").0;
+        let result = store
+            .create_planned_work_v3(
+                &V3MutationContext {
+                    project_id: "p1".to_owned(),
+                    actor_id: "operator-1".to_owned(),
+                    session_id: Some("session-1".to_owned()),
+                    operation_id: format!("op-create-{work_id}"),
+                    request_digest: format!("sha256:op-create-{work_id}"),
+                    expected_revision: Some(expected_revision),
+                    now: "unix-ms:3".to_owned(),
+                },
+                &PlannedWorkV3Input {
+                    work: WorkItem::new(
+                        "p1".into(),
+                        work_id.into(),
+                        WorkKind::Task,
+                        None,
+                        format!("Work {work_id}"),
+                    )
+                    .open(),
+                    execution_mode: execution_mode.to_owned(),
+                },
+            )
+            .expect("work and its production projection commit together");
+
+        assert_eq!(result.revision, expected_revision + 1);
+        assert_eq!(
+            store
+                .work("p1", work_id)
+                .expect("work reads")
+                .expect("canonical work exists")
+                .title,
+            format!("Work {work_id}")
+        );
+        assert_eq!(
+            store
+                .work_node_v3("p1", work_id)
+                .expect("work projection reads")
+                .expect("one work projection exists")
+                .execution_mode,
+            execution_mode
+        );
+    }
 }

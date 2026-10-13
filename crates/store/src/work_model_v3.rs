@@ -517,19 +517,50 @@ impl SqliteStore {
                 }
                 let parent_node_id = self.v3_parent_for_work(work)?;
                 self.create_work_in_transaction(work, &context.now)?;
-                let mut statement = self.prepare(
-                    "INSERT INTO work_node_v3
-                     (work_id, project_id, decomposition_kind, execution_mode,
-                      parent_id, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                )?;
-                statement.bind_text(1, work.id.as_str())?;
-                statement.bind_text(2, work.project_id.as_str())?;
-                statement.bind_text(3, work_kind_name(work.kind))?;
-                statement.bind_text(4, &input.execution_mode)?;
-                statement.bind_optional_text(5, parent_node_id.as_deref())?;
-                statement.bind_text(6, &context.now)?;
-                statement.run()
+                if let Some(node) = self.work_node_v3(work.project_id.as_str(), work.id.as_str())? {
+                    // The production schema projects each new work_item via an
+                    // AFTER INSERT trigger. Keep the explicit insert for
+                    // schema-v3 stores without that compatibility trigger, but
+                    // reconcile the generated row here instead of inserting a
+                    // duplicate. The trigger's default for Tasks is `direct`;
+                    // update it when this request explicitly asks for a
+                    // container Task.
+                    if node.decomposition_kind != work_kind_name(work.kind)
+                        || node.parent_id != parent_node_id
+                    {
+                        return Err(StoreError::Corrupt(format!(
+                            "work-model/3 projection for {}/{} does not match canonical work",
+                            work.project_id, work.id
+                        )));
+                    }
+                    if node.execution_mode != input.execution_mode {
+                        let mut statement = self.prepare(
+                            "UPDATE work_node_v3
+                             SET execution_mode = ?1, updated_at = ?2
+                             WHERE project_id = ?3 AND work_id = ?4",
+                        )?;
+                        statement.bind_text(1, &input.execution_mode)?;
+                        statement.bind_text(2, &context.now)?;
+                        statement.bind_text(3, work.project_id.as_str())?;
+                        statement.bind_text(4, work.id.as_str())?;
+                        statement.run()?;
+                    }
+                    Ok(())
+                } else {
+                    let mut statement = self.prepare(
+                        "INSERT INTO work_node_v3
+                         (work_id, project_id, decomposition_kind, execution_mode,
+                          parent_id, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                    )?;
+                    statement.bind_text(1, work.id.as_str())?;
+                    statement.bind_text(2, work.project_id.as_str())?;
+                    statement.bind_text(3, work_kind_name(work.kind))?;
+                    statement.bind_text(4, &input.execution_mode)?;
+                    statement.bind_optional_text(5, parent_node_id.as_deref())?;
+                    statement.bind_text(6, &context.now)?;
+                    statement.run()
+                }
             },
         )
     }
