@@ -4,9 +4,9 @@
 //! from that copied snapshot. The Global database is reopened read-only for
 //! validation; this path never runs schema initialization or migrations.
 
-use super::{GLOBAL_SCHEMA_ID, GLOBAL_SCHEMA_VERSION, GlobalManagerStore};
-use crate::{SQLITE_ROW, SqliteBackupReport, SqliteStore, StoreError};
-use serde_json::{Value, json};
+use super::{GlobalManagerStore, GLOBAL_SCHEMA_ID, GLOBAL_SCHEMA_VERSION};
+use crate::{SqliteBackupReport, SqliteStore, StoreError, SQLITE_ROW};
+use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -880,11 +880,15 @@ fn validate_revision_history(
             .checked_add(1)
             .ok_or_else(|| StoreError::Corrupt("Global history revision overflow".into()))?;
     }
-    let minimum_history_count = revision.max(1);
-    if expected_revision < minimum_history_count
-        || expected_revision > revision.saturating_add(1)
-        || !current_revision_present
-    {
+    // Mutations retain the pre-mutation state at revisions 0..N-1 while the
+    // current state is stored separately. Some upgraded stores also retain a
+    // matching snapshot at N, so accept either contiguous shape.
+    let history_ends_before_current = revision > 0 && expected_revision == revision;
+    let history_includes_current = revision
+        .checked_add(1)
+        .is_some_and(|history_count| expected_revision == history_count)
+        && current_revision_present;
+    if !history_ends_before_current && !history_includes_current {
         return Err(StoreError::Corrupt(
             "Global revision history does not cover the committed revision range".into(),
         ));
@@ -1048,7 +1052,7 @@ fn is_sha256_digest(value: &str) -> bool {
 
 #[cfg(test)]
 mod streaming_checksum_tests {
-    use super::{Sha256, format_sha256};
+    use super::{format_sha256, Sha256};
 
     #[test]
     fn incremental_sha256_matches_standard_vectors() {
@@ -1076,5 +1080,147 @@ mod streaming_checksum_tests {
             hasher.update(chunk);
         }
         assert_eq!(format_sha256(hasher.finish()), expected);
+    }
+}
+
+#[cfg(test)]
+mod revision_history_tests {
+    use super::validate_revision_history;
+    use crate::{SqliteStore, StoreError, SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE};
+    use serde_json::{json, Value};
+    use std::path::Path;
+
+    fn state() -> Value {
+        json!({
+            "projects": [],
+            "items": [],
+            "notes": [],
+            "statuses": [],
+            "relationships": [],
+            "associations": [],
+            "status_history": [],
+            "imported_history": [],
+        })
+    }
+
+    fn encoded_state(state: &Value) -> String {
+        serde_json::to_string(state).unwrap()
+    }
+
+    fn validate_rows(
+        revision: u64,
+        rows: &[(u64, String)],
+        current_state: &Value,
+    ) -> Result<(), StoreError> {
+        let database = SqliteStore::open_connection(
+            Path::new(":memory:"),
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        )?;
+        database.execute_batch(
+            "CREATE TABLE global_revision_snapshot(revision INTEGER, state_json TEXT)",
+        )?;
+        for (history_revision, history_state) in rows {
+            let mut insert = database.prepare(
+                "INSERT INTO global_revision_snapshot(revision,state_json) VALUES(?1,?2)",
+            )?;
+            insert.bind_i64(1, *history_revision)?;
+            insert.bind_text(2, history_state)?;
+            insert.run()?;
+        }
+        validate_revision_history(&database, revision, current_state)
+    }
+
+    #[test]
+    fn accepts_contiguous_history_ending_before_current_snapshot() {
+        let prior_state = state();
+        let current_state = json!({
+            "projects": [{"id": "current"}],
+            "items": [],
+            "notes": [],
+            "statuses": [],
+            "relationships": [],
+            "associations": [],
+            "status_history": [],
+            "imported_history": [],
+        });
+        let history = vec![
+            (0, encoded_state(&prior_state)),
+            (1, encoded_state(&prior_state)),
+        ];
+
+        validate_rows(2, &history, &current_state).unwrap();
+    }
+
+    #[test]
+    fn accepts_matching_current_snapshot_and_revision_zero_baseline() {
+        let current_state = state();
+        validate_rows(0, &[(0, encoded_state(&current_state))], &current_state).unwrap();
+
+        let history = vec![
+            (0, encoded_state(&current_state)),
+            (1, encoded_state(&current_state)),
+            (2, encoded_state(&current_state)),
+        ];
+        validate_rows(2, &history, &current_state).unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_initial_and_interior_history_rows() {
+        let current_state = state();
+        let snapshot = encoded_state(&current_state);
+
+        assert!(validate_rows(2, &[(1, snapshot.clone())], &current_state).is_err());
+        assert!(validate_rows(2, &[(0, snapshot.clone())], &current_state).is_err());
+        assert!(
+            validate_rows(2, &[(0, snapshot.clone()), (2, snapshot)], &current_state,).is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_overlong_history() {
+        let current_state = state();
+        let snapshot = encoded_state(&current_state);
+        let malformed_shape = encoded_state(&json!({"projects": []}));
+
+        assert!(validate_rows(
+            2,
+            &[(0, "{".to_owned()), (1, snapshot.clone())],
+            &current_state,
+        )
+        .is_err());
+        assert!(validate_rows(
+            2,
+            &[(0, malformed_shape), (1, snapshot.clone())],
+            &current_state,
+        )
+        .is_err());
+        assert!(validate_rows(
+            1,
+            &[(0, snapshot.clone()), (1, snapshot.clone()), (2, snapshot)],
+            &current_state,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_a_mismatching_current_revision_snapshot() {
+        let prior_state = state();
+        let current_state = json!({
+            "projects": [{"id": "current"}],
+            "items": [],
+            "notes": [],
+            "statuses": [],
+            "relationships": [],
+            "associations": [],
+            "status_history": [],
+            "imported_history": [],
+        });
+        let history = vec![
+            (0, encoded_state(&prior_state)),
+            (1, encoded_state(&prior_state)),
+            (2, encoded_state(&prior_state)),
+        ];
+
+        assert!(validate_rows(2, &history, &current_state).is_err());
     }
 }
