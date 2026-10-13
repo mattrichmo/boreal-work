@@ -31,6 +31,8 @@ pub mod summary_queries;
 pub use summary_queries::*;
 pub mod template_planning;
 pub use template_planning::*;
+pub mod intake_delivery;
+pub use intake_delivery::*;
 pub mod global_manager;
 pub use global_manager::*;
 pub(crate) mod global_daily_review;
