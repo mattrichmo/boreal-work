@@ -20,6 +20,10 @@ pub use global_backup::{
     GlobalBackupManifest, GlobalBackupPackageReport,
 };
 
+#[path = "global_restore.rs"]
+pub mod global_restore;
+pub use global_restore::{restore_global_backup_package, GlobalRestoreReport};
+
 pub(super) const GLOBAL_SCHEMA_ID: &str = "boreal.global";
 pub(super) const GLOBAL_SCHEMA_VERSION: u64 = 2;
 const GLOBAL_SCHEMA: &str = r#"

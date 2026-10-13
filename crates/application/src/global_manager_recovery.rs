@@ -62,6 +62,58 @@ pub struct GlobalBackupMetadata {
     pub idempotent_readback: bool,
 }
 
+/// Bounded readback for a completed physical Global restore.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlobalRestoreMetadata {
+    pub operation_id: String,
+    pub package_path: PathBuf,
+    pub database_path: PathBuf,
+    pub source_database_id: String,
+    pub database_id: String,
+    pub revision: u64,
+    pub previous_database_path: Option<PathBuf>,
+    pub validated: bool,
+    pub idempotent_readback: bool,
+}
+
+/// Restores a validated physical Global backup through a private staging DB.
+/// Validation happens before maintenance admission touches the live database.
+pub fn restore_global_backup(
+    database_path: impl AsRef<Path>,
+    package_path: impl AsRef<Path>,
+    operation_id: &str,
+) -> Result<GlobalRestoreMetadata, GlobalManagerError> {
+    validate_operation_id(operation_id)?;
+    let database_path = database_path.as_ref();
+    let package_path = package_path.as_ref();
+    validate_path(database_path, "Global database path")?;
+    validate_path(package_path, "Global backup package path")?;
+
+    GlobalManagerStore::inspect_backup_package(package_path)?;
+    let guard = GlobalMaintenanceGuard::acquire_exclusive(
+        database_path,
+        operation_id,
+        GlobalMaintenanceKind::Restore,
+    )?;
+    let report = boreal_store::global_manager::restore_global_backup_package(
+        database_path,
+        package_path,
+        operation_id,
+        &guard,
+    )?;
+    Ok(GlobalRestoreMetadata {
+        operation_id: report.operation_id,
+        package_path: report.package_path,
+        database_path: report.database_path,
+        source_database_id: report.source_database_id,
+        database_id: report.database_id,
+        revision: report.revision,
+        previous_database_path: report.previous_database_path,
+        validated: true,
+        idempotent_readback: report.idempotent_readback,
+    })
+}
+
 /// Creates a validated physical backup under the database's private `backups`
 /// directory. A default destination is stable for the supplied operation ID,
 /// so a retried request can read back the already-published package.
@@ -455,6 +507,37 @@ mod tests {
                 0o700
             );
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restores_physical_backup_with_fresh_identity_and_idempotent_readback() {
+        let root = test_root("restore-api");
+        let source_path = root.join("source.sqlite");
+        let database_path = root.join("global.sqlite");
+        let package_path = root.join("restore.global-backup");
+
+        let source = GlobalManagerStore::open(&source_path).unwrap();
+        let package = source.backup_package_to(&package_path).unwrap();
+        drop(source);
+        let active = GlobalManagerStore::open(&database_path).unwrap();
+        drop(active);
+
+        let first =
+            restore_global_backup(&database_path, &package_path, "op_restore_api_1").unwrap();
+        assert!(first.validated);
+        assert!(!first.idempotent_readback);
+        assert_eq!(first.source_database_id, package.manifest.database_id);
+        assert_ne!(first.database_id, first.source_database_id);
+        assert!(first.previous_database_path.as_ref().unwrap().exists());
+
+        let replay =
+            restore_global_backup(&database_path, &package_path, "op_restore_api_1").unwrap();
+        assert!(replay.idempotent_readback);
+        assert_eq!(replay.database_id, first.database_id);
+        assert_eq!(replay.previous_database_path, first.previous_database_path);
+
         let _ = std::fs::remove_dir_all(root);
     }
 

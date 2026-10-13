@@ -1478,6 +1478,15 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "write a validated physical package under the private Global backup root, including private notes and complete revision history; an operation ID reads back a retry",
     },
     CommandSpec {
+        path: "global restore",
+        syntax: "bwrk global restore PACKAGE --yes [--operation-id ID] [--json]",
+        action: "mutate",
+        output: "global_restore",
+        direct: true,
+        service: true,
+        summary: "restore a validated physical Global backup with a fresh active database identity and retained previous database",
+    },
+    CommandSpec {
         path: "global export",
         syntax: "bwrk global export [--out PATH] [--json]",
         action: "read",

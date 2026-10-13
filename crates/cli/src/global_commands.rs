@@ -5,8 +5,8 @@
 
 use super::*;
 use boreal_application::{
-    create_global_backup, GlobalManagerApplication, GlobalManagerError, ResolvedWorkspaceIdentity,
-    GLOBAL_BACKUP_CONTENTS,
+    create_global_backup, restore_global_backup, GlobalManagerApplication, GlobalManagerError,
+    ResolvedWorkspaceIdentity, GLOBAL_BACKUP_CONTENTS,
 };
 
 pub(crate) fn supported(path: &[String]) -> bool {
@@ -628,6 +628,18 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
             }
             "backup".to_owned()
         }
+        ["restore"] => {
+            if !parsed.options.setup.yes {
+                return Err(CliError::invalid(
+                    "global restore requires --yes to confirm replacing the active database",
+                ));
+            }
+            payload["path"] = json!(required(
+                positional(0),
+                "global restore requires a physical backup package path"
+            )?);
+            "restore".to_owned()
+        }
         ["export"] => {
             if let Some(out) = value("out") {
                 payload["path"] = json!(out);
@@ -902,6 +914,25 @@ pub(crate) fn execute_request(
             "validated": metadata.validated,
             "idempotent_readback": metadata.idempotent_readback,
             "contents": GLOBAL_BACKUP_CONTENTS,
+        }));
+    }
+    if command == "restore" {
+        let package = payload
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::invalid("Global restore package path must be a string"))?;
+        let metadata =
+            restore_global_backup(&path, Path::new(package), operation).map_err(global_error)?;
+        return Ok(json!({
+            "operation_id": metadata.operation_id,
+            "path": metadata.database_path.to_string_lossy(),
+            "package_path": metadata.package_path.to_string_lossy(),
+            "source_database_id": metadata.source_database_id,
+            "database_id": metadata.database_id,
+            "revision": metadata.revision,
+            "previous_database_path": metadata.previous_database_path.map(|path| path.to_string_lossy().into_owned()),
+            "validated": metadata.validated,
+            "idempotent_readback": metadata.idempotent_readback,
         }));
     }
     let app = GlobalManagerApplication::open(path).map_err(global_error)?;
@@ -2039,6 +2070,39 @@ mod tests {
         let (command, payload) = build_command(&export).unwrap();
         assert_eq!(command, "export");
         assert_eq!(payload, json!({"path":"private-copy"}));
+    }
+
+    #[test]
+    fn physical_restore_requires_package_path_and_explicit_confirmation() {
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "restore".to_owned()],
+            options: CliOptions::default(),
+        };
+        assert!(build_command(&parsed)
+            .unwrap_err()
+            .message
+            .contains("requires --yes"));
+
+        let mut options = CliOptions::default();
+        options.setup.yes = true;
+        let missing_package = ParsedCommand {
+            path: vec!["global".to_owned(), "restore".to_owned()],
+            options: options.clone(),
+        };
+        assert!(build_command(&missing_package)
+            .unwrap_err()
+            .message
+            .contains("package path"));
+
+        options.positionals.push("backup.global-backup".to_owned());
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "restore".to_owned()],
+            options,
+        };
+        let (command, payload) = build_command(&parsed).unwrap();
+        assert_eq!(command, "restore");
+        assert_eq!(payload, json!({"path":"backup.global-backup"}));
+        assert!(mutation(&command));
     }
 
     #[test]
