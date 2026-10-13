@@ -78,6 +78,14 @@ jobs:
           test -n "$archive"
           sh scripts/release/package-target-smoke.sh "$archive" "$TARGET"
 
+      - name: Inject installer and archive failures on Linux x86-64
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          output_dir="$RUNNER_TEMP/boreal-release"
+          archive=$(find "$output_dir" -maxdepth 1 -type f -name "bwrk-v*-x86_64-unknown-linux-gnu.tar.gz" -print -quit)
+          test -n "$archive"
+          python3 scripts/release/test_package_smoke.py --archive "$archive"
+
       - name: Retain target archive and release manifest
         uses: actions/upload-artifact@v4
         with:
