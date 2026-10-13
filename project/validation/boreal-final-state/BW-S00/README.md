@@ -1,8 +1,8 @@
 # BW-S00 combined qualification
 
-Date: 2026-10-13  
-Validated source: `caeafb5c7a212e2b72103a33a93af62f012c7cef`  
-Source tree: clean  
+Date: 2026-10-13
+Validated source: `caeafb5c7a212e2b72103a33a93af62f012c7cef`
+Source tree: clean
 Validation owner: integration coordinator (BW-S00-T90)
 
 ## Result
