@@ -369,6 +369,11 @@ fn fresh_candidate(parsed: &ParsedCommand, root: &str, project: &str) -> Result<
     let actor = metadata["operator_actor"]
         .as_str()
         .ok_or_else(|| CliError::invalid("workspace has no registered local operator"))?;
+    let session = metadata["operator_session"]
+        .as_str()
+        .filter(|session| !session.trim().is_empty())
+        .ok_or_else(|| CliError::invalid("workspace has no registered local operator session"))?;
+    validate_operator_session(&store, project, actor, session)?;
     let role = store
         .principal_authority(project, actor)
         .map_err(map_store_error)?
@@ -380,10 +385,17 @@ fn fresh_candidate(parsed: &ParsedCommand, root: &str, project: &str) -> Result<
             actor_id: ActorId::new(actor),
             role,
         },
-        None,
+        Some(session),
         TimestampMs::from_millis(now_ms_u64()),
     )
     .map_err(CliError::invalid)?;
+    validate_operator_session(&store, project, actor, session)?;
+    let current_revision = store.project_revision(project).map_err(map_store_error)?.0;
+    if current_revision != snapshot.revision.0 {
+        return Err(CliError::invalid(
+            "workspace changed during advisory discovery",
+        ));
+    }
     let Some(item) = snapshot
         .items
         .iter()
@@ -396,4 +408,34 @@ fn fresh_candidate(parsed: &ParsedCommand, root: &str, project: &str) -> Result<
     Ok(
         json!({"workspace_id":project,"working_directory":ctx.root,"project_revision":snapshot.revision.0,"as_of":stamp(now_ms_u64()),"work_id":item.work.id.as_str(),"title":item.work.title,"priority":item.work.priority,"safe_argv":["bwrk","prime","--project",project,"--json"],"authority":"advisory_snapshot_only"}),
     )
+}
+
+fn validate_operator_session(
+    store: &SqliteStore,
+    project: &str,
+    actor: &str,
+    session_id: &str,
+) -> Result<(), CliError> {
+    let session = store
+        .session(project, session_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CliError::invalid("workspace operator session does not exist"))?;
+    if session.registration_operation_id.is_none() || session.project_id != project {
+        return Err(CliError::invalid(
+            "workspace operator session is not bound to this project",
+        ));
+    }
+    if session.actor_id != actor {
+        return Err(CliError::invalid(
+            "workspace operator session is bound to a different actor",
+        ));
+    }
+    if session.state != boreal_store::SessionState::Active {
+        return Err(CliError::invalid(
+            "workspace operator session is not active",
+        ));
+    }
+    store
+        .validate_project_session(project, actor, session_id)
+        .map_err(map_store_error)
 }
