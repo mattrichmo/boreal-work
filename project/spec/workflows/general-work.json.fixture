@@ -100,6 +100,52 @@
         }
       }],
       "bundle_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "deliverable_requirement_v2": {
+      "schema_version": "boreal.deliverable_requirement.v2",
+      "requirement_key": "final_brief",
+      "purpose": "Provide the approved project brief.",
+      "required": true,
+      "deliverable_type": "document",
+      "allowed_media_types": ["text/markdown"],
+      "min_count": 1,
+      "max_count": 1,
+      "criteria": [{"kind":"non_empty"},{"kind":"maximum_bytes","value":131072},{"kind":"text_contains","text":"Approved brief"}]
+    },
+    "accepted_input_bundle_v2": {
+      "schema_version": "boreal.accepted_input_bundle.v2",
+      "project_id": "project_demo",
+      "work_id": "work_task_02",
+      "bindings": [{
+        "input_key": "approved_logo",
+        "role": "accepted_input",
+        "required": true,
+        "access_scope": "project",
+        "artifact": {
+          "project_id": "project_demo",
+          "source_version_id": "source_version_logo_01",
+          "content_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "media_type": "image/png",
+          "byte_count": 4096,
+          "availability": "available"
+        },
+        "produced_by": {
+          "work_id": "work_task_master",
+          "attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+          "result_id": "result_logo_master_01"
+        },
+        "accepted_result": {
+          "producer": {
+            "work_id": "work_task_master",
+            "attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+            "result_id": "result_logo_master_01"
+          },
+          "decision_id": "decision_master_01",
+          "submission_id": "submission_master_01",
+          "artifact_set_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }],
+      "bundle_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     }
   },
   "v4_optional_contracts": {

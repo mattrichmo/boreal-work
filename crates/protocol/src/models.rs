@@ -647,6 +647,52 @@ mod tests {
             ArtifactAccessScopeDto::AcceptedResultOnly
         );
 
+        let requirement_v2: DeliverableRequirementV2Dto =
+            serde_json::from_value(schemas["deliverable_requirement_v2"].clone()).unwrap();
+        let input_bundle_v2: AcceptedInputBundleV2Dto =
+            serde_json::from_value(schemas["accepted_input_bundle_v2"].clone()).unwrap();
+        assert_eq!(
+            requirement_v2.schema_version,
+            DELIVERABLE_REQUIREMENT_V2_SCHEMA_VERSION
+        );
+        assert_eq!(
+            requirement_v2.deliverable_type,
+            DeliverableTypeDto::Document
+        );
+        assert!(matches!(
+            requirement_v2.criteria[2],
+            DeliverableCriterionV2Dto::TextContains { ref text } if text == "Approved brief"
+        ));
+        assert_eq!(
+            input_bundle_v2.schema_version,
+            ACCEPTED_INPUT_BUNDLE_V2_SCHEMA_VERSION
+        );
+        assert_eq!(
+            input_bundle_v2.bindings[0].role,
+            InputArtifactRoleV2Dto::AcceptedInput
+        );
+        assert_eq!(
+            input_bundle_v2.bindings[0].access_scope,
+            InputArtifactScopeV2Dto::Project
+        );
+        assert_eq!(
+            input_bundle_v2.bindings[0]
+                .produced_by
+                .as_ref()
+                .unwrap()
+                .attempt_id,
+            "attempt_01J8V2ATTEMPT00000000001"
+        );
+        assert_eq!(
+            input_bundle_v2.bindings[0]
+                .accepted_result
+                .as_ref()
+                .unwrap()
+                .producer
+                .result_id,
+            "result_logo_master_01"
+        );
+
         let artifacts: serde_json::Value = serde_json::from_str(include_str!(
             "../../../project/spec/workflows/artifacts-acceptance.json.fixture"
         ))
@@ -723,6 +769,22 @@ mod tests {
                 "unknown fields must fail closed for {name}"
             );
         }
+
+        let mut requirement_v2_with_unknown =
+            general["contract_only_schemas"]["deliverable_requirement_v2"].clone();
+        requirement_v2_with_unknown["unexpected_client_field"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<DeliverableRequirementV2Dto>(requirement_v2_with_unknown)
+                .is_err()
+        );
+        let mut input_bundle_v2_with_unknown =
+            general["contract_only_schemas"]["accepted_input_bundle_v2"].clone();
+        input_bundle_v2_with_unknown["bindings"][0]["unexpected_client_field"] =
+            serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<AcceptedInputBundleV2Dto>(input_bundle_v2_with_unknown)
+                .is_err()
+        );
     }
 
     #[test]
@@ -799,6 +861,8 @@ pub struct CompletionCommandDto {
 /// implements and wires the corresponding application operation.
 pub const DELIVERABLE_REQUIREMENT_SCHEMA_VERSION: &str = "boreal.deliverable_requirement.v1";
 pub const ACCEPTED_INPUT_BUNDLE_SCHEMA_VERSION: &str = "boreal.accepted_input_bundle.v1";
+pub const DELIVERABLE_REQUIREMENT_V2_SCHEMA_VERSION: &str = "boreal.deliverable_requirement.v2";
+pub const ACCEPTED_INPUT_BUNDLE_V2_SCHEMA_VERSION: &str = "boreal.accepted_input_bundle.v2";
 pub const ARTIFACT_SUBMISSION_SCHEMA_VERSION: &str = "boreal.artifact_submission.v1";
 pub const ARTIFACT_INSPECTION_SCHEMA_VERSION: &str = "boreal.artifact_inspection.v1";
 pub const ARTIFACT_ACCEPTANCE_SCHEMA_VERSION: &str = "boreal.artifact_acceptance.v1";
@@ -884,6 +948,103 @@ pub struct AcceptedInputBundleDto {
     pub project_id: String,
     pub work_id: String,
     pub bindings: Vec<AcceptedInputBindingDto>,
+    pub bundle_digest: String,
+}
+
+/// V2 preserves the semantic deliverable category and all bounded criteria
+/// represented by the domain requirement. V1 remains frozen for older clients.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverableTypeDto {
+    Code,
+    Document,
+    Image,
+    Dataset,
+    Report,
+    Archive,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeliverableCriterionV2Dto {
+    NonEmpty,
+    MinimumBytes { value: u64 },
+    MaximumBytes { value: u64 },
+    DigestPresent,
+    JsonDocument,
+    TextContains { text: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliverableRequirementV2Dto {
+    pub schema_version: String,
+    pub requirement_key: String,
+    pub purpose: String,
+    pub required: bool,
+    pub deliverable_type: DeliverableTypeDto,
+    pub allowed_media_types: Vec<String>,
+    pub min_count: u32,
+    pub max_count: u32,
+    pub criteria: Vec<DeliverableCriterionV2Dto>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputArtifactRoleV2Dto {
+    Context,
+    AcceptedInput,
+    Reference,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputArtifactScopeV2Dto {
+    Project,
+    Private,
+}
+
+/// Exact producer identity required to bind an input to its originating work
+/// attempt and immutable result, independently of any accepted decision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactProductionIdentityDto {
+    pub work_id: String,
+    pub attempt_id: String,
+    pub result_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedResultIdentityV2Dto {
+    pub producer: ArtifactProductionIdentityDto,
+    pub decision_id: String,
+    pub submission_id: String,
+    pub artifact_set_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedInputBindingV2Dto {
+    pub input_key: String,
+    pub role: InputArtifactRoleV2Dto,
+    pub required: bool,
+    pub access_scope: InputArtifactScopeV2Dto,
+    pub artifact: ArtifactVersionIdentityDto,
+    #[serde(default)]
+    pub produced_by: Option<ArtifactProductionIdentityDto>,
+    #[serde(default)]
+    pub accepted_result: Option<AcceptedResultIdentityV2Dto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedInputBundleV2Dto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub bindings: Vec<AcceptedInputBindingV2Dto>,
     pub bundle_digest: String,
 }
 

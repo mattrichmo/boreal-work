@@ -337,8 +337,13 @@
         "artifact_inspection": "boreal.artifact_inspection.v1",
         "artifact_acceptance_request_and_readback": "boreal.artifact_acceptance.v1"
       },
+      "v2_planning_schemas": {
+        "deliverable_requirement": "boreal.deliverable_requirement.v2",
+        "accepted_input_bundle": "boreal.accepted_input_bundle.v2",
+        "reason": "V2 preserves semantic deliverable type, the complete registered criterion set, domain input roles/scopes, and exact producer attempt/result identity while v1 remains frozen."
+      },
       "handoff": {
-        "BW-S12-T02": ["deliverable_requirement.v1", "accepted_input_bundle.v1"],
+        "BW-S12-T02": ["deliverable_requirement.v2", "accepted_input_bundle.v2"],
         "BW-S12-T03": ["artifact_submission.v1", "artifact_inspection.v1", "artifact_acceptance.v1"],
         "BW-S12-T04": ["project-scoped immutable artifact identity", "portable source/blob bytes"]
       },
