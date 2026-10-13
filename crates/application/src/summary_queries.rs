@@ -21,12 +21,15 @@ impl<'a> SummaryQueries<'a> {
                 "project and summary ids are required".into(),
             ));
         }
-        self.store
+        let artifact = self
+            .store
             .summary_artifact(project_id, summary_id)?
             .ok_or_else(|| StoreError::NotFound {
                 entity: "summary",
                 id: summary_id.to_owned(),
-            })
+            })?;
+        validate_body(&artifact)?;
+        Ok(artifact)
     }
 
     pub fn current_for_work(
@@ -51,6 +54,70 @@ impl<'a> SummaryQueries<'a> {
         Ok(artifact)
     }
 
+    /// Reads the summary sealed for an exact current final-result proof. A
+    /// matching submission is required, and every result identity in its
+    /// summary is checked against the immutable result binding.
+    pub fn final_result_for_proof(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        proof_revision: u64,
+    ) -> Result<Option<SummaryArtifactRecord>, StoreError> {
+        if project_id.trim().is_empty() || work_id.trim().is_empty() || proof_revision == 0 {
+            return Err(StoreError::Invalid(
+                "project, work, and positive proof revision are required".into(),
+            ));
+        }
+        let acceptance = boreal_store::acceptance::AcceptanceStore::new(self.store);
+        let Some(binding) = acceptance.current_final_result(project_id, work_id, proof_revision)?
+        else {
+            return Ok(None);
+        };
+        let Some(submission) =
+            self.store
+                .current_submission(project_id, work_id, proof_revision)?
+        else {
+            return Ok(None);
+        };
+        if submission.attempt_id != binding.attempt_id
+            || submission.fence != binding.fence
+            || submission.entity_revision != binding.entity_revision
+            || submission.source_version_id != binding.source_version_id
+            || submission.config_identity != binding.config_identity
+            || submission.profile_id != binding.profile_id
+            || submission.profile_version != binding.profile_version
+            || submission.profile_digest != binding.profile_digest
+        {
+            return Err(StoreError::Corrupt(
+                "submission does not match the final-result binding for its proof".into(),
+            ));
+        }
+        let Some(artifact) = self
+            .store
+            .summary_artifact(project_id, &submission.summary_id)?
+        else {
+            return Err(StoreError::Corrupt(
+                "sealed submission refers to a missing summary artifact".into(),
+            ));
+        };
+        validate_body(&artifact)?;
+        if artifact.body.is_none()
+            || artifact.summary.work_id != work_id
+            || artifact.summary.attempt_id != binding.attempt_id
+            || artifact.summary.fence != binding.fence
+            || artifact.summary.source_version_id != binding.source_version_id
+            || artifact.summary.config_identity != binding.config_identity
+            || artifact.summary.profile_id != binding.profile_id
+            || artifact.summary.profile_version != binding.profile_version
+        {
+            return Err(StoreError::Corrupt(
+                "summary artifact does not match the final-result proof or has no durable body"
+                    .into(),
+            ));
+        }
+        Ok(Some(artifact))
+    }
+
     /// Returns a bounded newest-first page, including superseded history.
     pub fn list(
         &self,
@@ -62,8 +129,13 @@ impl<'a> SummaryQueries<'a> {
         if project_id.trim().is_empty() {
             return Err(StoreError::Invalid("project id is required".into()));
         }
-        self.store
-            .summary_artifact_list(project_id, work_id, limit, offset)
+        let page = self
+            .store
+            .summary_artifact_list(project_id, work_id, limit, offset)?;
+        for item in &page.items {
+            validate_body(item)?;
+        }
+        Ok(page)
     }
 
     /// Compatibility helper for output paths that need metadata only.
@@ -91,6 +163,42 @@ fn validate_body(artifact: &SummaryArtifactRecord) -> Result<(), StoreError> {
 }
 
 impl crate::WorkApplication<'_> {
+    /// Project-scoped summary readback includes and validates the retained
+    /// immutable body bytes, so a reopened client can display the delivered
+    /// closeout without relying on the original input file.
+    pub fn read_summary_artifact(
+        &self,
+        project_id: &str,
+        summary_id: &str,
+    ) -> Result<SummaryArtifactRecord, crate::ApplicationError> {
+        Ok(SummaryQueries::new(self.store_ref()).show(project_id, summary_id)?)
+    }
+
+    pub fn read_summary_artifacts(
+        &self,
+        project_id: &str,
+        work_id: Option<&str>,
+        limit: u64,
+        offset: u64,
+    ) -> Result<SummaryArtifactPage, crate::ApplicationError> {
+        Ok(SummaryQueries::new(self.store_ref()).list(project_id, work_id, limit, offset)?)
+    }
+
+    pub fn read_final_result_summary(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        proof_revision: u64,
+    ) -> Result<Option<SummaryArtifactRecord>, crate::ApplicationError> {
+        Ok(
+            SummaryQueries::new(self.store_ref()).final_result_for_proof(
+                project_id,
+                work_id,
+                proof_revision,
+            )?,
+        )
+    }
+
     /// Proof-bound summary create with atomic immutable body persistence.
     #[allow(clippy::too_many_arguments)]
     pub fn record_summary_with_body(

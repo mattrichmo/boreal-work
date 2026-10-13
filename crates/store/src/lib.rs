@@ -35,6 +35,7 @@ mod completion_migrations;
 pub mod cycle_commands;
 pub mod deliverables;
 pub mod execution;
+pub mod final_result;
 pub mod identity;
 pub mod jobs;
 mod knowledge;
@@ -6961,22 +6962,39 @@ impl SqliteStore {
                         );
                         let review_satisfied = row.kind == GateKind::Review
                             && reviews.get(&review_key).copied().unwrap_or(false);
-                        let summary_satisfied = row.kind == GateKind::Summary
-                            && summaries.get(&row.work_id).is_some_and(|summary| {
-                                let Some(attempt) = current_attempts.get(&row.work_id) else {
-                                    return false;
-                                };
-                                summary.attempt_id == attempt_id
-                                    && summary.fence == fence
-                                    && summary.source_version_id
-                                        == attempt.source_version_id.clone().unwrap_or_default()
-                                    && summary.config_identity == attempt.config_identity
-                                    && summary.profile_id == row.profile_id
-                                    && summary.profile_version == row.profile_version
-                                    && summary.body_size > 0
-                                    && summary.body_size <= MAX_SUMMARY_BODY_BYTES
-                                    && valid_sha256_digest(&summary.body_digest)
-                            });
+                        let summary_satisfied = if row.kind == GateKind::Summary {
+                            match (
+                                summaries.get(&row.work_id),
+                                current_attempts.get(&row.work_id),
+                            ) {
+                                (Some(summary), Some(attempt)) => {
+                                    let binding = self.current_final_result_for_attempt(attempt)?;
+                                    let source = binding
+                                        .as_ref()
+                                        .map(|binding| binding.source_version_id.clone())
+                                        .or(attempt.source_version_id.clone())
+                                        .unwrap_or_default();
+                                    summary.attempt_id == attempt_id
+                                        && summary.fence == fence
+                                        && summary.source_version_id == source
+                                        && summary.config_identity == attempt.config_identity
+                                        && summary.profile_id == row.profile_id
+                                        && summary.profile_version == row.profile_version
+                                        && binding.as_ref().is_none_or(|binding| {
+                                            binding.config_identity == summary.config_identity
+                                                && binding.profile_id == summary.profile_id
+                                                && binding.profile_version
+                                                    == summary.profile_version
+                                        })
+                                        && summary.body_size > 0
+                                        && summary.body_size <= MAX_SUMMARY_BODY_BYTES
+                                        && valid_sha256_digest(&summary.body_digest)
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
                         if review_satisfied || summary_satisfied {
                             (GateState::Satisfied, None, None)
                         } else if row.kind == GateKind::Review
@@ -10411,7 +10429,12 @@ impl SqliteStore {
                 actual: attempt.session_id.unwrap_or_default(),
             });
         }
-        if attempt.source_version_id.as_deref() != Some(request.source_version_id.as_str()) {
+        let final_binding = self.current_final_result_for_attempt(&attempt)?;
+        let expected_source = final_binding
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id.clone());
+        if expected_source.as_deref() != Some(request.source_version_id.as_str()) {
             return Err(StoreError::Invalid(
                 "summary source context mismatch".to_owned(),
             ));
@@ -10439,6 +10462,15 @@ impl SqliteStore {
         {
             return Err(StoreError::Invalid(
                 "summary profile context mismatch".to_owned(),
+            ));
+        }
+        if final_binding.as_ref().is_some_and(|binding| {
+            binding.config_identity != request.config_identity
+                || binding.profile_id != request.profile_id
+                || binding.profile_version != request.profile_version
+        }) {
+            return Err(StoreError::Invalid(
+                "summary context does not match the bound final result".to_owned(),
             ));
         }
         Ok(())
@@ -10470,10 +10502,15 @@ impl SqliteStore {
         let Some(summary) = self.current_summary(&request.project_id, &request.work_id)? else {
             return Ok(false);
         };
+        let final_binding = self.current_final_result_for_attempt(attempt)?;
+        let expected_source = final_binding
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id.clone());
         Ok(summary.attempt_id == request.attempt_id
             && summary.fence == request.fence
-            && summary.source_version_id
-                == request.source_version_id.as_deref().unwrap_or_default()
+            && summary.source_version_id == expected_source.as_deref().unwrap_or_default()
+            && request.source_version_id == expected_source
             && summary.config_identity == request.config_identity
             && summary.profile_id == request.profile_id
             && summary.profile_version == request.profile_version
@@ -10487,7 +10524,11 @@ impl SqliteStore {
             && (attempt.current || self.attempt_has_current_submission(attempt)?)
             && attempt.actor_id == request.actor_id
             && attempt.session_id == request.session_id
-            && attempt.source_version_id == request.source_version_id
+            && final_binding.as_ref().is_none_or(|binding| {
+                binding.config_identity == request.config_identity
+                    && binding.profile_id == request.profile_id
+                    && binding.profile_version == request.profile_version
+            })
             && attempt.config_identity == request.config_identity)
     }
 
@@ -10608,8 +10649,18 @@ impl SqliteStore {
                 actual: request.fence,
             }));
         }
+        let final_binding = self.current_final_result_for_attempt(&attempt)?;
+        let current_source = final_binding
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id.clone());
         if request.source_version_id != expected.source_version_id
-            || attempt.source_version_id != expected.source_version_id
+            || expected.source_version_id != current_source
+            || final_binding.as_ref().is_some_and(|binding| {
+                binding.config_identity != expected.config_identity
+                    || binding.profile_id != expected.profile_id
+                    || binding.profile_version != expected.profile_version
+            })
         {
             return Ok(Some(receipt_rejected("receipt_source_mismatch")));
         }
@@ -10995,12 +11046,23 @@ impl SqliteStore {
         let Some(gate) = self.gate(project_id, work_id, gate_id)? else {
             return Ok(false);
         };
+        let binding = self.current_final_result_for_attempt(&attempt)?;
+        let source = binding
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id.clone())
+            .unwrap_or_default();
         Ok(summary.attempt_id == attempt_id
             && summary.fence == fence
-            && summary.source_version_id == attempt.source_version_id.clone().unwrap_or_default()
+            && summary.source_version_id == source
             && summary.config_identity == attempt.config_identity
             && summary.profile_id == gate.profile_id
             && summary.profile_version == gate.profile_version
+            && binding.as_ref().is_none_or(|binding| {
+                binding.config_identity == summary.config_identity
+                    && binding.profile_id == summary.profile_id
+                    && binding.profile_version == summary.profile_version
+            })
             && summary.body_size > 0
             && summary.body_size <= MAX_SUMMARY_BODY_BYTES
             && valid_sha256_digest(&summary.body_digest))

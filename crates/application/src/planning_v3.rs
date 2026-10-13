@@ -13,7 +13,10 @@ use boreal_domain::work_model_v3::{
     CycleAssignment, CycleId, CycleInstance, CycleSeries, CycleTemplate, DirectDependency,
     ExecutionMode, FoldPolicy, GapPolicy, LocalDateTime, ModelError, TimeResolution,
 };
-use boreal_domain::{DispatchPolicy, ProjectId, ReasonCode, TimestampMs, WorkId, WorkItem};
+use boreal_domain::{
+    AcceptanceProfile, DispatchPolicy, GateId, GateKind, GateRequirement, ProjectId, ReasonCode,
+    TimestampMs, WorkId, WorkItem,
+};
 use serde_json::json;
 
 use crate::canonical_request_digest;
@@ -220,6 +223,62 @@ pub struct WorkEditRequest {
     pub parent_id: Option<Option<WorkId>>,
     pub title: Option<String>,
     pub execution_mode: Option<ExecutionMode>,
+}
+
+/// Resolve a user-facing profile token to the exact immutable profile
+/// identity and gate set used when creating planned work. Versioned profiles
+/// must use canonical `name/version` syntax; the two legacy software profiles
+/// remain available as `focused` and `reviewed` (or `/1`).
+pub fn resolve_planning_acceptance_profile(
+    value: &str,
+) -> Result<AcceptanceProfile, PlanningError> {
+    match value {
+        "focused" => return Ok(AcceptanceProfile::focused()),
+        "reviewed" => return Ok(AcceptanceProfile::reviewed()),
+        _ => {}
+    }
+    let (profile_id, version_text) = value.split_once('/').ok_or_else(|| {
+        PlanningError::Invalid(format!(
+            "acceptance profile must be focused, reviewed, or a registered name/version: {value}"
+        ))
+    })?;
+    let version = version_text.parse::<u64>().map_err(|_| {
+        PlanningError::Invalid(format!("invalid acceptance profile version in {value}"))
+    })?;
+    if profile_id.trim().is_empty()
+        || version_text.is_empty()
+        || version.to_string() != version_text
+    {
+        return Err(PlanningError::Invalid(format!(
+            "acceptance profile version in {value} is not canonical"
+        )));
+    }
+    let registered = boreal_store::profiles::registered_acceptance_profile(profile_id, version)
+        .map_err(|error| PlanningError::Invalid(error.to_string()))?;
+    let Some(registered) = registered else {
+        return match profile_id {
+            "focused" => Ok(AcceptanceProfile::focused()),
+            "reviewed" => Ok(AcceptanceProfile::reviewed()),
+            _ => Err(PlanningError::Invalid(format!(
+                "acceptance profile {profile_id}/{version} is not a registered general-work profile"
+            ))),
+        };
+    };
+    let mut gates = vec![GateRequirement::required(
+        GateId::new(registered.summary_gate_id),
+        GateKind::Summary,
+    )];
+    if let Some(review_gate_id) = registered.review_gate_id {
+        gates.push(GateRequirement::required(
+            GateId::new(review_gate_id),
+            GateKind::Review,
+        ));
+    }
+    Ok(AcceptanceProfile {
+        id: boreal_domain::ProfileId::new(registered.profile_id),
+        version: registered.version.to_string(),
+        gates,
+    })
 }
 
 pub fn plan_work_edit(

@@ -25,6 +25,7 @@ fn parity_supported(path: &[String]) -> bool {
             .as_slice(),
         ["agent", "guide" | "next"]
             | ["next"]
+            | ["evidence", "bind-result" | "receipts"]
             | ["work", "create"]
             | ["cycle" | "sprint", "current"]
     ) || super::directive_commands::supported(path)
@@ -2572,6 +2573,8 @@ mod unix {
             alias = "acceptance_profile_version"
         )]
         profile_version: String,
+        #[serde(default)]
+        execution_mode: Option<String>,
         actor_id: String,
         #[serde(default, rename = "harness_id")]
         _harness_id: Option<String>,
@@ -2896,6 +2899,8 @@ mod unix {
                 "finish_close" => self.finish_close(data, &request.operation_id),
                 "evidence_add" => self.evidence_add(data),
                 "evidence_run" => self.evidence_run(data, &request.operation_id),
+                "bind_final_result" => self.bind_final_result(data, &request.operation_id),
+                "receipts_for_attempt" => self.receipts_for_attempt(data),
                 "update" => self.update(data, &request.operation_id),
                 "operation_show" => self.operation_show(data),
                 "session_start" => self.session_start(data, &request.operation_id),
@@ -3542,14 +3547,18 @@ mod unix {
             };
             let kind = parse_work_kind(&request.kind)?;
             let dispatch_policy = parse_dispatch_policy(&request.dispatch)?;
-            let mut acceptance_profile = parse_acceptance_profile(&request.profile)?;
-            if request.profile_version != "1" {
-                return Err(CliError::invalid(format!(
-                    "unsupported acceptance profile version {:?}; supported versions: 1",
-                    request.profile_version
-                )));
-            }
-            acceptance_profile.version = request.profile_version;
+            let profile_token = if request.profile.contains('/') {
+                let (_, explicit_version) = request.profile.split_once('/').unwrap();
+                if explicit_version != request.profile_version {
+                    return Err(CliError::invalid(
+                        "acceptance profile token and profile_version disagree",
+                    ));
+                }
+                request.profile.clone()
+            } else {
+                format!("{}/{}", request.profile, request.profile_version)
+            };
+            let acceptance_profile = super::super::acceptance_profile_from_token(&profile_token)?;
             let parent_id = request
                 .parent_id
                 .map(|parent_id| required_trimmed(parent_id, "parent_id"))
@@ -3569,18 +3578,52 @@ mod unix {
                 acceptance_profile,
             };
             let app = WorkApplication::new(&self.store);
-            let result = app
-                .create_work_as_session_checked(
+            let requested_mode = request
+                .execution_mode
+                .as_deref()
+                .map(super::super::execution_mode_from_token)
+                .transpose()?;
+            let mode =
+                requested_mode.unwrap_or_else(|| super::super::default_execution_mode(work.kind));
+            let at = now();
+            let result = if work.kind == WorkKind::Sprint {
+                if requested_mode.is_some() {
+                    return Err(CliError::invalid(
+                        "Sprint is a legacy grouping row and has no execution mode",
+                    ));
+                }
+                app.create_work_as_session_checked(
                     &work,
                     &actor_id,
                     request._session_id.as_deref().ok_or_else(|| {
                         CliError::invalid("work creation requires project session")
                     })?,
                     request.expected_revision,
-                    &now(),
+                    &at,
                     operation,
                 )
-                .map_err(map_application_error)?;
+                .map_err(map_application_error)?
+            } else {
+                let expected_revision = request
+                    .expected_revision
+                    .ok_or_else(|| CliError::invalid("work creation requires expected_revision"))?;
+                let session_id = request
+                    ._session_id
+                    .as_deref()
+                    .ok_or_else(|| CliError::invalid("work creation requires project session"))?;
+                let scope = PlanningScope::new(work.project_id.clone(), actor_id.clone())
+                    .with_session(session_id)
+                    .at_revision(expected_revision);
+                app.create_planning_work_v3(&scope, operation, &work, mode, &at)
+                    .map_err(map_application_error)?
+            };
+            let planning = super::super::planning_projection_json(
+                &self.store,
+                &result.value.project_id,
+                &result.value.work_id,
+                &result.value.kind,
+                result.value.parent_id.as_deref(),
+            );
             Ok((
                 if result.changed {
                     ApplicationOutcome::Changed
@@ -3601,6 +3644,10 @@ mod unix {
                         "id": work.acceptance_profile.id.as_str(),
                         "version": work.acceptance_profile.version,
                     },
+                    "execution_mode": planning["execution_mode"],
+                    "planning_parent_id": planning["planning_parent_id"],
+                    "planning_integrity": planning["planning_integrity"],
+                    "planning_diagnostic": planning["planning_diagnostic"],
                     "hard_holds": result
                         .value
                         .hard_holds
@@ -3615,44 +3662,111 @@ mod unix {
         fn work_edit(&mut self, data: &Value, operation: &str) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
             let work_id = string(data, "work_id")?;
-            let result = WorkApplication::new(&self.store)
-                .edit_work_as(
-                    &project,
-                    &work_id,
-                    &string(data, "actor_id")?,
-                    optional_string(data, "parent_id")?.map(Some),
-                    optional_string(data, "title")?,
-                    optional_string(data, "description")?,
-                    optional_u64(data, "priority")?
-                        .map(|value| {
-                            u8::try_from(value).map_err(|_| {
-                                CliError::invalid("priority must be an integer from 0 to 255")
-                            })
-                        })
-                        .transpose()?,
-                    optional_string(data, "dispatch_policy")?,
-                    optional_u64(data, "expected_revision")?,
-                    &now(),
-                    operation.to_owned(),
-                )
-                .map_err(map_application_error)?;
+            let actor_id = string(data, "actor_id")?;
+            let session_id = optional_string(data, "session_id")?;
+            let expected_revision = optional_u64(data, "expected_revision")?
+                .ok_or_else(|| CliError::invalid("work_edit requires expected_revision"))?;
+            let parent_id = optional_string(data, "parent_id")?;
+            let clear_parent = match data.get("clear_parent") {
+                None | Some(Value::Null) => false,
+                Some(value) => value
+                    .as_bool()
+                    .ok_or_else(|| CliError::invalid("work_edit clear_parent must be a boolean"))?,
+            };
+            if parent_id.is_some() && clear_parent {
+                return Err(CliError::invalid(
+                    "work_edit parent_id and clear_parent are mutually exclusive",
+                ));
+            }
+            let title = optional_string(data, "title")?;
+            let description = optional_string(data, "description")?;
+            let priority = optional_u64(data, "priority")?
+                .map(|value| {
+                    u8::try_from(value)
+                        .map_err(|_| CliError::invalid("priority must be an integer from 0 to 255"))
+                })
+                .transpose()?;
+            let dispatch_policy = optional_string(data, "dispatch_policy")?
+                .map(|value| parse_dispatch_policy(&value))
+                .transpose()?;
+            let execution_mode = optional_string(data, "execution_mode")?
+                .map(|value| super::super::execution_mode_from_token(&value))
+                .transpose()?;
+            let app = WorkApplication::new(&self.store);
+            let current = self
+                .store
+                .work(project.as_str(), &work_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| {
+                    CliError::with(
+                        ErrorCode::NotFound,
+                        ApplicationOutcome::Rejected,
+                        format!("work not found: {work_id}"),
+                    )
+                })?;
+            let at = now();
+            let (revision, changed) = if current.kind == "sprint" {
+                if clear_parent || parent_id.is_some() || execution_mode.is_some() {
+                    return Err(CliError::invalid(
+                        "Sprint parent and execution-mode edits require the atomic planning projection route",
+                    ));
+                }
+                let result = app
+                    .edit_work_as(
+                        &project,
+                        &work_id,
+                        &actor_id,
+                        None,
+                        title,
+                        description,
+                        priority,
+                        dispatch_policy.map(|policy| dispatch_policy_name(policy).to_owned()),
+                        Some(expected_revision),
+                        &at,
+                        operation.to_owned(),
+                    )
+                    .map_err(map_application_error)?;
+                (result.snapshot_revision, result.changed)
+            } else {
+                let canonical_parent_id = if clear_parent {
+                    Some(None)
+                } else {
+                    parent_id.map(|parent_id| Some(WorkId::new(parent_id)))
+                };
+                let input = WorkPlanningEditV3Input {
+                    work_id: WorkId::new(work_id.clone()),
+                    canonical_parent_id,
+                    title,
+                    description,
+                    priority,
+                    dispatch_policy,
+                    execution_mode,
+                };
+                let mut scope = PlanningScope::new(project.clone(), actor_id);
+                if let Some(session_id) = session_id {
+                    scope = scope.with_session(session_id);
+                }
+                scope = scope.at_revision(expected_revision);
+                let result = app
+                    .edit_planning_work_v3(&scope, operation.to_owned(), &input, &at)
+                    .map_err(map_application_error)?;
+                (result.snapshot_revision, result.changed)
+            };
+            let projected = self
+                .store
+                .work(project.as_str(), &work_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| CliError::invalid("edited work disappeared during readback"))?;
+            let mut response = super::super::work_projection_json(&projected, &self.store);
+            response["replayed"] = json!(!changed);
             Ok((
-                if result.changed {
+                if changed {
                     ApplicationOutcome::Changed
                 } else {
                     ApplicationOutcome::Unchanged
                 },
-                Some(result.snapshot_revision),
-                Some(json!({
-                    "command": "work_edit",
-                    "project_id": project.as_str(),
-                    "work_id": result.value.work_id,
-                    "title": result.value.title,
-                    "description": result.value.description,
-                    "priority": result.value.priority,
-                    "dispatch_policy": result.value.dispatch_policy,
-                    "replayed": !result.changed,
-                })),
+                Some(revision),
+                Some(response),
             ))
         }
 
@@ -4195,6 +4309,7 @@ mod unix {
                     "readback_required": false,
                     "service_state": "ready",
                 })),
+                &self.store,
             );
             if include_query_metrics {
                 let metrics = self.store.query_metrics();
@@ -4226,7 +4341,7 @@ mod unix {
             Ok((
                 ApplicationOutcome::Unchanged,
                 Some(revision.0),
-                Some(super::super::work_projection_json(&item)),
+                Some(super::super::work_projection_json(&item, &self.store)),
             ))
         }
 
@@ -4803,6 +4918,71 @@ mod unix {
                     "replayed": result.replayed,
                 })),
             ))
+        }
+
+        fn bind_final_result(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let database = self.store.database_path().ok_or_else(|| {
+                CliError::invalid("final-result binding requires a file-backed source catalog")
+            })?;
+            let mut extra = std::collections::BTreeMap::new();
+            extra.insert(
+                "--content-digest".to_owned(),
+                vec![string(data, "content_digest")?],
+            );
+            extra.insert(
+                "--expected-entity-revision".to_owned(),
+                vec![required_u64(data, "expected_entity_revision")?.to_string()],
+            );
+            extra.insert(
+                "--expected-proof-revision".to_owned(),
+                vec![required_u64(data, "expected_proof_revision")?.to_string()],
+            );
+            let parsed = ParsedCommand {
+                path: vec!["evidence".to_owned(), "bind-result".to_owned()],
+                options: CliOptions {
+                    extra,
+                    db: database.to_string_lossy().into_owned(),
+                    project: Some(string(data, "project_id")?),
+                    actor: string(data, "actor_id")?,
+                    session: string(data, "session_id")?,
+                    operation_id: Some(operation.to_owned()),
+                    expected_revision: Some(required_u64(data, "expected_revision")?),
+                    attempt: Some(string(data, "attempt_id")?),
+                    fence: Some(required_u64(data, "fence")?),
+                    work: Some(string(data, "work_id")?),
+                    source_version: Some(string(data, "source_version_id")?),
+                    ..CliOptions::default()
+                },
+            };
+            let result = super::super::evidence_bind_result_result(
+                &parsed,
+                operation,
+                &WorkApplication::new(&self.store),
+                &self.store,
+            )?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
+        fn receipts_for_attempt(&self, data: &Value) -> ServiceResult {
+            let parsed = ParsedCommand {
+                path: vec!["evidence".to_owned(), "receipts".to_owned()],
+                options: CliOptions {
+                    project: Some(string(data, "project_id")?),
+                    actor: optional_string(data, "actor_id")?.unwrap_or_default(),
+                    session: optional_string(data, "session_id")?.unwrap_or_default(),
+                    attempt: Some(string(data, "attempt_id")?),
+                    fence: Some(required_u64(data, "fence")?),
+                    work: Some(string(data, "work_id")?),
+                    limit: Some(optional_u64(data, "limit")?.unwrap_or(50)),
+                    offset: Some(optional_u64(data, "offset")?.unwrap_or(0)),
+                    ..CliOptions::default()
+                },
+            };
+            let result = super::super::evidence_receipts_result(
+                &parsed,
+                &WorkApplication::new(&self.store),
+            )?;
+            Ok((result.outcome, result.revision, result.data))
         }
 
         pub(super) fn evidence_run(&mut self, data: &Value, operation: &str) -> ServiceResult {
@@ -5796,16 +5976,6 @@ mod unix {
             "paused" => Ok(DispatchPolicy::Paused),
             _ => Err(CliError::invalid(format!(
                 "unknown create_work dispatch policy: {value}"
-            ))),
-        }
-    }
-
-    fn parse_acceptance_profile(value: &str) -> Result<AcceptanceProfile, CliError> {
-        match value {
-            "focused" => Ok(AcceptanceProfile::focused()),
-            "reviewed" => Ok(AcceptanceProfile::reviewed()),
-            _ => Err(CliError::invalid(format!(
-                "unknown create_work acceptance profile: {value}"
             ))),
         }
     }
@@ -7340,7 +7510,10 @@ mod tests {
         let direct = WorkApplication::new(&handler.store)
             .show_work(&ProjectId::new("show-project"), "show-task")
             .expect("direct work show");
-        assert_eq!(data, &super::super::work_projection_json(&direct));
+        assert_eq!(
+            data,
+            &super::super::work_projection_json(&direct, &handler.store)
+        );
         let _ = fs::remove_file(db);
     }
 

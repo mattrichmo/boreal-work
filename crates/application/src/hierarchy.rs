@@ -19,12 +19,13 @@ use boreal_domain::work_model_v3::{
     ExecutionMode, FoldPolicy, GapPolicy, IntakeBucket, IntakeItem, IntakeKind, IntakeLifecycle,
     IntakePromotion, PromotionTargetKind,
 };
-use boreal_domain::{ProjectId, SessionId, TimestampMs, WorkId};
+use boreal_domain::{DispatchPolicy, ProjectId, SessionId, TimestampMs, WorkId, WorkItem};
 use boreal_store::{
     AttemptRecord, ContainerDispositionV3Input, CycleAssignmentV3Input, CycleSeriesV3Input,
     CycleTemplateV3Input, CycleV3Input, IntakeBucketV3Input, IntakeItemV3Input, IntakeItemV3Record,
-    IntakePromotionV3Input, MutationResult, SessionRecord, V3MutationContext, WorkNodeV3Input,
-    WorkPlanningContractRecord,
+    IntakePromotionV3Input, MutationResult, PlannedWorkV3Input,
+    PlanningWorkEditV3Input as PlanningWorkEditV3StoreInput, SessionRecord, V3MutationContext,
+    WorkNodeV3Input, WorkPlanningContractRecord,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -96,6 +97,19 @@ pub struct WorkPlanningContractView {
     pub work_id: String,
     pub revision: u64,
     pub contract: Option<WorkPlanningContractRecord>,
+}
+
+/// Durable work-model/3 edit request. `canonical_parent_id` is the schema-2
+/// work parent; nested Tasks use a Sprint whose parent is the v3 Milestone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkPlanningEditV3Input {
+    pub work_id: WorkId,
+    pub canonical_parent_id: Option<Option<WorkId>>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub priority: Option<u8>,
+    pub dispatch_policy: Option<DispatchPolicy>,
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 impl WorkApplication<'_> {
@@ -903,6 +917,106 @@ impl WorkApplication<'_> {
                 now,
             ),
             &input,
+        )?;
+        Ok(operation_result(operation_id, mutation))
+    }
+
+    /// Create a canonical Milestone/Task work row and its v3 decomposition
+    /// node atomically. This is the route for v3 planned work; callers should
+    /// not create the schema-2 row and project it with a second operation.
+    pub fn create_planning_work_v3(
+        &self,
+        scope: &PlanningScope,
+        operation_id: impl Into<String>,
+        work: &WorkItem,
+        execution_mode: ExecutionMode,
+        now: &str,
+    ) -> Result<OperationResult<boreal_store::WorkRecord>, ApplicationError> {
+        ensure_mutation_scope(self.store_ref(), scope)?;
+        if work.project_id != scope.project_id {
+            return Err(ApplicationError::Planning(PlanningError::ScopeConflict {
+                expected: scope.project_id.to_string(),
+                actual: work.project_id.to_string(),
+            }));
+        }
+        if !matches!(
+            work.kind,
+            boreal_domain::WorkKind::Milestone | boreal_domain::WorkKind::Task
+        ) {
+            return Err(ApplicationError::Invalid(
+                "work-model/3 creation supports Milestones and Tasks".to_owned(),
+            ));
+        }
+        let execution_mode = execution_mode_name(execution_mode).to_owned();
+        let operation_id = operation_id.into();
+        let mutation = self.store_ref().create_planned_work_v3(
+            &v3_context(
+                scope,
+                &operation_id,
+                "work.create/v3",
+                work.id.as_str(),
+                now,
+            ),
+            &PlannedWorkV3Input {
+                work: work.clone(),
+                execution_mode,
+            },
+        )?;
+        let value = self
+            .store_ref()
+            .work(scope.project_id.as_str(), work.id.as_str())?
+            .ok_or_else(|| boreal_store::StoreError::NotFound {
+                entity: "work",
+                id: work.id.to_string(),
+            })?;
+        Ok(OperationResult {
+            operation_id,
+            snapshot_revision: mutation.revision,
+            changed: !mutation.replayed,
+            value,
+        })
+    }
+
+    /// Apply a revision-checked hierarchy edit to both the canonical work row
+    /// and v3 node. The store derives the v3 parent from the supplied
+    /// canonical parent and validates the resulting forest before commit.
+    pub fn edit_planning_work_v3(
+        &self,
+        scope: &PlanningScope,
+        operation_id: impl Into<String>,
+        input: &WorkPlanningEditV3Input,
+        now: &str,
+    ) -> Result<OperationResult<()>, ApplicationError> {
+        ensure_mutation_scope(self.store_ref(), scope)?;
+        let operation_id = operation_id.into();
+        let mutation = self.store_ref().edit_planning_work_v3(
+            &v3_context(
+                scope,
+                &operation_id,
+                "work.edit/v3",
+                input.work_id.as_str(),
+                now,
+            ),
+            &PlanningWorkEditV3StoreInput {
+                project_id: scope.project_id.to_string(),
+                work_id: input.work_id.to_string(),
+                parent_id: input
+                    .canonical_parent_id
+                    .as_ref()
+                    .map(|parent| parent.as_ref().map(ToString::to_string)),
+                title: input.title.clone(),
+                description: input.description.clone(),
+                priority: input.priority,
+                dispatch_policy: input
+                    .dispatch_policy
+                    .map(dispatch_policy_name)
+                    .map(str::to_owned),
+                execution_mode: input
+                    .execution_mode
+                    .map(execution_mode_name)
+                    .map(str::to_owned),
+                updated_at: now.to_owned(),
+            },
         )?;
         Ok(operation_result(operation_id, mutation))
     }
@@ -1744,6 +1858,21 @@ fn operation_result(operation_id: String, mutation: MutationResult) -> Operation
         snapshot_revision: mutation.revision,
         changed: !mutation.replayed,
         value: (),
+    }
+}
+
+fn execution_mode_name(value: ExecutionMode) -> &'static str {
+    match value {
+        ExecutionMode::Direct => "direct",
+        ExecutionMode::Container => "container",
+    }
+}
+
+fn dispatch_policy_name(value: DispatchPolicy) -> &'static str {
+    match value {
+        DispatchPolicy::Automatic => "automatic",
+        DispatchPolicy::OperatorOnly => "operator_only",
+        DispatchPolicy::Paused => "paused",
     }
 }
 

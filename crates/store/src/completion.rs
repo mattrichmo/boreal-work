@@ -62,6 +62,41 @@ pub struct CompletionMutationRequest {
     pub at: String,
 }
 
+/// A row in the unified review history. Canonical review events carry their
+/// sealed submission identity; legacy rows remain distinguishable and keep
+/// their original review id without inventing a submission relationship.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewHistoryRecord {
+    pub event_id: String,
+    pub provenance: ReviewHistoryProvenance,
+    pub project_id: String,
+    pub work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub submission_id: Option<String>,
+    pub gate_id: Option<String>,
+    pub reviewer_actor_id: String,
+    pub outcome: String,
+    pub reason: String,
+    pub operation_id: Option<String>,
+    pub created_at: String,
+    pub superseded_by: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewHistoryProvenance {
+    CanonicalEvent,
+    LegacyReview,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewHistoryPage {
+    pub items: Vec<ReviewHistoryRecord>,
+    pub limit: u64,
+    pub offset: u64,
+    pub has_more: bool,
+}
+
 impl CompletionMutationRequest {
     fn digest(&self) -> String {
         checksum(
@@ -85,6 +120,215 @@ impl CompletionMutationRequest {
 }
 
 impl SqliteStore {
+    /// Returns canonical review-event history together with legacy decisions.
+    /// History is ordered newest first, includes superseded decisions, and
+    /// keeps the source of every row explicit. The page is bounded so public
+    /// clients do not need to hydrate an entire review history to reopen a
+    /// work item.
+    pub fn review_history_list(
+        &self,
+        project_id: &str,
+        work_id: Option<&str>,
+        limit: u64,
+        offset: u64,
+    ) -> Result<ReviewHistoryPage, StoreError> {
+        if project_id.trim().is_empty() || work_id.is_some_and(|value| value.trim().is_empty()) {
+            return Err(StoreError::Invalid(
+                "project id and optional work id are required".into(),
+            ));
+        }
+        let limit = limit.clamp(1, 100);
+        let offset = offset.min(1_000_000);
+        let canonical = self.table_exists("boreal_review_event")?;
+        let sql = if canonical {
+            "SELECT event_id,provenance,project_id,work_id,attempt_id,fence,submission_id,
+                    gate_id,reviewer_actor_id,outcome,reason,operation_id,created_at,superseded_by
+             FROM (
+               SELECT 'canonical:'||r.review_event_id AS event_id,'canonical_event' AS provenance,
+                      r.project_id,r.work_id,s.attempt_id,s.fence,r.submission_id,r.gate_id,
+                      r.reviewer_actor_id,r.outcome,r.reason,r.operation_id,r.created_at,
+                      (SELECT 'canonical:'||n.review_event_id FROM boreal_review_event n
+                       WHERE n.project_id=r.project_id AND n.submission_id=r.submission_id
+                         AND n.gate_id=r.gate_id AND n.rowid>r.rowid
+                       ORDER BY n.rowid LIMIT 1) AS superseded_by
+               FROM boreal_review_event r
+               JOIN work_item w ON w.project_id=r.project_id AND w.work_id=r.work_id
+               JOIN boreal_submission s ON s.project_id=r.project_id AND s.work_id=r.work_id
+                   AND s.submission_id=r.submission_id
+               WHERE r.project_id=?1 AND (?2 IS NULL OR r.work_id=?2)
+               UNION ALL
+               SELECT 'legacy:'||r.review_id AS event_id,'legacy_review' AS provenance,
+                      w.project_id,r.work_id,r.attempt_id,r.fence,NULL AS submission_id,
+                      r.gate_id,r.reviewer_actor_id,
+                      r.decision AS outcome,
+                      r.reason,NULL AS operation_id,r.created_at,
+                      (SELECT 'legacy:'||n.review_id FROM review n
+                       WHERE n.work_id=r.work_id AND n.attempt_id=r.attempt_id AND n.fence=r.fence
+                         AND n.gate_id=r.gate_id AND n.rowid>r.rowid
+                       ORDER BY n.rowid LIMIT 1) AS superseded_by
+               FROM review r JOIN work_item w ON w.work_id=r.work_id
+               WHERE w.project_id=?1 AND (?2 IS NULL OR r.work_id=?2)
+             ) ORDER BY created_at DESC,event_id DESC LIMIT ?3 OFFSET ?4"
+        } else {
+            "SELECT event_id,provenance,project_id,work_id,attempt_id,fence,submission_id,
+                    gate_id,reviewer_actor_id,outcome,reason,operation_id,created_at,superseded_by
+             FROM (
+               SELECT 'legacy:'||r.review_id AS event_id,'legacy_review' AS provenance,
+                      w.project_id,r.work_id,r.attempt_id,r.fence,NULL AS submission_id,
+                      r.gate_id,r.reviewer_actor_id,
+                      r.decision AS outcome,
+                      r.reason,NULL AS operation_id,r.created_at,
+                      (SELECT 'legacy:'||n.review_id FROM review n
+                       WHERE n.work_id=r.work_id AND n.attempt_id=r.attempt_id AND n.fence=r.fence
+                         AND n.gate_id=r.gate_id AND n.rowid>r.rowid
+                       ORDER BY n.rowid LIMIT 1) AS superseded_by
+               FROM review r JOIN work_item w ON w.work_id=r.work_id
+               WHERE w.project_id=?1 AND (?2 IS NULL OR r.work_id=?2)
+             ) ORDER BY created_at DESC,event_id DESC LIMIT ?3 OFFSET ?4"
+        };
+        let mut statement = self.prepare(sql)?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_optional_text(2, work_id)?;
+        statement.bind_i64(3, limit + 1)?;
+        statement.bind_i64(4, offset)?;
+        let mut items = Vec::with_capacity((limit + 1) as usize);
+        while statement.step()? == SQLITE_ROW {
+            let provenance = match statement.column_text(1)?.as_str() {
+                "canonical_event" => ReviewHistoryProvenance::CanonicalEvent,
+                "legacy_review" => ReviewHistoryProvenance::LegacyReview,
+                other => {
+                    return Err(StoreError::Corrupt(format!(
+                        "unknown review history provenance: {other}"
+                    )))
+                }
+            };
+            items.push(ReviewHistoryRecord {
+                event_id: statement.column_text(0)?,
+                provenance,
+                project_id: statement.column_text(2)?,
+                work_id: statement.column_text(3)?,
+                attempt_id: statement.column_text(4)?,
+                fence: statement.column_u64(5)?,
+                submission_id: statement.column_optional_text(6)?,
+                gate_id: statement.column_optional_text(7)?,
+                reviewer_actor_id: statement.column_text(8)?,
+                outcome: statement.column_text(9)?,
+                reason: statement.column_text(10)?,
+                operation_id: statement.column_optional_text(11)?,
+                created_at: statement.column_text(12)?,
+                superseded_by: statement.column_optional_text(13)?,
+            });
+        }
+        let has_more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        Ok(ReviewHistoryPage {
+            items,
+            limit,
+            offset,
+            has_more,
+        })
+    }
+
+    /// Read one namespaced `canonical:` event or `legacy:` decision.
+    pub fn review_history_show(
+        &self,
+        project_id: &str,
+        event_id: &str,
+    ) -> Result<Option<ReviewHistoryRecord>, StoreError> {
+        if project_id.trim().is_empty() || event_id.trim().is_empty() {
+            return Err(StoreError::Invalid(
+                "project and review history event ids are required".into(),
+            ));
+        }
+        let canonical_id = event_id.strip_prefix("canonical:");
+        let legacy_id = event_id.strip_prefix("legacy:");
+        let (provenance, raw_id) = match (canonical_id, legacy_id) {
+            (Some(id), None) => (ReviewHistoryProvenance::CanonicalEvent, id),
+            (None, Some(id)) => (ReviewHistoryProvenance::LegacyReview, id),
+            _ => {
+                return Err(StoreError::Invalid(
+                    "review history id must include canonical: or legacy: provenance".into(),
+                ))
+            }
+        };
+        match provenance {
+            ReviewHistoryProvenance::CanonicalEvent => {
+                if !self.table_exists("boreal_review_event")? {
+                    return Ok(None);
+                }
+                let mut statement = self.prepare(
+                    "SELECT 'canonical:'||r.review_event_id,r.project_id,r.work_id,s.attempt_id,
+                            s.fence,r.submission_id,r.gate_id,r.reviewer_actor_id,r.outcome,
+                            r.reason,r.operation_id,r.created_at,
+                            (SELECT 'canonical:'||n.review_event_id FROM boreal_review_event n
+                             WHERE n.project_id=r.project_id AND n.submission_id=r.submission_id
+                               AND n.gate_id=r.gate_id AND n.rowid>r.rowid
+                             ORDER BY n.rowid LIMIT 1)
+                     FROM boreal_review_event r
+                     JOIN boreal_submission s ON s.project_id=r.project_id AND s.work_id=r.work_id
+                         AND s.submission_id=r.submission_id
+                     WHERE r.project_id=?1 AND r.review_event_id=?2",
+                )?;
+                statement.bind_text(1, project_id)?;
+                statement.bind_text(2, raw_id)?;
+                if statement.step()? != SQLITE_ROW {
+                    return Ok(None);
+                }
+                Ok(Some(ReviewHistoryRecord {
+                    event_id: statement.column_text(0)?,
+                    provenance,
+                    project_id: statement.column_text(1)?,
+                    work_id: statement.column_text(2)?,
+                    attempt_id: statement.column_text(3)?,
+                    fence: statement.column_u64(4)?,
+                    submission_id: statement.column_optional_text(5)?,
+                    gate_id: Some(statement.column_text(6)?),
+                    reviewer_actor_id: statement.column_text(7)?,
+                    outcome: statement.column_text(8)?,
+                    reason: statement.column_text(9)?,
+                    operation_id: statement.column_optional_text(10)?,
+                    created_at: statement.column_text(11)?,
+                    superseded_by: statement.column_optional_text(12)?,
+                }))
+            }
+            ReviewHistoryProvenance::LegacyReview => {
+                let mut statement = self.prepare(
+                    "SELECT 'legacy:'||r.review_id,w.project_id,r.work_id,r.attempt_id,r.fence,
+                            r.gate_id,r.reviewer_actor_id,
+                            r.decision,
+                            r.reason,r.created_at,
+                            (SELECT 'legacy:'||n.review_id FROM review n
+                             WHERE n.work_id=r.work_id AND n.attempt_id=r.attempt_id AND n.fence=r.fence
+                               AND n.gate_id=r.gate_id AND n.rowid>r.rowid
+                             ORDER BY n.rowid LIMIT 1)
+                     FROM review r JOIN work_item w ON w.work_id=r.work_id
+                     WHERE w.project_id=?1 AND r.review_id=?2",
+                )?;
+                statement.bind_text(1, project_id)?;
+                statement.bind_text(2, raw_id)?;
+                if statement.step()? != SQLITE_ROW {
+                    return Ok(None);
+                }
+                Ok(Some(ReviewHistoryRecord {
+                    event_id: statement.column_text(0)?,
+                    provenance,
+                    project_id: statement.column_text(1)?,
+                    work_id: statement.column_text(2)?,
+                    attempt_id: statement.column_text(3)?,
+                    fence: statement.column_u64(4)?,
+                    submission_id: None,
+                    gate_id: statement.column_optional_text(5)?,
+                    reviewer_actor_id: statement.column_text(6)?,
+                    outcome: statement.column_text(7)?,
+                    reason: statement.column_text(8)?,
+                    operation_id: None,
+                    created_at: statement.column_text(9)?,
+                    superseded_by: statement.column_optional_text(10)?,
+                }))
+            }
+        }
+    }
+
     pub(crate) fn current_gate_exception(
         &self,
         project: &str,

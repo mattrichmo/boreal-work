@@ -2343,7 +2343,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "work create",
-        syntax: "bwrk work create --project PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--acceptance focused|reviewed] [--hold CODE] [--session SESSION_ID] --expected-revision N [--json]",
+        syntax: "bwrk work create --project PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID] [--execution-mode direct|container] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--acceptance focused|reviewed|PROFILE/VERSION] [--hold CODE] [--session SESSION_ID] --expected-revision N [--json]",
         action: "mutate",
         output: "work",
         direct: true,
@@ -2352,7 +2352,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "work edit",
-        syntax: "bwrk work edit PROJECT WORK_ID [--title TEXT] [--description TEXT] [--parent WORK_ID] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N",
+        syntax: "bwrk work edit PROJECT WORK_ID [--title TEXT] [--description TEXT] [--parent WORK_ID|--clear-parent] [--execution-mode direct|container] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N",
         action: "mutate",
         output: "work",
         direct: true,
@@ -2565,6 +2565,24 @@ const COMMANDS: &[CommandSpec] = &[
         direct: true,
         service: true,
         summary: "run an admitted bounded verifier",
+    },
+    CommandSpec {
+        path: "evidence bind-result",
+        syntax: "bwrk evidence bind-result --project PROJECT --work WORK_ID --attempt ID --fence N --source-version ID --content-digest SHA --expected-revision N --expected-entity-revision N --expected-proof-revision N [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "final_result_binding",
+        direct: true,
+        service: true,
+        summary: "bind verified produced-source bytes to the current attempt and next proof generation",
+    },
+    CommandSpec {
+        path: "evidence receipts",
+        syntax: "bwrk evidence receipts --project PROJECT --work WORK_ID --attempt ID --fence N [--limit N --offset N --socket PATH --json]",
+        action: "read",
+        output: "receipt_page",
+        direct: true,
+        service: true,
+        summary: "read bounded receipt history for one exact attempt fence",
     },
     CommandSpec {
         path: "gate policy publish",

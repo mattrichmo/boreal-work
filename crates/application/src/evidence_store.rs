@@ -22,11 +22,219 @@ use crate::{
     ReceiptExpectation, ReceiptExpectationBase, ReceiptPayload, ReviewDecision,
     ReviewDecisionRequest, SqliteStore, SummaryPayload, WorkApplication,
 };
+use boreal_source::{
+    ArtifactProducer, ArtifactRelationshipInput, ArtifactRightsProvenance, ArtifactRole,
+    ArtifactScope, SourceCatalog, SourceIdentity, DEFAULT_MAX_ARTIFACT_BYTES,
+};
 use boreal_store::jobs::ExternalJobInput;
 
 const VERIFIER_JOB_PREFIX: &str = "verifier:";
 
 impl WorkApplication<'_> {
+    /// Project-scoped durable receipt readback. A receipt remains available
+    /// after its attempt is stale so failed and superseded evidence stays
+    /// inspectable, but callers cannot use this helper to cross project scope.
+    pub fn read_receipt(
+        &self,
+        project_id: &str,
+        receipt_id: &str,
+    ) -> Result<Option<ReceiptRecord>, ApplicationError> {
+        if project_id.trim().is_empty() || receipt_id.trim().is_empty() {
+            return Err(ApplicationError::Invalid(
+                "project and receipt ids are required".into(),
+            ));
+        }
+        let Some(receipt) = self.store().receipt(receipt_id)? else {
+            return Ok(None);
+        };
+        if receipt.project_id != project_id {
+            return Err(ApplicationError::Store(StoreError::WrongSubject {
+                expected: project_id.to_owned(),
+                actual: receipt.project_id,
+            }));
+        }
+        Ok(Some(receipt))
+    }
+
+    /// Exact sealed proof readback used when a client reconnects. The store
+    /// only returns the submission for the requested proof generation.
+    pub fn read_current_submission(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        proof_revision: u64,
+    ) -> Result<Option<boreal_store::acceptance::SubmissionRecord>, ApplicationError> {
+        if project_id.trim().is_empty() || work_id.trim().is_empty() || proof_revision == 0 {
+            return Err(ApplicationError::Invalid(
+                "project, work, and positive proof revision are required".into(),
+            ));
+        }
+        let acceptance = boreal_store::acceptance::AcceptanceStore::new(self.store_ref());
+        let binding = acceptance.current_final_result(project_id, work_id, proof_revision)?;
+        let submission =
+            self.store_ref()
+                .current_submission(project_id, work_id, proof_revision)?;
+        if let (Some(binding), Some(submission)) = (&binding, &submission) {
+            if submission.attempt_id != binding.attempt_id
+                || submission.fence != binding.fence
+                || submission.entity_revision != binding.entity_revision
+                || submission.source_version_id != binding.source_version_id
+                || submission.config_identity != binding.config_identity
+                || submission.profile_id != binding.profile_id
+                || submission.profile_version != binding.profile_version
+                || submission.profile_digest != binding.profile_digest
+            {
+                return Err(ApplicationError::Store(StoreError::Corrupt(
+                    "submission does not match the current final-result binding".into(),
+                )));
+            }
+        }
+        Ok(submission)
+    }
+
+    /// Verify captured result bytes through the canonical source catalog,
+    /// then bind that exact source to the next proof generation. The immutable
+    /// SQLite binding is authoritative; the source relationship is a
+    /// rebuildable lineage projection and can be repaired from its receipt.
+    pub fn bind_final_result(
+        &self,
+        catalog: &SourceCatalog,
+        request: &crate::FinalResultCaptureRequest,
+    ) -> Result<crate::OperationResult<crate::FinalResultCaptureResult>, ApplicationError> {
+        validate_final_result_capture_request(request)?;
+        let source = SourceIdentity {
+            project_id: request.project_id.clone(),
+            source_version_id: request.source_version_id.clone(),
+            content_digest: request.content_digest.clone(),
+        };
+        let acceptance = boreal_store::acceptance::AcceptanceStore::new(self.store_ref());
+        let replay = acceptance
+            .final_result_for_operation(&request.project_id, &request.operation_id)?
+            .is_some();
+        if !replay {
+            catalog
+                .read_identity_bounded(&source, DEFAULT_MAX_ARTIFACT_BYTES)
+                .map_err(|error| {
+                    ApplicationError::Invalid(format!(
+                        "final result source bytes failed catalog verification: {error}"
+                    ))
+                })?;
+        }
+        let binding =
+            acceptance.bind_final_result(&boreal_store::acceptance::FinalResultBindingRequest {
+                project_id: request.project_id.clone(),
+                work_id: request.work_id.clone(),
+                actor_id: request.actor_id.clone(),
+                session_id: request.session_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                fence: request.fence,
+                expected_project_revision: request.expected_project_revision,
+                expected_entity_revision: request.expected_entity_revision,
+                expected_proof_revision: request.expected_proof_revision,
+                source_version_id: request.source_version_id.clone(),
+                content_digest: request.content_digest.clone(),
+                operation_id: request.operation_id.clone(),
+                at: request.at.clone(),
+            })?;
+        let lineage_pending = record_final_result_lineage(catalog, &binding).err();
+        Ok(crate::OperationResult {
+            operation_id: binding.operation_id.clone(),
+            snapshot_revision: binding.project_revision,
+            changed: !binding.replayed,
+            value: crate::FinalResultCaptureResult {
+                binding,
+                lineage_pending,
+            },
+        })
+    }
+
+    pub fn read_current_final_result(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        proof_revision: u64,
+    ) -> Result<Option<boreal_store::acceptance::FinalResultBindingRecord>, ApplicationError> {
+        Ok(
+            boreal_store::acceptance::AcceptanceStore::new(self.store_ref()).current_final_result(
+                project_id,
+                work_id,
+                proof_revision,
+            )?,
+        )
+    }
+
+    pub fn read_final_result_for_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<boreal_store::acceptance::FinalResultBindingRecord>, ApplicationError> {
+        Ok(
+            boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+                .final_result_for_operation(project_id, operation_id)?,
+        )
+    }
+
+    /// Rebuild the non-authoritative ProducedDeliverable relationship from
+    /// the durable result binding after a restart or partial catalog write.
+    pub fn reconcile_final_result_lineage(
+        &self,
+        catalog: &SourceCatalog,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<boreal_store::acceptance::FinalResultBindingRecord, ApplicationError> {
+        let binding = self
+            .read_final_result_for_operation(project_id, operation_id)?
+            .ok_or_else(|| {
+                ApplicationError::Invalid(format!(
+                    "final result operation {operation_id} has no durable binding"
+                ))
+            })?;
+        record_final_result_lineage(catalog, &binding).map_err(ApplicationError::Invalid)?;
+        Ok(binding)
+    }
+
+    /// Canonical event and legacy decision history for public list/show paths.
+    /// Canonical rows preserve their submission ID and supersession chain;
+    /// legacy decisions are explicitly marked as legacy and keep their own
+    /// original identity.
+    pub fn review_history_list(
+        &self,
+        project_id: &str,
+        work_id: Option<&str>,
+        limit: u64,
+        offset: u64,
+    ) -> Result<boreal_store::completion::ReviewHistoryPage, ApplicationError> {
+        Ok(self
+            .store_ref()
+            .review_history_list(project_id, work_id, limit, offset)?)
+    }
+
+    pub fn review_history_show(
+        &self,
+        project_id: &str,
+        event_id: &str,
+    ) -> Result<Option<boreal_store::completion::ReviewHistoryRecord>, ApplicationError> {
+        Ok(self.store_ref().review_history_show(project_id, event_id)?)
+    }
+
+    /// Bounded exact attempt/fence receipt hydration. Absence is an empty page;
+    /// multiple receipts are preserved in insertion order, including failed
+    /// and rejected facts.
+    pub fn read_receipts_for_attempt(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        attempt_id: &str,
+        fence: u64,
+        limit: u64,
+        offset: u64,
+    ) -> Result<boreal_store::acceptance::ReceiptAttemptPage, ApplicationError> {
+        Ok(
+            boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+                .receipts_for_attempt(project_id, work_id, attempt_id, fence, limit, offset)?,
+        )
+    }
+
     pub fn record_receipt(
         &self,
         actor_id: &str,
@@ -533,11 +741,27 @@ impl WorkApplication<'_> {
                 crate::EvidenceValidationError::new(EvidenceErrorCode::StaleFence),
             ));
         }
-        let source_snapshot_hash = attempt.source_version_id.clone().ok_or_else(|| {
-            ApplicationError::Evidence(crate::EvidenceValidationError::new(
-                EvidenceErrorCode::ReceiptSourceMismatch,
-            ))
-        })?;
+        let current_final = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+            .current_final_result_for_attempt(&attempt)?;
+        if let Some(binding) = &current_final {
+            if binding.config_identity != attempt.config_identity
+                || binding.profile_id != definition.id.as_str()
+                || binding.profile_version.to_string() != definition.version
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptPolicyMismatch),
+                ));
+            }
+        }
+        let source_snapshot_hash = current_final
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or_else(|| attempt.source_version_id.clone())
+            .ok_or_else(|| {
+                ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                    EvidenceErrorCode::ReceiptSourceMismatch,
+                ))
+            })?;
         let base = ReceiptExpectationBase {
             work_id: work_id.clone(),
             attempt_id: attempt_id.clone(),
@@ -608,11 +832,8 @@ impl WorkApplication<'_> {
                 actual: attempt.actor_id,
             }));
         }
-        let source_snapshot_hash = attempt.source_version_id.ok_or_else(|| {
-            ApplicationError::Evidence(crate::EvidenceValidationError::new(
-                EvidenceErrorCode::ReceiptSourceMismatch,
-            ))
-        })?;
+        let current_final = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+            .current_final_result_for_attempt(&attempt)?;
         let persisted_gate_id = self.store().gate_id_for_work(
             &project_id,
             receipt.work_id.as_str(),
@@ -624,6 +845,25 @@ impl WorkApplication<'_> {
             .ok_or_else(|| StoreError::NotFound {
                 entity: "gate",
                 id: receipt.gate_id.as_str().to_owned(),
+            })?;
+        if let Some(binding) = &current_final {
+            if binding.config_identity != attempt.config_identity
+                || binding.profile_id != gate.profile_id
+                || binding.profile_version != gate.profile_version
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptPolicyMismatch),
+                ));
+            }
+        }
+        let source_snapshot_hash = current_final
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id)
+            .ok_or_else(|| {
+                ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                    EvidenceErrorCode::ReceiptSourceMismatch,
+                ))
             })?;
         Ok(ReceiptExpectation {
             work_id: receipt.work_id.clone(),
@@ -1436,6 +1676,89 @@ fn receipt_outcome(value: boreal_domain::ReceiptResult) -> ReceiptOutcome {
         boreal_domain::ReceiptResult::Failed => ReceiptOutcome::Failed,
         boreal_domain::ReceiptResult::Stale => ReceiptOutcome::Stale,
     }
+}
+
+fn validate_final_result_capture_request(
+    request: &crate::FinalResultCaptureRequest,
+) -> Result<(), ApplicationError> {
+    for (name, value) in [
+        ("project_id", request.project_id.as_str()),
+        ("work_id", request.work_id.as_str()),
+        ("actor_id", request.actor_id.as_str()),
+        ("session_id", request.session_id.as_str()),
+        ("attempt_id", request.attempt_id.as_str()),
+        ("source_version_id", request.source_version_id.as_str()),
+        ("operation_id", request.operation_id.as_str()),
+        ("timestamp", request.at.as_str()),
+    ] {
+        if value.trim().is_empty() || value.len() > 255 || value.contains('\0') {
+            return Err(ApplicationError::Invalid(format!(
+                "final result {name} must contain 1..=255 valid bytes"
+            )));
+        }
+    }
+    if request.fence == 0
+        || request.expected_project_revision == 0
+        || request.expected_proof_revision == 0
+        || request.content_digest.len() != "sha256:".len() + 64
+        || !request.content_digest.starts_with("sha256:")
+        || !request.content_digest["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(ApplicationError::Invalid(
+            "final result fence, revisions, or source digest are invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn record_final_result_lineage(
+    catalog: &SourceCatalog,
+    binding: &boreal_store::acceptance::FinalResultBindingRecord,
+) -> Result<(), String> {
+    let source = SourceIdentity {
+        project_id: binding.project_id.clone(),
+        source_version_id: binding.source_version_id.clone(),
+        content_digest: binding.content_digest.clone(),
+    };
+    catalog
+        .read_identity_bounded(&source, DEFAULT_MAX_ARTIFACT_BYTES)
+        .map_err(|error| format!("final result source readback failed: {error}"))?;
+    let digest = crate::canonical_request_digest(
+        "final-result.lineage-id/v1",
+        json!({
+            "project_id": binding.project_id,
+            "work_id": binding.work_id,
+            "attempt_id": binding.attempt_id,
+            "fence": binding.fence,
+            "binding_id": binding.binding_id,
+        }),
+    );
+    let relationship_suffix = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    let relationship_suffix = relationship_suffix
+        .get(..48)
+        .ok_or_else(|| "final result lineage digest is malformed".to_owned())?;
+    catalog
+        .record_artifact_relationship(ArtifactRelationshipInput {
+            relationship_id: format!("final-result-{relationship_suffix}"),
+            source,
+            role: ArtifactRole::ProducedDeliverable,
+            scope: ArtifactScope::Project,
+            requirement_key: None,
+            produced_by: Some(ArtifactProducer {
+                work_id: binding.work_id.clone(),
+                attempt_id: binding.attempt_id.clone(),
+                result_id: binding.binding_id.clone(),
+            }),
+            rights: ArtifactRightsProvenance::default(),
+            operation_id: format!(
+                "final-result-lineage-{}",
+                digest.strip_prefix("sha256:").unwrap_or(&digest)
+            ),
+        })
+        .map_err(|error| format!("final result lineage remains pending: {error}"))?;
+    Ok(())
 }
 
 fn receipt_payload_from_record(record: &ReceiptRecord) -> Result<ReceiptPayload, ApplicationError> {

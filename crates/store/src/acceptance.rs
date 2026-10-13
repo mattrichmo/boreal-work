@@ -1332,6 +1332,61 @@ pub struct AcceptanceResultRecord {
     pub replayed: bool,
 }
 
+/// Request to bind one immutable produced source to the next proof generation.
+/// The profile and configuration are deliberately absent: both are recovered
+/// from the authoritative attempt and pinned requirements under the write lock.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalResultBindingRequest {
+    pub project_id: String,
+    pub work_id: String,
+    pub actor_id: String,
+    pub session_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub expected_project_revision: u64,
+    pub expected_entity_revision: u64,
+    pub expected_proof_revision: u64,
+    pub source_version_id: String,
+    pub content_digest: String,
+    pub operation_id: String,
+    pub at: String,
+}
+
+/// Durable binding and restart-safe operation receipt for one final result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalResultBindingRecord {
+    pub binding_id: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub actor_id: String,
+    pub session_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub source_version_id: String,
+    pub content_digest: String,
+    pub config_identity: String,
+    pub profile_id: String,
+    pub profile_version: u64,
+    pub profile_digest: String,
+    pub entity_revision: u64,
+    pub prior_proof_revision: u64,
+    pub proof_revision: u64,
+    pub operation_id: String,
+    pub request_digest: String,
+    pub project_revision: u64,
+    pub created_at: String,
+    pub replayed: bool,
+}
+
+/// Bounded append-only receipt history for one exact attempt fence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiptAttemptPage {
+    pub items: Vec<super::ReceiptRecord>,
+    pub limit: u64,
+    pub offset: u64,
+    pub has_more: bool,
+}
+
 impl AcceptanceResultRecord {
     /// Typed facts present in this immutable result, in stable schema order.
     pub fn fact_schemas(&self) -> Vec<&'static str> {
@@ -1372,6 +1427,55 @@ impl<'a> AcceptanceStore<'a> {
         request: &AcceptanceResultBindRequest,
     ) -> Result<AcceptanceResultRecord, StoreError> {
         self.store.bind_acceptance_result(request)
+    }
+
+    pub fn bind_final_result(
+        &self,
+        request: &FinalResultBindingRequest,
+    ) -> Result<FinalResultBindingRecord, StoreError> {
+        self.store.bind_final_result(request)
+    }
+
+    pub fn final_result_for_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<FinalResultBindingRecord>, StoreError> {
+        self.store
+            .final_result_binding_for_operation(project_id, operation_id)
+    }
+
+    pub fn current_final_result(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        proof_revision: u64,
+    ) -> Result<Option<FinalResultBindingRecord>, StoreError> {
+        self.store
+            .current_final_result_binding(project_id, work_id, proof_revision)
+    }
+
+    /// Returns the binding for the current proof only when it belongs to this
+    /// exact attempt fence. A binding for another attempt is a stale-context
+    /// conflict, not an absent result.
+    pub fn current_final_result_for_attempt(
+        &self,
+        attempt: &super::AttemptRecord,
+    ) -> Result<Option<FinalResultBindingRecord>, StoreError> {
+        self.store.current_final_result_for_attempt(attempt)
+    }
+
+    pub fn receipts_for_attempt(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        attempt_id: &str,
+        fence: u64,
+        limit: u64,
+        offset: u64,
+    ) -> Result<ReceiptAttemptPage, StoreError> {
+        self.store
+            .receipts_for_attempt(project_id, work_id, attempt_id, fence, limit, offset)
     }
 
     pub fn result_for_attempt(
@@ -1554,6 +1658,332 @@ impl SubmissionRecord {
 }
 
 impl SqliteStore {
+    /// Returns all receipt history for one exact project/work/attempt/fence
+    /// scope. Failed and rejected records remain in the result; paging never
+    /// silently selects a passing receipt or a receipt from another fence.
+    pub fn receipts_for_attempt(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        attempt_id: &str,
+        fence: u64,
+        limit: u64,
+        offset: u64,
+    ) -> Result<ReceiptAttemptPage, StoreError> {
+        if project_id.trim().is_empty()
+            || work_id.trim().is_empty()
+            || attempt_id.trim().is_empty()
+            || fence == 0
+        {
+            return Err(StoreError::Invalid(
+                "project, work, attempt, and positive fence are required".into(),
+            ));
+        }
+        let limit = limit.clamp(1, 100);
+        let offset = offset.min(1_000_000);
+        let mut rows = self.prepare(
+            "SELECT r.receipt_id,wi.project_id,r.work_id,r.attempt_id,r.fence,
+                    r.operation_id,r.gate_id,r.executable,r.argv_json,r.cwd,r.exit_code,
+                    r.started_at,r.ended_at,r.source_version_id,r.config_identity,
+                    r.environment_fingerprint,r.output_digest,r.output_ref,r.subject_json,
+                    r.coverage_json,r.attestation,r.result,r.rejection_code,r.created_at
+             FROM receipt r
+             JOIN work_item wi ON wi.project_id=?1 AND wi.work_id=r.work_id
+             WHERE wi.project_id=?1 AND r.work_id=?2 AND r.attempt_id=?3 AND r.fence=?4
+             ORDER BY r.rowid LIMIT ?5 OFFSET ?6",
+        )?;
+        rows.bind_text(1, project_id)?;
+        rows.bind_text(2, work_id)?;
+        rows.bind_text(3, attempt_id)?;
+        rows.bind_i64(4, fence)?;
+        rows.bind_i64(5, limit + 1)?;
+        rows.bind_i64(6, offset)?;
+        let mut items = Vec::with_capacity((limit + 1) as usize);
+        while rows.step()? == super::SQLITE_ROW {
+            items.push(super::receipt_from_statement(&rows)?);
+        }
+        let has_more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        Ok(ReceiptAttemptPage {
+            items,
+            limit,
+            offset,
+            has_more,
+        })
+    }
+
+    /// Binds a validated immutable result source to a fresh proof generation.
+    /// The claim source on the attempt remains untouched; this row records the
+    /// produced source, pinned profile, and current execution fence together.
+    pub fn bind_final_result(
+        &self,
+        request: &FinalResultBindingRequest,
+    ) -> Result<FinalResultBindingRecord, StoreError> {
+        validate_final_result_binding_request(request)?;
+        self.ensure_final_result_binding_schema()?;
+        let request_digest = final_result_binding_digest(request);
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            if let Some(mut existing) =
+                self.final_result_binding_for_operation(&request.project_id, &request.operation_id)?
+            {
+                if existing.request_digest != request_digest
+                    || existing.actor_id != request.actor_id
+                    || existing.session_id != request.session_id
+                    || existing.work_id != request.work_id
+                    || existing.attempt_id != request.attempt_id
+                    || existing.fence != request.fence
+                    || existing.source_version_id != request.source_version_id
+                    || existing.content_digest != request.content_digest
+                {
+                    return Err(StoreError::Conflict(
+                        "final result operation id was reused with a different identity or payload"
+                            .into(),
+                    ));
+                }
+                existing.replayed = true;
+                return Ok(existing);
+            }
+            if self.operation(&request.operation_id)?.is_some() {
+                return Err(StoreError::Conflict(
+                    "final result operation id is already used by another operation".into(),
+                ));
+            }
+
+            self.validate_project_session(
+                &request.project_id,
+                &request.actor_id,
+                &request.session_id,
+            )?;
+            check_expected_revision(
+                self.project_revision(&request.project_id)?.0,
+                Some(request.expected_project_revision),
+            )?;
+            let (entity_revision, proof_revision) =
+                self.proof_cursor(&request.project_id, &request.work_id)?;
+            if entity_revision != request.expected_entity_revision
+                || proof_revision != request.expected_proof_revision
+            {
+                return Err(StoreError::Conflict(
+                    "final result subject revision changed before binding".into(),
+                ));
+            }
+
+            let attempt = self
+                .attempt_record(&request.attempt_id, false)?
+                .ok_or_else(|| StoreError::NotFound {
+                    entity: "attempt",
+                    id: request.attempt_id.clone(),
+                })?;
+            if !attempt.current
+                || attempt.project_id != request.project_id
+                || attempt.work_id != request.work_id
+                || attempt.actor_id != request.actor_id
+                || attempt.session_id.as_deref() != Some(request.session_id.as_str())
+                || attempt.fence != request.fence
+                || attempt.phase != boreal_domain::AttemptPhase::Running
+                || super::timestamp_cmp(&request.at, &attempt.hard_deadline)
+                    != std::cmp::Ordering::Less
+                || super::timestamp_cmp(&request.at, &attempt.lease_deadline)
+                    != std::cmp::Ordering::Less
+            {
+                return Err(StoreError::Conflict(
+                    "final result requires the current running actor/session attempt, fence, and live deadlines".into(),
+                ));
+            }
+            if attempt.config_identity.trim().is_empty() {
+                return Err(StoreError::Conflict(
+                    "final result requires the attempt's pinned configuration identity".into(),
+                ));
+            }
+            let at = super::status_evaluation::canonical_status_timestamp(&request.at)?;
+            self.authorize_work_action_in_transaction(
+                &request.project_id,
+                &request.work_id,
+                &request.actor_id,
+                Some(&request.session_id),
+                at,
+                boreal_domain::actions::ActionKind::AttachEvidence,
+            )?;
+
+            let source = self
+                .source_version(&request.project_id, &request.source_version_id)?
+                .ok_or_else(|| {
+                    StoreError::Conflict(
+                        "final result source is not registered in this project".into(),
+                    )
+                })?;
+            if source.content_digest != request.content_digest || source.availability != "available"
+            {
+                return Err(StoreError::Conflict(
+                    "final result source digest or availability does not match registered metadata"
+                        .into(),
+                ));
+            }
+
+            let pin = super::ProfileStore::new(self)
+                .current_pinned_requirements(&request.project_id, &request.work_id)?;
+            if pin.proof_revision != proof_revision {
+                return Err(StoreError::Corrupt(format!(
+                    "pinned profile revision {} does not match current proof revision {proof_revision}",
+                    pin.proof_revision
+                )));
+            }
+
+            let identity = super::identity::IdentityStore::new(self)
+                .context(&request.project_id)
+                .map_err(|error| {
+                    StoreError::Conflict(format!("final result identity context: {error}"))
+                })?;
+            let advanced = super::identity::IdentityStore::new(self)
+                .advance_proof(
+                    &identity,
+                    &request.work_id,
+                    super::identity::ProofRevision::new(proof_revision),
+                    &request.at,
+                )
+                .map_err(|error| {
+                    StoreError::Conflict(format!("final result proof advance: {error}"))
+                })?;
+
+            // A new proof generation must have its own durable requirement
+            // snapshot before closeout, verification, or review can read it.
+            let mut next_pin = pin.clone();
+            next_pin.proof_revision = advanced.proof.get();
+            next_pin.resolved_digest = next_pin.computed_digest()?;
+            super::ProfileStore::new(self).persist_pinned_requirements_in_transaction(&next_pin)?;
+
+            let binding_id = format!("final-result:{}", request.operation_id);
+            let mut insert = self.prepare(
+                "INSERT INTO boreal_final_result_binding_v1
+                 (binding_id,project_id,work_id,attempt_id,fence,source_version_id,content_digest,
+                  config_identity,profile_id,profile_version,profile_digest,entity_revision,
+                  prior_proof_revision,proof_revision,actor_id,session_id,operation_id,
+                  request_digest,project_revision,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+            )?;
+            insert.bind_text(1, &binding_id)?;
+            insert.bind_text(2, &request.project_id)?;
+            insert.bind_text(3, &request.work_id)?;
+            insert.bind_text(4, &request.attempt_id)?;
+            insert.bind_i64(5, request.fence)?;
+            insert.bind_text(6, &request.source_version_id)?;
+            insert.bind_text(7, &request.content_digest)?;
+            insert.bind_text(8, &attempt.config_identity)?;
+            insert.bind_text(9, &pin.profile.profile_id)?;
+            insert.bind_i64(10, pin.profile.version)?;
+            insert.bind_text(11, &pin.profile.policy_digest)?;
+            insert.bind_i64(12, entity_revision)?;
+            insert.bind_i64(13, proof_revision)?;
+            insert.bind_i64(14, advanced.proof.get())?;
+            insert.bind_text(15, &request.actor_id)?;
+            insert.bind_text(16, &request.session_id)?;
+            insert.bind_text(17, &request.operation_id)?;
+            insert.bind_text(18, &request_digest)?;
+            insert.bind_i64(19, advanced.project_snapshot.0)?;
+            insert.bind_text(20, &request.at)?;
+            insert.run()?;
+
+            let result_json = json!({
+                "binding_id": binding_id,
+                "work_id": request.work_id,
+                "attempt_id": request.attempt_id,
+                "fence": request.fence,
+                "source_version_id": request.source_version_id,
+                "content_digest": request.content_digest,
+                "config_identity": attempt.config_identity,
+                "profile_id": pin.profile.profile_id,
+                "profile_version": pin.profile.version,
+                "profile_digest": pin.profile.policy_digest,
+                "entity_revision": entity_revision,
+                "prior_proof_revision": proof_revision,
+                "proof_revision": advanced.proof.get(),
+            })
+            .to_string();
+            self.append_operation(&super::OperationRecord {
+                operation_id: request.operation_id.clone(),
+                project_id: request.project_id.clone(),
+                command: "final.result.bind".into(),
+                actor_id: request.actor_id.clone(),
+                session_id: Some(request.session_id.clone()),
+                expected_revision: Some(request.expected_project_revision),
+                attempt_id: Some(request.attempt_id.clone()),
+                fence: Some(request.fence),
+                request_digest: request_digest.clone(),
+                outcome: super::OperationOutcome::Changed,
+                result_json,
+                revision: advanced.project_snapshot.0,
+                created_at: request.at.clone(),
+                completed_at: Some(request.at.clone()),
+            })?;
+            self.final_result_binding_for_operation(&request.project_id, &request.operation_id)?
+                .ok_or_else(|| StoreError::Corrupt("final result binding disappeared".into()))
+        })();
+        finish_transaction(self, result)
+    }
+
+    pub fn final_result_binding_for_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<FinalResultBindingRecord>, StoreError> {
+        if !self.table_exists("boreal_final_result_binding_v1")? {
+            return Ok(None);
+        }
+        let mut row = self.prepare(
+            "SELECT binding_id,project_id,work_id,actor_id,session_id,attempt_id,fence,
+                    source_version_id,content_digest,config_identity,profile_id,profile_version,
+                    profile_digest,entity_revision,prior_proof_revision,proof_revision,
+                    operation_id,request_digest,project_revision,created_at
+             FROM boreal_final_result_binding_v1
+             WHERE project_id=?1 AND operation_id=?2",
+        )?;
+        row.bind_text(1, project_id)?;
+        row.bind_text(2, operation_id)?;
+        if row.step()? != super::SQLITE_ROW {
+            return Ok(None);
+        }
+        final_result_binding_from_row(&row).map(Some)
+    }
+
+    /// Reads the immutable result attached to an exact proof generation.
+    pub fn current_final_result_binding(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        proof_revision: u64,
+    ) -> Result<Option<FinalResultBindingRecord>, StoreError> {
+        if project_id.trim().is_empty() || work_id.trim().is_empty() || proof_revision == 0 {
+            return Err(StoreError::Invalid(
+                "project, work, and positive proof revision are required".into(),
+            ));
+        }
+        if !self.table_exists("boreal_final_result_binding_v1")? {
+            return Ok(None);
+        }
+        let (_, current_proof_revision) = self.proof_cursor(project_id, work_id)?;
+        if current_proof_revision != proof_revision {
+            return Err(StoreError::Conflict(format!(
+                "final result proof revision is stale: requested {proof_revision}, current {current_proof_revision}"
+            )));
+        }
+        let mut row = self.prepare(
+            "SELECT binding_id,project_id,work_id,actor_id,session_id,attempt_id,fence,
+                    source_version_id,content_digest,config_identity,profile_id,profile_version,
+                    profile_digest,entity_revision,prior_proof_revision,proof_revision,
+                    operation_id,request_digest,project_revision,created_at
+             FROM boreal_final_result_binding_v1
+             WHERE project_id=?1 AND work_id=?2 AND proof_revision=?3",
+        )?;
+        row.bind_text(1, project_id)?;
+        row.bind_text(2, work_id)?;
+        row.bind_i64(3, proof_revision)?;
+        if row.step()? != super::SQLITE_ROW {
+            return Ok(None);
+        }
+        final_result_binding_from_row(&row).map(Some)
+    }
+
     /// Installs the additive typed-acceptance sidecar. It intentionally does
     /// not alter legacy profile, receipt, submission, or review tables.
     pub fn ensure_typed_acceptance_schema(&self) -> Result<(), StoreError> {
@@ -2304,6 +2734,12 @@ impl SqliteStore {
         &self,
         attempt: &super::AttemptRecord,
     ) -> Result<Vec<String>, StoreError> {
+        let current_final = self.current_final_result_for_attempt(attempt)?;
+        let source_version_id = current_final
+            .as_ref()
+            .map(|binding| binding.source_version_id.as_str())
+            .or(attempt.source_version_id.as_deref())
+            .filter(|id| !id.is_empty());
         let mut rows = self.prepare(
             "SELECT receipt_id FROM receipt WHERE work_id = ?1 AND attempt_id = ?2 AND fence = ?3
              AND source_version_id = ?4 AND config_identity = ?5 ORDER BY rowid",
@@ -2311,13 +2747,40 @@ impl SqliteStore {
         rows.bind_text(1, &attempt.work_id)?;
         rows.bind_text(2, &attempt.attempt_id)?;
         rows.bind_i64(3, attempt.fence)?;
-        rows.bind_optional_text(4, attempt.source_version_id.as_deref())?;
+        rows.bind_optional_text(4, source_version_id)?;
         rows.bind_text(5, &attempt.config_identity)?;
         let mut ids = Vec::new();
         while rows.step()? == super::SQLITE_ROW {
             ids.push(rows.column_text(0)?);
         }
         Ok(ids)
+    }
+
+    pub(crate) fn current_final_result_for_attempt(
+        &self,
+        attempt: &super::AttemptRecord,
+    ) -> Result<Option<FinalResultBindingRecord>, StoreError> {
+        let (entity_revision, proof_revision) =
+            self.proof_cursor(&attempt.project_id, &attempt.work_id)?;
+        let Some(binding) = self.current_final_result_binding(
+            &attempt.project_id,
+            &attempt.work_id,
+            proof_revision,
+        )?
+        else {
+            return Ok(None);
+        };
+        if binding.attempt_id != attempt.attempt_id || binding.fence != attempt.fence {
+            return Err(StoreError::Conflict(
+                "current final-result binding belongs to another attempt fence".into(),
+            ));
+        }
+        if binding.entity_revision != entity_revision {
+            return Err(StoreError::Corrupt(
+                "current final-result binding does not match the work entity revision".into(),
+            ));
+        }
+        Ok(Some(binding))
     }
 
     pub(crate) fn seal_submission_in_transaction(
@@ -2351,9 +2814,11 @@ impl SqliteStore {
                 "submission requires a running or verifying attempt".into(),
             ));
         }
-        let source = attempt
-            .source_version_id
-            .as_deref()
+        let current_final = self.current_final_result_for_attempt(&attempt)?;
+        let source = current_final
+            .as_ref()
+            .map(|binding| binding.source_version_id.as_str())
+            .or(attempt.source_version_id.as_deref())
             .filter(|id| !id.is_empty())
             .ok_or_else(|| {
                 StoreError::Invalid("submission requires a genuine source snapshot".into())
@@ -2372,6 +2837,18 @@ impl SqliteStore {
         let pin =
             super::ProfileStore::new(self).current_pinned_requirements(project_id, work_id)?;
         let (entity_revision, proof_revision) = self.proof_cursor(project_id, work_id)?;
+        if let Some(binding) = &current_final {
+            if binding.entity_revision != entity_revision
+                || binding.proof_revision != proof_revision
+                || binding.attempt_id != attempt_id
+                || binding.fence != fence
+            {
+                return Err(StoreError::Conflict(
+                    "final result binding does not match the submitted attempt fence and revisions"
+                        .into(),
+                ));
+            }
+        }
         if pin.proof_revision != proof_revision
             || !summary.current
             || summary.work_id != work_id
@@ -2569,6 +3046,85 @@ impl SqliteStore {
             Ok(None)
         }
     }
+}
+
+fn validate_final_result_binding_request(
+    request: &FinalResultBindingRequest,
+) -> Result<(), StoreError> {
+    for (name, value, maximum) in [
+        ("project_id", request.project_id.as_str(), 255),
+        ("work_id", request.work_id.as_str(), 255),
+        ("actor_id", request.actor_id.as_str(), 255),
+        ("session_id", request.session_id.as_str(), 255),
+        ("attempt_id", request.attempt_id.as_str(), 255),
+        ("source_version_id", request.source_version_id.as_str(), 255),
+        ("operation_id", request.operation_id.as_str(), 255),
+        ("timestamp", request.at.as_str(), 255),
+    ] {
+        if value.trim().is_empty() || value.len() > maximum || value.contains('\0') {
+            return Err(StoreError::Invalid(format!(
+                "final result {name} must contain 1..={maximum} valid bytes"
+            )));
+        }
+    }
+    if request.fence == 0
+        || request.expected_project_revision == 0
+        || request.expected_proof_revision == 0
+        || !super::valid_sha256_digest(&request.content_digest)
+    {
+        return Err(StoreError::Invalid(
+            "final result fence, revisions, or source digest are invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn final_result_binding_digest(request: &FinalResultBindingRequest) -> String {
+    super::checksum(
+        json!({
+            "project_id": request.project_id,
+            "work_id": request.work_id,
+            "actor_id": request.actor_id,
+            "session_id": request.session_id,
+            "attempt_id": request.attempt_id,
+            "fence": request.fence,
+            "expected_project_revision": request.expected_project_revision,
+            "expected_entity_revision": request.expected_entity_revision,
+            "expected_proof_revision": request.expected_proof_revision,
+            "source_version_id": request.source_version_id,
+            "content_digest": request.content_digest,
+        })
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+fn final_result_binding_from_row(
+    row: &super::Statement<'_>,
+) -> Result<FinalResultBindingRecord, StoreError> {
+    Ok(FinalResultBindingRecord {
+        binding_id: row.column_text(0)?,
+        project_id: row.column_text(1)?,
+        work_id: row.column_text(2)?,
+        actor_id: row.column_text(3)?,
+        session_id: row.column_text(4)?,
+        attempt_id: row.column_text(5)?,
+        fence: row.column_u64(6)?,
+        source_version_id: row.column_text(7)?,
+        content_digest: row.column_text(8)?,
+        config_identity: row.column_text(9)?,
+        profile_id: row.column_text(10)?,
+        profile_version: row.column_u64(11)?,
+        profile_digest: row.column_text(12)?,
+        entity_revision: row.column_u64(13)?,
+        prior_proof_revision: row.column_u64(14)?,
+        proof_revision: row.column_u64(15)?,
+        operation_id: row.column_text(16)?,
+        request_digest: row.column_text(17)?,
+        project_revision: row.column_u64(18)?,
+        created_at: row.column_text(19)?,
+        replayed: false,
+    })
 }
 
 fn validate_acceptance_bind_request(

@@ -56,6 +56,31 @@ pub struct WorkNodeV3Input {
     pub updated_at: String,
 }
 
+/// Canonical work data and the v3 execution mode, created together so every
+/// newly planned milestone/task is immediately available to v3 rollups and
+/// cycle assignment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannedWorkV3Input {
+    pub work: boreal_domain::WorkItem,
+    pub execution_mode: String,
+}
+
+/// Fields accepted by the durable v3 planning edit. `parent_id` is the
+/// canonical schema-2 parent (a Sprint for nested Tasks); the store derives
+/// the flattened v3 milestone parent in the same transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanningWorkEditV3Input {
+    pub project_id: String,
+    pub work_id: String,
+    pub parent_id: Option<Option<String>>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub priority: Option<u8>,
+    pub dispatch_policy: Option<String>,
+    pub execution_mode: Option<String>,
+    pub updated_at: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkNodeV3Record {
     pub project_id: String,
@@ -278,6 +303,11 @@ impl SqliteStore {
                         "state": format!("{:?}", gate.state).to_ascii_lowercase(),
                     })).collect::<Vec<_>>(),
                 },
+            },
+            "v3_execution_mode": match work.kind {
+                boreal_domain::WorkKind::Milestone => Some("container"),
+                boreal_domain::WorkKind::Task => Some("direct"),
+                boreal_domain::WorkKind::Sprint => None,
             }
         }));
         let context = &bound;
@@ -316,7 +346,35 @@ impl SqliteStore {
                 } else if work.kind == boreal_domain::WorkKind::Sprint {
                     return Err(StoreError::Invalid("sprints require a parent".into()));
                 }
+                let v3_parent = if matches!(
+                    work.kind,
+                    boreal_domain::WorkKind::Milestone | boreal_domain::WorkKind::Task
+                ) {
+                    Some(self.v3_parent_for_work(work)?)
+                } else {
+                    None
+                };
                 self.create_work_in_transaction(work, &input.created_at)?;
+                if let Some(parent_id) = v3_parent {
+                    let execution_mode = match work.kind {
+                        boreal_domain::WorkKind::Milestone => "container",
+                        boreal_domain::WorkKind::Task => "direct",
+                        boreal_domain::WorkKind::Sprint => unreachable!("Sprint has no v3 node"),
+                    };
+                    let mut node = self.prepare(
+                        "INSERT INTO work_node_v3
+                         (work_id, project_id, decomposition_kind, execution_mode,
+                          parent_id, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                    )?;
+                    node.bind_text(1, work.id.as_str())?;
+                    node.bind_text(2, work.project_id.as_str())?;
+                    node.bind_text(3, work_kind_name(work.kind))?;
+                    node.bind_text(4, execution_mode)?;
+                    node.bind_optional_text(5, parent_id.as_deref())?;
+                    node.bind_text(6, &input.created_at)?;
+                    node.run()?;
+                }
                 let mut statement = self.prepare(
                     "INSERT INTO intake_promotion_v3
                      (promotion_id, project_id, intake_id, intake_revision,
@@ -352,6 +410,29 @@ impl SqliteStore {
             "work_node",
             &input.work_id,
             || {
+                let work = self
+                    .work(&input.project_id, &input.work_id)?
+                    .ok_or_else(|| StoreError::NotFound {
+                        entity: "work",
+                        id: input.work_id.clone(),
+                    })?;
+                let domain_work = work_item_from_record(&work, work.parent_id.clone())?;
+                let expected_parent = self.v3_parent_for_work(&domain_work)?;
+                if input.decomposition_kind != work_kind_name(domain_work.kind)
+                    || input.parent_id != expected_parent
+                {
+                    return Err(StoreError::Invalid(
+                        "v3 node identity must match its canonical work kind and parent".into(),
+                    ));
+                }
+                if !matches!(input.execution_mode.as_str(), "direct" | "container")
+                    || (domain_work.kind == boreal_domain::WorkKind::Milestone
+                        && input.execution_mode != "container")
+                {
+                    return Err(StoreError::Invalid(
+                        "invalid execution mode for the canonical work kind".into(),
+                    ));
+                }
                 let mut statement = self.prepare(
                     "INSERT INTO work_node_v3
                  (work_id, project_id, decomposition_kind, execution_mode,
@@ -368,6 +449,397 @@ impl SqliteStore {
                 statement.run()
             },
         )
+    }
+
+    /// Create a canonical schema-2 work row and its additive v3 hierarchy
+    /// projection under one operation, revision, journal entry, and audit
+    /// event. Schema-2 Sprint remains the adapter parent for nested Tasks; the
+    /// v3 node points to that Sprint's Milestone.
+    pub fn create_planned_work_v3(
+        &self,
+        context: &V3MutationContext,
+        input: &PlannedWorkV3Input,
+    ) -> Result<MutationResult, StoreError> {
+        let work = &input.work;
+        let profile = &work.acceptance_profile;
+        let bound = context.with_payload(json!({
+            "work": {
+                "project_id": work.project_id.as_str(),
+                "work_id": work.id.as_str(),
+                "kind": work_kind_name(work.kind),
+                "parent_id": work.parent_id.as_ref().map(|id| id.as_str()),
+                "title": work.title,
+                "description": work.description,
+                "lifecycle": format!("{:?}", work.lifecycle).to_ascii_lowercase(),
+                "priority": work.priority,
+                "dispatch_policy": format!("{:?}", work.dispatch_policy).to_ascii_lowercase(),
+                "hard_holds": work.hard_holds.iter().map(|hold| hold.stable_code()).collect::<Vec<_>>(),
+                "acceptance_profile": {
+                    "id": profile.id.as_str(),
+                    "version": profile.version,
+                    "gates": profile.gates.iter().map(|gate| json!({
+                        "id": gate.id.as_str(),
+                        "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
+                        "required": gate.required,
+                        "state": format!("{:?}", gate.state).to_ascii_lowercase(),
+                    })).collect::<Vec<_>>(),
+                },
+            },
+            "execution_mode": input.execution_mode,
+        }));
+        let context = &bound;
+        ensure_project(&context.project_id, work.project_id.as_str())?;
+        self.v3_mutation(
+            context,
+            "work.create.v3",
+            "work_node",
+            work.id.as_str(),
+            || {
+                if !matches!(work.kind, boreal_domain::WorkKind::Milestone | boreal_domain::WorkKind::Task) {
+                    return Err(StoreError::Invalid(
+                        "work-model/3 creation supports Milestones and Tasks; create legacy Sprint containers through the planning adapter".into(),
+                    ));
+                }
+                if !matches!(input.execution_mode.as_str(), "direct" | "container") {
+                    return Err(StoreError::Invalid("invalid work execution mode".into()));
+                }
+                if work.kind == boreal_domain::WorkKind::Milestone
+                    && input.execution_mode != "container"
+                {
+                    return Err(StoreError::Invalid(
+                        "milestones must use container execution mode".into(),
+                    ));
+                }
+                if work.title.trim().is_empty() || work.title.len() > 512 {
+                    return Err(StoreError::Invalid(
+                        "work title is required and limited to 512 bytes".into(),
+                    ));
+                }
+                let parent_node_id = self.v3_parent_for_work(work)?;
+                self.create_work_in_transaction(work, &context.now)?;
+                let mut statement = self.prepare(
+                    "INSERT INTO work_node_v3
+                     (work_id, project_id, decomposition_kind, execution_mode,
+                      parent_id, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                )?;
+                statement.bind_text(1, work.id.as_str())?;
+                statement.bind_text(2, work.project_id.as_str())?;
+                statement.bind_text(3, work_kind_name(work.kind))?;
+                statement.bind_text(4, &input.execution_mode)?;
+                statement.bind_optional_text(5, parent_node_id.as_deref())?;
+                statement.bind_text(6, &context.now)?;
+                statement.run()
+            },
+        )
+    }
+
+    /// Persist a hierarchy edit together with its canonical schema-2 title
+    /// and parent. The v3 parent is always derived from the canonical parent
+    /// inside the same transaction, then the full v3 forest is revalidated.
+    pub fn edit_planning_work_v3(
+        &self,
+        context: &V3MutationContext,
+        input: &PlanningWorkEditV3Input,
+    ) -> Result<MutationResult, StoreError> {
+        let bound = context.with_payload(json!({
+            "project_id": input.project_id,
+            "work_id": input.work_id,
+            "parent_change": match input.parent_id.as_ref() {
+                None => json!({"mode": "unchanged"}),
+                Some(None) => json!({"mode": "clear"}),
+                Some(Some(parent_id)) => json!({"mode": "set", "work_id": parent_id}),
+            },
+            "title": input.title,
+            "description": input.description,
+            "priority": input.priority,
+            "dispatch_policy": input.dispatch_policy,
+            "execution_mode": input.execution_mode,
+        }));
+        let context = &bound;
+        ensure_project(&context.project_id, &input.project_id)?;
+        let roles: &[boreal_domain::ActorRole] = if input.dispatch_policy.is_some() {
+            &[boreal_domain::ActorRole::Operator]
+        } else {
+            &[
+                boreal_domain::ActorRole::Agent,
+                boreal_domain::ActorRole::Operator,
+            ]
+        };
+        self.fact_mutation(
+            context,
+            "work.edit.v3",
+            "work_node",
+            &input.work_id,
+            roles,
+            || {
+                if input.parent_id.is_none()
+                    && input.title.is_none()
+                    && input.description.is_none()
+                    && input.priority.is_none()
+                    && input.dispatch_policy.is_none()
+                    && input.execution_mode.is_none()
+                {
+                    return Err(StoreError::Invalid(
+                        "work edit requires at least one changed field".into(),
+                    ));
+                }
+                if input
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.trim().is_empty() || title.len() > 512)
+                {
+                    return Err(StoreError::Invalid(
+                        "work title is required and limited to 512 bytes".into(),
+                    ));
+                }
+                if input.description.as_deref().is_some_and(|description| {
+                    description.contains('\0') || description.len() > 65_536
+                }) {
+                    return Err(StoreError::Invalid(
+                        "work description contains invalid content or exceeds 65536 bytes".into(),
+                    ));
+                }
+                if input.dispatch_policy.as_deref().is_some_and(|policy| {
+                    !matches!(policy, "automatic" | "operator_only" | "paused")
+                }) {
+                    return Err(StoreError::Invalid("invalid dispatch policy".into()));
+                }
+                if input
+                    .execution_mode
+                    .as_deref()
+                    .is_some_and(|mode| !matches!(mode, "direct" | "container"))
+                {
+                    return Err(StoreError::Invalid("invalid work execution mode".into()));
+                }
+                let current_work =
+                    self.work(&input.project_id, &input.work_id)?
+                        .ok_or_else(|| StoreError::NotFound {
+                            entity: "work",
+                            id: input.work_id.clone(),
+                        })?;
+                let mut current_node = self
+                    .work_node_v3(&input.project_id, &input.work_id)?
+                    .ok_or_else(|| StoreError::NotFound {
+                        entity: "work_node_v3",
+                        id: input.work_id.clone(),
+                    })?;
+                let target_parent = input
+                    .parent_id
+                    .clone()
+                    .unwrap_or_else(|| current_work.parent_id.clone());
+                let target_work = work_item_from_record(&current_work, target_parent.clone())?;
+                let parent_node_id = self.v3_parent_for_work(&target_work)?;
+                current_node.parent_id = parent_node_id;
+                if let Some(mode) = &input.execution_mode {
+                    current_node.execution_mode = mode.clone();
+                }
+
+                let mut nodes = Vec::new();
+                for record in self.work_nodes_v3(&input.project_id)? {
+                    let mut work = if record.work_id == input.work_id {
+                        current_work.clone()
+                    } else {
+                        self.work(&input.project_id, &record.work_id)?
+                            .ok_or_else(|| {
+                                StoreError::Corrupt(format!(
+                                    "v3 hierarchy node {} has no canonical work row",
+                                    record.work_id
+                                ))
+                            })?
+                    };
+                    if record.work_id == input.work_id {
+                        work.parent_id = target_parent.clone();
+                        if let Some(title) = &input.title {
+                            work.title = title.clone();
+                        }
+                    }
+                    let kind = match record.decomposition_kind.as_str() {
+                        "milestone" => boreal_domain::work_model_v3::DecompositionKind::Milestone,
+                        "task" => boreal_domain::work_model_v3::DecompositionKind::Task,
+                        _ => {
+                            return Err(StoreError::Corrupt(format!(
+                                "v3 hierarchy node {} has an unknown decomposition kind",
+                                record.work_id
+                            )))
+                        }
+                    };
+                    let execution_mode = if record.work_id == input.work_id {
+                        match current_node.execution_mode.as_str() {
+                            "direct" => boreal_domain::work_model_v3::ExecutionMode::Direct,
+                            "container" => boreal_domain::work_model_v3::ExecutionMode::Container,
+                            _ => {
+                                return Err(StoreError::Corrupt(
+                                    "invalid stored execution mode".into(),
+                                ))
+                            }
+                        }
+                    } else {
+                        match record.execution_mode.as_str() {
+                            "direct" => boreal_domain::work_model_v3::ExecutionMode::Direct,
+                            "container" => boreal_domain::work_model_v3::ExecutionMode::Container,
+                            _ => {
+                                return Err(StoreError::Corrupt(format!(
+                                    "v3 hierarchy node {} has an unknown execution mode",
+                                    record.work_id
+                                )))
+                            }
+                        }
+                    };
+                    let parent_id = if record.work_id == input.work_id {
+                        current_node
+                            .parent_id
+                            .clone()
+                            .map(boreal_domain::WorkId::new)
+                    } else {
+                        record.parent_id.clone().map(boreal_domain::WorkId::new)
+                    };
+                    let expected_kind = match work.kind.as_str() {
+                        "milestone" => "milestone",
+                        "task" => "task",
+                        _ => {
+                            return Err(StoreError::Corrupt(format!(
+                                "v3 hierarchy node {} disagrees with its canonical work kind",
+                                work.work_id
+                            )))
+                        }
+                    };
+                    if expected_kind != record.decomposition_kind {
+                        return Err(StoreError::Corrupt(format!(
+                            "v3 hierarchy node {} disagrees with its canonical work kind",
+                            work.work_id
+                        )));
+                    }
+                    let domain_work = work_item_from_record(&work, work.parent_id.clone())?;
+                    let expected_parent = self.v3_parent_for_work(&domain_work)?;
+                    let actual_parent = if record.work_id == input.work_id {
+                        current_node.parent_id.clone()
+                    } else {
+                        record.parent_id.clone()
+                    };
+                    if actual_parent != expected_parent {
+                        return Err(StoreError::Corrupt(format!(
+                            "v3 hierarchy node {} disagrees with its canonical parent",
+                            work.work_id
+                        )));
+                    }
+                    nodes.push(boreal_domain::work_model_v3::WorkNode {
+                        id: boreal_domain::WorkId::new(record.work_id),
+                        project_id: boreal_domain::ProjectId::new(input.project_id.clone()),
+                        kind,
+                        execution_mode,
+                        parent_id,
+                        title: work.title,
+                    });
+                }
+                boreal_domain::work_model_v3::validate_decomposition(&nodes)
+                    .map_err(|error| StoreError::Invalid(error.to_string()))?;
+
+                if input.parent_id.is_some()
+                    || input.title.is_some()
+                    || input.description.is_some()
+                    || input.priority.is_some()
+                    || input.dispatch_policy.is_some()
+                {
+                    let mut update = self.prepare(
+                        "UPDATE work_item
+                         SET parent_id = ?1, title = ?2, description = ?3,
+                             priority = ?4, dispatch_policy = ?5, updated_at = ?6
+                         WHERE project_id = ?7 AND work_id = ?8",
+                    )?;
+                    update.bind_optional_text(1, target_parent.as_deref())?;
+                    update.bind_text(2, input.title.as_deref().unwrap_or(&current_work.title))?;
+                    update.bind_text(
+                        3,
+                        input
+                            .description
+                            .as_deref()
+                            .unwrap_or(&current_work.description),
+                    )?;
+                    update.bind_i64(
+                        4,
+                        u64::from(input.priority.unwrap_or(current_work.priority)),
+                    )?;
+                    update.bind_text(
+                        5,
+                        input
+                            .dispatch_policy
+                            .as_deref()
+                            .unwrap_or(&current_work.dispatch_policy),
+                    )?;
+                    update.bind_text(6, &input.updated_at)?;
+                    update.bind_text(7, &input.project_id)?;
+                    update.bind_text(8, &input.work_id)?;
+                    update.run()?;
+                }
+                let mut update = self.prepare(
+                    "UPDATE work_node_v3
+                     SET parent_id = ?1, execution_mode = ?2, updated_at = ?3
+                     WHERE project_id = ?4 AND work_id = ?5",
+                )?;
+                update.bind_optional_text(1, current_node.parent_id.as_deref())?;
+                update.bind_text(2, &current_node.execution_mode)?;
+                update.bind_text(3, &input.updated_at)?;
+                update.bind_text(4, &input.project_id)?;
+                update.bind_text(5, &input.work_id)?;
+                update.run()
+            },
+        )
+    }
+
+    /// Resolve the additive parent from the canonical work parent while
+    /// checking that the schema-2 and v3 hierarchy contracts agree.
+    fn v3_parent_for_work(
+        &self,
+        work: &boreal_domain::WorkItem,
+    ) -> Result<Option<String>, StoreError> {
+        let Some(parent_id) = &work.parent_id else {
+            boreal_domain::validate_parent(work, None)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?;
+            return Ok(None);
+        };
+        let parent = self
+            .work(work.project_id.as_str(), parent_id.as_str())?
+            .ok_or_else(|| StoreError::Invalid("work parent is not in this project".into()))?;
+        let parent_item = work_item_from_record(&parent, parent.parent_id.clone())?;
+        boreal_domain::validate_parent(work, Some(&parent_item))
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        if work.kind != boreal_domain::WorkKind::Task {
+            return Err(StoreError::Invalid(
+                "milestones cannot have a schema-2 work parent".into(),
+            ));
+        }
+        if parent.kind != "sprint" {
+            return Err(StoreError::Invalid(
+                "nested tasks require a Sprint work parent".into(),
+            ));
+        }
+        let milestone_id = parent.parent_id.as_deref().ok_or_else(|| {
+            StoreError::Invalid("nested task Sprint must belong to a Milestone".into())
+        })?;
+        let milestone = self
+            .work(work.project_id.as_str(), milestone_id)?
+            .ok_or_else(|| StoreError::Invalid("Sprint Milestone is missing".into()))?;
+        if milestone.kind != "milestone" {
+            return Err(StoreError::Invalid(
+                "nested task Sprint parent must be a Milestone".into(),
+            ));
+        }
+        let milestone_node = self
+            .work_node_v3(work.project_id.as_str(), milestone_id)?
+            .ok_or_else(|| {
+                StoreError::Invalid(
+                    "nested task requires its Milestone to be projected into work-model/3".into(),
+                )
+            })?;
+        if milestone_node.decomposition_kind != "milestone"
+            || milestone_node.execution_mode != "container"
+        {
+            return Err(StoreError::Invalid(
+                "nested task parent must be a v3 Milestone container".into(),
+            ));
+        }
+        Ok(Some(milestone_id.to_owned()))
     }
 
     pub fn work_nodes_v3(&self, project_id: &str) -> Result<Vec<WorkNodeV3Record>, StoreError> {
@@ -1319,6 +1791,38 @@ impl SqliteStore {
             }
         }
     }
+}
+
+fn work_kind_name(kind: boreal_domain::WorkKind) -> &'static str {
+    match kind {
+        boreal_domain::WorkKind::Milestone => "milestone",
+        boreal_domain::WorkKind::Sprint => "sprint",
+        boreal_domain::WorkKind::Task => "task",
+    }
+}
+
+fn work_item_from_record(
+    record: &super::WorkRecord,
+    parent_id: Option<String>,
+) -> Result<boreal_domain::WorkItem, StoreError> {
+    let kind = match record.kind.as_str() {
+        "milestone" => boreal_domain::WorkKind::Milestone,
+        "sprint" => boreal_domain::WorkKind::Sprint,
+        "task" => boreal_domain::WorkKind::Task,
+        _ => {
+            return Err(StoreError::Corrupt(format!(
+                "work {} has an unknown kind",
+                record.work_id
+            )))
+        }
+    };
+    Ok(boreal_domain::WorkItem::new(
+        boreal_domain::ProjectId::new(record.project_id.clone()),
+        boreal_domain::WorkId::new(record.work_id.clone()),
+        kind,
+        parent_id.map(boreal_domain::WorkId::new),
+        record.title.clone(),
+    ))
 }
 
 fn ensure_v3_replay_identity(

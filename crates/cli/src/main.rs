@@ -1,12 +1,14 @@
 use boreal_application::{
-    canonical_request_digest, sha256_content_digest, AcceptanceGateDefinition, ApplicationError,
-    AttemptPolicy, AttemptRequest, AuthenticatedOperationJournal, BoundedExecutionResult,
-    CommandSpec, EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest,
-    ExecutorAttestation, IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind,
-    IntakeLifecycle, KnowledgeApplication, LivenessMetadata, OperationResult, ReceiptCoverage,
-    ReceiptExpectation, ReceiptPayload, SessionRegistrationRequest, SourceCaptureInput,
-    SqliteAttemptAdapter, SummaryPayload, WorkApplication, WorkflowRegistry,
+    canonical_request_digest, resolve_planning_acceptance_profile, sha256_content_digest,
+    AcceptanceGateDefinition, ApplicationError, AttemptPolicy, AttemptRequest,
+    AuthenticatedOperationJournal, BoundedExecutionResult, CommandSpec, EndAttemptRequest,
+    EvidenceExecutionOutcome, EvidenceRunRequest, ExecutorAttestation, IntakeBucket,
+    IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle, KnowledgeApplication,
+    LivenessMetadata, OperationResult, PlanningScope, ReceiptCoverage, ReceiptExpectation,
+    ReceiptPayload, SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter,
+    SummaryPayload, WorkApplication, WorkPlanningEditV3Input, WorkflowRegistry,
 };
+use boreal_domain::work_model_v3::ExecutionMode;
 use boreal_domain::{
     AcceptanceProfile, ActorId, AttemptId, AttemptPhase, ConfigIdentity, DispatchPolicy, Fence,
     GateId, GateKind, HarnessId, OperationId, PersistedLifecycle, ProjectId, ReasonCode, ReceiptId,
@@ -118,8 +120,8 @@ Usage:
   bwrk service run --db PATH --socket PATH [--max-requests N] [--dispatch-workers N] [--dispatch-capacity N] [--json]
   bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
   bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--json]
-  bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--hold CODE] [--session SESSION_ID] --expected-revision N [--db PATH] [--json]
-  bwrk work edit <project> <work-id> [--title TEXT] [--description TEXT] [--parent WORK_ID] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N
+  bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--execution-mode direct|container] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--acceptance PROFILE[/VERSION]] [--hold CODE] [--session SESSION_ID] --expected-revision N [--db PATH] [--json]
+  bwrk work edit <project> <work-id> [--title TEXT] [--description TEXT] [--parent WORK_ID|--clear-parent] [--execution-mode direct|container] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N
   bwrk work rollup <project> <container-id> [--socket PATH] [--json]
   bwrk dep remove <project> <prerequisite-id> <dependent-id> --expected-revision N
   bwrk work hold add <project> <work-id> --reason CODE --expected-revision N
@@ -152,6 +154,8 @@ Usage:
   bwrk agent finish WORK_ID --close --project PROJECT --attempt ATTEMPT_ID --fence N --receipt PATH --summary PATH [--session SESSION_ID] [--socket PATH] [--json]
   bwrk agent finish WORK_ID --release --project PROJECT --attempt ATTEMPT_ID --fence N [--session SESSION_ID] [--socket PATH] [--reason CODE] [--json]
   bwrk evidence run --project PROJECT --work WORK_ID --gate GATE_ID [--attempt ATTEMPT_ID --fence N] [--json]
+  bwrk evidence bind-result --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N --source-version ID --content-digest SHA --expected-revision N --expected-entity-revision N --expected-proof-revision N [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk evidence receipts --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--limit N --offset N --socket PATH --json]
   bwrk gate policy publish --project PROJECT --gate GATE_ID --input PATH --expected-revision N --yes [--socket PATH] [--json]
   bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]
   bwrk session start --project PROJECT --session SESSION_ID --harness HARNESS_ID [--json]
@@ -1677,8 +1681,8 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["migration", "apply"] => migration_apply_result(parsed, operation, store),
         ["gate", "policy", "publish"] => gate_policy_publish_result(parsed, operation, store),
         ["maintenance", "show"] => maintenance_show_result(parsed, store),
-        ["work", "create"] => create_work_result(parsed, app, operation),
-        ["work", "edit"] => work_edit_result(parsed, app, operation),
+        ["work", "create"] => create_work_result(parsed, app, operation, store),
+        ["work", "edit"] => work_edit_result(parsed, app, operation, store),
         ["work", "hold", "add"] => work_hold_add_result(parsed, app, operation),
         ["work", "hold", "resolve"] => work_hold_resolve_result(parsed, app, operation),
         ["work", "dispatch", "set"] => work_dispatch_set_result(parsed, app, operation),
@@ -1771,6 +1775,8 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["operation", "show"] => operation_show_result(parsed, store),
         ["next"] | ["agent", "next"] => next_result(parsed, app, store),
         ["evidence", "add"] => evidence_add_result(parsed, app),
+        ["evidence", "bind-result"] => evidence_bind_result_result(parsed, operation, app, store),
+        ["evidence", "receipts"] => evidence_receipts_result(parsed, app),
         ["evidence", "run"] => evidence_run_result(
             parsed,
             app,
@@ -1976,6 +1982,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--touched-path"
                 | "--blocker"
                 | "--acceptance"
+                | "--execution-mode"
                 | "--workspace"
                 | "--todo"
                 | "--statement"
@@ -2003,6 +2010,9 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--minimum-bytes"
                 | "--max-bytes"
                 | "--direction"
+                | "--content-digest"
+                | "--expected-entity-revision"
+                | "--expected-proof-revision"
         ) {
             let value = option_value(args, &mut index, arg)?;
             options.extra.entry(arg.clone()).or_default().push(value);
@@ -2510,6 +2520,23 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["agent", "status"] => positionals == 0,
         ["agent", "heartbeat"] | ["agent", "renew"] => positionals == 0 && options.work.is_some(),
         ["evidence", "run"] => positionals == 0 && options.work.is_some() && options.gate.is_some(),
+        ["evidence", "bind-result"] => {
+            positionals == 0
+                && options.work.is_some()
+                && options.attempt.is_some()
+                && options.fence.is_some()
+                && options.source_version.is_some()
+                && extra_value(options, "--content-digest").is_some()
+                && options.expected_revision.is_some()
+                && extra_value(options, "--expected-entity-revision").is_some()
+                && extra_value(options, "--expected-proof-revision").is_some()
+        }
+        ["evidence", "receipts"] => {
+            positionals == 0
+                && options.work.is_some()
+                && options.attempt.is_some()
+                && options.fence.is_some()
+        }
         ["evidence", "add"] => {
             positionals == 0
                 && options.work.is_some()
@@ -2527,6 +2554,8 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
     if matches!(
         path.as_slice(),
         ["evidence", "run"]
+            | ["evidence", "bind-result"]
+            | ["evidence", "receipts"]
             | ["evidence", "add"]
             | ["work", "accept"]
             | ["work", "heartbeat"]
@@ -2593,6 +2622,14 @@ fn work_argument(parsed: &ParsedCommand, index: usize) -> Result<String, CliErro
         .clone()
         .or_else(|| parsed.options.positionals.get(index).cloned())
         .ok_or_else(|| CliError::invalid("missing work identifier"))
+}
+
+fn extra_value<'a>(options: &'a CliOptions, name: &str) -> Option<&'a str> {
+    options
+        .extra
+        .get(name)
+        .and_then(|values| values.last())
+        .map(String::as_str)
 }
 
 fn parse_revision(value: &str) -> Result<u64, CliError> {
@@ -2696,6 +2733,7 @@ fn work_edit_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
     operation: &str,
+    store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
     let offset = usize::from(parsed.options.project.is_none());
@@ -2705,36 +2743,94 @@ fn work_edit_result(
         .get(offset)
         .cloned()
         .ok_or_else(|| CliError::invalid("work edit requires a work identifier"))?;
-    let result = app
-        .edit_work_as(
-            &project,
-            &work_id,
-            &parsed.options.actor,
-            parsed.options.parent.clone().map(Some),
-            parsed.options.title.clone(),
-            parsed.options.description.clone(),
-            parsed.options.priority,
-            parsed.options.dispatch.clone(),
-            parsed.options.expected_revision,
-            &now(),
-            operation.to_owned(),
-        )
+    let clear_parent = parsed.options.extra.contains_key("--clear-parent");
+    if clear_parent && parsed.options.parent.is_some() {
+        return Err(CliError::invalid(
+            "--clear-parent cannot be combined with --parent",
+        ));
+    }
+    let current = app
+        .show_work(&project, &work_id)
         .map_err(map_application_error)?;
-    bounded_result(
-        Some(json!({
-            "project_id": result.value.project_id,
-            "work_id": result.value.work_id,
-            "title": result.value.title,
-            "description": result.value.description,
-            "priority": result.value.priority,
-            "dispatch_policy": result.value.dispatch_policy,
-            "hard_holds": result.value.hard_holds.iter().map(ReasonCode::stable_code).collect::<Vec<_>>(),
-            "replayed": !result.changed,
-        })),
-        Some(result.snapshot_revision),
-    )
-    .map(|mut view| {
-        view.outcome = if result.changed { ApplicationOutcome::Changed } else { ApplicationOutcome::Unchanged };
+    let requested_mode = parsed
+        .options
+        .extra
+        .get("--execution-mode")
+        .and_then(|values| values.last())
+        .map(|value| execution_mode_from_token(value))
+        .transpose()?;
+    let expected_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("work edit requires --expected-revision"))?;
+    let at = now();
+    let (revision, changed) = if current.kind == "sprint" {
+        if clear_parent || parsed.options.parent.is_some() || requested_mode.is_some() {
+            return Err(CliError::invalid(
+                "Sprint parent and execution-mode edits require the atomic planning projection route",
+            ));
+        }
+        let result = app
+            .edit_work_as(
+                &project,
+                &work_id,
+                &parsed.options.actor,
+                None,
+                parsed.options.title.clone(),
+                parsed.options.description.clone(),
+                parsed.options.priority,
+                parsed.options.dispatch.clone(),
+                Some(expected_revision),
+                &at,
+                operation.to_owned(),
+            )
+            .map_err(map_application_error)?;
+        (result.snapshot_revision, result.changed)
+    } else {
+        let canonical_parent_id = if clear_parent {
+            Some(None)
+        } else {
+            parsed
+                .options
+                .parent
+                .as_ref()
+                .map(|parent| Some(WorkId::new(parent.clone())))
+        };
+        let dispatch_policy = parsed.options.dispatch.as_deref().map(|value| match value {
+            "automatic" => DispatchPolicy::Automatic,
+            "operator_only" => DispatchPolicy::OperatorOnly,
+            "paused" => DispatchPolicy::Paused,
+            _ => unreachable!("parser validates dispatch policy"),
+        });
+        let input = WorkPlanningEditV3Input {
+            work_id: WorkId::new(work_id.clone()),
+            canonical_parent_id,
+            title: parsed.options.title.clone(),
+            description: parsed.options.description.clone(),
+            priority: parsed.options.priority,
+            dispatch_policy,
+            execution_mode: requested_mode,
+        };
+        let scope = PlanningScope::new(project.clone(), parsed.options.actor.clone())
+            .with_session(parsed.options.session.clone())
+            .at_revision(expected_revision);
+        let result = app
+            .edit_planning_work_v3(&scope, operation.to_owned(), &input, &at)
+            .map_err(map_application_error)?;
+        (result.snapshot_revision, result.changed)
+    };
+    let projected = store
+        .work(project.as_str(), &work_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CliError::invalid("edited work disappeared during readback"))?;
+    let mut data = work_projection_json(&projected, store);
+    data["replayed"] = json!(!changed);
+    bounded_result(Some(data), Some(revision)).map(|mut view| {
+        view.outcome = if changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
         view
     })
 }
@@ -4269,7 +4365,7 @@ fn status_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
         )
     })?;
     bounded_result(
-        Some(status_snapshot_json(&snapshot, None)),
+        Some(status_snapshot_json(&snapshot, None, store)),
         Some(snapshot.project_revision.0),
     )
     .map(|mut result| {
@@ -4281,6 +4377,7 @@ fn status_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
 fn status_snapshot_json(
     snapshot: &boreal_application::StatusSnapshot,
     recovery: Option<Value>,
+    store: &SqliteStore,
 ) -> Value {
     let counts = &snapshot.counts;
     let mut result = json!({
@@ -4357,7 +4454,7 @@ fn status_snapshot_json(
             result["items"]
                 .as_array_mut()
                 .expect("array created above")
-                .push(status_item_json(item));
+                .push(status_item_json(item, store));
         }
         for diagnostic in snapshot.diagnostics.iter().filter(|d| &d.work_id == id) {
             result["diagnostics"]
@@ -4400,7 +4497,14 @@ fn attention_queue_json(queue: &boreal_application::AttentionQueue) -> Value {
     })
 }
 
-fn status_item_json(item: &boreal_application::StatusWork) -> Value {
+fn status_item_json(item: &boreal_application::StatusWork, store: &SqliteStore) -> Value {
+    let planning = planning_projection_json(
+        store,
+        item.work.project_id.as_str(),
+        item.work.id.as_str(),
+        work_kind_name(item.work.kind),
+        item.work.parent_id.as_ref().map(|id| id.as_str()),
+    );
     let gates = item
         .gates
         .gates
@@ -4467,6 +4571,10 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "lifecycle": lifecycle_name(item.work.lifecycle),
         "priority": item.work.priority,
         "dispatch_policy": dispatch_policy_name(item.work.dispatch_policy),
+        "execution_mode": planning["execution_mode"],
+        "planning_parent_id": planning["planning_parent_id"],
+        "planning_integrity": planning["planning_integrity"],
+        "planning_diagnostic": planning["planning_diagnostic"],
         // `status` is the status/2 compatibility field. Keep the richer
         // status/3 value in `display_status` so newer clients can render
         // expiry as its own recovery state without breaking older clients.
@@ -4621,7 +4729,14 @@ fn status2_name(status: boreal_domain::DerivedStatus) -> &'static str {
     }
 }
 
-pub(crate) fn work_projection_json(item: &WorkRecord) -> Value {
+pub(crate) fn work_projection_json(item: &WorkRecord, store: &SqliteStore) -> Value {
+    let planning = planning_projection_json(
+        store,
+        &item.project_id,
+        &item.work_id,
+        &item.kind,
+        item.parent_id.as_deref(),
+    );
     json!({
         "work_id": item.work_id,
         "project_id": item.project_id,
@@ -4637,7 +4752,183 @@ pub(crate) fn work_projection_json(item: &WorkRecord) -> Value {
             .collect::<Vec<_>>(),
         "title": item.title,
         "description": item.description,
+        "execution_mode": planning["execution_mode"],
+        "planning_parent_id": planning["planning_parent_id"],
+        "planning_integrity": planning["planning_integrity"],
+        "planning_diagnostic": planning["planning_diagnostic"],
     })
+}
+
+/// Build a typed planning projection without hiding legacy rows or damaged
+/// siblings from the canonical work/status page. Only `valid` v3 rows are
+/// safe for v3 planning actions such as cycle assignment.
+fn planning_projection_json(
+    store: &SqliteStore,
+    project_id: &str,
+    work_id: &str,
+    kind: &str,
+    canonical_parent_id: Option<&str>,
+) -> Value {
+    let projection = |integrity: &str,
+                      mode: Option<String>,
+                      parent: Option<String>,
+                      diagnostic: Option<String>| {
+        json!({
+            "execution_mode": mode,
+            "planning_parent_id": parent,
+            "planning_integrity": integrity,
+            "planning_diagnostic": diagnostic,
+        })
+    };
+    if kind == "sprint" {
+        return projection("legacy", None, None, None);
+    }
+    if !matches!(kind, "milestone" | "task") {
+        return projection(
+            "inconsistent",
+            None,
+            None,
+            Some("unknown canonical work kind".to_owned()),
+        );
+    }
+    match store.work_model_v3_enabled() {
+        Ok(true) => {}
+        Ok(false) => return projection("unavailable", None, None, None),
+        Err(error) => return projection("unreadable", None, None, Some(error.to_string())),
+    }
+    let node = match store.work_node_v3(project_id, work_id) {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            return projection(
+                "missing",
+                None,
+                None,
+                Some("v3 work node is missing".to_owned()),
+            )
+        }
+        Err(error) => return projection("unreadable", None, None, Some(error.to_string())),
+    };
+    let expected_parent = if kind == "milestone" {
+        if canonical_parent_id.is_some() {
+            return projection(
+                "inconsistent",
+                Some(node.execution_mode),
+                node.parent_id,
+                Some("milestones cannot have a canonical parent".to_owned()),
+            );
+        }
+        None
+    } else if let Some(sprint_id) = canonical_parent_id {
+        let sprint = match store.work(project_id, sprint_id) {
+            Ok(Some(work)) if work.kind == "sprint" => work,
+            Ok(Some(_)) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("nested tasks require a Sprint canonical parent".to_owned()),
+                )
+            }
+            Ok(None) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("canonical Sprint parent is missing".to_owned()),
+                )
+            }
+            Err(error) => {
+                return projection(
+                    "unreadable",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some(error.to_string()),
+                )
+            }
+        };
+        let Some(milestone_id) = sprint.parent_id else {
+            return projection(
+                "inconsistent",
+                Some(node.execution_mode),
+                node.parent_id,
+                Some("nested task Sprint has no Milestone parent".to_owned()),
+            );
+        };
+        let milestone = match store.work(project_id, &milestone_id) {
+            Ok(Some(work)) if work.kind == "milestone" => work,
+            Ok(Some(_)) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("Sprint parent is not a Milestone".to_owned()),
+                )
+            }
+            Ok(None) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("Sprint Milestone parent is missing".to_owned()),
+                )
+            }
+            Err(error) => {
+                return projection(
+                    "unreadable",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some(error.to_string()),
+                )
+            }
+        };
+        let milestone_node = match store.work_node_v3(project_id, &milestone_id) {
+            Ok(Some(node)) => node,
+            Ok(None) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("canonical Milestone parent has no v3 projection".to_owned()),
+                )
+            }
+            Err(error) => {
+                return projection(
+                    "unreadable",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some(error.to_string()),
+                )
+            }
+        };
+        if milestone_node.decomposition_kind != "milestone"
+            || milestone_node.execution_mode != "container"
+            || milestone_node.parent_id.is_some()
+            || milestone.work_id != milestone_id
+        {
+            return projection(
+                "inconsistent",
+                Some(node.execution_mode),
+                node.parent_id,
+                Some("Sprint Milestone projection is inconsistent".to_owned()),
+            );
+        }
+        Some(milestone_id)
+    } else {
+        None
+    };
+    if node.decomposition_kind != kind
+        || !matches!(node.execution_mode.as_str(), "direct" | "container")
+        || (kind == "milestone" && node.execution_mode != "container")
+        || node.parent_id != expected_parent
+    {
+        return projection(
+            "inconsistent",
+            Some(node.execution_mode),
+            node.parent_id,
+            Some("v3 node disagrees with canonical kind, parent, or execution mode".to_owned()),
+        );
+    }
+    projection("valid", Some(node.execution_mode), node.parent_id, None)
 }
 
 fn show_work_result(
@@ -4651,7 +4942,7 @@ fn show_work_result(
         .show_work(&project, &work_id)
         .map_err(map_application_error)?;
     let revision = store_revision(store, &project)?;
-    bounded_result(Some(work_projection_json(&item)), Some(revision))
+    bounded_result(Some(work_projection_json(&item, store)), Some(revision))
 }
 
 fn operation_show_result(
@@ -5274,10 +5565,32 @@ fn acceptance_profile_option(parsed: &ParsedCommand) -> &str {
         .unwrap_or("focused")
 }
 
+fn acceptance_profile_from_token(value: &str) -> Result<AcceptanceProfile, CliError> {
+    resolve_planning_acceptance_profile(value).map_err(|error| CliError::invalid(error.to_string()))
+}
+
+fn execution_mode_from_token(value: &str) -> Result<ExecutionMode, CliError> {
+    match value {
+        "direct" => Ok(ExecutionMode::Direct),
+        "container" => Ok(ExecutionMode::Container),
+        _ => Err(CliError::invalid(
+            "execution mode must be direct or container",
+        )),
+    }
+}
+
+fn default_execution_mode(kind: WorkKind) -> ExecutionMode {
+    match kind {
+        WorkKind::Milestone => ExecutionMode::Container,
+        WorkKind::Sprint | WorkKind::Task => ExecutionMode::Direct,
+    }
+}
+
 fn create_work_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
     operation: &str,
+    store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
     let positional_offset = usize::from(parsed.options.project.is_none());
@@ -5324,26 +5637,50 @@ fn create_work_result(
             .into_iter()
             .map(ReasonCode::HardHold)
             .collect(),
-        acceptance_profile: match acceptance_profile_option(parsed) {
-            "focused" => AcceptanceProfile::focused(),
-            "reviewed" => AcceptanceProfile::reviewed(),
-            _ => {
-                return Err(CliError::invalid(
-                    "--acceptance must be focused or reviewed",
-                ));
-            }
-        },
+        acceptance_profile: acceptance_profile_from_token(acceptance_profile_option(parsed))?,
     };
-    let result = app
-        .create_work_as_session_checked(
+    let requested_mode = parsed
+        .options
+        .extra
+        .get("--execution-mode")
+        .and_then(|values| values.last())
+        .map(|value| execution_mode_from_token(value))
+        .transpose()?;
+    let mode = requested_mode.unwrap_or_else(|| default_execution_mode(work.kind));
+    let at = now();
+    let result = if work.kind == WorkKind::Sprint {
+        if requested_mode.is_some() {
+            return Err(CliError::invalid(
+                "Sprint is a legacy grouping row and has no execution mode",
+            ));
+        }
+        app.create_work_as_session_checked(
             &work,
             &parsed.options.actor,
             &parsed.options.session,
             parsed.options.expected_revision,
-            &now(),
+            &at,
             operation.to_owned(),
         )
-        .map_err(map_application_error)?;
+        .map_err(map_application_error)?
+    } else {
+        let expected_revision = parsed
+            .options
+            .expected_revision
+            .ok_or_else(|| CliError::invalid("work creation requires --expected-revision"))?;
+        let scope = PlanningScope::new(work.project_id.clone(), parsed.options.actor.clone())
+            .with_session(parsed.options.session.clone())
+            .at_revision(expected_revision);
+        app.create_planning_work_v3(&scope, operation.to_owned(), &work, mode, &at)
+            .map_err(map_application_error)?
+    };
+    let planning = planning_projection_json(
+        store,
+        &result.value.project_id,
+        &result.value.work_id,
+        &result.value.kind,
+        result.value.parent_id.as_deref(),
+    );
     bounded_result(
         Some(json!({
             "project_id": result.value.project_id,
@@ -5358,6 +5695,10 @@ fn create_work_result(
                 "id": work.acceptance_profile.id.as_str(),
                 "version": work.acceptance_profile.version,
             },
+            "execution_mode": planning["execution_mode"],
+            "planning_parent_id": planning["planning_parent_id"],
+            "planning_integrity": planning["planning_integrity"],
+            "planning_diagnostic": planning["planning_diagnostic"],
             "hard_holds": result
                 .value
                 .hard_holds
@@ -6607,6 +6948,196 @@ fn evidence_add_result(
         ),
         Some(result.revision),
     )
+}
+
+fn evidence_bind_result_result(
+    parsed: &ParsedCommand,
+    operation: &str,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project_id = project_argument(parsed, 0)?;
+    let work_id = work_argument(parsed, 0)?;
+    let attempt_id = parsed
+        .options
+        .attempt
+        .clone()
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --attempt"))?;
+    let fence = parsed
+        .options
+        .fence
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --fence"))?;
+    let source_version_id = parsed
+        .options
+        .source_version
+        .clone()
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --source-version"))?;
+    let content_digest = extra_value(&parsed.options, "--content-digest")
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --content-digest"))?
+        .to_owned();
+    let expected_project_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --expected-revision"))?;
+    let expected_entity_revision =
+        required_extra_revision(&parsed.options, "--expected-entity-revision")?;
+    let expected_proof_revision =
+        required_extra_revision(&parsed.options, "--expected-proof-revision")?;
+    let database_path = store.database_path().ok_or_else(|| {
+        CliError::invalid("final-result binding requires a file-backed source catalog")
+    })?;
+    let catalog = source_catalog(&source_catalog_root(&database_path.to_string_lossy()))?;
+    let result = app
+        .bind_final_result(
+            &catalog,
+            &boreal_application::FinalResultCaptureRequest {
+                project_id,
+                work_id,
+                actor_id: parsed.options.actor.clone(),
+                session_id: parsed.options.session.clone(),
+                attempt_id,
+                fence,
+                expected_project_revision,
+                expected_entity_revision,
+                expected_proof_revision,
+                source_version_id,
+                content_digest,
+                operation_id: operation.to_owned(),
+                at: now(),
+            },
+        )
+        .map_err(map_application_error)?;
+    let binding = result.value.binding;
+    bounded_result(
+        Some(json!({
+            "binding_id": binding.binding_id,
+            "project_id": binding.project_id,
+            "work_id": binding.work_id,
+            "attempt_id": binding.attempt_id,
+            "fence": binding.fence,
+            "source_version_id": binding.source_version_id,
+            "content_digest": binding.content_digest,
+            "config_identity": binding.config_identity,
+            "profile_id": binding.profile_id,
+            "profile_version": binding.profile_version,
+            "profile_digest": binding.profile_digest,
+            "entity_revision": binding.entity_revision,
+            "prior_proof_revision": binding.prior_proof_revision,
+            "proof_revision": binding.proof_revision,
+            "operation_id": binding.operation_id,
+            "request_digest": binding.request_digest,
+            "project_revision": binding.project_revision,
+            "created_at": binding.created_at,
+            "lineage_pending": result.value.lineage_pending,
+            "replayed": !result.changed,
+        })),
+        Some(result.snapshot_revision),
+    )
+}
+
+fn evidence_receipts_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project_id = project_argument(parsed, 0)?;
+    let work_id = work_argument(parsed, 0)?;
+    let attempt_id = parsed
+        .options
+        .attempt
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("evidence receipts requires --attempt"))?;
+    let fence = parsed
+        .options
+        .fence
+        .ok_or_else(|| CliError::invalid("evidence receipts requires --fence"))?;
+    let page = app
+        .read_receipts_for_attempt(
+            &project_id,
+            &work_id,
+            attempt_id,
+            fence,
+            parsed.options.limit.unwrap_or(50),
+            parsed.options.offset.unwrap_or(0),
+        )
+        .map_err(map_application_error)?;
+    let items = page
+        .items
+        .iter()
+        .map(|receipt| {
+            let mut item = json!({
+                "receipt_id": receipt.receipt_id,
+                "project_id": receipt.project_id,
+                "work_id": receipt.work_id,
+                "attempt_id": receipt.attempt_id,
+                "fence": receipt.fence,
+                "operation_id": receipt.operation_id,
+                "gate_id": receipt.gate_id,
+                "executable": receipt.executable,
+                "argv_json": receipt.argv_json,
+                "cwd": receipt.cwd,
+                "exit_code": receipt.exit_code,
+                "started_at": receipt.started_at,
+                "ended_at": receipt.ended_at,
+                "source_version_id": receipt.source_version_id,
+                "config_identity": receipt.config_identity,
+                "environment_fingerprint": receipt.environment_fingerprint,
+                "output_digest": receipt.output_digest,
+                "output_ref": receipt.output_ref,
+                "subject_json": receipt.subject_json,
+                "coverage_json": receipt.coverage_json,
+                "attestation": receipt_attestation_name(receipt.attestation),
+                "result": receipt_outcome_name(receipt.result),
+                "rejection_code": receipt.rejection_code,
+                "created_at": receipt.created_at,
+            });
+            match receipt_record_json(receipt) {
+                Ok(payload) => item["receipt_payload"] = payload,
+                Err(error) => {
+                    item["receipt_payload"] = Value::Null;
+                    item["receipt_payload_diagnostic"] = json!(error.message);
+                }
+            }
+            item
+        })
+        .collect::<Vec<_>>();
+    bounded_result(
+        Some(json!({
+            "project_id": project_id,
+            "work_id": work_id,
+            "attempt_id": attempt_id,
+            "fence": fence,
+            "items": items,
+            "limit": page.limit,
+            "offset": page.offset,
+            "has_more": page.has_more,
+        })),
+        None,
+    )
+}
+
+fn required_extra_revision(options: &CliOptions, name: &str) -> Result<u64, CliError> {
+    let value = extra_value(options, name)
+        .ok_or_else(|| CliError::invalid(format!("missing required option {name}")))?;
+    parse_revision(value)
+}
+
+fn receipt_attestation_name(attestation: ReceiptAttestation) -> &'static str {
+    match attestation {
+        ReceiptAttestation::BorealWitnessed => "boreal_witnessed",
+        ReceiptAttestation::ExternalAttested => "external_attested",
+        ReceiptAttestation::SelfReported => "self_reported",
+        ReceiptAttestation::Unknown => "unknown",
+    }
+}
+
+fn receipt_outcome_name(outcome: ReceiptOutcome) -> &'static str {
+    match outcome {
+        ReceiptOutcome::Passed => "passed",
+        ReceiptOutcome::Failed => "failed",
+        ReceiptOutcome::Rejected => "rejected",
+        ReceiptOutcome::Unknown => "unknown",
+        ReceiptOutcome::Stale => "stale",
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
