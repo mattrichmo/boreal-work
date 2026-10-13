@@ -69,6 +69,15 @@ jobs:
               --output-dir "$output_dir"
           fi
 
+      - name: Install candidate and smoke package surfaces
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          output_dir="$RUNNER_TEMP/boreal-release"
+          archive=$(find "$output_dir" -maxdepth 1 -type f -name "bwrk-v*-$TARGET.tar.gz" -print -quit)
+          test -n "$archive"
+          sh scripts/release/package-target-smoke.sh "$archive" "$TARGET"
+
       - name: Retain target archive and release manifest
         uses: actions/upload-artifact@v4
         with:
