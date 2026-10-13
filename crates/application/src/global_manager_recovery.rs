@@ -5,7 +5,9 @@
 //! export/import transfer format.
 
 use crate::{sha256_content_digest, GlobalManagerError};
-use boreal_store::global_manager::{GlobalBackupManifest, GlobalManagerStore};
+use boreal_store::global_manager::{
+    GlobalBackupManifest, GlobalMaintenanceGuard, GlobalMaintenanceKind, GlobalManagerStore,
+};
 use std::path::{Component, Path, PathBuf};
 
 const BACKUP_DIRECTORY: &str = "backups";
@@ -14,6 +16,34 @@ const OPERATION_ID_MAX_BYTES: usize = 512;
 
 /// Private content classes present in a physical database image.
 pub const GLOBAL_BACKUP_CONTENTS: &str = "private management notes and complete revision history";
+
+/// Acquires the shared Global maintenance boundary for restore, schema
+/// migration, or machine-update work. The returned guard must stay alive until
+/// the complete maintenance operation and any durable readback have finished.
+pub fn acquire_global_maintenance(
+    database_path: impl AsRef<Path>,
+    operation_id: &str,
+    kind: GlobalMaintenanceKind,
+) -> Result<GlobalMaintenanceGuard, GlobalManagerError> {
+    Ok(GlobalMaintenanceGuard::acquire_exclusive(
+        database_path,
+        operation_id,
+        kind,
+    )?)
+}
+
+/// Opens the active or staged Global database under an already-held exclusive
+/// maintenance guard. The store shares the guard's OS lock handle, preventing
+/// connection use from outliving maintenance admission accidentally.
+pub fn open_global_under_maintenance(
+    database_path: impl AsRef<Path>,
+    guard: &GlobalMaintenanceGuard,
+) -> Result<GlobalManagerStore, GlobalManagerError> {
+    Ok(GlobalManagerStore::open_under_maintenance(
+        database_path,
+        guard,
+    )?)
+}
 
 /// Bounded metadata for a physical backup that has passed package validation.
 /// Database bytes are written only to the local package directory.
@@ -359,6 +389,41 @@ fn ensure_private_child_directory(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_admission_blocks_ordinary_open_and_authorizes_readback() {
+        let root = test_root("maintenance-admission");
+        let database = root.join("global.sqlite");
+        let guard = acquire_global_maintenance(
+            &database,
+            "op_restore_test",
+            GlobalMaintenanceKind::Restore,
+        )
+        .unwrap();
+
+        let error = GlobalManagerStore::open(&database).err().unwrap();
+        assert!(matches!(error, boreal_store::StoreError::Busy(_)));
+        assert!(error.to_string().contains("op_restore_test"));
+
+        let staged_database = guard.staging_database_path().unwrap();
+        let staged = open_global_under_maintenance(&staged_database, &guard).unwrap();
+        assert_eq!(staged.revision().unwrap(), 0);
+        drop(staged);
+
+        let unrelated_database = root.join("unrelated.sqlite");
+        let error = open_global_under_maintenance(&unrelated_database, &guard)
+            .err()
+            .unwrap();
+        assert!(matches!(error, GlobalManagerError::Invalid(_)));
+        assert!(!unrelated_database.exists());
+
+        drop(guard);
+        let resumed = GlobalManagerStore::open(&database).unwrap();
+        assert_eq!(resumed.revision().unwrap(), 0);
+        drop(resumed);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn creates_validated_private_backup_and_reads_back_same_operation() {

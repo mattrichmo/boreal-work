@@ -7,6 +7,11 @@
 use super::{SqliteStore, StoreError, SQLITE_ROW};
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[path = "global_maintenance.rs"]
+pub mod global_maintenance;
+pub use global_maintenance::{GlobalMaintenanceGuard, GlobalMaintenanceKind};
 
 #[path = "global_backup.rs"]
 pub mod global_backup;
@@ -48,9 +53,19 @@ CREATE TABLE IF NOT EXISTS global_audit (
 
 const EMPTY_STATE: &str = r#"{"projects":[],"items":[],"notes":[],"statuses":[{"project_id":null,"status_id":"todo","label":"To do","category":"open","position":0},{"project_id":null,"status_id":"doing","label":"Doing","category":"active","position":1},{"project_id":null,"status_id":"waiting","label":"Waiting","category":"waiting","position":2},{"project_id":null,"status_id":"blocked","label":"Blocked","category":"blocked","position":3},{"project_id":null,"status_id":"done","label":"Done","category":"completed","position":4},{"project_id":null,"status_id":"cancelled","label":"Cancelled","category":"cancelled","position":5}],"relationships":[],"note_links":[],"associations":[],"status_history":[],"imported_history":[]}"#;
 
+static GLOBAL_MIGRATION_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlobalSchemaStatus {
+    Ready,
+    Bootstrap,
+    Migration,
+}
+
 /// A connection to the separate installation-wide SQLite database.
 pub struct GlobalManagerStore {
     inner: SqliteStore,
+    _admission: GlobalMaintenanceGuard,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,9 +81,62 @@ pub struct GlobalAuditRecord {
 impl GlobalManagerStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path: std::path::PathBuf = path.as_ref().to_path_buf();
+        loop {
+            let shared = GlobalMaintenanceGuard::acquire_shared(&path, "global-store-open")?;
+            let schema_status = global_schema_status(&path)?;
+            if schema_status == GlobalSchemaStatus::Ready {
+                return Self::open_with_admission(path, shared);
+            }
+
+            // Migrations and first-time initialization are exclusive. Release
+            // the ordinary admission before acquiring maintenance so this
+            // connection never deadlocks against its own shared guard.
+            drop(shared);
+            let migration = match GlobalMaintenanceGuard::acquire_migration(
+                &path,
+                &migration_operation_id(),
+                std::time::Duration::from_secs(5),
+                schema_status == GlobalSchemaStatus::Bootstrap,
+            ) {
+                Ok(Some(migration)) => migration,
+                Ok(None) => continue,
+                Err(StoreError::Busy(_))
+                    if global_schema_status(&path)? == GlobalSchemaStatus::Ready =>
+                {
+                    // A concurrent first-open migration can finish between
+                    // preflight and exclusive acquisition, then reopen under
+                    // shared admission before this caller reaches flock.
+                    // Recheck normally once the database is already ready.
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let migrated = Self::open_with_admission(path.clone(), migration.clone())?;
+            drop(migrated);
+            drop(migration);
+        }
+    }
+
+    /// Opens a Global database while the caller holds exclusive maintenance
+    /// admission for this database root. The store retains a clone of the OS
+    /// lock handle, so dropping the caller's guard cannot expose the database
+    /// while this connection remains open.
+    pub fn open_under_maintenance(
+        path: impl AsRef<Path>,
+        guard: &GlobalMaintenanceGuard,
+    ) -> Result<Self, StoreError> {
+        let path: std::path::PathBuf = path.as_ref().to_path_buf();
+        let admission = guard.clone_exclusive_for_database(&path)?;
+        Self::open_with_admission(path, admission)
+    }
+
+    fn open_with_admission(
+        path: std::path::PathBuf,
+        admission: GlobalMaintenanceGuard,
+    ) -> Result<Self, StoreError> {
         let started = std::time::Instant::now();
         loop {
-            match Self::open_once(&path) {
+            match Self::open_once(&path, admission.clone()) {
                 Ok(store) => return Ok(store),
                 Err(StoreError::Busy(_))
                     if started.elapsed() < std::time::Duration::from_secs(5) =>
@@ -80,7 +148,10 @@ impl GlobalManagerStore {
         }
     }
 
-    fn open_once(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+    fn open_once(
+        path: impl AsRef<Path>,
+        admission: GlobalMaintenanceGuard,
+    ) -> Result<Self, StoreError> {
         let path: std::path::PathBuf = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -99,6 +170,11 @@ impl GlobalManagerStore {
         let count = objects.column_i64(0)?;
         drop(objects);
         if count == 0 {
+            if !admission.is_exclusive_for(&path) {
+                return Err(StoreError::Busy(
+                    "Global bootstrap requires exclusive migration admission".into(),
+                ));
+            }
             inner.execute_batch("BEGIN IMMEDIATE")?;
             let mut now_has_objects = inner.prepare("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
             now_has_objects.step()?;
@@ -106,7 +182,7 @@ impl GlobalManagerStore {
             drop(now_has_objects);
             if appeared {
                 inner.execute_batch("ROLLBACK")?;
-                return Self::open(path);
+                return Self::open_once(path, admission);
             }
             let setup = (|| {
                 inner.execute_batch("CREATE TABLE global_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_id TEXT NOT NULL,schema_version INTEGER NOT NULL,database_id TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 0);")?;
@@ -154,6 +230,18 @@ impl GlobalManagerStore {
                         .into(),
                 ));
             }
+            let schema_ready = global_schema_ready(&inner)?;
+            if version == GLOBAL_SCHEMA_VERSION as i64 && schema_ready {
+                return Ok(Self {
+                    inner,
+                    _admission: admission,
+                });
+            }
+            if !admission.is_exclusive_for(&path) {
+                return Err(StoreError::Busy(
+                    "Global schema migration requires exclusive maintenance admission".into(),
+                ));
+            }
             inner.execute_batch("BEGIN IMMEDIATE")?;
             let setup = (|| {
                 inner.execute_batch(GLOBAL_SCHEMA)?;
@@ -195,7 +283,10 @@ impl GlobalManagerStore {
                 }
             }
         }
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            _admission: admission,
+        })
     }
 
     pub fn revision(&self) -> Result<u64, StoreError> {
@@ -602,6 +693,100 @@ fn table_exists(db: &SqliteStore, name: &str) -> Result<bool, StoreError> {
     Ok(q.column_i64(0)? > 0)
 }
 
+fn migration_operation_id() -> String {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = GLOBAL_MIGRATION_OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("global-migration-v{GLOBAL_SCHEMA_VERSION}.{time}.{sequence}")
+}
+
+fn global_schema_status(path: &Path) -> Result<GlobalSchemaStatus, StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(StoreError::Invalid(format!(
+                "Global database must be a regular non-symlink file: {}",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(GlobalSchemaStatus::Bootstrap);
+        }
+        Err(error) => {
+            return Err(StoreError::Unavailable(format!(
+                "cannot inspect Global database {}: {error}",
+                path.display()
+            )));
+        }
+    }
+    let database = SqliteStore::open_read_only_for_diagnostics(path)?;
+    let mut objects = database.prepare(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )?;
+    if objects.step()? != SQLITE_ROW {
+        return Err(StoreError::Corrupt(
+            "global schema preflight returned no row".into(),
+        ));
+    }
+    let count = objects.column_i64(0)?;
+    drop(objects);
+    if count == 0 {
+        return Ok(GlobalSchemaStatus::Bootstrap);
+    }
+    if !table_exists(&database, "global_schema")? {
+        return Err(StoreError::Invalid(
+            "database is not a supported Boreal global database; it was left unchanged".into(),
+        ));
+    }
+    let mut identity =
+        database.prepare("SELECT schema_id,schema_version FROM global_schema WHERE singleton=1")?;
+    if identity.step()? != SQLITE_ROW {
+        return Err(StoreError::Invalid(
+            "database is not a supported Boreal global database; it was left unchanged".into(),
+        ));
+    }
+    let schema_id = identity.column_text(0)?;
+    let version = identity.column_i64(1)?;
+    drop(identity);
+    if schema_id != GLOBAL_SCHEMA_ID || !(1..=GLOBAL_SCHEMA_VERSION as i64).contains(&version) {
+        return Err(StoreError::Invalid(
+            "database is not a supported Boreal global database; it was left unchanged".into(),
+        ));
+    }
+    if version != GLOBAL_SCHEMA_VERSION as i64 || !global_schema_ready(&database)? {
+        Ok(GlobalSchemaStatus::Migration)
+    } else {
+        Ok(GlobalSchemaStatus::Ready)
+    }
+}
+
+fn global_schema_ready(database: &SqliteStore) -> Result<bool, StoreError> {
+    for table in [
+        "global_schema",
+        "global_manager_state",
+        "global_operation",
+        "global_revision_snapshot",
+        "global_audit",
+    ] {
+        if !table_exists(database, table)? {
+            return Ok(false);
+        }
+    }
+    let mut current = database.prepare("SELECT COUNT(*) FROM global_schema WHERE singleton=1")?;
+    if current.step()? != SQLITE_ROW || current.column_i64(0)? != 1 {
+        return Ok(false);
+    }
+    drop(current);
+    let mut state =
+        database.prepare("SELECT COUNT(*) FROM global_manager_state WHERE singleton=1")?;
+    if state.step()? != SQLITE_ROW || state.column_i64(0)? != 1 {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn open_connection_with_retry(path: &Path) -> Result<SqliteStore, StoreError> {
     let started = std::time::Instant::now();
     loop {
@@ -672,6 +857,34 @@ mod global_backup_tests {
     use crate::SqliteStore;
     use serde_json::json;
     use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn global_schema_migration_needs_exclusive_admission() {
+        let root = std::env::temp_dir().join(format!(
+            "boreal-global-migration-admission-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("global.sqlite");
+        let active =
+            super::GlobalMaintenanceGuard::acquire_shared(&path, "op_live_service").unwrap();
+
+        let error = GlobalManagerStore::open(&path).err().unwrap();
+        assert!(matches!(error, crate::StoreError::Busy(_)));
+        assert!(error.to_string().contains("global-migration-v2."));
+        assert!(!path.exists());
+
+        drop(active);
+        let migrated = GlobalManagerStore::open(&path).unwrap();
+        assert_eq!(migrated.revision().unwrap(), 0);
+        drop(migrated);
+        let _ = fs::remove_dir_all(root);
+    }
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
