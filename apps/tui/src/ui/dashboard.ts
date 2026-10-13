@@ -4,6 +4,7 @@ import { Screen, type Rect, type Tone } from "./screen.js";
 import { inputDisplay } from "./input.js";
 import { resolveViewport, chromeFor, paneViewport, dialogViewport, adaptiveHint, windowStart, type Density, type Chrome } from "./layout.js";
 import { ACTION_NAMES, FILTERS, itemStatus, paletteCommands, selectedAttentionQueue, visibleItems, type DashboardState, type Modal } from "./model.js";
+import { receiptDetailLines } from "./workspace-view.js";
 const LABELS: Record<string, string> = {
     in_progress: "In progress",
     needs_verification: "Verification needed",
@@ -229,6 +230,14 @@ export function detailLines(item: StatusItem | undefined, view: MountedView, tab
             add(`Phase  ${label(item.attempt.phase ?? "unknown")}`, "muted");
             if (item.attempt.lease_deadline)
                 add(`Lease  ${item.attempt.lease_deadline}`, "muted");
+            add("");
+            add("FINISH RECEIPT", "heading");
+            if (view.selected_receipt_available)
+                add(`Selected ${view.selected_receipt_id ?? "receipt payload"} · attempt ${item.attempt.attempt_id} · fence ${item.attempt.fence}`, "good");
+            else if (view.receipt_readback_available)
+                add("No receipt payload selected. Open Attempt receipt history in the command palette.", "warn");
+            else
+                add("Exact attempt receipt history is unavailable; finish stays disabled.", "warn");
         }
         add("");
         add("DEPENDENCIES", "heading");
@@ -287,7 +296,7 @@ function modal(screen: Screen, view: MountedView, state: DashboardState): void {
     const desired = m.kind === "confirm" ? 22 : m.kind === "search" ? 9 : m.kind === "form" ? 18 : 26;
     const d = dialogViewport(screen.width, screen.height, desired), p = d.body;
     screen.fill(d.rect);
-    const title = m.kind === "form" ? ACTION_NAMES[m.action] : m.kind === "confirm" ? "REVIEW ACTION" : m.kind === "palette" ? m.scope === "views" ? "SWITCH VIEW" : "COMMAND PALETTE" : m.kind === "help" ? "KEYBOARD REFERENCE" : m.kind === "message" ? m.title : "SEARCH WORK";
+    const title = m.kind === "form" ? ACTION_NAMES[m.action] : m.kind === "confirm" ? "REVIEW ACTION" : m.kind === "palette" ? m.scope === "views" ? "SWITCH VIEW" : "COMMAND PALETTE" : m.kind === "help" ? "KEYBOARD REFERENCE" : m.kind === "message" ? m.title : m.kind === "source_picker" ? "REGISTERED SOURCES" : m.kind === "work_picker" ? "VALID PLANNING TASKS" : m.kind === "receipt_picker" ? "ATTEMPT RECEIPTS" : "SEARCH WORK";
     if (d.boxed) screen.box(d.rect, title, true, state.ascii);
     else if (d.rect.height >= 3) screen.text(p.x, d.titleY, clip(title, p.width), "accent", p.width);
     const foot = (text: string, tone: Tone = "muted") => { if (d.rect.height >= 2) screen.text(p.x, d.footerY, fit(text, p.width), tone, p.width); };
@@ -306,7 +315,7 @@ function modal(screen: Screen, view: MountedView, state: DashboardState): void {
         foot(adaptiveHint(p.width, `↑↓ choose · Enter run · Esc close · ${index + 1}/${commands.length}`, "↑↓ Enter · Esc back", "↑↓ Enter Esc"));
     } else if (m.kind === "form") {
         const f = m.fields[m.index], hasLabel = p.height >= 2;
-        if (hasLabel) screen.text(p.x, p.y, clip(`${m.index + 1}/${m.fields.length} ${f.label}${f.required ? " *" : ""}`, p.width), "heading", p.width);
+        if (hasLabel) screen.text(p.x, p.y, clip(`${m.index + 1}/${m.fields.length} ${f.label}${f.required ? " *" : ""}${f.readOnly ? " · read only" : ""}`, p.width), "heading", p.width);
         const inputY = p.y + (hasLabel ? 1 : 0), room = Math.max(1, p.height - (hasLabel ? 1 : 0));
         const errorRows = m.error && room >= 2 ? 1 : 0;
         const hints = room >= 4 ? wrapWords(f.hint, p.width).slice(0, 2) : [];
@@ -322,6 +331,64 @@ function modal(screen: Screen, view: MountedView, state: DashboardState): void {
         hints.forEach((t, i) => screen.text(p.x, p.y + p.height - errorRows - hints.length + i, t, "muted", p.width));
         if (m.error && errorRows) screen.text(p.x, p.y + p.height - 1, clip(m.error, p.width), "danger", p.width);
         foot(m.error && !errorRows ? clip(m.error, p.width) : adaptiveHint(p.width, "Enter next / review · Tab field · ←→ edit · Ctrl-U clear · Esc cancel", "Enter next · Tab field · Esc cancel", "Enter Tab Esc"), m.error ? "danger" : "muted");
+    } else if (m.kind === "work_picker") {
+        let rowY = p.y;
+        if (p.height >= 2) {
+            screen.text(p.x, rowY++, clip(`${m.items.length} valid Tasks · ${m.hidden} hidden · ${m.total} work rows`, p.width), "muted", p.width);
+            if (p.height >= 3) screen.text(p.x, rowY++, clip(`Project revision ${m.revision ?? "unknown"} · page ${m.offset} · ${m.as_of}`, p.width), "muted", p.width);
+        }
+        const rowCapacity = Math.max(1, p.y + p.height - rowY);
+        const start = windowStart(m.index, m.items.length, rowCapacity);
+        if (m.items.length) {
+            m.items.slice(start, start + rowCapacity).forEach((item, i) => {
+                const index = start + i;
+                screen.text(p.x, rowY + i, fit(`${index === m.index ? ">" : " "} ${item.work_id} · ${item.execution_mode} · parent ${item.planning_parent_id ?? "root"} · ${item.title}`, p.width), index === m.index ? "selected" : "text", p.width);
+            });
+        } else screen.text(p.x, rowY, clip("No Tasks with a valid planning hierarchy are available on this page.", p.width), "muted", p.width);
+        foot(adaptiveHint(p.width, "↑↓ choose · Enter select · [ ] work pages · Esc return to form", "↑↓ Enter · [ ] page · Esc form", "↑↓ Enter [ ] Esc"));
+    } else if (m.kind === "source_picker") {
+        let rowY = p.y;
+        if (p.height >= 2) {
+            screen.text(p.x, rowY++, clip(`${m.total} registered · ${m.offset + 1}–${Math.min(m.offset + m.items.length, m.total)}${m.has_more ? " · more" : ""}`, p.width), "muted", p.width);
+            if (p.height >= 3) screen.text(p.x, rowY++, clip(`Service revision ${m.revision ?? "unknown"} · ${m.as_of}`, p.width), "muted", p.width);
+        }
+        const rowCapacity = Math.max(1, p.y + p.height - rowY);
+        const start = windowStart(m.index, m.items.length, rowCapacity);
+        if (m.items.length) {
+            m.items.slice(start, start + rowCapacity).forEach((item, i) => {
+                const index = start + i;
+                screen.text(p.x, rowY + i, fit(`${index === m.index ? ">" : " "} ${item.source_version_id} · ${item.availability} · ${item.origin}`, p.width), index === m.index ? "selected" : "text", p.width);
+            });
+        } else screen.text(p.x, rowY, clip("No registered source versions on this page.", p.width), "muted", p.width);
+        foot(adaptiveHint(p.width, "↑↓ choose · Enter select · [ ] source pages · Esc return to form", "↑↓ Enter · [ ] page · Esc form", "↑↓ Enter [ ] Esc"));
+    } else if (m.kind === "receipt_picker") {
+        let rowY = p.y;
+        if (p.height >= 2) {
+            screen.text(p.x, rowY++, clip(`Work ${m.work_id} · attempt ${m.attempt_id} · fence ${m.fence}`, p.width), "heading", p.width);
+            if (p.height >= 3) screen.text(p.x, rowY++, clip(`Service revision ${m.revision ?? "unknown"} · page ${m.offset} · ${m.as_of}`, p.width), "muted", p.width);
+        }
+        if (m.show_details && m.items[m.index]) {
+            const lines = receiptDetailLines(m.items[m.index]!).flatMap(line => wrapWords(line, p.width));
+            const capacity = Math.max(1, p.y + p.height - rowY);
+            const maximum = Math.max(0, lines.length - capacity);
+            m.detail_offset = Math.max(0, Math.min(m.detail_offset ?? 0, maximum));
+            lines.slice(m.detail_offset, m.detail_offset + capacity).forEach((line, index) =>
+                screen.text(p.x, rowY + index, clip(line, p.width), "text", p.width));
+            foot(adaptiveHint(p.width, `↑↓ scroll · i return to receipt list · Esc close · ${m.detail_offset + 1}-${Math.min(lines.length, m.detail_offset + capacity)}/${lines.length}`, "↑↓ scroll · i list · Esc close", "↑↓ i Esc"));
+        } else {
+            const rowCapacity = Math.max(1, Math.floor((p.y + p.height - rowY) / 3));
+            const start = windowStart(m.index, m.items.length, rowCapacity);
+            if (m.items.length) {
+                m.items.slice(start, start + rowCapacity).forEach((item, i) => {
+                    const index = start + i, selected = index === m.index, y = rowY + i * 3;
+                    const state = item.receipt_payload === undefined || item.receipt_payload === null ? "payload unavailable" : "payload selectable";
+                    screen.text(p.x, y, fit(`${selected ? ">" : " "} ${item.receipt_id} · ${item.result} · ${item.attestation} · gate ${item.gate_id ?? "unknown"}`, p.width), selected ? "selected" : "text", p.width);
+                    if (y + 1 < p.y + p.height) screen.text(p.x, y + 1, fit(`  ${item.created_at} · operation ${item.operation_id}`, p.width), "muted", p.width);
+                    if (y + 2 < p.y + p.height) screen.text(p.x, y + 2, fit(`  source ${item.source_version_id ?? "unknown"} · config ${item.config_identity} · exit ${item.exit_code} · ${item.rejection_code ?? state}`, p.width), item.result === "passed" ? "muted" : "warn", p.width);
+                });
+            } else screen.text(p.x, rowY, clip("No receipts were recorded for this exact attempt and fence.", p.width), "muted", p.width);
+            foot(adaptiveHint(p.width, "↑↓ inspect · i details · Enter select exact payload · [ ] receipt pages · Esc close", "↑↓ Enter select · i details · [ ] page · Esc close", "↑↓ i Enter [ ] Esc"));
+        }
     } else {
         const doc = modalDocument(view, state, screen.width, screen.height);
         const offset = Math.min(m.offset ?? 0, doc.maximum);

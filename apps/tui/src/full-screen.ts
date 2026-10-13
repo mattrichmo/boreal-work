@@ -1,12 +1,13 @@
-import type { ActionResult, CreateWorkDraftInput, Envelope, MountedView, TuiAction, WorkspaceViewKind } from "./client.js";
+import type { ActionResult, AttemptReceiptPage, AttemptReceiptRecord, CreateWorkDraftInput, CycleChange, CycleCommandInput, DependencyChangeInput, Envelope, ExecutionMode, FinalResultBinding, LocalDateTimeInput, MemoryCommandInput, MountedView, RecoveryCommandInput, RevisionedStatusResponse, TuiAction, WorkspaceViewKind, WorkEditInput, WorkProjection } from "./client.js";
 import type { LineShellController } from "./line-shell.js";
 import { safeText } from "./ui/cells.js";
 import { FrameWriter, type Theme } from "./ui/screen.js";
 import { renderDashboard, dashboardLayout, detailLines, inspectorRect, modalDocument, currentNotice } from "./ui/dashboard.js";
-import { initialState, reconcileSelection, visibleItems, FILTERS, ACTION_NAMES, actionForm, paletteCommands, type Modal, type DashboardState } from "./ui/model.js";
+import { initialState, reconcileSelection, visibleItems, FILTERS, ACTION_NAMES, actionForm, paletteCommands, type FormModal, type Modal, type DashboardState, type PlanningTaskPickerItem, type UiAction, type WorkspaceUiAction } from "./ui/model.js";
 import { paneViewport, cycleDensity, type Density } from "./ui/layout.js";
 import { editInput } from "./ui/input.js";
 import { StreamingKeyDecoder } from "./ui/keys.js";
+import { formatWorkspaceView } from "./ui/workspace-view.js";
 export { StreamingKeyDecoder, decodeKeys } from "./ui/keys.js";
 export type TerminalSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
 export interface FullScreenTerminal {
@@ -39,7 +40,41 @@ type Confirm = Extract<Modal, {
 type ExtendedController = LineShellController & {
     readback?: (operation_id: string) => Promise<unknown>;
     readWorkspaceView?: (kind: WorkspaceViewKind) => Promise<Envelope<unknown>>;
+    readCycle?: (view: "list" | "current" | "board" | "report", cycle_id?: string, limit?: number, offset?: number) => Promise<Envelope<unknown>>;
+    readSources?: (limit?: number, offset?: number) => Promise<Envelope<{ project_id: string; items: SourceRow[]; total: number; offset: number; limit: number; has_more: boolean; catalog_root: string }>>;
+    searchSources?: (query: string, limit?: number) => Promise<Envelope<unknown>>;
+    readReview?: (review_id: string) => Promise<Envelope<unknown>>;
+    readWork?: (work_id: string) => Promise<Envelope<WorkProjection>>;
+    readWorkPage?: (limit?: number, offset?: number) => Promise<Envelope<RevisionedStatusResponse>>;
+    editWork?: (input: Omit<WorkEditInput, "project_id" | "expected_revision">) => Promise<ActionResult<unknown>>;
+    changeDependency?: (action: "dependency_add" | "dependency_remove", input: Omit<DependencyChangeInput, "project_id" | "expected_revision">) => Promise<ActionResult<unknown>>;
+    changeCycle?: (input: CycleCommandInput) => Promise<ActionResult<unknown>>;
+    runMemoryCommand?: (input: MemoryCommandInput) => Promise<ActionResult<unknown>>;
+    runRecoveryCommand?: (input: RecoveryCommandInput) => Promise<ActionResult<unknown>>;
+    endSession?: () => Promise<ActionResult<unknown>>;
+    addSource?: (input: { input: string; origin: string; media_type?: string }) => Promise<ActionResult<unknown>>;
+    bindFinalResult?: (work_id: string, input: { source_version_id: string; content_digest: string }) => Promise<ActionResult<FinalResultBinding>>;
+    readReceiptsForAttempt?: (work_id: string, limit?: number, offset?: number) => Promise<Envelope<AttemptReceiptPage>>;
+    selectReceiptForAttempt?: (work_id: string, receipt_id: string) => void;
 };
+interface SourceRow {
+    project_id: string;
+    source_version_id: string;
+    origin: string;
+    media_type: string;
+    byte_count: number;
+    content_digest: string;
+    availability: string;
+    parser_identity?: string | null;
+}
+const WORKSPACE_UI_ACTIONS = new Set<WorkspaceUiAction>([
+    "edit_work", "dependency_add", "dependency_remove", "cycle_create", "cycle_board", "cycle_activate", "cycle_close", "cycle_cancel",
+    "cycle_assign", "cycle_commit", "cycle_remove", "cycle_carry_over", "memory_search", "memory_show", "memory_draft", "memory_review",
+    "memory_publish", "memory_reconcile", "recovery_resolve", "session_end", "source_capture", "source_search", "review_show", "bind_result",
+]);
+function isWorkspaceUiAction(action: UiAction): action is WorkspaceUiAction {
+    return WORKSPACE_UI_ACTIONS.has(action as WorkspaceUiAction);
+}
 function attemptIdentity(view: MountedView, id?: string): string | null {
     const a = view.monitoring?.items.find(i => i.work_id === id)?.attempt;
     return a ? `${a.attempt_id} · generation ${a.fence}` : null;
@@ -178,7 +213,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         message(`View: ${id.toUpperCase()}`);
         syncSelection();
     };
-    const confirm = (action: TuiAction, payload: unknown, summary: string, details: string[] = [], id = state.selectedId): void => {
+    const confirm = (action: UiAction, payload: unknown, summary: string, details: string[] = [], id?: string): void => {
         const view = controller.view();
         state.modal = { kind: "confirm", action, workId: action === "create_work" ? undefined : id, payload, summary, details,
             revision: view.monitoring?.revision ?? null, attempt: attemptIdentity(view, id), offset: 0 };
@@ -202,11 +237,215 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             state.modal = actionForm(action as "create_work" | "claim" | "evidence" | "finish" | "release", state.selectedId);
             return;
         }
-        confirm(action, {}, action === "claim" ? "Claim this work for the current operator session." : "Accept this claim and begin work.");
+        confirm(action, {}, action === "claim" ? "Claim this work for the current operator session." : "Accept this claim and begin work.", [], state.selectedId);
     };
-    const submitForm = (form: Extract<Modal, {
-        kind: "form";
-    }>): void => {
+    const stageWorkspace = (action: WorkspaceUiAction): void => {
+        if (state.busy || mutationQueued) {
+            message("Wait for the current request to finish before starting another action.", true);
+            return;
+        }
+        syncSelection();
+        const current = controller.view();
+        const selected = visibleItems(current, state).find(item => item.work_id === state.selectedId);
+        const needsWork = ["edit_work", "dependency_add", "dependency_remove", "bind_result"].includes(action);
+        if (needsWork && !selected) {
+            message(`${ACTION_NAMES[action]} requires selected work.`, true);
+            return;
+        }
+        if (action === "session_end") {
+            confirm(action, {}, "End the current service session.", [
+                `Project: ${current.route.project_id ?? "unknown"}`,
+                "Session: the mounted actor/harness/session context",
+                "The service checks current authority and project revision before ending it.",
+            ], undefined);
+            return;
+        }
+        if (action === "edit_work") {
+            if (!selected || !controller.readWork) {
+                message("Work detail is unavailable; refresh or reconnect before opening an edit form.", true);
+                return;
+            }
+            const selectedWork = selected;
+            enqueue("Reading work detail", async () => {
+                const result = await controller.readWork!(selectedWork.work_id);
+                const detail = result.data;
+                if (!detail || detail.project_id !== current.route.project_id || detail.work_id !== selectedWork.work_id)
+                    throw new Error("Work detail did not match the selected project item.");
+                const hydrated = { ...selectedWork, title: detail.title, description: detail.description,
+                    parent_id: detail.parent_id, kind: detail.kind, dispatch_policy: detail.dispatch_policy,
+                    priority: detail.priority, execution_mode: detail.execution_mode ?? null };
+                state.modal = actionForm(action, selectedWork.work_id, hydrated);
+                message(`Loaded ${selectedWork.work_id} detail for editing.`);
+            });
+            return;
+        }
+        state.modal = actionForm(action, needsWork ? selected?.work_id : undefined, selected);
+    };
+    const showWorkspaceData = (title: string, kind: WorkspaceViewKind, result: Envelope<unknown>): void => {
+        state.modal = { kind: "message", title: title.toUpperCase(), text: formatWorkspaceView(
+            kind,
+            controller.view().route.project_id ?? "unknown project",
+            result.revision,
+            result.as_of,
+            result.data,
+        ), offset: 0 };
+    };
+    const openSourcePicker = (form: FormModal, fieldName: "source_version_id", offset = 0): void => {
+        if (!controller.readSources) {
+            form.error = "Registered source selection is unavailable in this service connection.";
+            return;
+        }
+        enqueue("Loading registered sources", async () => {
+            try {
+                const result = await controller.readSources!(100, offset);
+                const data = result.data;
+                if (!data || data.project_id !== controller.view().route.project_id || !Array.isArray(data.items))
+                    throw new Error("The source list did not belong to the mounted project.");
+                const items = data.items.filter(item => item.project_id === data.project_id && typeof item.source_version_id === "string" && item.source_version_id.trim());
+                if (items.length !== data.items.length)
+                    throw new Error("The source list included malformed or cross-project rows; none were selected.");
+                if (state.modal !== form && !(state.modal?.kind === "source_picker" && state.modal.form === form)) return;
+                state.modal = {
+                    kind: "source_picker", form, field_name: fieldName, items, index: 0,
+                    total: data.total, offset: data.offset, limit: data.limit, has_more: data.has_more,
+                    revision: result.revision, as_of: result.as_of,
+                };
+                message(items.length ? `${items.length} registered source versions loaded.` : "No registered source versions are available on this page.");
+            }
+            catch (error) {
+                form.error = error instanceof Error ? error.message : String(error);
+                if (state.modal === form) message("Source selection is unavailable.", true);
+            }
+        });
+    };
+    const openWorkPicker = (form: FormModal, offset = 0, limit = 50): void => {
+        if (!controller.readWorkPage || !controller.readWork) {
+            form.error = "Task assignment requires the typed work list and hierarchy read routes.";
+            return;
+        }
+        enqueue("Checking Task hierarchy", async () => {
+            const page = await controller.readWorkPage!(limit, offset);
+            const data = page.data;
+            if (!data || data.project_id !== controller.view().route.project_id || !Array.isArray(data.items))
+                throw new Error("The work page did not belong to the mounted project.");
+            const currentRevision = controller.view().monitoring?.revision;
+            if (currentRevision !== undefined && currentRevision !== page.revision)
+                throw new Error("The work list changed while the dashboard was open. Refresh, then reopen the Task picker.");
+            const candidates = data.items.filter(item => item.kind === "task" && !item.diagnostic);
+            const items: PlanningTaskPickerItem[] = candidates
+                .filter(item => item.planning_integrity === "valid" && (item.execution_mode === "direct" || item.execution_mode === "container"))
+                .map(item => ({ work_id: item.work_id, title: item.title ?? item.work_id,
+                    execution_mode: item.execution_mode as "direct" | "container", planning_parent_id: item.planning_parent_id ?? null }));
+            if (state.modal !== form && !(state.modal?.kind === "work_picker" && state.modal.form === form)) return;
+            state.modal = {
+                kind: "work_picker", form, field_name: "work_id", items, index: 0,
+                total: data.total ?? data.items.length, hidden: candidates.length - items.length,
+                offset: data.offset ?? offset, limit: data.limit ?? limit, has_more: data.has_more ?? false,
+                revision: page.revision, as_of: page.as_of,
+            };
+            message(`Validated ${items.length} assignable Tasks; ${candidates.length - items.length} hidden because the planning hierarchy was not valid.`);
+        });
+    };
+    const openReceiptPicker = (work_id: string, offset = 0, limit = 50): void => {
+        if (!controller.readReceiptsForAttempt) {
+            message("Attempt receipt history is unavailable in this service connection.", true);
+            return;
+        }
+        const current = controller.view();
+        const item = current.monitoring?.items.find(row => row.work_id === work_id);
+        const attempt = item?.attempt;
+        if (!item || !attempt) {
+            message("Receipt history requires work with a current attempt.", true);
+            return;
+        }
+        const identity = { work_id, attempt_id: attempt.attempt_id, fence: attempt.fence };
+        enqueue("Loading attempt receipt history", async () => {
+            const result = await controller.readReceiptsForAttempt!(work_id, limit, offset);
+            const data = result.data;
+            const latest = controller.view().monitoring?.items.find(row => row.work_id === work_id)?.attempt;
+            if (!data || data.project_id !== current.route.project_id || data.work_id !== identity.work_id
+                || data.attempt_id !== identity.attempt_id || data.fence !== identity.fence
+                || !latest || latest.attempt_id !== identity.attempt_id || latest.fence !== identity.fence)
+                throw new Error("The receipt page did not match the current work attempt and fence.");
+            // Do not let a late page read replace a different view or a newly
+            // selected work item after the operator has navigated elsewhere.
+            const latestView = controller.view();
+            if (state.modal !== null || latestView.route.project_id !== current.route.project_id
+                || latestView.selected_work?.work_id !== work_id)
+                return;
+            state.modal = {
+                kind: "receipt_picker", work_id, attempt_id: attempt.attempt_id, fence: attempt.fence,
+                items: data.items, index: 0, offset: data.offset, limit: data.limit, has_more: data.has_more,
+                revision: result.revision, as_of: result.as_of,
+            };
+            const selectable = data.items.filter(record => record.receipt_payload !== undefined && record.receipt_payload !== null).length;
+            message(`Loaded ${data.items.length} receipt records for the exact fence; ${selectable} have a reconstructed payload available for explicit selection.`);
+        });
+    };
+    const changeSourcePage = (direction: -1 | 1): void => {
+        const picker = state.modal;
+        if (picker?.kind !== "source_picker") return;
+        const nextOffset = direction < 0 ? Math.max(0, picker.offset - picker.limit) : picker.offset + picker.limit;
+        if (direction > 0 && !picker.has_more) {
+            message("No later source page is available.");
+            return;
+        }
+        openSourcePicker(picker.form, picker.field_name, nextOffset);
+    };
+    const changeWorkPage = (direction: -1 | 1): void => {
+        const picker = state.modal;
+        if (picker?.kind !== "work_picker") return;
+        const nextOffset = direction < 0 ? Math.max(0, picker.offset - picker.limit) : picker.offset + picker.limit;
+        if (direction > 0 && !picker.has_more) {
+            message("No later work page is available.");
+            return;
+        }
+        openWorkPicker(picker.form, nextOffset, picker.limit);
+    };
+    const changeReceiptPage = (direction: -1 | 1): void => {
+        const picker = state.modal;
+        if (picker?.kind !== "receipt_picker") return;
+        const nextOffset = direction < 0 ? Math.max(0, picker.offset - picker.limit) : picker.offset + picker.limit;
+        if (direction > 0 && !picker.has_more) {
+            message("No later receipt page is available.");
+            return;
+        }
+        openReceiptPicker(picker.work_id, nextOffset, picker.limit);
+    };
+    const readWorkspaceForm = (form: Extract<Modal, { kind: "form" }>, values: Record<string, string>): void => {
+        state.modal = null;
+        enqueue(`Loading ${ACTION_NAMES[form.action]}`, async () => {
+            if (form.action === "cycle_board") {
+                if (!controller.readCycle) throw new Error("Cycle board is unavailable in this connection.");
+                showWorkspaceData("Cycle board", "cycles", await controller.readCycle("board", values.cycle_id));
+            } else if (form.action === "memory_search" || form.action === "memory_show") {
+                if (!controller.runMemoryCommand) throw new Error("Memory operations are unavailable in this connection.");
+                const memory: MemoryCommandInput = form.action === "memory_show"
+                    ? { expected_revision: null, confirmed: false, change: { kind: "show", draft_id: values.draft_id } }
+                    : { expected_revision: null, confirmed: false, change: { kind: "search", text: values.query || null, entry_id: null, source_version_id: null, requested_git_revision: null, limit: 20 } };
+                const result = await controller.runMemoryCommand(memory);
+                if (!result.ok) throw result.error;
+                showWorkspaceData(form.action === "memory_show" ? "Memory draft" : "Published memory", "memory", result.envelope);
+            } else if (form.action === "source_search") {
+                if (!controller.searchSources) throw new Error("Source search is unavailable in this connection.");
+                showWorkspaceData("Source search", "sources", await controller.searchSources(values.query));
+            } else if (form.action === "review_show") {
+                if (!controller.readReview) throw new Error("Review detail is unavailable in this connection.");
+                showWorkspaceData("Review detail", "reviews", await controller.readReview(values.review_id));
+            }
+            message(`${ACTION_NAMES[form.action]} loaded from the project service.`);
+        });
+    };
+    const parseLocalDateTime = (value: string): LocalDateTimeInput | null => {
+        const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/u.exec(value);
+        if (!match) return null;
+        const [, year, month, day, hour, minute, second] = match;
+        const parts = { year: Number(year), month: Number(month), day: Number(day), hour: Number(hour), minute: Number(minute), second: Number(second ?? 0) };
+        const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second));
+        return date.getUTCFullYear() === parts.year && date.getUTCMonth() === parts.month - 1 && date.getUTCDate() === parts.day
+            && parts.hour <= 23 && parts.minute <= 59 && parts.second <= 59 ? parts : null;
+    };
+    const submitForm = (form: FormModal): void => {
         const values = Object.fromEntries(form.fields.map(f => [f.name, f.value.trim()]));
         const missing = form.fields.findIndex(f => f.required && !f.value.trim());
         if (missing >= 0) {
@@ -217,7 +456,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         if (form.action === "create_work") {
             const priority = Number(values.priority || "0");
             if (!Number.isInteger(priority) || priority < 0 || priority > 255) {
-                form.index = 4;
+                form.index = form.fields.findIndex(field => field.name === "priority");
                 form.error = "Priority must be an integer from 0 to 255.";
                 return;
             }
@@ -226,9 +465,49 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 form.error = "Identifier cannot contain whitespace or control characters.";
                 return;
             }
-            const input: CreateWorkDraftInput = { work_id: values.work_id, kind: values.kind as CreateWorkDraftInput["kind"], title: values.title,
-                parent_id: values.parent_id || null, priority, ...(values.description ? { description: values.description } : {}) };
-            confirm("create_work", input, `Create ${input.kind}: ${input.title}`, [`Identifier: ${input.work_id}`, `Parent: ${input.parent_id ?? "none"}`, `Priority: ${priority}`]);
+            const kind = values.kind as CreateWorkDraftInput["kind"];
+            const execution_mode: ExecutionMode | undefined = kind === "milestone" ? "container"
+                : kind === "task" ? values.execution_mode as ExecutionMode : undefined;
+            if (kind === "milestone" && values.execution_mode !== "container") {
+                form.index = form.fields.findIndex(field => field.name === "execution_mode");
+                form.error = "Milestones must use container execution mode.";
+                return;
+            }
+            if (kind === "task" && !["direct", "container"].includes(values.execution_mode)) {
+                form.index = form.fields.findIndex(field => field.name === "execution_mode");
+                form.error = "Choose direct or container execution mode for this Task.";
+                return;
+            }
+            const input: CreateWorkDraftInput = { work_id: values.work_id, kind, title: values.title,
+                parent_id: values.parent_id || null, priority, ...(execution_mode ? { execution_mode } : {}),
+                ...(values.description ? { description: values.description } : {}) };
+            confirm("create_work", input, `Create ${input.kind}: ${input.title}`, [
+                `Identifier: ${input.work_id}`, `Parent: ${input.parent_id ?? "none"}`, `Priority: ${priority}`,
+                `Execution mode: ${execution_mode ?? "legacy Sprint grouping"}`,
+            ]);
+        }
+        else if (form.action === "bind_result") {
+            if (!form.workId) { form.error = "Select work with a current attempt before binding a result."; return; }
+            if (!/^sha256:[0-9a-f]{64}$/u.test(values.content_digest)) {
+                form.index = form.fields.findIndex(field => field.name === "source_version_id");
+                form.error = "Select a registered source with a valid content digest using P.";
+                return;
+            }
+            const selected = controller.view().monitoring?.items.find(item => item.work_id === form.workId);
+            const facts = selected?.action_context;
+            if (!selected?.attempt || facts?.state !== "available" || facts.integrity !== "valid"
+                || !Number.isSafeInteger(facts.entity_revision) || !facts.entity_revision
+                || !Number.isSafeInteger(facts.proof_revision) || !facts.proof_revision) {
+                form.error = "Authoritative attempt, entity revision, and proof revision are unavailable; refresh before binding.";
+                return;
+            }
+            confirm("bind_result", { source_version_id: values.source_version_id, content_digest: values.content_digest },
+                `Bind ${values.source_version_id} as the captured result for ${form.workId}.`, [
+                    `Attempt ${selected.attempt.attempt_id} · fence ${selected.attempt.fence}`,
+                    `SHA-256 ${values.content_digest}`,
+                    `Entity revision ${facts.entity_revision} · proof revision ${facts.proof_revision}`,
+                    "The service verifies the registered source, revisions, attempt fence, and acceptance profile.",
+                ], form.workId);
         }
         else if (form.action === "claim") {
             const sourceVersionId = values.source_version_id;
@@ -263,8 +542,185 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         }
         else if (form.action === "finish")
             confirm("finish", values.summary, values.summary, ["Requests proof-gated finish and close."], form.workId);
-        else
+        else if (form.action === "release")
             confirm("release", values.reason, values.reason, ["Releases the current attempt."], form.workId);
+        else if (["cycle_board", "memory_search", "memory_show", "source_search", "review_show"].includes(form.action))
+            readWorkspaceForm(form, values);
+        else if (form.action === "edit_work") {
+            const selected = form.workSnapshot ?? controller.view().monitoring?.items.find(item => item.work_id === form.workId);
+            if (!form.workId || !selected) { form.error = "Selected work is no longer in the current service page."; return; }
+            const input: Record<string, unknown> = { work_id: form.workId };
+            if (values.title !== (selected.title ?? "")) input.title = values.title;
+            if (values.description !== (selected.description ?? "")) input.description = values.description;
+            if (values.priority) {
+                const priority = Number(values.priority);
+                if (!Number.isInteger(priority) || priority < 0 || priority > 255) { form.index = form.fields.findIndex(field => field.name === "priority"); form.error = "Priority must be an integer from 0 to 255."; return; }
+                if (priority !== selected.priority) input.priority = priority;
+            }
+            if (values.dispatch_policy && values.dispatch_policy !== selected.dispatch_policy) input.dispatch_policy = values.dispatch_policy;
+            if (values.execution_mode && values.execution_mode !== "unknown") {
+                if (selected.kind === "milestone" && values.execution_mode !== "container") {
+                    form.index = form.fields.findIndex(field => field.name === "execution_mode");
+                    form.error = "Milestones must use container execution mode.";
+                    return;
+                }
+                if (values.execution_mode !== selected.execution_mode) input.execution_mode = values.execution_mode as ExecutionMode;
+            }
+            if (values.parent_action === "set") {
+                if (!values.parent_id) {
+                    form.index = form.fields.findIndex(field => field.name === "parent_id");
+                    form.error = "Enter the new parent identifier, or choose keep or clear.";
+                    return;
+                }
+                if (values.parent_id !== selected.parent_id) input.parent_id = values.parent_id;
+            } else if (values.parent_action === "clear" && selected.parent_id) input.clear_parent = true;
+            if (Object.keys(input).length === 1) { form.error = "No work fields changed."; return; }
+            confirm("edit_work", input, `Update ${selected.title ?? form.workId}.`, Object.entries(input).slice(1).map(([key, value]) => `${key.replaceAll("_", " ")}: ${String(value)}`), form.workId);
+        }
+        else if (form.action === "dependency_add" || form.action === "dependency_remove") {
+            const payload = { prerequisite_id: values.prerequisite_id, dependent_id: values.dependent_id };
+            confirm(form.action, payload, `${form.action === "dependency_add" ? "Add" : "Remove"} dependency.`, [
+                `${payload.prerequisite_id} must close before ${payload.dependent_id}.`,
+                "The server checks project scope, cycle constraints, and the current revision.",
+            ], form.workId);
+        }
+        else if (form.action === "cycle_assign") {
+            if (!controller.readWork) {
+                form.error = "Task assignment requires the typed work hierarchy read route.";
+                return;
+            }
+            const snapshotRevision = controller.view().monitoring?.revision;
+            if (snapshotRevision === undefined) {
+                form.error = "A current project revision is required before assigning a Task to a cycle.";
+                return;
+            }
+            state.modal = null;
+            enqueue("Verifying Task hierarchy", async () => {
+                const detailEnvelope = await controller.readWork!(values.work_id);
+                const detail = detailEnvelope.data;
+                const currentRevision = controller.view().monitoring?.revision;
+                if (!detail || detailEnvelope.revision !== snapshotRevision || currentRevision !== snapshotRevision
+                    || detail.kind !== "task" || !["direct", "container"].includes(detail.execution_mode ?? "")
+                    || detail.planning_integrity !== "valid") {
+                    state.modal = form;
+                    const diagnostic = detail?.planning_diagnostic?.trim();
+                    form.error = `This Task is missing or has an invalid planning hierarchy. ${diagnostic ? safeText(diagnostic) : "Select a validated Task with P, refresh, and try again."}`;
+                    return;
+                }
+                const reason = values.reason;
+                const input: CycleCommandInput = { expected_revision: snapshotRevision ?? 0, reason, confirmed: true,
+                    change: { kind: "assign", cycle_id: values.cycle_id, assignment_id: values.assignment_id, work_id: values.work_id } };
+                confirm(form.action, input, `Assign valid Task ${detail.work_id} to cycle ${values.cycle_id}.`, [
+                    `Assignment: ${values.assignment_id}`, `Planning parent: ${detail.planning_parent_id ?? "root"}`,
+                    `Reason: ${reason}`, `Project revision: ${input.expected_revision}`,
+                ], values.work_id);
+            });
+        }
+        else if (form.action.startsWith("cycle_")) {
+            const reason = values.reason ?? "";
+            let change: CycleChange;
+            if (form.action === "cycle_create") {
+                const start = parseLocalDateTime(values.start), end = values.end ? parseLocalDateTime(values.end) : null;
+                if (!start) { form.index = 4; form.error = "Start must use a valid YYYY-MM-DDTHH:mm[:ss] local date and time."; return; }
+                if (values.end && !end) { form.index = 5; form.error = "End must use a valid YYYY-MM-DDTHH:mm[:ss] local date and time."; return; }
+                change = { kind: "create", cycle_id: values.cycle_id, name: values.name, goal: values.goal, timezone: values.timezone, start, end };
+            } else if (form.action === "cycle_activate") change = { kind: "activate", cycle_id: values.cycle_id };
+            else if (form.action === "cycle_close") change = { kind: "close", cycle_id: values.cycle_id };
+            else if (form.action === "cycle_cancel") change = { kind: "cancel", cycle_id: values.cycle_id };
+            else if (form.action === "cycle_commit") change = { kind: "commit", cycle_id: values.cycle_id, assignment_id: values.assignment_id };
+            else if (form.action === "cycle_remove") change = { kind: "remove", cycle_id: values.cycle_id, assignment_id: values.assignment_id };
+            else if (form.action === "cycle_carry_over") change = { kind: "carry_over", cycle_id: values.cycle_id, assignment_id: values.assignment_id, successor_cycle_id: values.successor_cycle_id, successor_assignment_id: values.successor_assignment_id };
+            else { form.error = "This cycle operation is not supported by the current service contract."; return; }
+            const input: CycleCommandInput = { expected_revision: controller.view().monitoring?.revision ?? 0, reason, confirmed: true, change };
+            confirm(form.action, input, `${ACTION_NAMES[form.action]}: ${values.cycle_id ?? "cycle"}.`, [
+                `Reason: ${reason}`,
+                `Project revision: ${input.expected_revision}`,
+                "The Rust planning service owns calendar, assignment, and carry-over rules.",
+            ], undefined);
+        }
+        else if (form.action === "memory_draft") {
+            const input: MemoryCommandInput = { expected_revision: null, confirmed: true, change: {
+                kind: "draft", draft_id: values.draft_id, entry_id: values.entry_id, title: values.title, body: values.body,
+                citations: [{ source_version_id: values.source_version_id, location: values.location }],
+            } };
+            confirm(form.action, input, `Create cited memory draft ${values.draft_id}.`, [`Entry: ${values.entry_id}`, `Citation: ${values.source_version_id} · ${values.location}`], undefined);
+        }
+        else if (form.action === "memory_review") {
+            const input: MemoryCommandInput = { expected_revision: null, confirmed: true, change: { kind: "review", draft_id: values.draft_id, decision: values.decision, reason: values.reason } };
+            confirm(form.action, input, `${values.decision} memory draft ${values.draft_id}.`, [`Reason: ${values.reason}`], undefined);
+        }
+        else if (form.action === "memory_publish") {
+            const input: MemoryCommandInput = { expected_revision: null, confirmed: true, change: { kind: "publish", review_id: values.review_id, expected_manifest_identity: values.expected_manifest_identity } };
+            confirm(form.action, input, `Publish reviewed memory ${values.review_id}.`, [`Expected manifest: ${values.expected_manifest_identity}`, "Git publication is performed and reconciled by the service."], undefined);
+        }
+        else if (form.action === "memory_reconcile") {
+            const input: MemoryCommandInput = { expected_revision: null, confirmed: true, change: { kind: "reconcile", operation_id: values.operation_id } };
+            confirm(form.action, input, `Reconcile memory publication operation ${values.operation_id}.`, ["The service reads the exact durable operation outcome before updating publication state."], undefined);
+        }
+        else if (form.action === "recovery_resolve") {
+            const input: RecoveryCommandInput = { action: "resolve", obligation_id: values.obligation_id, resolution_id: values.resolution_id, outcome: values.outcome, reason: values.reason, resource_state: values.resource_state, expected_revision: controller.view().monitoring?.revision ?? 0, confirmed: true };
+            confirm(form.action, input, `Resolve recovery obligation ${values.obligation_id}.`, [`Outcome: ${values.outcome}`, `Resource state: ${values.resource_state}`, `Reason: ${values.reason}`], undefined);
+        }
+        else if (form.action === "source_capture") {
+            confirm(form.action, { input: values.input, origin: values.origin, ...(values.media_type ? { media_type: values.media_type } : {}) }, `Capture source from ${values.input}.`, [`Origin: ${values.origin}`, "The Rust service confines source capture to the selected project workspace and checks source permissions."], undefined);
+        }
+    };
+    const executeWorkspaceConfirm = async (pending: Confirm): Promise<void> => {
+        let result: ActionResult<unknown>;
+        switch (pending.action) {
+            case "edit_work":
+                if (!controller.editWork) throw new Error("Work editing is unavailable in this connection.");
+                result = await controller.editWork(pending.payload as Omit<WorkEditInput, "project_id" | "expected_revision">);
+                break;
+            case "dependency_add":
+            case "dependency_remove":
+                if (!controller.changeDependency) throw new Error("Dependency changes are unavailable in this connection.");
+                result = await controller.changeDependency(pending.action, pending.payload as Omit<DependencyChangeInput, "project_id" | "expected_revision">);
+                break;
+            case "cycle_create":
+            case "cycle_activate":
+            case "cycle_close":
+            case "cycle_cancel":
+            case "cycle_assign":
+            case "cycle_commit":
+            case "cycle_remove":
+            case "cycle_carry_over":
+                if (!controller.changeCycle) throw new Error("Cycle changes are unavailable in this connection.");
+                result = await controller.changeCycle(pending.payload as CycleCommandInput);
+                break;
+            case "memory_draft":
+            case "memory_review":
+            case "memory_publish":
+            case "memory_reconcile":
+                if (!controller.runMemoryCommand) throw new Error("Memory changes are unavailable in this connection.");
+                result = await controller.runMemoryCommand(pending.payload as MemoryCommandInput);
+                break;
+            case "recovery_resolve":
+                if (!controller.runRecoveryCommand) throw new Error("Recovery resolution is unavailable in this connection.");
+                result = await controller.runRecoveryCommand(pending.payload as RecoveryCommandInput);
+                break;
+            case "session_end":
+                if (!controller.endSession) throw new Error("Session end is unavailable in this connection.");
+                result = await controller.endSession();
+                break;
+            case "source_capture":
+                if (!controller.addSource) throw new Error("Source capture is unavailable in this connection.");
+                result = await controller.addSource(pending.payload as { input: string; origin: string; media_type?: string });
+                break;
+            case "bind_result":
+                if (!controller.bindFinalResult) throw new Error("Final result binding is unavailable in this connection.");
+                result = await controller.bindFinalResult(pending.workId!, pending.payload as { source_version_id: string; content_digest: string });
+                break;
+            default: throw new Error("This workspace action is read-only or unavailable.");
+        }
+        if (result.ok && pending.action === "bind_result") {
+            const binding = result.data as FinalResultBinding;
+            message(`Result bound as ${binding.binding_id} · proof revision ${binding.proof_revision}${binding.lineage_pending ? ` · source lineage pending: ${binding.lineage_pending}` : ""}`);
+        } else {
+            message(result.ok
+                ? `${ACTION_NAMES[pending.action]}: ${result.envelope.outcome} · revision ${result.envelope.revision ?? "unknown"}`
+                : `${ACTION_NAMES[pending.action]}: ${result.error.message}`, !result.ok);
+        }
     };
     const execute = async (pending: Confirm): Promise<void> => {
         const view = controller.view();
@@ -275,6 +731,10 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         if (pending.workId) {
             controller.navigate({ kind: "work", project_id: view.route.project_id, work_id: pending.workId });
             state.selectedId = pending.workId;
+        }
+        if (isWorkspaceUiAction(pending.action)) {
+            await executeWorkspaceConfirm(pending);
+            return;
         }
         const rule = controller.view().actions.find(a => a.action === pending.action);
         if (!rule?.enabled) {
@@ -303,7 +763,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 return;
             default: throw new Error("Unsupported interactive action");
         }
-        message(resultMessage(pending.action, result), !result.ok);
+        message(resultMessage(pending.action as TuiAction, result), !result.ok);
     };
     const readback = (): void => {
         const operation = controller.view().pending_operations[0];
@@ -365,26 +825,53 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             stage(id.slice(7) as TuiAction);
             return;
         }
+        if (id.startsWith("workspace-action:")) {
+            stageWorkspace(id.slice("workspace-action:".length) as WorkspaceUiAction);
+            return;
+        }
         if (id.startsWith("workspace:")) {
             const viewKind = id.slice("workspace:".length);
             const current = controller.view();
+            if (viewKind === "receipts") {
+                const work_id = current.selected_work?.work_id;
+                if (work_id) openReceiptPicker(work_id);
+                else message("Select work with a current attempt before reading its receipts.", true);
+                return;
+            }
+            if (viewKind === "cycle-board") {
+                stageWorkspace("cycle_board");
+                return;
+            }
             if (viewKind === "project") {
                 const projectId = current.route.project_id ?? "unknown project";
                 const monitoring = current.monitoring;
-                state.modal = { kind: "message", title: "PROJECT OVERVIEW", text: JSON.stringify({ project_id: projectId, revision: monitoring?.revision ?? null, total_work_items: monitoring?.total ?? 0, displayed_work_items: monitoring?.items.length ?? 0, page_offset: monitoring?.offset ?? 0, has_more: monitoring?.has_more ?? false, notice: current.notice?.message ?? null }, null, 2), offset: 0 };
+                state.modal = { kind: "message", title: "PROJECT OVERVIEW", text: [
+                    `Project ${projectId}`,
+                    `Service revision ${monitoring?.revision ?? "unavailable"}`,
+                    `Work items ${monitoring?.total ?? "unavailable"} total · ${monitoring?.items.length ?? 0} loaded`,
+                    `Page offset ${monitoring?.offset ?? "unavailable"}${monitoring?.has_more ? " · more rows available" : ""}`,
+                    `Project name ${monitoring?.project_name ?? "not supplied"}`,
+                    current.notice ? `Connection ${current.notice.kind}: ${current.notice.message}` : "Connection state is current.",
+                ].join("\n"), offset: 0 };
                 return;
             }
             if (viewKind === "pending") {
                 const pending = current.pending_operations;
-                state.modal = { kind: "message", title: "PENDING OPERATIONS", text: pending.length ? JSON.stringify(pending.map(operation => ({ operation_id: operation.operation_id, action: operation.action, work_id: operation.work_id })), null, 2) : "No operations are awaiting readback.", offset: 0 };
+                state.modal = { kind: "message", title: "PENDING OPERATIONS", text: pending.length
+                    ? pending.map(operation => `${operation.action}${operation.work_id ? ` · ${operation.work_id}` : ""}\n  Read operation ${operation.operation_id} before retrying.`).join("\n\n")
+                    : "No operations are awaiting readback.", offset: 0 };
                 return;
             }
             if (viewKind === "unavailable") {
                 const capabilities = (current.capabilities ?? []).map(capability => ({ route: capability.route, label: capability.label, status: capability.status, reason: capability.reason }));
-                state.modal = { kind: "message", title: "UNAVAILABLE ROUTES", text: `${current.notice ? `Connection notice: ${current.notice.message}\n\n` : ""}${JSON.stringify(capabilities, null, 2)}`, offset: 0 };
+                const rows = capabilities.map(capability => `${capability.label} · ${capability.status}\n  ${capability.reason}`);
+                state.modal = { kind: "message", title: "UNAVAILABLE ROUTES", text: [
+                    ...(current.notice ? [`Connection notice: ${current.notice.message}`, ""] : []),
+                    ...rows,
+                ].join("\n\n") || "No unavailable routes are registered.", offset: 0 };
                 return;
             }
-            if (["cycles", "reviews", "memory", "recovery"].includes(viewKind)) {
+            if (["cycles", "reviews", "memory", "recovery", "dependencies", "sources", "session"].includes(viewKind)) {
                 if (!controller.readWorkspaceView) {
                     state.modal = { kind: "message", title: `${viewKind.toUpperCase()} UNAVAILABLE`, text: "This service connection does not provide this project view.", offset: 0 };
                     return;
@@ -393,7 +880,13 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 enqueue(`Loading ${kind}`, async () => {
                     try {
                         const result = await controller.readWorkspaceView!(kind);
-                        state.modal = { kind: "message", title: kind.toUpperCase(), text: JSON.stringify({ project_id: controller.view().route.project_id, revision: result.revision, as_of: result.as_of, data: result.data }, null, 2) ?? "No data returned.", offset: 0 };
+                        state.modal = { kind: "message", title: kind.toUpperCase(), text: formatWorkspaceView(
+                            kind,
+                            controller.view().route.project_id ?? "unknown project",
+                            result.revision,
+                            result.as_of,
+                            result.data,
+                        ), offset: 0 };
                         message(`${kind} view loaded from the project service.`);
                     }
                     catch (error) {
@@ -470,6 +963,17 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         const m = state.modal;
         if (!m)
             return;
+        if (key === "escape" && (m.kind === "source_picker" || m.kind === "work_picker")) {
+            state.modal = m.form;
+            message("Returned to the form; no action was submitted.");
+            return;
+        }
+        if (key === "escape" && m.kind === "receipt_picker" && m.show_details) {
+            m.show_details = false;
+            m.detail_offset = 0;
+            message("Returned to the receipt list; no evidence was selected.");
+            return;
+        }
         if (key === "escape") {
             state.modal = null;
             message("Cancelled. No action was submitted.");
@@ -500,6 +1004,86 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             else if (key === "end") m.offset = doc.maximum;
             return;
         }
+        if (m.kind === "source_picker") {
+            if (["up", "k"].includes(key)) m.index = Math.max(0, m.index - 1);
+            else if (["down", "j"].includes(key)) m.index = Math.min(Math.max(0, m.items.length - 1), m.index + 1);
+            else if (key === "home") m.index = 0;
+            else if (key === "end") m.index = Math.max(0, m.items.length - 1);
+            else if (key === "[" || key === "page-up") changeSourcePage(-1);
+            else if (key === "]" || key === "page-down") changeSourcePage(1);
+            else if (key === "enter" && m.items[m.index]) {
+                const field = m.form.fields.find(value => value.name === m.field_name);
+                if (!field) { state.modal = m.form; m.form.error = "The source field is no longer available."; return; }
+                field.value = m.items[m.index].source_version_id;
+                field.cursor = field.value.length;
+                if (m.form.action === "bind_result") {
+                    const digest = m.form.fields.find(value => value.name === "content_digest");
+                    if (digest) { digest.value = m.items[m.index].content_digest; digest.cursor = digest.value.length; }
+                }
+                m.form.index = m.form.fields.indexOf(field);
+                m.form.error = undefined;
+                state.modal = m.form;
+                message(`Selected source ${field.value}.`);
+            }
+            return;
+        }
+        if (m.kind === "receipt_picker") {
+            if (m.show_details) {
+                if (key === "i") { m.show_details = false; m.detail_offset = 0; }
+                else if (["up", "k"].includes(key)) m.detail_offset = Math.max(0, (m.detail_offset ?? 0) - 1);
+                else if (["down", "j"].includes(key)) m.detail_offset = (m.detail_offset ?? 0) + 1;
+                else if (key === "home") m.detail_offset = 0;
+                else if (key === "end") m.detail_offset = Number.MAX_SAFE_INTEGER;
+                else if (key === "page-up") m.detail_offset = Math.max(0, (m.detail_offset ?? 0) - 10);
+                else if (key === "page-down") m.detail_offset = (m.detail_offset ?? 0) + 10;
+                return;
+            }
+            if (["up", "k"].includes(key)) m.index = Math.max(0, m.index - 1);
+            else if (["down", "j"].includes(key)) m.index = Math.min(Math.max(0, m.items.length - 1), m.index + 1);
+            else if (key === "home") m.index = 0;
+            else if (key === "end") m.index = Math.max(0, m.items.length - 1);
+            else if (key === "[" || key === "page-up") changeReceiptPage(-1);
+            else if (key === "]" || key === "page-down") changeReceiptPage(1);
+            else if (key === "i" && m.items[m.index]) { m.show_details = true; m.detail_offset = 0; }
+            else if (key === "enter" && m.items[m.index]) {
+                const record = m.items[m.index];
+                if (record.receipt_payload === undefined || record.receipt_payload === null) {
+                    message(record.receipt_payload_diagnostic ?? `Receipt ${record.receipt_id} has no reconstructed payload. It remains visible and cannot be selected for finish.`, true);
+                    return;
+                }
+                if (!controller.selectReceiptForAttempt) {
+                    message("Receipt selection is unavailable in this service connection.", true);
+                    return;
+                }
+                try {
+                    controller.selectReceiptForAttempt(m.work_id, record.receipt_id);
+                    state.modal = null;
+                    message(`Selected receipt ${record.receipt_id} for attempt ${m.attempt_id} · fence ${m.fence}. Finish will use this exact payload.`);
+                } catch (error) {
+                    message(error instanceof Error ? error.message : String(error), true);
+                }
+            }
+            return;
+        }
+        if (m.kind === "work_picker") {
+            if (["up", "k"].includes(key)) m.index = Math.max(0, m.index - 1);
+            else if (["down", "j"].includes(key)) m.index = Math.min(Math.max(0, m.items.length - 1), m.index + 1);
+            else if (key === "home") m.index = 0;
+            else if (key === "end") m.index = Math.max(0, m.items.length - 1);
+            else if (key === "[" || key === "page-up") changeWorkPage(-1);
+            else if (key === "]" || key === "page-down") changeWorkPage(1);
+            else if (key === "enter" && m.items[m.index]) {
+                const field = m.form.fields.find(value => value.name === m.field_name);
+                if (!field) { state.modal = m.form; m.form.error = "The Task field is no longer available."; return; }
+                field.value = m.items[m.index].work_id;
+                field.cursor = field.value.length;
+                m.form.index = m.form.fields.indexOf(field);
+                m.form.error = undefined;
+                state.modal = m.form;
+                message(`Selected valid Task ${field.value}.`);
+            }
+            return;
+        }
         if (m.kind === "form") {
             const field = m.fields[m.index];
             if (key === "tab" || key === "shift-tab") {
@@ -513,12 +1097,30 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                     submitForm(m);
                 return;
             }
+            if ((key === "p" || key === "P") && field.name === "source_version_id") {
+                openSourcePicker(m, "source_version_id");
+                return;
+            }
+            if ((key === "p" || key === "P") && m.action === "cycle_assign" && field.name === "work_id") {
+                openWorkPicker(m);
+                return;
+            }
             if (field.choices && ["left", "right", "up", "down", " "].includes(key)) {
                 const delta = key === "left" || key === "up" ? -1 : 1;
                 field.value = field.choices[(field.choices.indexOf(field.value) + delta + field.choices.length) % field.choices.length];
+                if (m.action === "create_work" && field.name === "kind") {
+                    const mode = m.fields.find(value => value.name === "execution_mode");
+                    if (mode) {
+                        if (field.value === "milestone") mode.value = "container";
+                        else if (field.value === "sprint") mode.value = "not applicable";
+                        else if (mode.value === "not applicable" || mode.value === "container") mode.value = "direct";
+                    }
+                }
                 return;
             }
             if (field.choices)
+                return;
+            if (field.readOnly)
                 return;
             const edited = editInput(field.value, field.cursor, key, field.name === "receipt" ? 262144 : 8192, true);
             field.value = edited.value;
