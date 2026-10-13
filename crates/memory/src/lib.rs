@@ -1,6 +1,8 @@
 //! Project-scoped cited drafts and Git-authoritative memory publication.
 //!
-//! This crate deliberately has no persistence or serialization dependencies.
+//! Published content is stored in Git with explicit project and citation
+//! boundaries; serialization is limited to the durable manifest and backup
+//! formats.
 
 /// Durable admission and readback boundary for the Git publication side
 /// effect.  The application/store owner supplies the `PublicationJobPort`;
@@ -13,13 +15,14 @@ pub use publisher::{
     PublicationJobRequest, PublicationJobState,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -40,6 +43,12 @@ pub const INDEX_SCHEMA_VERSION: &str = "boreal.memory_index.v1";
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_OUTPUT_LIMIT: usize = 1024 * 1024;
 const LOCK_WAIT: Duration = Duration::from_secs(10);
+pub const MEMORY_BUNDLE_FORMAT_V1: &str = "boreal.memory.bundle.v1";
+pub const MAX_MEMORY_BUNDLE_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_MEMORY_BUNDLE_METADATA_BYTES: usize = 32 * 1024 * 1024;
+const MAX_MEMORY_BUNDLE_FILES: usize = 100_000;
+const MEMORY_BUNDLE_MAGIC: &[u8] = b"boreal.memory.bundle.v1\0";
+const GIT_BUNDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Citation {
@@ -84,6 +93,9 @@ pub enum MemoryError {
     EmptyIdentity,
     InvalidPath,
     InvalidManifest(String),
+    InvalidBundle(String),
+    BundleConflict,
+    BundleTooLarge { actual: usize, limit: usize },
     Io(String),
 }
 
@@ -94,6 +106,16 @@ impl std::fmt::Display for MemoryError {
             Self::EmptyIdentity => f.write_str("memory identity is empty or unsafe"),
             Self::InvalidPath => f.write_str("memory path is outside the managed memory root"),
             Self::InvalidManifest(message) => write!(f, "invalid memory manifest: {}", message),
+            Self::InvalidBundle(message) => {
+                write!(f, "memory backup bundle is invalid: {}", message)
+            }
+            Self::BundleConflict => {
+                f.write_str("memory backup restore conflicts with existing data")
+            }
+            Self::BundleTooLarge { actual, limit } => write!(
+                f,
+                "memory backup bundle is {actual} bytes, above the configured {limit} byte bound"
+            ),
             Self::Io(message) => write!(f, "memory I/O failed: {}", message),
         }
     }
@@ -182,6 +204,78 @@ pub struct MemoryRoot {
     runtime_root: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct MemoryBundleFileMetadata {
+    path: String,
+    digest: String,
+    byte_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct MemoryGitRef {
+    name: String,
+    object: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct MemoryGitSnapshot {
+    repository_scope: String,
+    head_commit: Option<String>,
+    head_ref: Option<String>,
+    tree: Option<String>,
+    refs: Vec<MemoryGitRef>,
+    bundle_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct MemoryBundleMetadata {
+    format: String,
+    layout: String,
+    project_id: Option<String>,
+    manifest_identity: Option<String>,
+    files: Vec<MemoryBundleFileMetadata>,
+    git: Option<MemoryGitSnapshot>,
+}
+
+struct MemoryBundleFile {
+    path: String,
+    bytes: Vec<u8>,
+}
+
+struct DecodedMemoryBundle {
+    metadata: MemoryBundleMetadata,
+    files: Vec<MemoryBundleFile>,
+    git_bundle: Option<Vec<u8>>,
+    total_bytes: usize,
+}
+
+/// Bounded project memory backup. `bytes` is a deterministic archive of the
+/// exact memory file snapshot and its publication Git identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MemoryBundle {
+    pub format: String,
+    pub layout: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Readback of the memory files and publication identity restored from a
+/// bundle. In-repository layouts carry the captured Git identity without
+/// bundling or changing the enclosing repository history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MemoryBundleReadback {
+    pub format: String,
+    pub layout: String,
+    pub project_id: Option<String>,
+    pub files: usize,
+    pub bytes: usize,
+    pub git_head: Option<String>,
+    pub git_ref: Option<String>,
+    pub git_tree: Option<String>,
+    pub git_history_included: bool,
+    pub duplicate: bool,
+    pub preserved_previous_root: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MemoryLayout {
     #[default]
@@ -250,6 +344,127 @@ impl MemoryRoot {
         Ok(())
     }
 
+    /// Capture the exact memory file snapshot and its publication identity.
+    /// Standalone memory repositories include a bounded `git bundle --all`;
+    /// in-repository layouts record the scoped Git ref/tree without exporting
+    /// or changing the enclosing project's repository.
+    pub fn export_bundle(&self) -> Result<MemoryBundle, MemoryError> {
+        let _publication_lock =
+            PublicationLock::acquire(self).map_err(|error| MemoryError::Io(error.to_string()))?;
+        let files = collect_memory_files(self)?;
+        let (mut git, git_bundle) = capture_memory_git(self, true)?;
+        let project_id = match files.iter().find(|file| file.path == "manifest.json") {
+            Some(file) => {
+                let text = std::str::from_utf8(&file.bytes).map_err(|error| {
+                    MemoryError::InvalidManifest(format!("manifest is not UTF-8: {error}"))
+                })?;
+                let manifest = parse_existing_manifest(text)
+                    .map_err(|error| MemoryError::InvalidManifest(error.to_string()))?;
+                Some(manifest.project_id)
+            }
+            None => None,
+        };
+        let manifest_identity = files
+            .iter()
+            .find(|file| file.path == "manifest.json")
+            .map(|file| digest(&file.bytes));
+        if let (Some(git), Some(bundle)) = (git.as_mut(), git_bundle.as_ref()) {
+            git.bundle_digest = Some(digest(bundle));
+        }
+        let metadata = MemoryBundleMetadata {
+            format: MEMORY_BUNDLE_FORMAT_V1.to_owned(),
+            layout: memory_layout_name(self.layout).to_owned(),
+            project_id,
+            manifest_identity,
+            files: files
+                .iter()
+                .map(|file| MemoryBundleFileMetadata {
+                    path: file.path.clone(),
+                    digest: digest(&file.bytes),
+                    byte_count: file.bytes.len() as u64,
+                })
+                .collect(),
+            git,
+        };
+        let bytes = encode_memory_bundle(&metadata, &files, git_bundle.as_deref())?;
+        Ok(MemoryBundle {
+            format: MEMORY_BUNDLE_FORMAT_V1.to_owned(),
+            layout: memory_layout_name(self.layout).to_owned(),
+            bytes,
+        })
+    }
+
+    /// Restore a bundle into an empty memory root, or confirm an exact
+    /// idempotent replay. Existing non-matching files or Git history are
+    /// retained and reported as a conflict.
+    pub fn restore_bundle(
+        &self,
+        bundle: &MemoryBundle,
+        expected_project_id: Option<&str>,
+    ) -> Result<MemoryBundleReadback, MemoryError> {
+        if bundle.format != MEMORY_BUNDLE_FORMAT_V1
+            || bundle.layout != memory_layout_name(self.layout)
+        {
+            return Err(MemoryError::InvalidBundle(
+                "bundle format or memory layout does not match the destination".to_owned(),
+            ));
+        }
+        if let Some(project_id) = expected_project_id {
+            validate_segment(project_id)?;
+        }
+        let decoded = decode_memory_bundle(&bundle.bytes)?;
+        if decoded.metadata.format != MEMORY_BUNDLE_FORMAT_V1
+            || decoded.metadata.layout != memory_layout_name(self.layout)
+        {
+            return Err(MemoryError::InvalidBundle(
+                "metadata format or layout does not match the destination".to_owned(),
+            ));
+        }
+        if expected_project_id.is_some()
+            && decoded.metadata.project_id.as_deref() != expected_project_id
+        {
+            return Err(MemoryError::InvalidBundle(
+                "published memory project identity does not match the destination".to_owned(),
+            ));
+        }
+        let _publication_lock =
+            PublicationLock::acquire(self).map_err(|error| MemoryError::Io(error.to_string()))?;
+        let current_files = collect_memory_files(self)?;
+        let files_match = memory_files_equal(&current_files, &decoded.files);
+        let current_git = if self.layout == MemoryLayout::Child {
+            capture_memory_git(self, false)?.0
+        } else {
+            None
+        };
+        let git_match = if self.layout == MemoryLayout::InRepo {
+            true
+        } else {
+            memory_git_matches(current_git.as_ref(), decoded.metadata.git.as_ref())
+        };
+        if files_match && git_match {
+            return Ok(memory_bundle_readback(&decoded, true, None));
+        }
+
+        let current_has_files = !current_files.is_empty();
+        let current_has_git = self.layout == MemoryLayout::Child
+            && current_git
+                .as_ref()
+                .is_some_and(|git| git.head_commit.is_some() || !git.refs.is_empty());
+        if current_has_files || current_has_git {
+            return Err(MemoryError::BundleConflict);
+        }
+
+        let staging = create_memory_restore_staging(self)?;
+        for file in &decoded.files {
+            write_memory_snapshot_file(&staging, file)?;
+        }
+        if self.layout == MemoryLayout::Child {
+            restore_memory_git(&staging, &decoded)?;
+        }
+        let previous = install_memory_restore(self, &staging)?;
+        Ok(memory_bundle_readback(&decoded, false, previous))
+    }
+
     pub fn manifest_path(&self) -> PathBuf {
         self.path.join("manifest.json")
     }
@@ -307,6 +522,871 @@ impl MemoryRoot {
             fs::create_dir(&notes)?;
         }
         Ok(())
+    }
+}
+
+fn memory_layout_name(layout: MemoryLayout) -> &'static str {
+    match layout {
+        MemoryLayout::Child => "child",
+        MemoryLayout::InRepo => "in-repo",
+    }
+}
+
+fn collect_memory_files(root: &MemoryRoot) -> Result<Vec<MemoryBundleFile>, MemoryError> {
+    let mut files = Vec::new();
+    let mut total_bytes = 0usize;
+    if !root.path().exists() {
+        return Ok(files);
+    }
+    reject_symlink(root.path())?;
+    collect_memory_files_from(root, root.path(), &mut files, &mut total_bytes)?;
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    if files.len() > MAX_MEMORY_BUNDLE_FILES {
+        return Err(MemoryError::BundleTooLarge {
+            actual: files.len(),
+            limit: MAX_MEMORY_BUNDLE_FILES,
+        });
+    }
+    Ok(files)
+}
+
+fn collect_memory_files_from(
+    root: &MemoryRoot,
+    directory: &Path,
+    files: &mut Vec<MemoryBundleFile>,
+    total_bytes: &mut usize,
+) -> Result<(), MemoryError> {
+    let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(MemoryError::InvalidPath);
+        }
+        if name == ".git" {
+            if root.layout == MemoryLayout::Child && path == root.path().join(".git") {
+                continue;
+            }
+            return Err(MemoryError::InvalidPath);
+        }
+        if metadata.is_dir() {
+            collect_memory_files_from(root, &path, files, total_bytes)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(MemoryError::InvalidPath);
+        }
+        let relative = path
+            .strip_prefix(root.path())
+            .map_err(|_| MemoryError::InvalidPath)?;
+        let path_text = relative
+            .to_str()
+            .ok_or(MemoryError::InvalidPath)?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        validate_memory_bundle_path(&path_text)?;
+        let size = usize::try_from(metadata.len()).map_err(|_| MemoryError::BundleTooLarge {
+            actual: usize::MAX,
+            limit: MAX_MEMORY_BUNDLE_BYTES,
+        })?;
+        *total_bytes = total_bytes
+            .checked_add(size)
+            .ok_or(MemoryError::BundleTooLarge {
+                actual: usize::MAX,
+                limit: MAX_MEMORY_BUNDLE_BYTES,
+            })?;
+        if *total_bytes > MAX_MEMORY_BUNDLE_BYTES {
+            return Err(MemoryError::BundleTooLarge {
+                actual: *total_bytes,
+                limit: MAX_MEMORY_BUNDLE_BYTES,
+            });
+        }
+        let bytes = fs::read(&path)?;
+        if bytes.len() != size {
+            return Err(MemoryError::Io(
+                "memory file changed while its backup snapshot was being read".into(),
+            ));
+        }
+        files.push(MemoryBundleFile {
+            path: path_text,
+            bytes,
+        });
+        if files.len() > MAX_MEMORY_BUNDLE_FILES {
+            return Err(MemoryError::BundleTooLarge {
+                actual: files.len(),
+                limit: MAX_MEMORY_BUNDLE_FILES,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_memory_bundle_path(path: &str) -> Result<(), MemoryError> {
+    let candidate = Path::new(path);
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.as_bytes().contains(&0)
+        || has_parent_component(candidate)
+        || candidate.components().any(|component| {
+            !matches!(component, Component::Normal(_)) || component.as_os_str() == ".git"
+        })
+    {
+        return Err(MemoryError::InvalidPath);
+    }
+    Ok(())
+}
+
+struct TemporaryDirectory {
+    path: PathBuf,
+}
+
+impl TemporaryDirectory {
+    fn create(parent: &Path, prefix: &str) -> Result<Self, MemoryError> {
+        for _ in 0..16 {
+            let path = parent.join(format!(
+                ".{prefix}-{}-{}",
+                std::process::id(),
+                unique_stamp()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(MemoryError::Io(error.to_string())),
+            }
+        }
+        Err(MemoryError::Io(
+            "could not allocate a unique memory backup staging directory".into(),
+        ))
+    }
+}
+
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn capture_memory_git(
+    root: &MemoryRoot,
+    include_history_bundle: bool,
+) -> Result<(Option<MemoryGitSnapshot>, Option<Vec<u8>>), MemoryError> {
+    if root.layout == MemoryLayout::InRepo {
+        ensure_git_repository(root).map_err(|error| MemoryError::Io(error.to_string()))?;
+    } else {
+        let git_directory = root.path().join(".git");
+        if !git_directory.exists() {
+            return Ok((None, None));
+        }
+        reject_symlink(&git_directory)?;
+        git_output(root.path(), &["rev-parse", "--is-inside-work-tree"])
+            .map_err(|error| MemoryError::Io(error.to_string()))?;
+    }
+
+    let repository_scope = git_prefix(root.path())
+        .map_err(|error| MemoryError::Io(error.to_string()))?
+        .trim_end_matches('/')
+        .to_owned();
+    let head_commit = run_git(root.path(), &["rev-parse", "--verify", "HEAD"])
+        .map_err(|error| MemoryError::Io(error.to_string()))?
+        .stdout
+        .trim()
+        .to_owned();
+    let head_commit = (!head_commit.is_empty()).then_some(head_commit);
+    let head_ref = run_git(root.path(), &["symbolic-ref", "-q", "HEAD"])
+        .map_err(|error| MemoryError::Io(error.to_string()))?
+        .stdout
+        .trim()
+        .to_owned();
+    let head_ref = (!head_ref.is_empty()).then_some(head_ref);
+    let tree = if head_commit.is_some() {
+        let expression = if repository_scope.is_empty() {
+            "HEAD^{tree}".to_owned()
+        } else {
+            format!("HEAD:{repository_scope}")
+        };
+        run_git(root.path(), &["rev-parse", "--verify", &expression])
+            .map_err(|error| MemoryError::Io(error.to_string()))?
+            .stdout
+            .trim()
+            .to_owned()
+    } else {
+        String::new()
+    };
+    let tree = (!tree.is_empty()).then_some(tree);
+    let refs_output = git_output(
+        root.path(),
+        &["for-each-ref", "--format=%(refname)%00%(objectname)"],
+    )
+    .map_err(|error| MemoryError::Io(error.to_string()))?;
+    let mut refs = Vec::new();
+    for line in refs_output.lines().filter(|line| !line.is_empty()) {
+        let (name, object) = line.split_once('\0').ok_or_else(|| {
+            MemoryError::InvalidBundle("Git returned an invalid reference listing".into())
+        })?;
+        if name.is_empty() || object.is_empty() {
+            return Err(MemoryError::InvalidBundle(
+                "Git returned an incomplete reference identity".into(),
+            ));
+        }
+        refs.push(MemoryGitRef {
+            name: name.to_owned(),
+            object: object.to_owned(),
+        });
+    }
+    refs.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut snapshot = MemoryGitSnapshot {
+        repository_scope,
+        head_commit,
+        head_ref,
+        tree,
+        refs,
+        bundle_digest: None,
+    };
+    let mut bundle_bytes = None;
+    if include_history_bundle
+        && root.layout == MemoryLayout::Child
+        && (snapshot.head_commit.is_some() || !snapshot.refs.is_empty())
+    {
+        let temporary =
+            TemporaryDirectory::create(&std::env::temp_dir(), "boreal-memory-git-bundle")?;
+        let bundle_path = temporary.path.join("history.bundle");
+        let bundle_path_text = bundle_path
+            .to_str()
+            .ok_or(MemoryError::InvalidPath)?
+            .to_owned();
+        let mut bundle_args = vec!["bundle", "create", "-", "--all"];
+        if snapshot.head_commit.is_some() {
+            bundle_args.push("HEAD");
+        }
+        let captured = run_git_binary_limited(
+            root.path(),
+            &bundle_args,
+            GIT_BUNDLE_TIMEOUT,
+            MAX_MEMORY_BUNDLE_BYTES,
+        )?;
+        fs::write(&bundle_path, &captured)?;
+        let verify = run_git_with_timeout(
+            root.path(),
+            &["bundle", "verify", &bundle_path_text],
+            GIT_BUNDLE_TIMEOUT,
+        )
+        .map_err(|error| MemoryError::Io(error.to_string()))?;
+        if !verify.status_success {
+            return Err(MemoryError::InvalidBundle(format!(
+                "Git rejected the generated history bundle: {}",
+                verify.stderr.trim()
+            )));
+        }
+        bundle_bytes = Some(captured);
+    }
+    if let Some(bundle) = bundle_bytes.as_ref() {
+        snapshot.bundle_digest = Some(digest(bundle));
+    }
+    Ok((Some(snapshot), bundle_bytes))
+}
+
+fn memory_files_equal(left: &[MemoryBundleFile], right: &[MemoryBundleFile]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.path == right.path
+                && left.bytes == right.bytes
+                && digest(&left.bytes) == digest(&right.bytes)
+        })
+}
+
+fn memory_git_matches(
+    current: Option<&MemoryGitSnapshot>,
+    archived: Option<&MemoryGitSnapshot>,
+) -> bool {
+    match (current, archived) {
+        (None, None) => true,
+        (Some(current), Some(archived)) => {
+            current.repository_scope == archived.repository_scope
+                && current.head_commit == archived.head_commit
+                && current.head_ref == archived.head_ref
+                && current.tree == archived.tree
+                && current.refs == archived.refs
+        }
+        _ => false,
+    }
+}
+
+fn memory_bundle_readback(
+    decoded: &DecodedMemoryBundle,
+    duplicate: bool,
+    preserved_previous_root: Option<PathBuf>,
+) -> MemoryBundleReadback {
+    MemoryBundleReadback {
+        format: MEMORY_BUNDLE_FORMAT_V1.to_owned(),
+        layout: decoded.metadata.layout.clone(),
+        project_id: decoded.metadata.project_id.clone(),
+        files: decoded.files.len(),
+        bytes: decoded.total_bytes,
+        git_head: decoded
+            .metadata
+            .git
+            .as_ref()
+            .and_then(|git| git.head_commit.clone()),
+        git_ref: decoded
+            .metadata
+            .git
+            .as_ref()
+            .and_then(|git| git.head_ref.clone()),
+        git_tree: decoded
+            .metadata
+            .git
+            .as_ref()
+            .and_then(|git| git.tree.clone()),
+        git_history_included: decoded.git_bundle.is_some(),
+        duplicate,
+        preserved_previous_root,
+    }
+}
+
+fn encode_memory_bundle(
+    metadata: &MemoryBundleMetadata,
+    files: &[MemoryBundleFile],
+    git_bundle: Option<&[u8]>,
+) -> Result<Vec<u8>, MemoryError> {
+    if files.len() > MAX_MEMORY_BUNDLE_FILES {
+        return Err(MemoryError::BundleTooLarge {
+            actual: files.len(),
+            limit: MAX_MEMORY_BUNDLE_FILES,
+        });
+    }
+    let metadata_bytes = serde_json::to_vec(metadata).map_err(|error| {
+        MemoryError::InvalidBundle(format!("metadata encoding failed: {error}"))
+    })?;
+    if metadata_bytes.len() > MAX_MEMORY_BUNDLE_METADATA_BYTES {
+        return Err(MemoryError::BundleTooLarge {
+            actual: metadata_bytes.len(),
+            limit: MAX_MEMORY_BUNDLE_METADATA_BYTES,
+        });
+    }
+    let mut output = Vec::new();
+    output.extend_from_slice(MEMORY_BUNDLE_MAGIC);
+    output.extend_from_slice(&(metadata_bytes.len() as u64).to_be_bytes());
+    output.extend_from_slice(&metadata_bytes);
+    output.extend_from_slice(digest(&metadata_bytes).as_bytes());
+    output.extend_from_slice(&(files.len() as u32).to_be_bytes());
+    for file in files {
+        let path = file.path.as_bytes();
+        if path.len() > u32::MAX as usize {
+            return Err(MemoryError::InvalidBundle("memory path is too long".into()));
+        }
+        output.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        output.extend_from_slice(path);
+        output.extend_from_slice(digest(&file.bytes).as_bytes());
+        output.extend_from_slice(&(file.bytes.len() as u64).to_be_bytes());
+        output.extend_from_slice(&file.bytes);
+        if output.len() > MAX_MEMORY_BUNDLE_BYTES {
+            return Err(MemoryError::BundleTooLarge {
+                actual: output.len(),
+                limit: MAX_MEMORY_BUNDLE_BYTES,
+            });
+        }
+    }
+    if let Some(bundle) = git_bundle {
+        output.push(1);
+        output.extend_from_slice(digest(bundle).as_bytes());
+        output.extend_from_slice(&(bundle.len() as u64).to_be_bytes());
+        output.extend_from_slice(bundle);
+    } else {
+        output.push(0);
+    }
+    if output.len() > MAX_MEMORY_BUNDLE_BYTES {
+        return Err(MemoryError::BundleTooLarge {
+            actual: output.len(),
+            limit: MAX_MEMORY_BUNDLE_BYTES,
+        });
+    }
+    Ok(output)
+}
+
+fn decode_memory_bundle(bytes: &[u8]) -> Result<DecodedMemoryBundle, MemoryError> {
+    if bytes.len() > MAX_MEMORY_BUNDLE_BYTES {
+        return Err(MemoryError::BundleTooLarge {
+            actual: bytes.len(),
+            limit: MAX_MEMORY_BUNDLE_BYTES,
+        });
+    }
+    let mut cursor = 0usize;
+    if take_memory_bytes(bytes, &mut cursor, MEMORY_BUNDLE_MAGIC.len())? != MEMORY_BUNDLE_MAGIC {
+        return Err(MemoryError::InvalidBundle(
+            "unknown bundle signature".into(),
+        ));
+    }
+    let metadata_len = usize::try_from(take_memory_u64(bytes, &mut cursor)?).map_err(|_| {
+        MemoryError::InvalidBundle("metadata length overflows this platform".into())
+    })?;
+    if metadata_len > MAX_MEMORY_BUNDLE_METADATA_BYTES {
+        return Err(MemoryError::BundleTooLarge {
+            actual: metadata_len,
+            limit: MAX_MEMORY_BUNDLE_METADATA_BYTES,
+        });
+    }
+    let metadata_bytes = take_memory_bytes(bytes, &mut cursor, metadata_len)?;
+    let metadata_digest = take_memory_bytes(bytes, &mut cursor, "sha256:".len() + 64)?;
+    if metadata_digest != digest(metadata_bytes).as_bytes() {
+        return Err(MemoryError::InvalidBundle(
+            "metadata checksum failed".into(),
+        ));
+    }
+    let metadata: MemoryBundleMetadata = serde_json::from_slice(metadata_bytes)
+        .map_err(|error| MemoryError::InvalidBundle(format!("metadata is invalid: {error}")))?;
+    if metadata.format != MEMORY_BUNDLE_FORMAT_V1
+        || !matches!(metadata.layout.as_str(), "child" | "in-repo")
+        || metadata.files.len() > MAX_MEMORY_BUNDLE_FILES
+    {
+        return Err(MemoryError::InvalidBundle(
+            "unsupported format or layout".into(),
+        ));
+    }
+    if let Some(project_id) = &metadata.project_id {
+        validate_segment(project_id)
+            .map_err(|error| MemoryError::InvalidBundle(error.to_string()))?;
+    }
+    let count = take_memory_u32(bytes, &mut cursor)? as usize;
+    if count > MAX_MEMORY_BUNDLE_FILES || count != metadata.files.len() {
+        return Err(MemoryError::InvalidBundle(
+            "file records do not match the manifest count".into(),
+        ));
+    }
+    let mut files = Vec::with_capacity(count);
+    let mut total_bytes = 0usize;
+    let mut last_path: Option<String> = None;
+    for record in &metadata.files {
+        validate_memory_bundle_path(&record.path)?;
+        if last_path.as_ref().is_some_and(|last| last >= &record.path) {
+            return Err(MemoryError::InvalidBundle(
+                "memory paths are duplicated or not sorted".into(),
+            ));
+        }
+        let path_len = usize::try_from(take_memory_u32(bytes, &mut cursor)?)
+            .map_err(|_| MemoryError::InvalidBundle("path length overflow".into()))?;
+        let path = std::str::from_utf8(take_memory_bytes(bytes, &mut cursor, path_len)?)
+            .map_err(|_| MemoryError::InvalidBundle("memory path is not UTF-8".into()))?
+            .to_owned();
+        let file_digest = std::str::from_utf8(take_memory_bytes(bytes, &mut cursor, 71)?)
+            .map_err(|_| MemoryError::InvalidBundle("file digest is not UTF-8".into()))?
+            .to_owned();
+        let file_len = usize::try_from(take_memory_u64(bytes, &mut cursor)?).map_err(|_| {
+            MemoryError::InvalidBundle("file length overflows this platform".into())
+        })?;
+        let file_bytes = take_memory_bytes(bytes, &mut cursor, file_len)?.to_vec();
+        total_bytes = total_bytes
+            .checked_add(file_len)
+            .ok_or(MemoryError::BundleTooLarge {
+                actual: usize::MAX,
+                limit: MAX_MEMORY_BUNDLE_BYTES,
+            })?;
+        if path != record.path
+            || file_digest != record.digest
+            || file_len as u64 != record.byte_count
+            || digest(&file_bytes) != file_digest
+        {
+            return Err(MemoryError::InvalidBundle(
+                "memory file identity or checksum does not match its manifest".into(),
+            ));
+        }
+        last_path = Some(path.clone());
+        files.push(MemoryBundleFile {
+            path,
+            bytes: file_bytes,
+        });
+    }
+    let has_git_bundle = take_memory_bytes(bytes, &mut cursor, 1)?[0];
+    let git_bundle = match has_git_bundle {
+        0 => None,
+        1 => {
+            let git_digest = std::str::from_utf8(take_memory_bytes(bytes, &mut cursor, 71)?)
+                .map_err(|_| MemoryError::InvalidBundle("Git bundle digest is not UTF-8".into()))?
+                .to_owned();
+            let git_len = usize::try_from(take_memory_u64(bytes, &mut cursor)?)
+                .map_err(|_| MemoryError::InvalidBundle("Git bundle size overflow".into()))?;
+            let git_bytes = take_memory_bytes(bytes, &mut cursor, git_len)?.to_vec();
+            total_bytes = total_bytes
+                .checked_add(git_len)
+                .ok_or(MemoryError::BundleTooLarge {
+                    actual: usize::MAX,
+                    limit: MAX_MEMORY_BUNDLE_BYTES,
+                })?;
+            if digest(&git_bytes) != git_digest {
+                return Err(MemoryError::InvalidBundle(
+                    "Git history checksum failed".into(),
+                ));
+            }
+            Some(git_bytes)
+        }
+        _ => {
+            return Err(MemoryError::InvalidBundle(
+                "invalid Git bundle marker".into(),
+            ))
+        }
+    };
+    if cursor != bytes.len() || total_bytes > MAX_MEMORY_BUNDLE_BYTES {
+        return Err(MemoryError::InvalidBundle(
+            "bundle has trailing data or exceeds its payload bound".into(),
+        ));
+    }
+    validate_memory_bundle_manifest(&metadata, &files, git_bundle.as_deref())?;
+    Ok(DecodedMemoryBundle {
+        metadata,
+        files,
+        git_bundle,
+        total_bytes,
+    })
+}
+
+fn validate_memory_bundle_manifest(
+    metadata: &MemoryBundleMetadata,
+    files: &[MemoryBundleFile],
+    git_bundle: Option<&[u8]>,
+) -> Result<(), MemoryError> {
+    let manifest = files.iter().find(|file| file.path == "manifest.json");
+    match manifest {
+        Some(file) => {
+            let text = std::str::from_utf8(&file.bytes).map_err(|error| {
+                MemoryError::InvalidBundle(format!("manifest is not UTF-8: {error}"))
+            })?;
+            let parsed = parse_existing_manifest(text)
+                .map_err(|error| MemoryError::InvalidBundle(error.to_string()))?;
+            if metadata.project_id.as_deref() != Some(parsed.project_id.as_str())
+                || metadata.manifest_identity.as_deref() != Some(digest(&file.bytes).as_str())
+            {
+                return Err(MemoryError::InvalidBundle(
+                    "manifest identity differs from the memory bundle metadata".into(),
+                ));
+            }
+        }
+        None if metadata.project_id.is_some() || metadata.manifest_identity.is_some() => {
+            return Err(MemoryError::InvalidBundle(
+                "manifest identity exists without a manifest file".into(),
+            ));
+        }
+        None => {}
+    }
+    match (metadata.layout.as_str(), metadata.git.as_ref(), git_bundle) {
+        ("in-repo", _, Some(_)) => {
+            return Err(MemoryError::InvalidBundle(
+                "in-repository bundles cannot contain enclosing Git history".into(),
+            ));
+        }
+        ("child", Some(git), Some(bundle))
+            if git.bundle_digest.as_deref() == Some(digest(bundle).as_str()) =>
+        {
+            if git.refs.is_empty() && git.head_commit.is_none() {
+                return Err(MemoryError::InvalidBundle(
+                    "empty standalone Git history must not carry a bundle".into(),
+                ));
+            }
+        }
+        ("child", Some(git), None)
+            if git.bundle_digest.is_some() || git.head_commit.is_some() || !git.refs.is_empty() =>
+        {
+            return Err(MemoryError::InvalidBundle(
+                "standalone Git history is missing its bundle".into(),
+            ));
+        }
+        ("child", None, Some(_)) => {
+            return Err(MemoryError::InvalidBundle(
+                "Git bundle has no matching repository identity".into(),
+            ));
+        }
+        (_, Some(git), _) => validate_memory_git_metadata(git)?,
+        _ => {}
+    }
+    if let Some(git) = &metadata.git {
+        validate_memory_git_metadata(git)?;
+    }
+    Ok(())
+}
+
+fn validate_memory_git_metadata(git: &MemoryGitSnapshot) -> Result<(), MemoryError> {
+    if git.repository_scope.starts_with('/')
+        || git.repository_scope.contains('\\')
+        || git
+            .repository_scope
+            .split('/')
+            .any(|part| part == ".." || part == ".git")
+    {
+        return Err(MemoryError::InvalidBundle("Git scope is invalid".into()));
+    }
+    if let Some(reference) = &git.head_ref {
+        if !reference.starts_with("refs/")
+            || reference.chars().any(char::is_control)
+            || !git.refs.iter().any(|entry| &entry.name == reference)
+        {
+            return Err(MemoryError::InvalidBundle(
+                "Git HEAD reference is invalid".into(),
+            ));
+        }
+    }
+    for reference in &git.refs {
+        if !reference.name.starts_with("refs/")
+            || reference.name.chars().any(char::is_control)
+            || !valid_git_oid(&reference.object)
+        {
+            return Err(MemoryError::InvalidBundle(
+                "Git reference metadata is invalid".into(),
+            ));
+        }
+    }
+    for oid in [git.head_commit.as_deref(), git.tree.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if !valid_git_oid(oid) {
+            return Err(MemoryError::InvalidBundle(
+                "Git object identity is invalid".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_git_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn take_memory_bytes<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    count: usize,
+) -> Result<&'a [u8], MemoryError> {
+    let end = cursor
+        .checked_add(count)
+        .ok_or_else(|| MemoryError::InvalidBundle("bundle offset overflow".into()))?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| MemoryError::InvalidBundle("bundle is truncated".into()))?;
+    *cursor = end;
+    Ok(value)
+}
+
+fn take_memory_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, MemoryError> {
+    Ok(u32::from_be_bytes(
+        take_memory_bytes(bytes, cursor, 4)?
+            .try_into()
+            .expect("fixed-width bundle read"),
+    ))
+}
+
+fn take_memory_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, MemoryError> {
+    Ok(u64::from_be_bytes(
+        take_memory_bytes(bytes, cursor, 8)?
+            .try_into()
+            .expect("fixed-width bundle read"),
+    ))
+}
+
+fn create_memory_restore_staging(root: &MemoryRoot) -> Result<TemporaryDirectory, MemoryError> {
+    let parent = root.path().parent().ok_or(MemoryError::InvalidPath)?;
+    reject_symlink(parent)?;
+    if fs::canonicalize(parent).ok().as_deref() != Some(parent) {
+        return Err(MemoryError::InvalidPath);
+    }
+    TemporaryDirectory::create(parent, "boreal-memory-restore")
+}
+
+fn write_memory_snapshot_file(
+    staging: &TemporaryDirectory,
+    file: &MemoryBundleFile,
+) -> Result<(), MemoryError> {
+    validate_memory_bundle_path(&file.path)?;
+    if digest(&file.bytes).is_empty() {
+        return Err(MemoryError::InvalidBundle("file digest is empty".into()));
+    }
+    let path = staging.path.join(&file.path);
+    let parent = path.parent().ok_or(MemoryError::InvalidPath)?;
+    fs::create_dir_all(parent)?;
+    reject_symlink(parent)?;
+    let mut handle = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    handle.write_all(&file.bytes)?;
+    handle.sync_all()?;
+    Ok(())
+}
+
+fn restore_memory_git(
+    staging: &TemporaryDirectory,
+    decoded: &DecodedMemoryBundle,
+) -> Result<(), MemoryError> {
+    let Some(git) = decoded.metadata.git.as_ref() else {
+        if decoded.git_bundle.is_some() {
+            return Err(MemoryError::InvalidBundle(
+                "standalone Git bundle has no Git snapshot".into(),
+            ));
+        }
+        return Ok(());
+    };
+    let output = run_git(staging.path.as_path(), &["init", "--quiet"])
+        .map_err(|error| MemoryError::Io(error.to_string()))?;
+    if !output.status_success {
+        return Err(MemoryError::Io(format!(
+            "could not initialize standalone memory history: {}",
+            output.stderr.trim()
+        )));
+    }
+    if let Some(bundle) = decoded.git_bundle.as_ref() {
+        let temporary =
+            TemporaryDirectory::create(&std::env::temp_dir(), "boreal-memory-restore-bundle")?;
+        let bundle_path = temporary.path.join("history.bundle");
+        fs::write(&bundle_path, bundle)?;
+        let bundle_path_text = bundle_path
+            .to_str()
+            .ok_or(MemoryError::InvalidPath)?
+            .to_owned();
+        let verify = run_git_with_timeout(
+            &staging.path,
+            &["bundle", "verify", &bundle_path_text],
+            GIT_BUNDLE_TIMEOUT,
+        )
+        .map_err(|error| MemoryError::Io(error.to_string()))?;
+        if !verify.status_success {
+            return Err(MemoryError::InvalidBundle(format!(
+                "Git rejected the supplied history bundle: {}",
+                verify.stderr.trim()
+            )));
+        }
+        if !git.refs.is_empty() {
+            let fetched = run_git_with_timeout(
+                &staging.path,
+                &["fetch", "--quiet", &bundle_path_text, "+refs/*:refs/*"],
+                GIT_BUNDLE_TIMEOUT,
+            )
+            .map_err(|error| MemoryError::Io(error.to_string()))?;
+            if !fetched.status_success {
+                return Err(MemoryError::InvalidBundle(format!(
+                    "Git could not restore bundled refs: {}",
+                    fetched.stderr.trim()
+                )));
+            }
+        }
+        if git.head_ref.is_none() && git.head_commit.is_some() {
+            let temporary_ref = format!("refs/boreal/restore-{}", unique_stamp());
+            let fetched = run_git_with_timeout(
+                &staging.path,
+                &[
+                    "fetch",
+                    "--quiet",
+                    &bundle_path_text,
+                    &format!("HEAD:{temporary_ref}"),
+                ],
+                GIT_BUNDLE_TIMEOUT,
+            )
+            .map_err(|error| MemoryError::Io(error.to_string()))?;
+            if !fetched.status_success {
+                return Err(MemoryError::InvalidBundle(format!(
+                    "Git could not restore detached HEAD: {}",
+                    fetched.stderr.trim()
+                )));
+            }
+            run_git(
+                staging.path.as_path(),
+                &[
+                    "update-ref",
+                    "--no-deref",
+                    "HEAD",
+                    git.head_commit.as_deref().unwrap(),
+                ],
+            )
+            .map_err(|error| MemoryError::Io(error.to_string()))?;
+            run_git(
+                staging.path.as_path(),
+                &["update-ref", "-d", &temporary_ref],
+            )
+            .map_err(|error| MemoryError::Io(error.to_string()))?;
+        }
+    }
+    for reference in &git.refs {
+        let checked = run_git(
+            staging.path.as_path(),
+            &["check-ref-format", &reference.name],
+        )
+        .map_err(|error| MemoryError::Io(error.to_string()))?;
+        if !checked.status_success {
+            return Err(MemoryError::InvalidBundle("Git ref name is invalid".into()));
+        }
+        let updated = run_git(
+            staging.path.as_path(),
+            &["update-ref", &reference.name, &reference.object],
+        )
+        .map_err(|error| MemoryError::Io(error.to_string()))?;
+        if !updated.status_success {
+            return Err(MemoryError::InvalidBundle(format!(
+                "Git could not restore ref {}: {}",
+                reference.name,
+                updated.stderr.trim()
+            )));
+        }
+    }
+    if let Some(head_ref) = &git.head_ref {
+        let output = run_git(staging.path.as_path(), &["symbolic-ref", "HEAD", head_ref])
+            .map_err(|error| MemoryError::Io(error.to_string()))?;
+        if !output.status_success {
+            return Err(MemoryError::InvalidBundle(
+                "Git could not restore symbolic HEAD".into(),
+            ));
+        }
+    } else if let Some(head_commit) = &git.head_commit {
+        let output = run_git(
+            staging.path.as_path(),
+            &["update-ref", "--no-deref", "HEAD", head_commit],
+        )
+        .map_err(|error| MemoryError::Io(error.to_string()))?;
+        if !output.status_success {
+            return Err(MemoryError::InvalidBundle(
+                "Git could not restore detached HEAD".into(),
+            ));
+        }
+    }
+    if let (Some(head), Some(tree)) = (&git.head_commit, &git.tree) {
+        let actual = run_git(
+            staging.path.as_path(),
+            &["rev-parse", "--verify", &format!("{head}^{{tree}}")],
+        )
+        .map_err(|error| MemoryError::Io(error.to_string()))?;
+        if !actual.status_success || actual.stdout.trim() != tree {
+            return Err(MemoryError::InvalidBundle(
+                "restored Git commit tree does not match its recorded identity".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn install_memory_restore(
+    root: &MemoryRoot,
+    staging: &TemporaryDirectory,
+) -> Result<Option<PathBuf>, MemoryError> {
+    let target = root.path();
+    let parent = target.parent().ok_or(MemoryError::InvalidPath)?;
+    reject_symlink(parent)?;
+    if fs::canonicalize(parent).ok().as_deref() != Some(parent) {
+        return Err(MemoryError::InvalidPath);
+    }
+    if target.exists() {
+        reject_symlink(target)?;
+        let name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(MemoryError::InvalidPath)?;
+        let previous = parent.join(format!(".{name}.pre-restore-{}", unique_stamp()));
+        fs::rename(target, &previous)?;
+        if let Err(error) = fs::rename(&staging.path, target) {
+            let _ = fs::rename(&previous, target);
+            return Err(MemoryError::Io(error.to_string()));
+        }
+        Ok(Some(previous))
+    } else {
+        fs::rename(&staging.path, target)?;
+        Ok(None)
     }
 }
 
@@ -3513,9 +4593,17 @@ struct GitOutput {
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<GitOutput, PublishError> {
+    run_git_with_timeout(root, args, GIT_COMMAND_TIMEOUT)
+}
+
+fn run_git_with_timeout(
+    root: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<GitOutput, PublishError> {
     let mut command = Command::new("git");
     configure_git_command(&mut command, root, args);
-    run_child(command, GIT_COMMAND_TIMEOUT)
+    run_child(command, timeout)
 }
 
 fn git_output_with_stdin(root: &Path, args: &[&str], input: &[u8]) -> Result<String, PublishError> {
@@ -3624,6 +4712,102 @@ fn configure_git_command(command: &mut Command, root: &Path, args: &[&str]) {
 
 fn run_child(command: Command, timeout: Duration) -> Result<GitOutput, PublishError> {
     run_child_with_input(command, timeout, None)
+}
+
+fn run_git_binary_limited(
+    root: &Path,
+    args: &[&str],
+    timeout: Duration,
+    limit: usize,
+) -> Result<Vec<u8>, MemoryError> {
+    let mut command = Command::new("git");
+    configure_git_command(&mut command, root, args);
+    configure_process_group(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| MemoryError::Io(error.to_string()))?;
+    let stdout = child.stdout.take().expect("git stdout was piped");
+    let stderr = child.stderr.take().expect("git stderr was piped");
+    let (stdout_sender, stdout_receiver) = mpsc::sync_channel(1);
+    let stdout_reader = thread::spawn(move || {
+        let output = read_limited(stdout, limit);
+        let _ = stdout_sender.send(output);
+    });
+    let stderr_reader = thread::spawn(|| read_bounded(stderr));
+    let deadline = Instant::now() + timeout;
+    let mut captured_stdout = None;
+    let status_success = loop {
+        if captured_stdout.is_none() {
+            match stdout_receiver.try_recv() {
+                Ok(output) if output.len() > limit => {
+                    terminate_process_group(&mut child);
+                    let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(MemoryError::BundleTooLarge {
+                        actual: output.len(),
+                        limit,
+                    });
+                }
+                Ok(output) => captured_stdout = Some(output),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    terminate_process_group(&mut child);
+                    let _ = child.wait();
+                    let _ = stderr_reader.join();
+                    return Err(MemoryError::Io(
+                        "Git binary output reader terminated unexpectedly".into(),
+                    ));
+                }
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                terminate_process_group(&mut child);
+                break status.success();
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                terminate_process_group(&mut child);
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(MemoryError::Io(format!(
+                    "Git bundle capture exceeded {:?}",
+                    timeout
+                )));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                terminate_process_group(&mut child);
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(MemoryError::Io(error.to_string()));
+            }
+        }
+    };
+    stdout_reader
+        .join()
+        .map_err(|_| MemoryError::Io("Git binary output reader failed".into()))?;
+    let output = captured_stdout
+        .or_else(|| stdout_receiver.try_recv().ok())
+        .ok_or_else(|| MemoryError::Io("Git binary output was not captured".into()))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| MemoryError::Io("Git error output reader failed".into()))?;
+    if output.len() > limit {
+        return Err(MemoryError::BundleTooLarge {
+            actual: output.len(),
+            limit,
+        });
+    }
+    if !status_success {
+        return Err(MemoryError::InvalidBundle(format!(
+            "Git could not capture standalone history: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        )));
+    }
+    Ok(output)
 }
 
 fn run_child_with_input(
@@ -3749,6 +4933,24 @@ fn read_bounded(mut reader: impl Read) -> Vec<u8> {
             Ok(read) => {
                 let remaining = GIT_OUTPUT_LIMIT.saturating_sub(output.len());
                 output.extend_from_slice(&buffer[..read.min(remaining)]);
+            }
+        }
+    }
+    output
+}
+
+fn read_limited(mut reader: impl Read, limit: usize) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let remaining = limit.saturating_add(1).saturating_sub(output.len());
+                output.extend_from_slice(&buffer[..read.min(remaining)]);
+                if output.len() > limit {
+                    break;
+                }
             }
         }
     }

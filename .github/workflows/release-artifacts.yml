@@ -1,0 +1,95 @@
+name: Release artifact preparation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-artifacts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pinned TUI compiler
+        run: |
+          npm install --prefix "$RUNNER_TEMP/typescript" --no-save --no-audit --no-fund typescript@5.7.3
+          echo "$RUNNER_TEMP/typescript/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Build installer inputs
+        run: npm run build --prefix apps/tui
+
+      - name: Verify generated installer bundles
+        run: node scripts/build-installer.mjs --check
+
+      - name: Build and verify platform archive
+        run: >-
+          python3 scripts/release/build_release.py
+          --target "${{ matrix.target }}"
+          --output-dir "$RUNNER_TEMP/release"
+
+      - name: Retain platform archive and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: boreal-${{ github.sha }}-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/release/*.tar.gz
+            ${{ runner.temp }}/release/*.release.json
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble:
+    name: Assemble checksums and release identity
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@v4
+
+      - name: Download platform archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: boreal-${{ github.sha }}-*
+          path: ${{ runner.temp }}/release-input
+          merge-multiple: true
+
+      - name: Verify platform set and assemble bundle metadata
+        run: >-
+          python3 scripts/release/assemble_artifacts.py
+          --input-dir "$RUNNER_TEMP/release-input"
+          --output-dir "$RUNNER_TEMP/release-bundle"
+
+      - name: Retain prepared release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: boreal-release-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/release-bundle/*
+          if-no-files-found: error
+          retention-days: 30
