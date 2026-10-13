@@ -1,4 +1,4 @@
-import type { GlobalController, Route } from "./model.js";
+import type { ChoiceCollection, GlobalController, Route } from "./model.js";
 import { render, ROUTE_MENU } from "./view.js";
 import { StreamingKeyDecoder } from "./terminal/keys.js";
 import { form, moveField, editField, cycleChoice, validateForm, renderForm, parseLabels, type FormField, type FormState } from "./forms.js";
@@ -43,6 +43,8 @@ export async function runInteractive(controller: GlobalController, terminal: Key
   const previous = "\u001b[?25h\u001b[?2004l\u001b[?1049l";
   let alive = true, busy = false, suspended = false, modal: Modal | undefined, notice = initialError;
   let relationshipReturn:{route:Route;projectId:string|undefined;selectedId:string|undefined}|undefined;
+  const ownerChoiceLoaders = new WeakMap<FormState,(owner:string|null)=>Promise<void>>();
+  const ownerChoicesLoaded = new WeakMap<FormState,string|null>();
   let escapeTimer: ReturnType<typeof setTimeout> | undefined;
   let alternateScreen = false;
   const frameWriter = new FrameWriter(value => terminal.write(value));
@@ -73,7 +75,7 @@ export async function runInteractive(controller: GlobalController, terminal: Key
     }
     const status = controller.refreshing ? "Refreshing…" : controller.lastRefreshError ? `Stale · ${controller.lastRefreshError}` : controller.sampledAt ? `Updated ${new Date(controller.sampledAt).toLocaleTimeString()} · rev ${controller.snapshot?.revision ?? "?"}` : `rev ${controller.snapshot?.revision ?? "?"}`;
     const linkedError=modal?.kind==="reader"&&modal.linkedAssociation?controller.linkedPageError:undefined;
-    const footer = controller.unresolvedOperation ? `Unknown write ${controller.unresolvedOperation} · r reads receipt before more writes` : linkedError ? `Linked detail unavailable · PgDn to retry: ${linkedError}` : busy ? (controller.detailLoading ? "Loading record detail…" : controller.pageLoading ? "Loading linked page…" : "Saving…") : notice || contextualHint(controller);
+    const footer = controller.unresolvedOperation ? `Unknown write ${controller.unresolvedOperation} · r reads receipt before more writes` : linkedError ? `Linked detail unavailable · PgDn to retry: ${linkedError}` : busy ? (controller.detailLoading ? "Loading record detail…" : controller.pageLoading ? "Loading complete choices or results…" : "Saving…") : controller.pageError ? `Page error · ${controller.pageError}` : notice || contextualHint(controller);
     const screen = new Screen(width, height);
     const lines = [...body.slice(0, Math.max(1, height - 2)), status, footer];
     lines.slice(0, height).forEach((line, row) => {
@@ -115,8 +117,8 @@ export async function runInteractive(controller: GlobalController, terminal: Key
     finally { busy = false; draw(); }
   };
   const launchWrite = (command: string, payload: Record<string, unknown>): void => { void writeMutation(command, payload).catch(error => { notice = `Action failed: ${String(error)}`; draw(); }); };
-  const formModal = (state: FormState, save: (values: Record<string, string | number | null>) => Promise<void>): void => { modal = { kind: "form", state, save }; draw(); };
-  const inputForm = (title: string, fields: Parameters<typeof form>[1], save: (v: Record<string, string | number | null>) => Promise<void>): void => formModal(form(title, fields), save);
+  const formModal = (state: FormState, save: (values: Record<string, string | number | null>) => Promise<void>): FormState => { modal = { kind: "form", state, save }; draw(); return state; };
+  const inputForm = (title: string, fields: Parameters<typeof form>[1], save: (v: Record<string, string | number | null>) => Promise<void>): FormState => formModal(form(title, fields), save);
   const picker = (title: string, options: Array<{ label: string; value: string }>, choose: (value: string) => void, cancel?: () => void): void => { modal = { kind: "picker", title, options, query: "", index: 0, choose, cancel }; draw(); };
   const cacheLinkedSample = (association: Association, response: LinkedProject): void => {
     if (!controller.snapshot) return;
@@ -133,9 +135,21 @@ export async function runInteractive(controller: GlobalController, terminal: Key
       draw();
     }).catch(e => { notice = `Linked progress unavailable: ${String(e)}`; draw(); });
   };
-  const chooseProject = (callback: (id: string) => void): void => picker("Choose project", [{ label: "All projects", value: "" }, ...controller.projects.map(p => ({ label: p.name, value: p.id }))], callback);
-  const chooseStatus = (item: Item, callback: (id: string) => void): void => picker("Choose status", controller.snapshot!.statuses.filter(s => s.project_id === item.project_id).map(s => ({ label: `${s.label} · ${s.category}`, value: s.status_id })), callback);
-  const chooseItem = (title: string, filter: (item: Item) => boolean, callback: (id: string) => void, exclude?: string): void => picker(title, controller.snapshot!.items.filter(i => !i.archived && filter(i) && i.id !== exclude).map(i => ({ label: `${i.title} · ${controller.projects.find(p => p.id === i.project_id)?.name ?? "Personal"}`, value: i.id })), callback);
+  const loadChoices = async <T extends Project|Item|Status>(collection:ChoiceCollection, projectId?:string|null):Promise<T[]> => {
+    busy=true;draw();
+    try{const rows=await controller.completeChoices<T>(collection,projectId);if(notice.startsWith("Could not load complete "))notice="";return rows;}
+    catch(error){notice=`Could not load complete ${collection} choices: ${String(error)}`;throw error;}
+    finally{busy=false;draw();}
+  };
+  const chooseProject = (callback: (id: string) => void): void => {
+    void loadChoices<Project>("projects").then(projects=>picker("Choose project", [{ label: "All projects", value: "" }, ...projects.map(p => ({ label: p.name, value: p.id }))], callback)).catch(()=>{});
+  };
+  const chooseStatus = (item: Item, callback: (id: string) => void): void => {
+    void loadChoices<Status>("statuses",item.project_id).then(statuses=>picker("Choose status", statuses.filter(s=>s.project_id===item.project_id).map(s => ({ label: `${s.label} · ${s.category}`, value: s.status_id })), callback)).catch(()=>{});
+  };
+  const chooseItem = (title: string, projectId:string|null, callback: (id: string) => void, exclude?: string): void => {
+    void loadChoices<Item>("items",projectId).then(items=>picker(title, items.filter(i => !i.archived && i.project_id===projectId && i.id !== exclude).map(i => ({ label: `${i.title} · ${controller.snapshot?.projects.find(p=>p.id===i.project_id)?.name ?? "Personal"}`, value: i.id })), callback)).catch(()=>{});
+  };
   const openPalette = (): void => { modal = { kind: "palette", query: "", index: 0 }; draw(); };
   const performPalette = (label: string): void => {
     const found = paletteEntries().find(x => x.label === label); modal = undefined; if (found) void Promise.resolve(found.run()).catch(error => { notice = `Action failed: ${String(error)}`; }).finally(draw); draw();
@@ -152,63 +166,94 @@ export async function runInteractive(controller: GlobalController, terminal: Key
   };
   const createItem = (kind: "task" | "milestone" | "subtask" = "task", parent?: Item, detail = false): void => {
     const begin = (projectId: string | null): void => {
-      const projectStatuses = (controller.snapshot?.statuses ?? []).filter(s => s.project_id === projectId).sort((a,b) => a.position-b.position);
-      const fields: FormField[] = [{ key: "title", label: "Title", value: "", required: true }];
-      if (detail) fields.push(
-        { key: "destination", label: "Destination", value: projectId ?? "", kind: "picker", choices: ["", ...controller.projects.map(p => p.id)], choiceLabels: Object.fromEntries([["", "Personal inbox"], ...controller.projects.map(p => [p.id, p.name] as [string,string])]), hint: "Choose a management project or Personal inbox" },
-        { key: "description", label: "Description", value: "", kind: "multiline" as const },
-        { key: "parent_id", label: "Parent", value: parent?.id ?? "", kind: "picker", requireChoiceOnOwnerChange:!!parent, choices: ["", ...(controller.snapshot?.items??[]).filter(i => i.project_id === projectId).map(i => i.id)], choiceLabels: Object.fromEntries([["", "No parent"], ...(controller.snapshot?.items??[]).filter(i => i.project_id === projectId).map(i => [i.id, i.title] as [string,string])]) },
-        { key: "status_id", label: "Workflow status", value: projectStatuses[0]?.status_id ?? "", kind: "picker" as const, required: true, touched: !!projectStatuses.length, choices: projectStatuses.map(s => s.status_id), choiceLabels: Object.fromEntries(projectStatuses.map(s => [s.status_id, s.label])), hint: "Choose a status for the selected destination" },
-        { key: "priority", label: "Priority", value: "", kind: "number" as const, required: false, hint: "Optional; blank uses the service default (0), allowed 0–255" },
-        { key: "due_at", label: "Due date", value: "", kind: "date" as const },
-        { key: "follow_up_at", label: "Waiting follow-up date", value: "", kind: "date" as const, hint: "Separate from due date; no reminder is sent" },
-        { key: "labels", label: "Labels", value: "", hint: "Separate labels with commas" }
-      );
-      inputForm(detail ? `New ${kind} · details` : `Quick capture · ${projectId ? controller.projects.find(p=>p.id===projectId)?.name ?? "selected project" : "Personal inbox"}`, fields, async v => {
-        const command = kind === "task" ? "todo add" : `${kind} add`;
-        const destination = detail ? String(v.destination ?? projectId ?? "") || null : projectId;
-        await writeMutation(command, { project_id: destination, parent_id: detail ? (v.parent_id || null) : (parent?.id ?? null), title: v.title, ...(detail ? { description: v.description, status_id: v.status_id || undefined, ...(v.priority === null || v.priority === "" ? {} : { priority: v.priority }), due_at: v.due_at || null, follow_up_at: v.follow_up_at || null, labels: parseLabels(String(v.labels)) } : {}) }); modal = undefined;
-      });
+      void (async()=>{
+        try{
+          const projects=detail?await loadChoices<Project>("projects"):controller.projects;
+          const parentChoices=detail?await loadChoices<Item>("items",projectId):[];
+          const projectStatuses=detail?await loadChoices<Status>("statuses",projectId):[];
+          const fields: FormField[] = [{ key: "title", label: "Title", value: "", required: true }];
+          if (detail) fields.push(
+            { key: "destination", label: "Destination", value: projectId ?? "", kind: "picker", choices: ["", ...projects.map(p => p.id)], choiceLabels: Object.fromEntries([["", "Personal inbox"], ...projects.map(p => [p.id, p.name] as [string,string])]), hint: "Choose a management project or Personal inbox" },
+            { key: "description", label: "Description", value: "", kind: "multiline" as const },
+            { key: "parent_id", label: "Parent", value: parent?.id ?? "", kind: "picker", requireChoiceOnOwnerChange:!!parent, choices: ["", ...parentChoices.filter(i => i.project_id === projectId).map(i => i.id)], choiceLabels: Object.fromEntries([["", "No parent"], ...parentChoices.filter(i => i.project_id === projectId).map(i => [i.id, i.title] as [string,string])]) },
+            { key: "status_id", label: "Workflow status", value: projectStatuses[0]?.status_id ?? "", kind: "picker" as const, required: true, touched: !!projectStatuses.length, choices: projectStatuses.filter(s=>s.project_id===projectId).sort((a,b)=>a.position-b.position).map(s => s.status_id), choiceLabels: Object.fromEntries(projectStatuses.filter(s=>s.project_id===projectId).map(s => [s.status_id, s.label])), hint: "Choose a status for the selected destination" },
+            { key: "priority", label: "Priority", value: "", kind: "number" as const, required: false, hint: "Optional; blank uses the service default (0), allowed 0–255" },
+            { key: "due_at", label: "Due date", value: "", kind: "date" as const },
+            { key: "follow_up_at", label: "Waiting follow-up date", value: "", kind: "date" as const, hint: "Separate from due date; no reminder is sent" },
+            { key: "labels", label: "Labels", value: "", hint: "Separate labels with commas" }
+          );
+          const formState=inputForm(detail ? `New ${kind} · details` : `Quick capture · ${projectId ? controller.snapshot?.projects.find(p=>p.id===projectId)?.name ?? "selected project" : "Personal inbox"}`, fields, async v => {
+            const command = kind === "task" ? "todo add" : `${kind} add`;
+            const destination = detail ? String(v.destination ?? projectId ?? "") || null : projectId;
+            await writeMutation(command, { project_id: destination, parent_id: detail ? (v.parent_id || null) : (parent?.id ?? null), title: v.title, ...(detail ? { description: v.description, status_id: v.status_id || undefined, ...(v.priority === null || v.priority === "" ? {} : { priority: v.priority }), due_at: v.due_at || null, follow_up_at: v.follow_up_at || null, labels: parseLabels(String(v.labels)) } : {}) }); modal = undefined;
+          });
+          if(detail)ownerChoiceLoaders.set(formState,async owner=>{
+            const parentRows=await controller.completeChoices<Item>("items",owner);
+            const statusRows=await controller.completeChoices<Status>("statuses",owner);
+            const parentField=formState.fields.find(f=>f.key==="parent_id"),statusField=formState.fields.find(f=>f.key==="status_id");
+            if(parentField){const eligible=parentRows.filter(i=>i.project_id===owner);parentField.choices=["",...eligible.map(i=>i.id)];parentField.choiceLabels=Object.fromEntries([["","No parent"],...eligible.map(i=>[i.id,i.title] as [string,string])]);}
+            if(statusField){const eligible=statusRows.filter(s=>s.project_id===owner).sort((a,b)=>a.position-b.position);statusField.choices=eligible.map(s=>s.status_id);statusField.choiceLabels=Object.fromEntries(eligible.map(s=>[s.status_id,s.label]));}
+            ownerChoicesLoaded.set(formState,owner);
+          });
+          if(detail)ownerChoicesLoaded.set(formState,projectId);
+        }catch{}
+      })();
     };
     const projectId = parent?.project_id ?? controller.projectId ?? null;
     begin(projectId);
   };
   const editItem = (item: Item): void => {
-    const choicesFor = (projectId: string | null) => (controller.snapshot?.items??[]).filter(i => i.project_id === projectId && i.id !== item.id);
-    const statusesFor = (projectId: string | null) => (controller.snapshot?.statuses ?? []).filter(s => s.project_id === projectId).sort((a,b)=>a.position-b.position);
-    const fields: FormField[] = [
-      { key: "title", label: "Title", value: item.title, required: true },
-      { key: "description", label: "Description", value: item.description ?? "", kind: "multiline" },
-      { key: "project_id", label: "Destination", value: item.project_id ?? "", kind: "picker", choices: ["", ...controller.projects.map(p=>p.id)], choiceLabels: Object.fromEntries([["", "Personal inbox"],...controller.projects.map(p=>[p.id,p.name] as [string,string])]), hint: "Move to a project or Personal inbox" },
-      { key: "parent_id", label: "Parent", value: item.parent_id ?? "", kind: "picker", excludeId:item.id, requireChoiceOnOwnerChange:!!item.parent_id, choices: ["",...choicesFor(item.project_id).map(i=>i.id)], choiceLabels: Object.fromEntries([["","No parent"],...choicesFor(item.project_id).map(i=>[i.id,i.title] as [string,string])]) },
-      { key: "status_id", label: "Workflow status", value: item.status_id, kind: "picker", required:true, touched:true, choices: statusesFor(item.project_id).map(s=>s.status_id), choiceLabels: Object.fromEntries(statusesFor(item.project_id).map(s=>[s.status_id,s.label])), hint:"Choose a target workflow status after changing destination" },
-      { key: "priority", label: "Priority", value: item.priority === null ? "" : String(item.priority), kind: "number", hint: "Blank keeps the current value; allowed 0–255" },
-    { key: "due_at", label: "Due date", value: item.due_at ?? "", kind: "date" },
-    { key: "follow_up_at", label: "Waiting follow-up date", value: item.follow_up_at ?? "", kind: "date", hint: "Separate from due date; no reminder is sent" },
-      { key: "labels", label: "Labels", value: item.labels?.join(", ") ?? "" },
-      { key: "position", label: "Card order", value: String(item.position), kind: "number" }
-    ];
-    inputForm("Edit item", fields, async v => {
-      const payload:Record<string,unknown>={item_id:item.id,title:v.title,description:v.description,status_id:v.status_id,due_at:v.due_at||null,follow_up_at:v.follow_up_at||null,labels:parseLabels(String(v.labels)),position:v.position};
-      if(v.priority!==null&&v.priority!=="")payload.priority=v.priority;
-      if(String(v.project_id??"")!==(item.project_id??""))payload.project_id=String(v.project_id??"")||null;
-      if(String(v.parent_id??"")!==(item.parent_id??""))payload.parent_id=v.parent_id||null;
-      await writeMutation("todo edit",payload); modal=undefined;
-    });
+    void (async()=>{
+      try{
+        const projects=await loadChoices<Project>("projects");
+        let ownerItems=await loadChoices<Item>("items",item.project_id);
+        let ownerStatuses=await loadChoices<Status>("statuses",item.project_id);
+        const choicesFor=(projectId:string|null)=>ownerItems.filter(i=>i.project_id===projectId&&i.id!==item.id);
+        const statusesFor=(projectId:string|null)=>ownerStatuses.filter(s=>s.project_id===projectId).sort((a,b)=>a.position-b.position);
+        const fields: FormField[] = [
+          { key: "title", label: "Title", value: item.title, required: true },
+          { key: "description", label: "Description", value: item.description ?? "", kind: "multiline" },
+          { key: "project_id", label: "Destination", value: item.project_id ?? "", kind: "picker", choices: ["", ...projects.map(p=>p.id)], choiceLabels: Object.fromEntries([["", "Personal inbox"],...projects.map(p=>[p.id,p.name] as [string,string])]), hint: "Move to a project or Personal inbox" },
+          { key: "parent_id", label: "Parent", value: item.parent_id ?? "", kind: "picker", excludeId:item.id, requireChoiceOnOwnerChange:!!item.parent_id, choices: ["",...choicesFor(item.project_id).map(i=>i.id)], choiceLabels: Object.fromEntries([["","No parent"],...choicesFor(item.project_id).map(i=>[i.id,i.title] as [string,string])]) },
+          { key: "status_id", label: "Workflow status", value: item.status_id, kind: "picker", required:true, touched:true, choices: statusesFor(item.project_id).map(s=>s.status_id), choiceLabels: Object.fromEntries(statusesFor(item.project_id).map(s=>[s.status_id,s.label])), hint:"Choose a target workflow status after changing destination" },
+          { key: "priority", label: "Priority", value: item.priority === null ? "" : String(item.priority), kind: "number", hint: "Blank keeps the current value; allowed 0–255" },
+          { key: "due_at", label: "Due date", value: item.due_at ?? "", kind: "date" },
+          { key: "follow_up_at", label: "Waiting follow-up date", value: item.follow_up_at ?? "", kind: "date", hint: "Separate from due date; no reminder is sent" },
+          { key: "labels", label: "Labels", value: item.labels?.join(", ") ?? "" },
+          { key: "position", label: "Card order", value: String(item.position), kind: "number" }
+        ];
+        const formState=inputForm("Edit item", fields, async v => {
+          const payload:Record<string,unknown>={item_id:item.id,title:v.title,description:v.description,status_id:v.status_id,due_at:v.due_at||null,follow_up_at:v.follow_up_at||null,labels:parseLabels(String(v.labels)),position:v.position};
+          if(v.priority!==null&&v.priority!=="")payload.priority=v.priority;
+          if(String(v.project_id??"")!==(item.project_id??""))payload.project_id=String(v.project_id??"")||null;
+          if(String(v.parent_id??"")!==(item.parent_id??""))payload.parent_id=v.parent_id||null;
+          await writeMutation("todo edit",payload); modal=undefined;
+        });
+        ownerChoiceLoaders.set(formState,async owner=>{
+          ownerItems=await controller.completeChoices<Item>("items",owner);
+          ownerStatuses=await controller.completeChoices<Status>("statuses",owner);
+          const parentField=formState.fields.find(f=>f.key==="parent_id"),statusField=formState.fields.find(f=>f.key==="status_id");
+          if(parentField){const eligible=choicesFor(owner);parentField.choices=["",...eligible.map(i=>i.id)];parentField.choiceLabels=Object.fromEntries([["","No parent"],...eligible.map(i=>[i.id,i.title] as [string,string])]);}
+          if(statusField){const eligible=statusesFor(owner);statusField.choices=eligible.map(s=>s.status_id);statusField.choiceLabels=Object.fromEntries(eligible.map(s=>[s.status_id,s.label]));}
+          ownerChoicesLoaded.set(formState,owner);
+        });
+        ownerChoicesLoaded.set(formState,item.project_id);
+      }catch{}
+    })();
   };
-  const editProject = (project: Project): void => inputForm("Edit project", [
+  const editProject = (project: Project): void => { inputForm("Edit project", [
     { key: "name", label: "Name", value: project.name, required: true },
     { key: "description", label: "Description", value: project.description, kind: "multiline" },
     { key: "priority", label: "Priority", value: String(project.priority ?? ""), kind: "number" },
     { key: "lifecycle", label: "Lifecycle", value: project.lifecycle ?? "" },
     { key: "health", label: "Health", value: project.health ?? "" },
     { key: "labels", label: "Labels", value: project.labels?.join(", ") ?? "" }
-  ], async v => { await writeMutation("project edit", { project_id: project.id, name:v.name, description:v.description, ...(v.priority === null || v.priority === "" ? {} : {priority:v.priority}), lifecycle:v.lifecycle, health:v.health, labels: parseLabels(String(v.labels)) }); modal = undefined; });
+  ], async v => { await writeMutation("project edit", { project_id: project.id, name:v.name, description:v.description, ...(v.priority === null || v.priority === "" ? {} : {priority:v.priority}), lifecycle:v.lifecycle, health:v.health, labels: parseLabels(String(v.labels)) }); modal = undefined; }); }
   const createNote = (note?: Note): void => {
-    const go = (projectId: string | null): void => inputForm(note ? "Edit note" : "New note", [
+    const go = (projectId: string | null): void => { inputForm(note ? "Edit note" : "New note", [
       { key: "title", label: "Title", value: note?.title ?? "", required: true },
       { key: "body", label: "Body", value: note?.body ?? "", kind: "multiline" }
-    ], async v => { await writeMutation(note ? "note edit" : "note add", note ? { note_id: note.id, ...v } : { project_id: projectId, ...v }); modal = undefined; });
+    ], async v => { await writeMutation(note ? "note edit" : "note add", note ? { note_id: note.id, ...v } : { project_id: projectId, ...v }); modal = undefined; }); }
     if (note) go(note.project_id); else if (controller.projectId) go(controller.projectId); else chooseProject(id => go(id || null));
   };
   const addStatus = (): void => {
@@ -228,11 +273,11 @@ export async function runInteractive(controller: GlobalController, terminal: Key
       { key: "path", label: "Workspace path", value: "", required: true }
     ], async v => { await writeMutation("project link", { project_id: project.id, path: v.path }); modal = undefined; });
   };
-  const editStatus = (status: Status): void => inputForm("Edit workflow status", [
+  const editStatus = (status: Status): void => { inputForm("Edit workflow status", [
     { key: "label", label: "Label", value: status.label, required: true },
     { key: "category", label: "Meaning", value: status.category, kind: "choice", choices: ["open", "active", "waiting", "blocked", "completed", "cancelled"] },
     { key: "position", label: "Position", value: String(status.position), kind: "number" }
-  ], async v => { await writeMutation("workflow status edit", { project_id: status.project_id, status_id: status.status_id, ...v }); modal = undefined; });
+  ], async v => { await writeMutation("workflow status edit", { project_id: status.project_id, status_id: status.status_id, ...v }); modal = undefined; }); }
   const paletteEntries = (): Array<{ label: string; run: () => void | Promise<void> }> => {
     const item = selectedItem(controller), project = selectedProject(controller), note = selectedNote(controller), status = selectedStatus(controller), association = selectedAssociation(controller);
     const archived = controller.route === "archive" ? controller.selectedRow() as unknown as { id?: string; status_id?: string; name?: string } : undefined;
@@ -257,7 +302,7 @@ export async function runInteractive(controller: GlobalController, terminal: Key
       { label: "Action · Complete item", run: () => launchWrite("todo complete", { item_id: item.id }) },
       { label: "Action · Reopen item", run: () => launchWrite("todo reopen", { item_id: item.id }) },
       { label: "Action · Add child", run: () => createItem(item.kind === "milestone" ? "task" : "subtask", item, true) },
-      { label: "Action · Add dependency", run: () => chooseItem("Choose dependency", x => x.project_id === item.project_id, id => launchWrite("relationship add", { project_id: item.project_id, source_id: item.id, target_id: id, kind: "depends_on" }), item.id) },
+      { label: "Action · Add dependency", run: () => chooseItem("Choose dependency", item.project_id, id => launchWrite("relationship add", { project_id: item.project_id, source_id: item.id, target_id: id, kind: "depends_on" }), item.id) },
       { label: "Action · Remove dependency", run: () => { const deps = controller.snapshot?.relationships.filter(r => r.source_id === item.id || r.target_id === item.id) ?? []; picker("Remove dependency", deps.map(r => ({ label: `${r.kind}: ${titleFor(controller, r.source_id)} → ${titleFor(controller, r.target_id)}`, value: `${r.source_id}\u0000${r.target_id}\u0000${r.kind}` })), value => { const [source_id, target_id, kind] = value.split("\u0000"); launchWrite("relationship remove", { source_id, target_id, kind }); }); } },
       { label: "Action · Move card earlier", run: () => launchWrite("todo reorder", { item_id: item.id, direction: "up" }) },
       { label: "Action · Move card later", run: () => launchWrite("todo reorder", { item_id: item.id, direction: "down" }) },
@@ -321,26 +366,38 @@ export async function runInteractive(controller: GlobalController, terminal: Key
   };
   const startBulkTriage = ():void => {
     const state=controller as GlobalController&{bulkSelectedIds?:Set<string>;clearBulkSelection?:()=>void};
-    const ids=[...(state.bulkSelectedIds??[])],items=ids.map(id=>controller.snapshot?.items.find(i=>i.id===id)).filter((x):x is Item=>!!x);
-    if(!items.length){notice="Mark work with y before starting bulk triage.";draw();return;}
-    picker(`Bulk triage · ${items.length} selected`,[{label:"Personal inbox",value:""},...controller.projects.map(p=>({label:p.name,value:p.id}))],projectValue=>{
-      const projectId=projectValue||null,statuses=(controller.snapshot?.statuses??[]).filter(s=>s.project_id===projectId).sort((a,b)=>a.position-b.position);
-      if(!statuses.length){notice="The destination has no workflow status; create one before triage.";draw();return;}
-      picker("Choose workflow status for selected work",statuses.map(s=>({label:`${s.label} · ${s.category}`,value:s.status_id})),statusId=>{
-        const changes:Array<{item_id:string;project_id:string|null;parent_id:string|null;status_id:string}>=[];
-        const chooseParent=(index:number):void=>{
-          if(index>=items.length){modal=undefined;void writeMutation("todo bulk triage",{changes}).then(()=>{state.clearBulkSelection?.();notice=`Triaged ${changes.length} items`;}).catch(error=>{notice=`Bulk triage failed: ${String(error)}`;}).finally(draw);return;}
-          const item=items[index],candidates=(controller.snapshot?.items??[]).filter(i=>i.project_id===projectId&&!items.some(selected=>selected.id===i.id)&&i.id!==item.id);
-          const choices=[{label:"No parent · clear parent",value:""},...candidates.map(i=>({label:i.title,value:i.id}))];
-          picker(`Parent for ${item.title} (${index+1}/${items.length})`,choices,parentId=>{changes.push({item_id:item.id,project_id:projectId,parent_id:parentId||null,status_id:statusId});chooseParent(index+1);});
-        };
-        chooseParent(0);
-      });
-    });
+    void (async()=>{
+      try{
+        const ids=[...(state.bulkSelectedIds??[])],allItems=await loadChoices<Item>("items"),items=ids.map(id=>allItems.find(i=>i.id===id)).filter((x):x is Item=>!!x);
+        if(!items.length){notice="Mark work with y before starting bulk triage.";draw();return;}
+        const projects=await loadChoices<Project>("projects");
+        picker(`Bulk triage · ${items.length} selected`,[{label:"Personal inbox",value:""},...projects.map(p=>({label:p.name,value:p.id}))],projectValue=>{
+          const projectId=projectValue||null;
+          void (async()=>{
+            try{
+              const statuses=(await loadChoices<Status>("statuses",projectId)).filter(s=>s.project_id===projectId).sort((a,b)=>a.position-b.position);
+              if(!statuses.length){notice="The destination has no workflow status; create one before triage.";draw();return;}
+              const parents=(await loadChoices<Item>("items",projectId)).filter(i=>i.project_id===projectId&&!items.some(selected=>selected.id===i.id));
+              picker("Choose workflow status for selected work",statuses.map(s=>({label:`${s.label} · ${s.category}`,value:s.status_id})),statusId=>{
+                const changes:Array<{item_id:string;project_id:string|null;parent_id:string|null;status_id:string}> = [];
+                const chooseParent=(index:number):void=>{
+                  if(index>=items.length){modal=undefined;void writeMutation("todo bulk triage",{changes}).then(()=>{state.clearBulkSelection?.();notice=`Triaged ${changes.length} items`;}).catch(error=>{notice=`Bulk triage failed: ${String(error)}`;}).finally(draw);return;}
+                  const item=items[index],candidates=parents.filter(i=>i.id!==item.id);
+                  const choices=[{label:"No parent · clear parent",value:""},...candidates.map(i=>({label:i.title,value:i.id}))];
+                  picker(`Parent for ${item.title} (${index+1}/${items.length})`,choices,parentId=>{changes.push({item_id:item.id,project_id:projectId,parent_id:parentId||null,status_id:statusId});chooseParent(index+1);});
+                };
+                chooseParent(0);
+              });
+            }catch{}
+          })();
+        });
+      }catch{}
+    })();
   };
 
   const action = (key: string): void => {
     if (key === "q" || key === "ctrl-c") { cleanup(); return; }
+    if (busy && controller.pageLoading && !(key === "escape" && modal?.kind === "form")) { draw(); return; }
     if (key === "?" ) { modal = { kind: "help", offset: 0 }; draw(); return; }
     if (key === ":") { openPalette(); return; }
     if (ROUTE_KEYS[key]) { controller.setRoute(ROUTE_KEYS[key]); draw(); return; }
@@ -421,7 +478,7 @@ export async function runInteractive(controller: GlobalController, terminal: Key
     if (key === "u" && controller.route === "archive") { const row = controller.selectedRow() as unknown as { id?: string; status_id?: string; name?: string; body?: string }; if (row?.id) launchWrite(row.status_id ? "todo unarchive" : row.name ? "project unarchive" : "note unarchive", row.status_id ? { item_id: row.id } : row.name ? { project_id: row.id } : { note_id: row.id }); return; }
     if (key === "g") { createItem("milestone", undefined, true); return; }
     if (key === "h" && item) { createItem(item.kind === "milestone" ? "task" : "subtask", item, true); return; }
-    if (key === "b" && item) { chooseItem("Choose dependency", x => x.project_id === item.project_id, id => launchWrite("relationship add", { project_id: item.project_id, source_id: item.id, target_id: id, kind: "depends_on" }), item.id); return; }
+    if (key === "b" && item) { chooseItem("Choose dependency", item.project_id, id => launchWrite("relationship add", { project_id: item.project_id, source_id: item.id, target_id: id, kind: "depends_on" }), item.id); return; }
     if (key === "D" && item) { const deps = controller.snapshot?.relationships.filter(r => r.source_id === item.id || r.target_id === item.id) ?? []; picker("Remove dependency", deps.map(r => ({ label: `${r.kind}: ${titleFor(controller, r.source_id)} → ${titleFor(controller, r.target_id)}`, value: `${r.source_id}\u0000${r.target_id}\u0000${r.kind}` })), value => { const [source_id, target_id, kind] = value.split("\u0000"); launchWrite("relationship remove", { source_id, target_id, kind }); }); return; }
     if (key === "p" && item && controller.route === "planning") { launchWrite("todo reorder", { item_id: item.id, direction: "up" }); return; }
     if (key === "v" && item) { modal = { kind: "reader", title: item.title, body: item.description ?? "", offset: 0 }; draw(); return; }
@@ -449,7 +506,7 @@ export async function runInteractive(controller: GlobalController, terminal: Key
   const handle = (key: string): void => {
     if (!alive) return;
     if (key === "ctrl-c") { cleanup(); return; }
-    if (suspended || busy) return;
+    if (suspended || (busy && !(controller.pageLoading && key === "escape" && modal?.kind === "form"))) return;
     if(controller.unresolvedOperation&&key==="r"){
       busy=true;void controller.resolveUnknownOperation().then(result=>{notice=result;if(controller.lastMutationReceipt!==undefined)modal=undefined;else if(modal?.kind==="form")modal.state.error=`${result} Draft retained; press Ctrl-S only if you still want to submit it.`;}).catch(error=>{notice=`Receipt read failed: ${String(error)}`;}).finally(()=>{busy=false;draw();});return;
     }
@@ -468,6 +525,7 @@ export async function runInteractive(controller: GlobalController, terminal: Key
       draw(); return;
     }
     if (modal?.kind === "form") {
+      if(busy&&controller.pageLoading&&key!=="escape"){draw();return;}
       if (key === "escape") { modal = undefined; draw(); return; }
       if (key === "tab" || key === "down") moveField(modal.state, 1);
       else if (key === "shift-tab" || key === "up") moveField(modal.state, -1);
@@ -482,10 +540,22 @@ export async function runInteractive(controller: GlobalController, terminal: Key
             const previousOwner=active.value||null;active.value=value;active.touched=true;const owner=value||null;
             if(active.key==="project_id"||active.key==="destination"){
               const parent=current.state.fields.find(f=>f.key==="parent_id"),status=current.state.fields.find(f=>f.key==="status_id");
-              if(parent){const eligible=(controller.snapshot?.items??[]).filter(i=>i.project_id===owner&&i.id!==parent.excludeId);parent.choices=["",...eligible.map(i=>i.id)];parent.choiceLabels=Object.fromEntries([["","No parent"],...eligible.map(i=>[i.id,i.title] as [string,string])]);if(owner!==previousOwner){parent.value="";parent.required=!!parent.requireChoiceOnOwnerChange;parent.touched=!parent.required;}else if(!parent.choices.includes(parent.value))parent.value="";}
-              if(status){const list=(controller.snapshot?.statuses??[]).filter(s=>s.project_id===owner).sort((a,b)=>a.position-b.position);status.choices=list.map(s=>s.status_id);status.choiceLabels=Object.fromEntries(list.map(s=>[s.status_id,s.label]));if(owner!==previousOwner){status.value="";status.touched=false;}else if(!status.choices.includes(status.value))status.value="";}
+              const ownerChanged=owner!==previousOwner,loadOwnerChoices=ownerChoiceLoaders.get(current.state);
+              if(parent){parent.value=ownerChanged?"":parent.value;parent.required=ownerChanged?!!parent.requireChoiceOnOwnerChange:parent.required;parent.touched=ownerChanged?!parent.required:parent.touched;}
+              if(status){status.value=ownerChanged?"":status.value;status.touched=ownerChanged?false:status.touched;}
+              modal={kind:"form",state:current.state,save:current.save};
+              if(loadOwnerChoices){
+                if(ownerChanged){if(parent){parent.choices=[""];parent.choiceLabels={"":"No parent"};}if(status){status.choices=[];status.choiceLabels={};}}
+                if(ownerChanged||ownerChoicesLoaded.get(current.state)!==owner){
+                  busy=true;draw();
+                  void loadOwnerChoices(owner).catch(error=>{notice=`Could not load complete choices for this destination: ${String(error)}`;}).finally(()=>{busy=false;draw();});
+                }else draw();
+                return;
+              }
+              if(parent){const eligible=(controller.snapshot?.items??[]).filter(i=>i.project_id===owner&&i.id!==parent.excludeId);parent.choices=["",...eligible.map(i=>i.id)];parent.choiceLabels=Object.fromEntries([["","No parent"],...eligible.map(i=>[i.id,i.title] as [string,string])]);if(ownerChanged){parent.value="";parent.required=!!parent.requireChoiceOnOwnerChange;parent.touched=!parent.required;}else if(!parent.choices.includes(parent.value))parent.value="";}
+              if(status){const list=(controller.snapshot?.statuses??[]).filter(s=>s.project_id===owner).sort((a,b)=>a.position-b.position);status.choices=list.map(s=>s.status_id);status.choiceLabels=Object.fromEntries(list.map(s=>[s.status_id,s.label]));if(ownerChanged){status.value="";status.touched=false;}else if(!status.choices.includes(status.value))status.value="";}
             }
-            modal={kind:"form",state:current.state,save:current.save};draw();
+            else modal={kind:"form",state:current.state,save:current.save};draw();
           },()=>{modal={kind:"form",state:current.state,save:current.save};draw();});return;
         }
         else if(current.state.fields.length===1||current.state.active===current.state.fields.length-1)void saveForm();else moveField(current.state,1);
