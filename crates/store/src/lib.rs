@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, NulError};
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -100,6 +101,11 @@ const BACKUP_MANIFEST_FILE: &str = "manifest.json";
 const BACKUP_DATABASE_FILE: &str = "database.sqlite";
 const BACKUP_FORMAT_VERSION: u64 = 2;
 const BACKUP_PACKAGE_KIND: &str = "boreal.sqlite.backup";
+const RESTORE_IDENTITY_INTENT_FILE: &str = "restore-identity.json";
+const RESTORE_IDENTITY_INTENT_TEMP_FILE: &str = "restore-identity.tmp";
+const RESTORE_IDENTITY_APPLYING_MARKER: &str = "restore-identity-applying";
+const RESTORE_IDENTITY_APPLYING_TEMP_FILE: &str = "restore-identity-applying.tmp";
+const RESTORE_IDENTITY_INTENT_FORMAT: &str = "boreal.project-restore-identity/1";
 
 const PRODUCTION_EXTERNAL_JOB_IDENTITY_TRIGGER_SQL: &str = r#"
 CREATE TRIGGER IF NOT EXISTS boreal_external_job_identity_guard
@@ -951,6 +957,32 @@ pub struct SqliteRestorePackageReport {
     pub current_database_instance_id: String,
     pub current_restore_epoch: u64,
     pub backup: SqliteBackupReport,
+}
+
+/// Durable intent for one restore operation. It is written before the staged
+/// database is created, so an interrupted backup can resume with the same
+/// physical identity and restore epoch.
+#[derive(Clone, Debug)]
+struct RestoreIdentityIntent {
+    operation_id: String,
+    package_path: String,
+    destination_path: String,
+    request_digest: String,
+    source_database_digest: String,
+    source_database_instance_id: String,
+    source_restore_epoch: u64,
+    current_database_instance_id: String,
+    current_restore_epoch: u64,
+    previous_database_path: Option<String>,
+    previous_database_instance_id: Option<String>,
+    previous_restore_epoch: Option<u64>,
+    previous_database_digest: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct RestoreDatabaseState {
+    identity: identity::DatabaseIdentity,
+    digest: String,
 }
 
 /// The durable session state values accepted by schema v2.
@@ -2360,6 +2392,17 @@ impl SqliteStore {
                     "restore maintenance receipt does not match its database and package".into(),
                 ));
             }
+            for (field, value) in [
+                ("operation_id", job.operation_id.as_str()),
+                ("request_digest", job.request_digest.as_str()),
+                ("created_at", job.created_at.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(StoreError::Invalid(format!(
+                        "restore maintenance job requires non-empty {field}"
+                    )));
+                }
+            }
         }
         let source = Self::open_read_only(&database_path)?;
         source.validate_backup_manifest(&manifest)?;
@@ -2372,6 +2415,12 @@ impl SqliteStore {
             )));
         }
 
+        if let Some(job) = job {
+            if let Some(receipt) = Self::reconcile_restore_maintenance_job(destination, job)? {
+                return restore_package_report_from_receipt(package, destination, &receipt);
+            }
+        }
+
         let parent = destination.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent).map_err(|error| {
             StoreError::Unavailable(format!(
@@ -2379,7 +2428,7 @@ impl SqliteStore {
                 parent.display()
             ))
         })?;
-        let existing_identity = if destination.exists() {
+        let existing_target = if destination.exists() {
             let existing = Self::open(destination, PRODUCTION_SCHEMA_SQL)?;
             let mut checkpoint = existing.prepare("PRAGMA wal_checkpoint(TRUNCATE)")?;
             if checkpoint.step()? != SQLITE_ROW {
@@ -2413,65 +2462,102 @@ impl SqliteStore {
                 .map_err(|error| StoreError::Corrupt(error.to_string()))?;
             drop(existing);
             remove_checkpointed_restore_sidecars(destination)?;
-            Some(identity)
+            let bytes = fs::read(destination).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot read restore destination {} for identity intent: {error}",
+                    destination.display()
+                ))
+            })?;
+            Some(RestoreDatabaseState {
+                identity,
+                digest: checksum(&bytes),
+            })
         } else {
             None
         };
-        let current_epoch =
-            existing_identity
-                .as_ref()
-                .map_or(source_identity.restore_epoch.get(), |identity| {
-                    identity
-                        .restore_epoch
-                        .get()
-                        .max(source_identity.restore_epoch.get())
-                });
-        let next_epoch = current_epoch
-            .checked_add(1)
-            .ok_or_else(|| StoreError::Invalid("restore epoch overflow".to_owned()))?;
         let staging = if let Some(job) = job {
             maintenance_restore_staging_path(destination, &job.operation_id)?
         } else {
             backup_staging_path(destination, "restore")?
         };
-        if staging.exists() {
-            return Err(StoreError::Conflict(format!(
-                "restore staging exists and must be reconciled before retry: {}",
-                staging.display()
-            )));
-        }
-        let current_database_instance_id = identity::IdentityStore::new(&source)
-            .fresh_restore_database_instance_id()
-            .map_err(|error| {
-                StoreError::Unavailable(format!(
-                    "cannot generate a fresh restore database identity: {error}"
-                ))
-            })?
-            .to_string();
+        let intent = if staging.exists() {
+            reject_symlink(&staging)?;
+            if job.is_none() {
+                return Err(StoreError::Conflict(format!(
+                    "restore staging exists and cannot be matched to an operation: {}",
+                    staging.display()
+                )));
+            }
+            match read_restore_identity_intent(&staging)? {
+                Some(intent) => {
+                    validate_restore_identity_intent_request(
+                        &intent,
+                        job.expect("maintenance job was checked"),
+                        package,
+                        destination,
+                        &source_identity,
+                        &actual_database_digest,
+                    )?;
+                    validate_restore_identity_intent_target(
+                        &intent,
+                        destination,
+                        existing_target.as_ref(),
+                    )?;
+                    clear_uncommitted_restore_staging(&staging, true)?;
+                    intent
+                }
+                None => {
+                    if restore_identity_applying_marker_exists(&staging)? {
+                        return Err(StoreError::Corrupt(
+                            "restore staging has an application marker but no identity intent"
+                                .into(),
+                        ));
+                    }
+                    clear_uncommitted_restore_staging(&staging, false)?;
+                    fs::remove_dir(&staging).map_err(|error| {
+                        StoreError::Unavailable(format!(
+                            "cannot remove unjournaled restore staging directory {}: {error}",
+                            staging.display()
+                        ))
+                    })?;
+                    create_restore_identity_intent(
+                        &source,
+                        package,
+                        destination,
+                        Some(job.expect("maintenance job was checked")),
+                        &source_identity,
+                        &actual_database_digest,
+                        existing_target.as_ref(),
+                        &staging,
+                    )?
+                }
+            }
+        } else {
+            create_restore_identity_intent(
+                &source,
+                package,
+                destination,
+                job,
+                &source_identity,
+                &actual_database_digest,
+                existing_target.as_ref(),
+                &staging,
+            )?
+        };
         let staging_database = staging.join(BACKUP_DATABASE_FILE);
-        fs::create_dir(&staging).map_err(|error| {
-            StoreError::Unavailable(format!(
-                "cannot create restore staging directory {}: {error}",
-                staging.display()
-            ))
-        })?;
         let result = (|| {
             let backup = source.backup_to(&staging_database)?;
             let restored = Self::open(&staging_database, PRODUCTION_SCHEMA_SQL)?;
-            let previous_database_path = if destination.exists() {
-                Some(restore_previous_path(destination, next_epoch)?)
-            } else {
-                None
-            };
             if job.is_some() {
                 restored.ensure_maintenance_job_schema()?;
+                write_restore_identity_applying_marker(&staging)?;
             }
             restored.execute_batch("BEGIN IMMEDIATE")?;
             let restore_result = (|| {
                 identity::IdentityStore::new(&restored)
                     .restore(
-                        current_database_instance_id.clone(),
-                        next_epoch,
+                        intent.current_database_instance_id.clone(),
+                        intent.current_restore_epoch,
                         &production_now(),
                     )
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?;
@@ -2479,11 +2565,11 @@ impl SqliteStore {
                     let receipt = json!({
                         "package_path": package,
                         "destination_path": destination,
-                        "previous_database_path": previous_database_path.clone(),
+                        "previous_database_path": intent.previous_database_path.clone(),
                         "source_database_instance_id": source_identity.database_instance_id.as_str(),
                         "source_restore_epoch": source_identity.restore_epoch.get(),
-                        "current_database_instance_id": current_database_instance_id.clone(),
-                        "current_restore_epoch": next_epoch,
+                        "current_database_instance_id": intent.current_database_instance_id.clone(),
+                        "current_restore_epoch": intent.current_restore_epoch,
                         "source_page_count": backup.source_page_count,
                         "pages_copied": backup.pages_copied,
                         "busy_retries": backup.busy_retries,
@@ -2507,16 +2593,35 @@ impl SqliteStore {
             let _ = fs::remove_file(staged_wal);
             let _ = fs::remove_file(staged_shm);
 
+            let previous_database_path =
+                intent.previous_database_path.as_deref().map(PathBuf::from);
+            let mut retained_previous_now = false;
             if let Some(previous) = previous_database_path.as_ref() {
-                fs::rename(destination, previous).map_err(|error| {
-                    StoreError::Unavailable(format!(
-                        "cannot retain previous database {}: {error}",
-                        previous.display()
-                    ))
-                })?;
+                if destination.exists() {
+                    if previous.exists() {
+                        return Err(StoreError::Conflict(format!(
+                            "restore retention path already exists: {}",
+                            previous.display()
+                        )));
+                    }
+                    fs::rename(destination, previous).map_err(|error| {
+                        StoreError::Unavailable(format!(
+                            "cannot retain previous database {}: {error}",
+                            previous.display()
+                        ))
+                    })?;
+                    retained_previous_now = true;
+                } else if !previous.exists() {
+                    return Err(StoreError::Corrupt(
+                        "restore target and its retained previous database are both missing".into(),
+                    ));
+                }
             }
             if let Err(error) = fs::rename(&staging_database, destination) {
-                if let Some(previous) = previous_database_path.as_ref() {
+                if retained_previous_now {
+                    let previous = previous_database_path
+                        .as_ref()
+                        .expect("a retained database path was selected");
                     let _ = fs::rename(previous, destination);
                 }
                 return Err(StoreError::Unavailable(format!(
@@ -2531,12 +2636,12 @@ impl SqliteStore {
                 previous_database_path,
                 source_database_instance_id: source_identity.database_instance_id.to_string(),
                 source_restore_epoch: source_identity.restore_epoch.get(),
-                current_database_instance_id,
-                current_restore_epoch: next_epoch,
+                current_database_instance_id: intent.current_database_instance_id.clone(),
+                current_restore_epoch: intent.current_restore_epoch,
                 backup,
             })
         })();
-        if result.is_err() {
+        if result.is_err() && job.is_none() {
             let _ = fs::remove_dir_all(&staging);
         }
         drop(source);
@@ -2559,6 +2664,27 @@ impl SqliteStore {
         }
         ensure_backup_package_path_exists(Path::new(&job.package_path))?;
         reject_symlink(destination)?;
+        let package = Path::new(&job.package_path);
+        let manifest_path = package.join(BACKUP_MANIFEST_FILE);
+        let package_database_path = package.join(BACKUP_DATABASE_FILE);
+        reject_symlink(&manifest_path)?;
+        reject_symlink(&package_database_path)?;
+        let manifest = read_backup_manifest(&manifest_path)?;
+        validate_backup_manifest(&manifest)?;
+        let package_database_digest =
+            checksum(&fs::read(&package_database_path).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot read restore package database during reconciliation: {error}"
+                ))
+            })?);
+        if manifest.get("database_digest").and_then(Value::as_str)
+            != Some(package_database_digest.as_str())
+        {
+            return Err(StoreError::Conflict(
+                "restore package changed after its staged operation was admitted".into(),
+            ));
+        }
+        let source_identity = manifest_database_identity(&manifest)?;
         let read_receipt = |path: &Path| -> Result<Option<MaintenanceJobRecord>, StoreError> {
             if !path.exists() {
                 return Ok(None);
@@ -2603,6 +2729,12 @@ impl SqliteStore {
                     != Some(identity.database_instance_id.as_str())
                 || result.get("current_restore_epoch").and_then(Value::as_u64)
                     != Some(identity.restore_epoch.get())
+                || result
+                    .get("source_database_instance_id")
+                    .and_then(Value::as_str)
+                    != Some(source_identity.database_instance_id.as_str())
+                || result.get("source_restore_epoch").and_then(Value::as_u64)
+                    != Some(source_identity.restore_epoch.get())
             {
                 return Err(StoreError::Conflict(
                     "published restore receipt does not match its database identity".into(),
@@ -2613,9 +2745,36 @@ impl SqliteStore {
 
         let staging = maintenance_restore_staging_path(destination, &job.operation_id)?;
         reject_symlink(&staging)?;
+        let staged_intent = read_restore_identity_intent(&staging)?;
+        if let Some(intent) = staged_intent.as_ref() {
+            validate_restore_identity_intent_request(
+                intent,
+                job,
+                package,
+                destination,
+                &source_identity,
+                &package_database_digest,
+            )?;
+        }
+        let applying_marker = if staging.exists() {
+            restore_identity_applying_marker_exists(&staging)?
+        } else {
+            false
+        };
         let staged_database = staging.join(BACKUP_DATABASE_FILE);
         reject_symlink(&staged_database)?;
-        let Some(receipt) = read_receipt(&staged_database)? else {
+        let staged_receipt = match read_receipt(&staged_database) {
+            Ok(receipt) => receipt,
+            Err(_error) if staged_intent.is_some() && !applying_marker => {
+                // The durable intent is written before the backup starts and
+                // the applying marker is published before the identity/receipt
+                // transaction. Without that marker, an unreadable staged file
+                // cannot contain a committed activation receipt.
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(receipt) = staged_receipt else {
             return Ok(None);
         };
         let result_json = receipt.result_json.as_deref().ok_or_else(|| {
@@ -2651,27 +2810,6 @@ impl SqliteStore {
                 "staged restore receipt does not match the staged database identity".into(),
             ));
         }
-        let package = Path::new(&job.package_path);
-        let manifest_path = package.join(BACKUP_MANIFEST_FILE);
-        let package_database_path = package.join(BACKUP_DATABASE_FILE);
-        reject_symlink(&manifest_path)?;
-        reject_symlink(&package_database_path)?;
-        let manifest = read_backup_manifest(&manifest_path)?;
-        validate_backup_manifest(&manifest)?;
-        let package_database_digest =
-            checksum(&fs::read(&package_database_path).map_err(|error| {
-                StoreError::Unavailable(format!(
-                    "cannot read restore package database during reconciliation: {error}"
-                ))
-            })?);
-        if manifest.get("database_digest").and_then(Value::as_str)
-            != Some(package_database_digest.as_str())
-        {
-            return Err(StoreError::Conflict(
-                "restore package changed after its staged operation was admitted".into(),
-            ));
-        }
-        let source_identity = manifest_database_identity(&manifest)?;
         if result
             .get("source_database_instance_id")
             .and_then(Value::as_str)
@@ -12510,6 +12648,587 @@ fn remove_checkpointed_restore_sidecars(destination: &Path) -> Result<(), StoreE
     Ok(())
 }
 
+impl RestoreIdentityIntent {
+    fn as_json(&self) -> Value {
+        json!({
+            "format": RESTORE_IDENTITY_INTENT_FORMAT,
+            "operation_id": self.operation_id,
+            "package_path": self.package_path,
+            "destination_path": self.destination_path,
+            "request_digest": self.request_digest,
+            "source_database_digest": self.source_database_digest,
+            "source_database_instance_id": self.source_database_instance_id,
+            "source_restore_epoch": self.source_restore_epoch,
+            "current_database_instance_id": self.current_database_instance_id,
+            "current_restore_epoch": self.current_restore_epoch,
+            "previous_database_path": self.previous_database_path,
+            "previous_database_instance_id": self.previous_database_instance_id,
+            "previous_restore_epoch": self.previous_restore_epoch,
+            "previous_database_digest": self.previous_database_digest,
+        })
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, StoreError> {
+        let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+            StoreError::Corrupt(format!("restore identity intent is invalid JSON: {error}"))
+        })?;
+        let string = |field: &str| -> Result<String, StoreError> {
+            value
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    StoreError::Corrupt(format!("restore identity intent is missing {field}"))
+                })
+        };
+        let optional_string = |field: &str| -> Result<Option<String>, StoreError> {
+            match value.get(field) {
+                Some(Value::Null) => Ok(None),
+                Some(Value::String(value)) => Ok(Some(value.clone())),
+                _ => Err(StoreError::Corrupt(format!(
+                    "restore identity intent has invalid {field}"
+                ))),
+            }
+        };
+        let number = |field: &str| -> Result<u64, StoreError> {
+            value.get(field).and_then(Value::as_u64).ok_or_else(|| {
+                StoreError::Corrupt(format!("restore identity intent has invalid {field}"))
+            })
+        };
+        let optional_number = |field: &str| -> Result<Option<u64>, StoreError> {
+            match value.get(field) {
+                Some(Value::Null) => Ok(None),
+                Some(value) => value.as_u64().map(Some).ok_or_else(|| {
+                    StoreError::Corrupt(format!("restore identity intent has invalid {field}"))
+                }),
+                None => Err(StoreError::Corrupt(format!(
+                    "restore identity intent is missing {field}"
+                ))),
+            }
+        };
+
+        if value.get("format").and_then(Value::as_str) != Some(RESTORE_IDENTITY_INTENT_FORMAT) {
+            return Err(StoreError::Corrupt(
+                "unsupported restore identity intent format".into(),
+            ));
+        }
+        let intent = Self {
+            operation_id: string("operation_id")?,
+            package_path: string("package_path")?,
+            destination_path: string("destination_path")?,
+            request_digest: string("request_digest")?,
+            source_database_digest: string("source_database_digest")?,
+            source_database_instance_id: string("source_database_instance_id")?,
+            source_restore_epoch: number("source_restore_epoch")?,
+            current_database_instance_id: string("current_database_instance_id")?,
+            current_restore_epoch: number("current_restore_epoch")?,
+            previous_database_path: optional_string("previous_database_path")?,
+            previous_database_instance_id: optional_string("previous_database_instance_id")?,
+            previous_restore_epoch: optional_number("previous_restore_epoch")?,
+            previous_database_digest: optional_string("previous_database_digest")?,
+        };
+        identity::DatabaseIdentity::new(
+            intent.source_database_instance_id.clone(),
+            intent.source_restore_epoch,
+        )
+        .and_then(|_| {
+            identity::DatabaseIdentity::new(
+                intent.current_database_instance_id.clone(),
+                intent.current_restore_epoch,
+            )
+        })
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if intent.operation_id.trim().is_empty()
+            || intent.package_path.trim().is_empty()
+            || intent.destination_path.trim().is_empty()
+            || intent.request_digest.trim().is_empty()
+            || intent.source_database_digest.trim().is_empty()
+            || intent.current_restore_epoch <= intent.source_restore_epoch
+        {
+            return Err(StoreError::Corrupt(
+                "restore identity intent contains incomplete or non-monotonic identity data".into(),
+            ));
+        }
+        let has_previous = intent.previous_database_path.is_some();
+        if intent.previous_database_instance_id.is_some() != has_previous
+            || intent.previous_restore_epoch.is_some() != has_previous
+            || intent.previous_database_digest.is_some() != has_previous
+        {
+            return Err(StoreError::Corrupt(
+                "restore identity intent has incomplete previous-database provenance".into(),
+            ));
+        }
+        if let (Some(previous_id), Some(previous_epoch)) = (
+            intent.previous_database_instance_id.as_ref(),
+            intent.previous_restore_epoch,
+        ) {
+            identity::DatabaseIdentity::new(previous_id.clone(), previous_epoch)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            if intent.current_restore_epoch <= previous_epoch {
+                return Err(StoreError::Corrupt(
+                    "restore identity intent does not advance the previous restore epoch".into(),
+                ));
+            }
+        }
+        Ok(intent)
+    }
+}
+
+fn read_restore_identity_intent(
+    staging: &Path,
+) -> Result<Option<RestoreIdentityIntent>, StoreError> {
+    reject_symlink(staging)?;
+    let metadata = match fs::symlink_metadata(staging) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(StoreError::Unavailable(format!(
+                "cannot inspect restore staging directory {}: {error}",
+                staging.display()
+            )))
+        }
+    };
+    if !metadata.is_dir() {
+        return Err(StoreError::Conflict(format!(
+            "restore staging path is not a directory: {}",
+            staging.display()
+        )));
+    }
+    let path = staging.join(RESTORE_IDENTITY_INTENT_FILE);
+    reject_symlink(&path)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(StoreError::Unavailable(format!(
+                "cannot inspect restore identity intent {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return Err(StoreError::Corrupt(
+            "restore identity intent is not a bounded regular file".into(),
+        ));
+    }
+    let bytes = fs::read(&path).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot read restore identity intent {}: {error}",
+            path.display()
+        ))
+    })?;
+    RestoreIdentityIntent::parse(&bytes).map(Some)
+}
+
+fn validate_restore_identity_intent_request(
+    intent: &RestoreIdentityIntent,
+    job: &MaintenanceJobInput,
+    package: &Path,
+    destination: &Path,
+    source_identity: &identity::DatabaseIdentity,
+    source_database_digest: &str,
+) -> Result<(), StoreError> {
+    if intent.operation_id != job.operation_id
+        || intent.package_path != job.package_path
+        || intent.destination_path != job.database_path
+        || intent.request_digest != job.request_digest
+        || Path::new(&intent.package_path) != package
+        || Path::new(&intent.destination_path) != destination
+        || intent.source_database_digest != source_database_digest
+        || intent.source_database_instance_id != source_identity.database_instance_id.as_str()
+        || intent.source_restore_epoch != source_identity.restore_epoch.get()
+    {
+        return Err(StoreError::Conflict(
+            "restore staging intent is already bound to another package, database, or source identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn create_restore_identity_intent(
+    source: &SqliteStore,
+    package: &Path,
+    destination: &Path,
+    job: Option<&MaintenanceJobInput>,
+    source_identity: &identity::DatabaseIdentity,
+    source_database_digest: &str,
+    existing_target: Option<&RestoreDatabaseState>,
+    staging: &Path,
+) -> Result<RestoreIdentityIntent, StoreError> {
+    let current_epoch = existing_target.map_or(source_identity.restore_epoch.get(), |target| {
+        target
+            .identity
+            .restore_epoch
+            .get()
+            .max(source_identity.restore_epoch.get())
+    });
+    let current_restore_epoch = current_epoch
+        .checked_add(1)
+        .ok_or_else(|| StoreError::Invalid("restore epoch overflow".into()))?;
+    let current_database_instance_id = identity::IdentityStore::new(source)
+        .fresh_restore_database_instance_id()
+        .map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot generate a fresh restore database identity: {error}"
+            ))
+        })?
+        .to_string();
+    let previous_database_path = if existing_target.is_some() {
+        Some(
+            restore_previous_path(destination, current_restore_epoch)?
+                .to_string_lossy()
+                .into_owned(),
+        )
+    } else {
+        None
+    };
+    let intent = RestoreIdentityIntent {
+        operation_id: job.map_or_else(String::new, |job| job.operation_id.clone()),
+        package_path: job.map_or_else(
+            || package.to_string_lossy().into_owned(),
+            |job| job.package_path.clone(),
+        ),
+        destination_path: job.map_or_else(
+            || destination.to_string_lossy().into_owned(),
+            |job| job.database_path.clone(),
+        ),
+        request_digest: job.map_or_else(String::new, |job| job.request_digest.clone()),
+        source_database_digest: source_database_digest.to_owned(),
+        source_database_instance_id: source_identity.database_instance_id.as_str().to_owned(),
+        source_restore_epoch: source_identity.restore_epoch.get(),
+        current_database_instance_id,
+        current_restore_epoch,
+        previous_database_path,
+        previous_database_instance_id: existing_target
+            .map(|target| target.identity.database_instance_id.as_str().to_owned()),
+        previous_restore_epoch: existing_target.map(|target| target.identity.restore_epoch.get()),
+        previous_database_digest: existing_target.map(|target| target.digest.clone()),
+    };
+    fs::create_dir(staging).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot create restore staging directory {}: {error}",
+            staging.display()
+        ))
+    })?;
+    if job.is_some() {
+        sync_restore_directory(staging.parent().unwrap_or(Path::new(".")))?;
+        write_restore_identity_intent(staging, &intent)?;
+    }
+    Ok(intent)
+}
+
+fn write_restore_identity_intent(
+    staging: &Path,
+    intent: &RestoreIdentityIntent,
+) -> Result<(), StoreError> {
+    let path = staging.join(RESTORE_IDENTITY_INTENT_FILE);
+    let temporary = staging.join(RESTORE_IDENTITY_INTENT_TEMP_FILE);
+    reject_symlink(&path)?;
+    reject_symlink(&temporary)?;
+    if path.exists() {
+        return Err(StoreError::Conflict(
+            "restore identity intent already exists".into(),
+        ));
+    }
+    if temporary.exists() {
+        fs::remove_file(&temporary).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot remove stale restore identity intent temporary file: {error}"
+            ))
+        })?;
+    }
+    let bytes = serde_json::to_vec(&intent.as_json()).map_err(|error| {
+        StoreError::Invalid(format!("cannot encode restore identity intent: {error}"))
+    })?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            StoreError::Unavailable(format!("cannot create restore identity intent: {error}"))
+        })?;
+    file.write_all(&bytes).map_err(|error| {
+        StoreError::Unavailable(format!("cannot write restore identity intent: {error}"))
+    })?;
+    file.sync_all().map_err(|error| {
+        StoreError::Unavailable(format!("cannot sync restore identity intent: {error}"))
+    })?;
+    drop(file);
+    fs::rename(&temporary, &path).map_err(|error| {
+        StoreError::Unavailable(format!("cannot publish restore identity intent: {error}"))
+    })?;
+    sync_restore_directory(staging)
+}
+
+fn write_restore_identity_applying_marker(staging: &Path) -> Result<(), StoreError> {
+    let path = staging.join(RESTORE_IDENTITY_APPLYING_MARKER);
+    let temporary = staging.join(RESTORE_IDENTITY_APPLYING_TEMP_FILE);
+    reject_symlink(&path)?;
+    reject_symlink(&temporary)?;
+    if path.exists() {
+        return Ok(());
+    }
+    if temporary.exists() {
+        fs::remove_file(&temporary).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot remove stale restore application marker temporary file: {error}"
+            ))
+        })?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            StoreError::Unavailable(format!("cannot create restore application marker: {error}"))
+        })?;
+    file.write_all(b"boreal.project-restore-applying/1")
+        .map_err(|error| {
+            StoreError::Unavailable(format!("cannot write restore application marker: {error}"))
+        })?;
+    file.sync_all().map_err(|error| {
+        StoreError::Unavailable(format!("cannot sync restore application marker: {error}"))
+    })?;
+    drop(file);
+    fs::rename(&temporary, &path).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot publish restore application marker: {error}"
+        ))
+    })?;
+    sync_restore_directory(staging)
+}
+
+fn restore_identity_applying_marker_exists(staging: &Path) -> Result<bool, StoreError> {
+    let path = staging.join(RESTORE_IDENTITY_APPLYING_MARKER);
+    reject_symlink(&path)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(StoreError::Corrupt(
+            "restore application marker is not a regular file".into(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(StoreError::Unavailable(format!(
+            "cannot inspect restore application marker: {error}"
+        ))),
+    }
+}
+
+fn sync_restore_directory(path: &Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot sync restore staging directory {}: {error}",
+                    path.display()
+                ))
+            })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn inspect_restore_database_state(path: &Path) -> Result<RestoreDatabaseState, StoreError> {
+    reject_symlink(path)?;
+    let store = SqliteStore::open_read_only_for_diagnostics(path)?;
+    let identity = identity::IdentityStore::new(&store)
+        .database_identity()
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    drop(store);
+    let bytes = fs::read(path).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot read restore database {} for identity validation: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(RestoreDatabaseState {
+        identity,
+        digest: checksum(&bytes),
+    })
+}
+
+fn validate_restore_identity_intent_target(
+    intent: &RestoreIdentityIntent,
+    destination: &Path,
+    existing_target: Option<&RestoreDatabaseState>,
+) -> Result<(), StoreError> {
+    let expected_previous_path =
+        restore_previous_path_value(destination, intent.current_restore_epoch)?;
+    let Some(previous_path) = intent.previous_database_path.as_deref().map(PathBuf::from) else {
+        if existing_target.is_some() {
+            return Err(StoreError::Conflict(
+                "restore target appeared after an empty-destination restore was staged".into(),
+            ));
+        }
+        return Ok(());
+    };
+    if previous_path != expected_previous_path {
+        return Err(StoreError::Corrupt(
+            "restore identity intent has an unexpected previous database path".into(),
+        ));
+    }
+    let state = if let Some(state) = existing_target {
+        if previous_path.exists() {
+            return Err(StoreError::Conflict(
+                "restore target and its retained previous database both exist".into(),
+            ));
+        }
+        state.clone()
+    } else {
+        if !previous_path.exists() {
+            return Err(StoreError::Corrupt(
+                "restore target and its retained previous database are both missing".into(),
+            ));
+        }
+        inspect_restore_database_state(&previous_path)?
+    };
+    if intent.previous_database_instance_id.as_deref()
+        != Some(state.identity.database_instance_id.as_str())
+        || intent.previous_restore_epoch != Some(state.identity.restore_epoch.get())
+        || intent.previous_database_digest.as_deref() != Some(state.digest.as_str())
+    {
+        return Err(StoreError::Conflict(
+            "restore target changed after its identity intent was recorded".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn clear_uncommitted_restore_staging(
+    staging: &Path,
+    preserve_identity_intent: bool,
+) -> Result<(), StoreError> {
+    let allowed = [
+        BACKUP_DATABASE_FILE,
+        "database.sqlite-wal",
+        "database.sqlite-shm",
+        "database.sqlite-journal",
+        RESTORE_IDENTITY_INTENT_FILE,
+        RESTORE_IDENTITY_INTENT_TEMP_FILE,
+        RESTORE_IDENTITY_APPLYING_MARKER,
+        RESTORE_IDENTITY_APPLYING_TEMP_FILE,
+    ];
+    for entry in fs::read_dir(staging).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot inspect interrupted restore staging directory {}: {error}",
+            staging.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot inspect interrupted restore staging entry: {error}"
+            ))
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !allowed.contains(&name.as_ref()) {
+            return Err(StoreError::Conflict(format!(
+                "restore staging contains an unexpected entry: {}",
+                entry.path().display()
+            )));
+        }
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot inspect interrupted restore staging entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(StoreError::Conflict(format!(
+                "restore staging entry is not a regular file: {}",
+                entry.path().display()
+            )));
+        }
+        if preserve_identity_intent && name == RESTORE_IDENTITY_INTENT_FILE {
+            continue;
+        }
+        fs::remove_file(entry.path()).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot clear interrupted restore staging entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+    }
+    sync_restore_directory(staging)
+}
+
+fn restore_package_report_from_receipt(
+    package: &Path,
+    destination: &Path,
+    receipt: &MaintenanceJobRecord,
+) -> Result<SqliteRestorePackageReport, StoreError> {
+    if receipt.kind != "restore" || receipt.stage != "committed" {
+        return Err(StoreError::Corrupt(
+            "restore readback is not a committed restore receipt".into(),
+        ));
+    }
+    let result_json = receipt
+        .result_json
+        .as_deref()
+        .ok_or_else(|| StoreError::Corrupt("committed restore has no result receipt".into()))?;
+    let result: Value = serde_json::from_str(result_json)
+        .map_err(|_| StoreError::Corrupt("restore receipt is invalid JSON".into()))?;
+    let string = |field: &str| -> Result<String, StoreError> {
+        result
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| StoreError::Corrupt(format!("restore receipt omitted {field}")))
+    };
+    let number = |field: &str| -> Result<u64, StoreError> {
+        result
+            .get(field)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| StoreError::Corrupt(format!("restore receipt omitted {field}")))
+    };
+    let previous_database_path = match result.get("previous_database_path") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(PathBuf::from(value)),
+        _ => {
+            return Err(StoreError::Corrupt(
+                "restore receipt has invalid previous_database_path".into(),
+            ))
+        }
+    };
+    if string("package_path")? != package.to_string_lossy()
+        || string("destination_path")? != destination.to_string_lossy()
+    {
+        return Err(StoreError::Conflict(
+            "restore receipt does not match its package and destination".into(),
+        ));
+    }
+    let source_database_instance_id = string("source_database_instance_id")?;
+    let source_restore_epoch = number("source_restore_epoch")?;
+    let current_database_instance_id = string("current_database_instance_id")?;
+    let current_restore_epoch = number("current_restore_epoch")?;
+    identity::DatabaseIdentity::new(source_database_instance_id.clone(), source_restore_epoch)
+        .and_then(|_| {
+            identity::DatabaseIdentity::new(
+                current_database_instance_id.clone(),
+                current_restore_epoch,
+            )
+        })
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    Ok(SqliteRestorePackageReport {
+        package_path: package.to_path_buf(),
+        destination_path: destination.to_path_buf(),
+        previous_database_path,
+        source_database_instance_id,
+        source_restore_epoch,
+        current_database_instance_id,
+        current_restore_epoch,
+        backup: SqliteBackupReport {
+            source_page_count: number("source_page_count")?,
+            pages_copied: number("pages_copied")?,
+            busy_retries: number("busy_retries")?,
+        },
+    })
+}
+
 fn backup_staging_path(destination: &Path, label: &str) -> Result<PathBuf, StoreError> {
     let file_name = destination
         .file_name()
@@ -14212,8 +14931,9 @@ mod sqlite_release_floor_tests {
 #[cfg(test)]
 mod production_restore_identity_tests {
     use super::{
+        checksum, create_restore_identity_intent,
         identity::{IdentityStore, WorkspaceBinding},
-        MaintenanceJobInput, SqliteStore, PRODUCTION_SCHEMA_SQL,
+        maintenance_restore_staging_path, MaintenanceJobInput, SqliteStore, PRODUCTION_SCHEMA_SQL,
     };
     use serde_json::Value;
     use std::fs;
@@ -14338,6 +15058,91 @@ mod production_restore_identity_tests {
         remove_database(&source_path);
         remove_database(&first_destination);
         remove_database(&second_destination);
+    }
+
+    #[test]
+    fn unreceipted_restore_retry_reuses_durable_identity_and_epoch() {
+        let source_path = unique_path("retry-source.sqlite");
+        let package_path = unique_path("retry-package");
+        let destination = unique_path("retry-destination.sqlite");
+        remove_database(&source_path);
+        remove_database(&destination);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let source = SqliteStore::open(&source_path, PRODUCTION_SCHEMA_SQL)
+            .expect("production source opens");
+        source
+            .create_project("restore-retry-project", "unix-ms:1")
+            .expect("project creates");
+        let binding = WorkspaceBinding::new(
+            "/tmp/boreal-restore-retry-root",
+            "/tmp/boreal-restore-retry-root/worktree",
+            "sha256:restore-retry-binding",
+        )
+        .expect("workspace binding validates");
+        IdentityStore::new(&source)
+            .bind_project("restore-retry-project", &binding, "unix-ms:1")
+            .expect("project binds");
+        let source_identity = IdentityStore::new(&source)
+            .database_identity()
+            .expect("source identity reads");
+        let package = source
+            .backup_package_to(&package_path)
+            .expect("source backup package is created");
+        let package_database_digest =
+            checksum(&fs::read(&package.database_path).expect("backup database can be read"));
+        let job = restore_job(&package_path, &destination, "restore-retry");
+        let staging = maintenance_restore_staging_path(&destination, &job.operation_id)
+            .expect("operation staging path resolves");
+        let intent = create_restore_identity_intent(
+            &source,
+            &package_path,
+            &destination,
+            Some(&job),
+            &source_identity,
+            &package_database_digest,
+            None,
+            &staging,
+        )
+        .expect("durable restore identity intent is written");
+        fs::write(
+            staging.join(super::BACKUP_DATABASE_FILE),
+            b"interrupted backup",
+        )
+        .expect("interrupted staging is represented");
+        drop(source);
+
+        let restored = SqliteStore::restore_package_to_with_maintenance_job(
+            &package_path,
+            &destination,
+            Some(&job),
+        )
+        .expect("retry resumes the unreceipted staging operation");
+        assert_eq!(
+            restored.current_database_instance_id,
+            intent.current_database_instance_id
+        );
+        assert_eq!(restored.current_restore_epoch, intent.current_restore_epoch);
+        assert_eq!(
+            restored.current_restore_epoch,
+            source_identity.restore_epoch.get() + 1
+        );
+        assert!(
+            !staging.exists(),
+            "published restore cleans its staging area"
+        );
+
+        let repeated = SqliteStore::restore_package_to_with_maintenance_job(
+            &package_path,
+            &destination,
+            Some(&job),
+        )
+        .expect("committed retry reads back the original restore result");
+        assert_eq!(repeated, restored);
+
+        let _ = fs::remove_dir_all(&package_path);
+        remove_database(&source_path);
+        remove_database(&destination);
     }
 
     fn restore_job(package: &Path, destination: &Path, operation_id: &str) -> MaintenanceJobInput {
