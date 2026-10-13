@@ -37,6 +37,7 @@ pub mod deliverables;
 pub mod execution;
 pub mod final_result;
 pub mod identity;
+mod intake_delivery;
 pub mod jobs;
 mod knowledge;
 pub mod maintenance;
@@ -50,6 +51,7 @@ mod status_facts;
 pub mod transactions;
 mod work_model_v3;
 pub use deliverables::*;
+pub use intake_delivery::*;
 pub use knowledge::*;
 pub use maintenance::{MaintenanceJobInput, MaintenanceJobRecord, MaintenanceJobTransition};
 pub use migrations::{
@@ -1549,6 +1551,7 @@ impl SqliteStore {
                 orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_SQL,
             )?;
             store.ensure_deliverables_schema()?;
+            store.ensure_intake_delivery_schema()?;
             store.ensure_summary_body_schema()?;
             store.ensure_legacy_summary_schema()?;
         }
