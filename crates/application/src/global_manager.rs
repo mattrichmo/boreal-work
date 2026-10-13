@@ -10,8 +10,47 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static GLOBAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 const GLOBAL_PATH_MAX_BYTES: usize = 4096;
 const INTERACTIVE_RESPONSE_MAX_BYTES: usize = 900 * 1024;
+const GLOBAL_TRANSFER_MAX_BYTES: usize = 64 * 1024 * 1024;
 const GLOBAL_ATTENTION_PROJECTS_LIMIT: usize = 100;
 const GLOBAL_PAGE_LIMIT_MAX: u64 = 200;
+
+fn serialized_json_size(value: &Value) -> Result<usize, serde_json::Error> {
+    struct CountingWriter(usize);
+
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = CountingWriter(0);
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.0)
+}
+
+fn validate_global_transfer_size(size: usize, limit: usize) -> Result<(), String> {
+    if size <= limit {
+        return Ok(());
+    }
+    let limit_description = if limit == GLOBAL_TRANSFER_MAX_BYTES {
+        "64 MiB".to_owned()
+    } else {
+        format!("{limit} bytes")
+    };
+    Err(format!(
+        "global logical transfer is {size} bytes, exceeding the {limit_description} import limit; refusing the transfer without dropping history. Use `bwrk global backup --out PATH` for a complete physical backup."
+    ))
+}
+
+fn validate_global_transfer(value: &Value, limit: usize) -> Result<(), String> {
+    let size = serialized_json_size(value).map_err(|error| error.to_string())?;
+    validate_global_transfer_size(size, limit)
+}
 
 #[derive(Debug)]
 pub enum GlobalManagerError {
@@ -314,11 +353,7 @@ impl GlobalManagerApplication {
             }
         }
         if command == "export" {
-            let (mut state, revision, history) = self.store.export_bundle()?;
-            state["schema_version"] = json!(2);
-            state["revision"] = json!(revision);
-            state["revision_history"] = json!(history);
-            return Ok(state);
+            return self.logical_export(GLOBAL_TRANSFER_MAX_BYTES);
         }
         let (mut state, revision) =
             if matches!(command, "snapshot" | "detail page" | "attention page") {
@@ -770,6 +805,15 @@ impl GlobalManagerApplication {
                 "unsupported global command: {command}"
             ))),
         }
+    }
+
+    fn logical_export(&self, size_limit: usize) -> Result<Value, GlobalManagerError> {
+        let (mut state, revision, history) = self.store.export_bundle()?;
+        state["schema_version"] = json!(2);
+        state["revision"] = json!(revision);
+        state["revision_history"] = json!(history);
+        validate_global_transfer(&state, size_limit).map_err(GlobalManagerError::Invalid)?;
+        Ok(state)
     }
 
     fn validate(&self, command: &str, p: &Value) -> Result<(), GlobalManagerError> {
@@ -2072,14 +2116,8 @@ fn apply_mutation(
                     "unsupported global backup schema version".into(),
                 ));
             }
-            let serialized_size = serde_json::to_vec(incoming)
-                .map_err(|error| StoreError::Invalid(error.to_string()))?
-                .len();
-            if serialized_size > 64 * 1024 * 1024 {
-                return Err(StoreError::Invalid(
-                    "global backup exceeds the 64 MiB import limit".into(),
-                ));
-            }
+            validate_global_transfer(incoming, GLOBAL_TRANSFER_MAX_BYTES)
+                .map_err(StoreError::Invalid)?;
             validate_import_snapshot(incoming)?;
             let mut history_entries = 0usize;
             validate_import_history(incoming, 0, &mut history_entries)?;
@@ -3581,6 +3619,113 @@ mod global_attention_page_tests {
             snapshot["attention"]["projects"]["personal"]["next_action"]["item_id"],
             item["id"]
         );
+
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod global_transfer_tests {
+    use super::{
+        serialized_json_size, validate_global_transfer, GlobalManagerApplication,
+        GLOBAL_TRANSFER_MAX_BYTES,
+    };
+    use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DB: AtomicU64 = AtomicU64::new(1);
+
+    fn database_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "boreal-global-transfer-{}-{}.sqlite",
+            std::process::id(),
+            NEXT_DB.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn call(
+        app: &GlobalManagerApplication,
+        command: &str,
+        payload: Value,
+        operation: &str,
+    ) -> Value {
+        app.execute(command, &payload, operation).unwrap()
+    }
+
+    #[test]
+    fn logical_transfer_limit_matches_compact_import_size_and_refuses_without_pruning() {
+        let sample = json!({"revision_history":[{"revision":1,"snapshot":{"id":"kept"}}]});
+        assert_eq!(
+            serialized_json_size(&sample).unwrap(),
+            serde_json::to_vec(&sample).unwrap().len()
+        );
+
+        let at_limit = Value::String("x".repeat(GLOBAL_TRANSFER_MAX_BYTES - 2));
+        assert_eq!(
+            serialized_json_size(&at_limit).unwrap(),
+            GLOBAL_TRANSFER_MAX_BYTES
+        );
+        assert!(validate_global_transfer(&at_limit, GLOBAL_TRANSFER_MAX_BYTES).is_ok());
+        drop(at_limit);
+
+        let over_limit = Value::String("x".repeat(GLOBAL_TRANSFER_MAX_BYTES - 1));
+        assert_eq!(
+            serialized_json_size(&over_limit).unwrap(),
+            GLOBAL_TRANSFER_MAX_BYTES + 1
+        );
+        let error = validate_global_transfer(&over_limit, GLOBAL_TRANSFER_MAX_BYTES).unwrap_err();
+        assert!(error.contains("64 MiB import limit"));
+        assert!(error.contains("without dropping history"));
+        assert!(error.contains("bwrk global backup --out PATH"));
+        assert_eq!(
+            over_limit.as_str().unwrap().len(),
+            GLOBAL_TRANSFER_MAX_BYTES - 1
+        );
+    }
+
+    #[test]
+    fn refused_export_leaves_ids_and_status_history_unchanged() {
+        let path = database_path();
+        let app = GlobalManagerApplication::open(&path).unwrap();
+        let project = call(&app, "project add", json!({"name":"Portable"}), "project");
+        let item = call(
+            &app,
+            "todo add",
+            json!({"project_id":project["id"],"title":"Keep history"}),
+            "item",
+        );
+        call(
+            &app,
+            "todo complete",
+            json!({"item_id":item["id"]}),
+            "complete-item",
+        );
+        let note = call(
+            &app,
+            "note add",
+            json!({"project_id":project["id"],"title":"Transfer note","body":"preserved"}),
+            "note",
+        );
+        let before = call(&app, "snapshot", json!({}), "before-export");
+        let revision = app.revision().unwrap();
+
+        let error = app.logical_export(1).unwrap_err().to_string();
+        assert!(error.contains("without dropping history"));
+        assert!(error.contains("bwrk global backup --out PATH"));
+        assert_eq!(app.revision().unwrap(), revision);
+
+        let after = call(&app, "snapshot", json!({}), "after-export");
+        assert_eq!(after["projects"][0]["id"], project["id"]);
+        assert_eq!(after["items"][0]["id"], item["id"]);
+        assert_eq!(after["notes"][0]["id"], note["id"]);
+        assert_eq!(after["status_history"], before["status_history"]);
+
+        let export = app.logical_export(GLOBAL_TRANSFER_MAX_BYTES).unwrap();
+        assert_eq!(export["projects"][0]["id"], project["id"]);
+        assert_eq!(export["items"][0]["id"], item["id"]);
+        assert_eq!(export["notes"][0]["id"], note["id"]);
+        assert!(!export["revision_history"].as_array().unwrap().is_empty());
 
         drop(app);
         let _ = std::fs::remove_file(path);
