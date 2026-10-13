@@ -404,6 +404,13 @@ fn ensure_private_root(root: &Path, database_path: &Path) -> Result<PathBuf, Sto
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), StoreError> {
+    ensure_private_directory_with_sync(path, sync_directory_entry)
+}
+
+fn ensure_private_directory_with_sync(
+    path: &Path,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), StoreError> {
     let created = match create_private_directory(&path) {
         Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
@@ -436,6 +443,17 @@ fn ensure_private_directory(path: &Path) -> Result<(), StoreError> {
             ))
         })?;
     }
+    if created {
+        let parent = path.parent().ok_or_else(|| {
+            StoreError::Invalid("Global admission directory must have a parent".into())
+        })?;
+        sync_parent(parent).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot persist Global admission directory entry {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -456,6 +474,18 @@ fn ensure_private_directory(path: &Path) -> Result<(), StoreError> {
         }
     }
     Ok(())
+}
+
+fn sync_directory_entry(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 fn database_lock_key(database_path: &Path) -> Result<PathBuf, StoreError> {
@@ -829,6 +859,33 @@ mod tests {
         if let Some(root) = database_path.parent() {
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn newly_created_control_staging_and_operation_directories_sync_each_parent_in_order() {
+        let database = database_path("directory-durability");
+        let root = database.parent().unwrap();
+        let control_directory = root.join(CONTROL_DIRECTORY);
+        let control_root = control_directory.join("db-key");
+        let staging = control_root.join(STAGING_DIRECTORY);
+        let operation = staging.join("op_restore_directory_test");
+        let mut synced_parents = Vec::new();
+
+        for directory in [&control_directory, &control_root, &staging, &operation] {
+            ensure_private_directory_with_sync(directory, |parent| {
+                assert!(directory.is_dir());
+                synced_parents.push(parent.to_path_buf());
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        assert_eq!(
+            synced_parents,
+            vec![root.to_path_buf(), control_directory, control_root, staging]
+        );
+        remove_root(&database);
     }
 
     #[cfg(unix)]

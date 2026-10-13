@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 const JOURNAL_FILE: &str = "restore-journal.json";
 const JOURNAL_TEMP_FILE: &str = "restore-journal.tmp";
 const INCOMING_PACKAGE_DIR: &str = "incoming-package";
-const RESTORE_JOURNAL_FORMAT: &str = "boreal.global-restore/1";
+const PREVIOUS_TEMP_FILE: &str = "previous.sqlite.tmp";
+const RESTORE_JOURNAL_FORMAT_V1: &str = "boreal.global-restore/1";
+const RESTORE_JOURNAL_FORMAT: &str = "boreal.global-restore/2";
 
 /// Durable readback returned by an activated Global restore.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,6 +53,7 @@ struct RestoreJournal {
     target_database_id: String,
     previous_database_id: Option<String>,
     previous_revision: Option<u64>,
+    previous_content_digest: Option<String>,
     phase: String,
 }
 
@@ -67,6 +70,7 @@ impl RestoreJournal {
             "target_database_id": self.target_database_id,
             "previous_database_id": self.previous_database_id,
             "previous_revision": self.previous_revision,
+            "previous_content_digest": self.previous_content_digest,
             "phase": self.phase,
         })
     }
@@ -84,7 +88,8 @@ impl RestoreJournal {
                     StoreError::Corrupt(format!("Global restore journal {name} is missing"))
                 })
         };
-        if field("format")? != RESTORE_JOURNAL_FORMAT {
+        let format = field("format")?;
+        if !matches!(format, RESTORE_JOURNAL_FORMAT_V1 | RESTORE_JOURNAL_FORMAT) {
             return Err(StoreError::Corrupt(
                 "Global restore journal format is unsupported".into(),
             ));
@@ -114,6 +119,15 @@ impl RestoreJournal {
                 "Global restore journal previous identity is incomplete".into(),
             ));
         }
+        let optional_content_digest = match value.get("previous_content_digest") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(digest)) if is_sha256_digest(digest) => Some(digest.clone()),
+            Some(_) => {
+                return Err(StoreError::Corrupt(
+                    "Global restore journal previous_content_digest is invalid".into(),
+                ));
+            }
+        };
         let journal = Self {
             operation_id: field("operation_id")?.to_owned(),
             database_path: PathBuf::from(field("database_path")?),
@@ -129,6 +143,7 @@ impl RestoreJournal {
             target_database_id: field("target_database_id")?.to_owned(),
             previous_database_id: optional_id,
             previous_revision: optional_revision,
+            previous_content_digest: optional_content_digest,
             phase: field("phase")?.to_owned(),
         };
         if !matches!(
@@ -143,6 +158,10 @@ impl RestoreJournal {
                 .is_some_and(|id| !is_database_id(id))
             || journal.previous_database_id.as_deref() == Some(journal.target_database_id.as_str())
             || !is_sha256_digest(&journal.source_checksum)
+            || (journal.previous_database_id.is_none() && journal.previous_content_digest.is_some())
+            || (format == RESTORE_JOURNAL_FORMAT
+                && journal.previous_database_id.is_some()
+                && journal.previous_content_digest.is_none())
         {
             return Err(StoreError::Corrupt(
                 "Global restore journal contains invalid identity or phase data".into(),
@@ -208,11 +227,13 @@ fn restore_global_backup_package_with_interruption(
     let journal_path = operation_root.join(JOURNAL_FILE);
     let journal_temp_path = operation_root.join(JOURNAL_TEMP_FILE);
     let previous_path = operation_root.join("previous.sqlite");
+    let previous_temp_path = operation_root.join(PREVIOUS_TEMP_FILE);
     let incoming_path = operation_root.join(INCOMING_PACKAGE_DIR);
     reject_symlink_if_present(operation_root, "Global restore operation directory")?;
     reject_symlink_if_present(&journal_path, "Global restore journal")?;
     reject_symlink_if_present(&journal_temp_path, "Global restore journal temporary file")?;
     reject_symlink_if_present(&previous_path, "retained previous Global database")?;
+    reject_symlink_if_present(&previous_temp_path, "temporary previous Global database")?;
     reject_symlink_if_present(&incoming_path, "Global restore incoming package")?;
     reject_sqlite_sidecars(&staged_database_path)?;
 
@@ -245,6 +266,7 @@ fn restore_global_backup_package_with_interruption(
         // activation and are preserved for operator inspection.
         if path_present(&staged_database_path)?
             || path_present(&previous_path)?
+            || path_present(&previous_temp_path)?
             || path_present(&incoming_path)?
         {
             return Err(StoreError::Conflict(
@@ -263,6 +285,16 @@ fn restore_global_backup_package_with_interruption(
                 None
             }
         };
+        let previous_content_digest = previous
+            .as_ref()
+            .map(|identity| {
+                validated_global_content_digest(
+                    &database_path,
+                    &identity.database_id,
+                    identity.revision,
+                )
+            })
+            .transpose()?;
         let target_database_id = fresh_database_id(
             &expected_package.manifest.database_id,
             previous
@@ -281,6 +313,7 @@ fn restore_global_backup_package_with_interruption(
                 .as_ref()
                 .map(|identity| identity.database_id.clone()),
             previous_revision: previous.as_ref().map(|identity| identity.revision),
+            previous_content_digest,
             phase: "intent".into(),
         };
         write_journal(&journal_path, &journal, true)?;
@@ -290,6 +323,11 @@ fn restore_global_backup_package_with_interruption(
     // The target may already be live if a prior process stopped after rename.
     if let Some(active) = read_database_identity_if_present(&database_path)? {
         if active.database_id == journal.target_database_id {
+            if journal.previous_database_id.is_some() && journal.previous_content_digest.is_none() {
+                return Err(StoreError::Corrupt(
+                    "legacy Global restore journal cannot prove the retained database copy".into(),
+                ));
+            }
             if matches!(journal.phase.as_str(), "intent" | "staged_ready") {
                 return Err(StoreError::Conflict(
                     "Global restore activated before its durable admission phase; outcome is uncertain".into(),
@@ -316,6 +354,20 @@ fn restore_global_backup_package_with_interruption(
                 "Global database changed after restore admission; active data was left untouched"
                     .into(),
             ));
+        }
+        let active_digest =
+            validated_global_content_digest(&database_path, &active.database_id, active.revision)?;
+        match journal.previous_content_digest.as_deref() {
+            Some(expected) if expected != active_digest => {
+                return Err(StoreError::Conflict(
+                    "Global database content changed after restore admission; active data was left untouched".into(),
+                ));
+            }
+            None => journal.previous_content_digest = Some(active_digest),
+            Some(_) => {}
+        }
+        if journal.previous_content_digest.is_some() {
+            write_journal(&journal_path, &journal, false)?;
         }
     } else if journal.previous_database_id.is_some() {
         return Err(StoreError::Conflict(
@@ -346,13 +398,33 @@ fn restore_global_backup_package_with_interruption(
     }
 
     if journal.phase == "staged_ready" {
-        retain_previous_database(&database_path, &previous_path, &journal)?;
+        retain_previous_database(
+            &database_path,
+            &previous_path,
+            &previous_temp_path,
+            &mut journal,
+        )?;
         journal.phase = "previous_retained".into();
         write_journal(&journal_path, &journal, false)?;
     } else {
-        verify_previous_database(&previous_path, &journal)?;
+        if journal.previous_database_id.is_some() {
+            retain_previous_database(
+                &database_path,
+                &previous_path,
+                &previous_temp_path,
+                &mut journal,
+            )?;
+        } else {
+            verify_previous_database(&previous_path, &journal)?;
+        }
     }
 
+    sync_restore_directory_chain(
+        operation_root,
+        database_path
+            .parent()
+            .expect("canonical database has parent"),
+    )?;
     prepare_active_database_for_atomic_replace(&database_path, &journal)?;
     verify_staged_database(
         &staged_database_path,
@@ -544,35 +616,120 @@ fn verify_staged_database(
 fn retain_previous_database(
     database_path: &Path,
     previous_path: &Path,
-    journal: &RestoreJournal,
+    previous_temp_path: &Path,
+    journal: &mut RestoreJournal,
 ) -> Result<(), StoreError> {
     let Some(expected_id) = journal.previous_database_id.as_deref() else {
-        if path_present(database_path)? || path_present(previous_path)? {
+        if path_present(database_path)?
+            || path_present(previous_path)?
+            || path_present(previous_temp_path)?
+        {
             return Err(StoreError::Conflict(
                 "unexpected Global database appeared during package-only restore".into(),
             ));
         }
         return Ok(());
     };
-    if path_present(previous_path)? {
-        return verify_previous_database(previous_path, journal);
-    }
-    let active = read_database_identity(database_path)?;
-    if active.database_id != expected_id || Some(active.revision) != journal.previous_revision {
+
+    let expected_revision = journal.previous_revision.ok_or_else(|| {
+        StoreError::Corrupt("Global restore journal previous revision is missing".into())
+    })?;
+    let active_digest =
+        validated_global_content_digest(database_path, expected_id, expected_revision)?;
+    if journal
+        .previous_content_digest
+        .as_deref()
+        .is_some_and(|expected| expected != active_digest)
+    {
         return Err(StoreError::Conflict(
-            "Global database changed before retention; active data was left untouched".into(),
+            "Global database content changed before retention; active data was left untouched"
+                .into(),
         ));
     }
-    let source = SqliteStore::open_connection(database_path, crate::SQLITE_OPEN_READWRITE)?;
-    source.backup_to(previous_path)?;
-    set_private_file_permissions(previous_path)?;
-    sync_file(previous_path)?;
-    verify_previous_database(previous_path, journal)?;
-    sync_directory(
-        previous_path
-            .parent()
-            .expect("previous database has parent"),
-    )?;
+    journal.previous_content_digest = Some(active_digest.clone());
+
+    if path_present(previous_path)? {
+        let complete_copy =
+            match validated_global_content_digest(previous_path, expected_id, expected_revision) {
+                Ok(digest) => digest == active_digest,
+                Err(
+                    StoreError::Corrupt(_)
+                    | StoreError::Invalid(_)
+                    | StoreError::UnsupportedSchema { .. },
+                ) => false,
+                Err(error) => return Err(error),
+            };
+        if complete_copy {
+            remove_sqlite_sidecars(previous_temp_path)?;
+            if path_present(previous_temp_path)? {
+                fs::remove_file(previous_temp_path).map_err(|error| {
+                    io_unavailable(
+                        "cannot remove stale temporary previous Global database",
+                        error,
+                    )
+                })?;
+                sync_directory(
+                    previous_temp_path
+                        .parent()
+                        .expect("previous database has parent"),
+                )?;
+            }
+            return Ok(());
+        }
+        // An earlier process may have stopped while writing the old direct-to-
+        // final copy. The still-active, fully validated database is authoritative.
+        remove_sqlite_sidecars(previous_path)?;
+        fs::remove_file(previous_path).map_err(|error| {
+            io_unavailable("cannot remove incomplete retained Global database", error)
+        })?;
+        sync_directory(
+            previous_path
+                .parent()
+                .expect("previous database has parent"),
+        )?;
+    }
+
+    remove_sqlite_sidecars(previous_temp_path)?;
+    if path_present(previous_temp_path)? {
+        fs::remove_file(previous_temp_path).map_err(|error| {
+            io_unavailable(
+                "cannot remove interrupted temporary previous Global database",
+                error,
+            )
+        })?;
+        sync_directory(
+            previous_temp_path
+                .parent()
+                .expect("previous database has parent"),
+        )?;
+    }
+
+    let source = SqliteStore::open_connection(database_path, SQLITE_OPEN_READONLY)?;
+    source.backup_to(previous_temp_path)?;
+    set_private_file_permissions(previous_temp_path)?;
+    sync_file(previous_temp_path)?;
+    let temporary_digest =
+        validated_global_content_digest(previous_temp_path, expected_id, expected_revision)?;
+    if temporary_digest != active_digest {
+        return Err(StoreError::Corrupt(
+            "temporary retained Global database does not match the active database".into(),
+        ));
+    }
+    let parent = previous_path
+        .parent()
+        .expect("previous database has parent");
+    sync_directory(parent)?;
+    fs::rename(previous_temp_path, previous_path).map_err(|error| {
+        io_unavailable("cannot publish retained previous Global database", error)
+    })?;
+    sync_directory(parent)?;
+    let published_digest =
+        validated_global_content_digest(previous_path, expected_id, expected_revision)?;
+    if published_digest != active_digest {
+        return Err(StoreError::Corrupt(
+            "published retained Global database failed content verification".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -588,13 +745,355 @@ fn verify_previous_database(
         }
         return Ok(());
     };
-    let previous = read_database_identity(previous_path)?;
-    if previous.database_id != expected_id || Some(previous.revision) != journal.previous_revision {
+    let expected_revision = journal.previous_revision.ok_or_else(|| {
+        StoreError::Corrupt("Global restore journal previous revision is missing".into())
+    })?;
+    let actual_digest =
+        validated_global_content_digest(previous_path, expected_id, expected_revision)?;
+    if journal
+        .previous_content_digest
+        .as_deref()
+        .is_some_and(|expected| expected != actual_digest)
+    {
         return Err(StoreError::Corrupt(
-            "retained previous Global database does not match restore journal".into(),
+            "retained previous Global database content does not match restore journal".into(),
         ));
     }
     Ok(())
+}
+
+fn validated_global_content_digest(
+    path: &Path,
+    expected_database_id: &str,
+    expected_revision: u64,
+) -> Result<String, StoreError> {
+    reject_symlink_if_present(path, "retained Global database")?;
+    reject_sqlite_sidecars(path)?;
+    let database = SqliteStore::open_connection(path, SQLITE_OPEN_READONLY)?;
+    database.execute_batch("BEGIN")?;
+    let result = (|| {
+        validate_global_integrity(&database)?;
+        let identity = read_connection_identity(&database)?;
+        if identity.database_id != expected_database_id || identity.revision != expected_revision {
+            return Err(StoreError::Corrupt(
+                "Global database identity or revision does not match restore journal".into(),
+            ));
+        }
+        validate_global_persisted_state(&database, &identity)?;
+        global_content_digest(&database)
+    })();
+    match result {
+        Ok(digest) => {
+            database.execute_batch("COMMIT")?;
+            Ok(digest)
+        }
+        Err(error) => {
+            let _ = database.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn validate_global_integrity(database: &SqliteStore) -> Result<(), StoreError> {
+    let mut check = database.prepare("PRAGMA integrity_check")?;
+    let mut rows = 0_u64;
+    while check.step()? == SQLITE_ROW {
+        rows = rows.saturating_add(1);
+        if check.column_text(0)? != "ok" {
+            return Err(StoreError::Corrupt(
+                "retained Global database failed SQLite integrity_check".into(),
+            ));
+        }
+    }
+    if rows != 1 {
+        return Err(StoreError::Corrupt(
+            "retained Global database integrity_check returned an invalid result".into(),
+        ));
+    }
+    let mut foreign_keys = database.prepare("PRAGMA foreign_key_check")?;
+    if foreign_keys.step()? == SQLITE_ROW {
+        return Err(StoreError::Corrupt(
+            "retained Global database failed SQLite foreign_key_check".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_global_persisted_state(
+    database: &SqliteStore,
+    identity: &DatabaseIdentity,
+) -> Result<(), StoreError> {
+    for table in [
+        "global_schema",
+        "global_manager_state",
+        "global_revision_snapshot",
+    ] {
+        if !global_table_exists(database, table)? {
+            return Err(StoreError::Corrupt(format!(
+                "retained Global database is missing required table {table}"
+            )));
+        }
+    }
+    if global_table_row_count(database, "global_schema")? != 1
+        || global_table_row_count(database, "global_manager_state")? != 1
+    {
+        return Err(StoreError::Corrupt(
+            "retained Global database singleton rows are inconsistent".into(),
+        ));
+    }
+
+    let (mut current_state, current_revision, history) = read_snapshot_and_history(database)?;
+    if current_revision != identity.revision {
+        return Err(StoreError::Corrupt(
+            "retained Global state revision does not match its identity".into(),
+        ));
+    }
+    super::ensure_compatible_state(&mut current_state)?;
+    validate_global_state_shape(&current_state)?;
+    validate_global_revision_history(&history, identity.revision, &current_state)?;
+
+    if identity.schema_version >= 2 {
+        if !global_table_exists(database, "global_operation")?
+            || !global_table_exists(database, "global_audit")?
+        {
+            return Err(StoreError::Corrupt(
+                "retained Global database is missing operation or audit history".into(),
+            ));
+        }
+        validate_global_operations_and_audit(database, identity.revision)?;
+    }
+    Ok(())
+}
+
+fn validate_global_state_shape(state: &Value) -> Result<(), StoreError> {
+    let object = state
+        .as_object()
+        .ok_or_else(|| StoreError::Corrupt("retained Global state must be an object".into()))?;
+    for field in [
+        "projects",
+        "items",
+        "notes",
+        "statuses",
+        "relationships",
+        "associations",
+        "status_history",
+        "imported_history",
+    ] {
+        if !object.get(field).is_some_and(Value::is_array) {
+            return Err(StoreError::Corrupt(format!(
+                "retained Global state field {field} must be an array"
+            )));
+        }
+    }
+    if object
+        .get("note_links")
+        .is_some_and(|value| !value.is_array())
+    {
+        return Err(StoreError::Corrupt(
+            "retained Global state field note_links must be an array".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_global_operations_and_audit(
+    database: &SqliteStore,
+    revision: u64,
+) -> Result<(), StoreError> {
+    if global_table_row_count(database, "global_operation")? != revision
+        || global_table_row_count(database, "global_audit")? != revision
+    {
+        return Err(StoreError::Corrupt(
+            "retained Global operation and audit counts do not match its revision".into(),
+        ));
+    }
+    let mut rows = database.prepare(
+        r#"SELECT o.revision,o.operation_id,o.request_digest,o.result_json,
+                  a.revision,a.operation_id,a.request_digest,a.command,a.before_digest,a.after_digest,a.created_at
+           FROM global_operation o LEFT JOIN global_audit a ON a.operation_id=o.operation_id
+           ORDER BY o.revision"#,
+    )?;
+    let mut expected_revision = 1_u64;
+    while rows.step()? == SQLITE_ROW {
+        let operation_revision = rows.column_u64(0)?;
+        let operation_id = rows.column_text(1)?;
+        let request_digest = rows.column_text(2)?;
+        let result_json = rows.column_text(3)?;
+        let audit_revision = rows.column_optional_i64(4)?.ok_or_else(|| {
+            StoreError::Corrupt("retained Global operation is missing its audit event".into())
+        })?;
+        let audit_operation_id = rows.column_optional_text(5)?.ok_or_else(|| {
+            StoreError::Corrupt("retained Global audit identity is missing".into())
+        })?;
+        let audit_request_digest = rows
+            .column_optional_text(6)?
+            .ok_or_else(|| StoreError::Corrupt("retained Global audit digest is missing".into()))?;
+        let command = rows.column_optional_text(7)?.ok_or_else(|| {
+            StoreError::Corrupt("retained Global audit command is missing".into())
+        })?;
+        let before_digest = rows.column_optional_text(8)?.ok_or_else(|| {
+            StoreError::Corrupt("retained Global audit before digest is missing".into())
+        })?;
+        let after_digest = rows.column_optional_text(9)?.ok_or_else(|| {
+            StoreError::Corrupt("retained Global audit after digest is missing".into())
+        })?;
+        let created_at = rows.column_optional_text(10)?.ok_or_else(|| {
+            StoreError::Corrupt("retained Global audit timestamp is missing".into())
+        })?;
+        if operation_revision != expected_revision
+            || audit_revision != operation_revision
+            || audit_operation_id != operation_id
+            || audit_request_digest != request_digest
+            || operation_id.trim().is_empty()
+            || request_digest.trim().is_empty()
+            || command.trim().is_empty()
+            || before_digest.trim().is_empty()
+            || after_digest.trim().is_empty()
+            || created_at.trim().is_empty()
+        {
+            return Err(StoreError::Corrupt(
+                "retained Global operation and audit history is inconsistent".into(),
+            ));
+        }
+        serde_json::from_str::<Value>(&result_json).map_err(|error| {
+            StoreError::Corrupt(format!(
+                "retained Global operation result JSON is invalid: {error}"
+            ))
+        })?;
+        expected_revision = expected_revision
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Corrupt("retained Global revision overflow".into()))?;
+    }
+    if expected_revision != revision.saturating_add(1) {
+        return Err(StoreError::Corrupt(
+            "retained Global operation history is not contiguous".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_global_revision_history(
+    history: &[Value],
+    revision: u64,
+    current_state: &Value,
+) -> Result<(), StoreError> {
+    let minimum_history_count = revision.max(1);
+    if history.len() as u64 != minimum_history_count {
+        return Err(StoreError::Corrupt(format!(
+            "retained Global revision history is not contiguous: {} rows for revision {revision}",
+            history.len(),
+        )));
+    }
+    for (expected, entry) in history.iter().enumerate() {
+        if entry.get("revision").and_then(Value::as_u64) != Some(expected as u64) {
+            return Err(StoreError::Corrupt(
+                "retained Global revision history is not contiguous".into(),
+            ));
+        }
+        let mut snapshot = entry.get("snapshot").cloned().ok_or_else(|| {
+            StoreError::Corrupt("retained Global history snapshot is missing".into())
+        })?;
+        super::ensure_compatible_state(&mut snapshot)?;
+        validate_global_state_shape(&snapshot)?;
+        if expected as u64 == revision && &snapshot != current_state {
+            return Err(StoreError::Corrupt(
+                "retained Global current snapshot differs from its revision history".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn global_table_exists(database: &SqliteStore, name: &str) -> Result<bool, StoreError> {
+    let mut query =
+        database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1")?;
+    query.bind_text(1, name)?;
+    Ok(query.step()? == SQLITE_ROW)
+}
+
+fn global_table_row_count(database: &SqliteStore, table: &str) -> Result<u64, StoreError> {
+    let mut query =
+        database.prepare(&format!("SELECT COUNT(*) FROM {}", quote_identifier(table)))?;
+    if query.step()? != SQLITE_ROW {
+        return Err(StoreError::Corrupt(format!(
+            "retained Global row count for {table} returned no result"
+        )));
+    }
+    query.column_u64(0)
+}
+
+fn global_content_digest(database: &SqliteStore) -> Result<String, StoreError> {
+    let mut digest = crate::checksum(b"boreal.global-restore-content/1");
+    let mut objects = database.prepare(
+        "SELECT quote(type),quote(name),quote(tbl_name),quote(sql) FROM sqlite_master ORDER BY type,name",
+    )?;
+    while objects.step()? == SQLITE_ROW {
+        digest_content_piece(&mut digest, b"schema");
+        for column in 0..4 {
+            digest_content_piece(&mut digest, objects.column_text(column)?.as_bytes());
+        }
+    }
+    drop(objects);
+
+    let mut tables =
+        database.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
+    let mut table_names = Vec::new();
+    while tables.step()? == SQLITE_ROW {
+        table_names.push(tables.column_text(0)?);
+    }
+    drop(tables);
+    for table in table_names {
+        digest_content_piece(&mut digest, b"table");
+        digest_content_piece(&mut digest, table.as_bytes());
+        let quoted_table = quote_identifier(&table);
+        let mut columns_query = database.prepare(&format!("PRAGMA table_xinfo({quoted_table})"))?;
+        let mut columns = Vec::new();
+        while columns_query.step()? == SQLITE_ROW {
+            columns.push(columns_query.column_text(1)?);
+        }
+        drop(columns_query);
+        if columns.is_empty() {
+            return Err(StoreError::Corrupt(format!(
+                "retained Global table {table} has no columns"
+            )));
+        }
+        for column in &columns {
+            digest_content_piece(&mut digest, column.as_bytes());
+        }
+        let projections = columns
+            .iter()
+            .map(|column| {
+                let column = quote_identifier(column);
+                format!("typeof({column}) || ':' || hex(CAST({column} AS BLOB))")
+            })
+            .collect::<Vec<_>>();
+        let order = projections.join(",");
+        let query = format!(
+            "SELECT {} FROM {} ORDER BY {order}",
+            projections.join(","),
+            quoted_table
+        );
+        let mut rows = database.prepare(&query)?;
+        while rows.step()? == SQLITE_ROW {
+            digest_content_piece(&mut digest, b"row");
+            for index in 0..columns.len() {
+                digest_content_piece(&mut digest, rows.column_text(index as i32)?.as_bytes());
+            }
+        }
+    }
+    Ok(digest)
+}
+
+fn digest_content_piece(digest: &mut String, piece: &[u8]) {
+    let mut input = Vec::with_capacity(digest.len() + std::mem::size_of::<u64>() + piece.len());
+    input.extend_from_slice(digest.as_bytes());
+    input.extend_from_slice(&(piece.len() as u64).to_be_bytes());
+    input.extend_from_slice(piece);
+    *digest = crate::checksum(&input);
+}
+
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn prepare_active_database_for_atomic_replace(
@@ -1082,6 +1581,37 @@ fn sync_directory(path: &Path) -> Result<(), StoreError> {
     }
 }
 
+fn sync_restore_directory_chain(
+    operation_root: &Path,
+    database_root: &Path,
+) -> Result<(), StoreError> {
+    sync_restore_directory_chain_with(operation_root, database_root, sync_directory)
+}
+
+fn sync_restore_directory_chain_with(
+    operation_root: &Path,
+    database_root: &Path,
+    mut sync: impl FnMut(&Path) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    let mut directory = operation_root;
+    loop {
+        sync(directory)?;
+        if directory == database_root {
+            return Ok(());
+        }
+        directory = directory.parent().ok_or_else(|| {
+            StoreError::Invalid(
+                "Global restore operation directory is outside the database directory chain".into(),
+            )
+        })?;
+        if !directory.starts_with(database_root) {
+            return Err(StoreError::Invalid(
+                "Global restore operation directory is outside the database directory chain".into(),
+            ));
+        }
+    }
+}
+
 fn io_unavailable(context: &str, error: std::io::Error) -> StoreError {
     StoreError::Unavailable(format!("{context}: {error}"))
 }
@@ -1204,6 +1734,97 @@ mod tests {
         let current = GlobalManagerStore::open(&active_path).unwrap();
         assert_eq!(current.snapshot().unwrap(), before_snapshot);
         drop(current);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn interrupted_previous_copy_is_rebuilt_before_restore_can_continue() {
+        let root = test_root("partial-previous-copy");
+        let active_path = root.join("global.sqlite");
+        let active = GlobalManagerStore::open(&active_path).unwrap();
+        add_project(&active, "retained", "Complete active database");
+        let identity = read_store_identity(&active).unwrap();
+        drop(active);
+
+        let operation_root = root.join("restore-operation");
+        fs::create_dir(&operation_root).unwrap();
+        let previous_path = operation_root.join("previous.sqlite");
+        let previous_temp_path = operation_root.join(PREVIOUS_TEMP_FILE);
+        let bytes = fs::read(&active_path).unwrap();
+        assert!(bytes.len() > 64);
+        fs::write(&previous_path, &bytes[..bytes.len() / 2]).unwrap();
+        fs::write(&previous_temp_path, &bytes[..32]).unwrap();
+
+        let expected_digest =
+            validated_global_content_digest(&active_path, &identity.database_id, identity.revision)
+                .unwrap();
+        let mut journal = RestoreJournal {
+            operation_id: "op_restore_partial_copy".into(),
+            database_path: active_path.clone(),
+            package_path: root.join("source.global-backup"),
+            source_database_id: "11111111111111111111111111111111".into(),
+            source_revision: 0,
+            source_checksum: crate::checksum(b"source"),
+            target_database_id: "22222222222222222222222222222222".into(),
+            previous_database_id: Some(identity.database_id.clone()),
+            previous_revision: Some(identity.revision),
+            previous_content_digest: Some(expected_digest.clone()),
+            phase: "staged_ready".into(),
+        };
+
+        retain_previous_database(
+            &active_path,
+            &previous_path,
+            &previous_temp_path,
+            &mut journal,
+        )
+        .unwrap();
+
+        assert!(!previous_temp_path.exists());
+        assert_eq!(
+            validated_global_content_digest(
+                &previous_path,
+                &identity.database_id,
+                identity.revision
+            )
+            .unwrap(),
+            expected_digest
+        );
+        let retained = SqliteStore::open_connection(&previous_path, SQLITE_OPEN_READONLY).unwrap();
+        assert_eq!(read_connection_identity(&retained).unwrap(), identity);
+        let (_, revision, history) = read_snapshot_and_history(&retained).unwrap();
+        assert_eq!(revision, identity.revision);
+        assert_eq!(history.len() as u64, revision.max(1));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restore_syncs_operation_directory_then_each_parent_before_activation() {
+        let root = test_root("directory-sync-order");
+        let control = root.join(".global-maintenance").join("db-key");
+        let staging = control.join("staging");
+        let operation = staging.join("op_restore_directory_order");
+        let mut synced = Vec::new();
+
+        sync_restore_directory_chain_with(&operation, &root, |path| {
+            synced.push(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            synced,
+            vec![
+                operation,
+                staging,
+                control,
+                root.join(".global-maintenance"),
+                root.clone()
+            ]
+        );
         let _ = fs::remove_dir_all(root);
     }
 
