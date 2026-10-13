@@ -545,7 +545,18 @@ impl SqliteStore {
         event.bind_text(8, &request.reason)?;
         event.bind_text(9, &request.operation_id)?;
         event.bind_text(10, at)?;
-        event.run()
+        event.run()?;
+        self.record_artifact_decision_in_transaction(
+            &request.project_id,
+            &request.work_id,
+            &sealed.submission_id,
+            &gate_id,
+            &request.actor_id,
+            outcome,
+            &request.reason,
+            &request.operation_id,
+            at,
+        )
     }
 
     fn commit_policy_exception(

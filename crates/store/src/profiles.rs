@@ -10,6 +10,91 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const ACCEPTANCE_CONTRACT: &str = "boreal.acceptance/2";
+pub const COMPLETION_ATTESTATION_FACT_SCHEMA: &str = "completion_attestation/1";
+pub const ARTIFACT_INSPECTION_FACT_SCHEMA: &str = "artifact_inspection/1";
+pub const INDEPENDENT_ARTIFACT_DECISION_FACT_SCHEMA: &str = "independent_artifact_decision/1";
+pub const REVIEWED_ARTIFACT_FACT_SCHEMAS: &str =
+    "artifact_inspection/1 + independent_artifact_decision/1";
+
+/// General-work acceptance profiles evaluated by typed result facts. These
+/// modes deliberately reuse the existing summary/review gate vocabulary;
+/// artifact inspection and producer attestation are not executable receipts
+/// and therefore do not introduce synthetic gate kinds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegisteredAcceptanceMode {
+    GeneralAttestation,
+    ValidatedDeliverables,
+    ReviewedArtifacts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegisteredAcceptanceProfile {
+    pub profile_id: &'static str,
+    pub version: u64,
+    pub mode: RegisteredAcceptanceMode,
+    pub summary_gate_id: &'static str,
+    pub review_gate_id: Option<&'static str>,
+    pub required_result_fact: &'static str,
+}
+
+pub const GENERAL_ACCEPTANCE_PROFILES: [RegisteredAcceptanceProfile; 3] = [
+    RegisteredAcceptanceProfile {
+        profile_id: "general-attestation",
+        version: 1,
+        mode: RegisteredAcceptanceMode::GeneralAttestation,
+        summary_gate_id: "summary",
+        review_gate_id: None,
+        required_result_fact: COMPLETION_ATTESTATION_FACT_SCHEMA,
+    },
+    RegisteredAcceptanceProfile {
+        profile_id: "validated-deliverables",
+        version: 1,
+        mode: RegisteredAcceptanceMode::ValidatedDeliverables,
+        summary_gate_id: "summary",
+        review_gate_id: None,
+        required_result_fact: ARTIFACT_INSPECTION_FACT_SCHEMA,
+    },
+    RegisteredAcceptanceProfile {
+        profile_id: "reviewed-artifacts",
+        version: 1,
+        mode: RegisteredAcceptanceMode::ReviewedArtifacts,
+        summary_gate_id: "summary",
+        review_gate_id: Some("artifact_review"),
+        required_result_fact: REVIEWED_ARTIFACT_FACT_SCHEMAS,
+    },
+];
+
+/// Resolve only explicit, versioned general-work profiles. Software profiles
+/// such as `focused/1` and `reviewed/1` remain governed by their existing
+/// declarations and are intentionally not mapped to a general-work fallback.
+pub fn registered_acceptance_profile(
+    profile_id: &str,
+    version: u64,
+) -> Result<Option<RegisteredAcceptanceProfile>, StoreError> {
+    if let Some(profile) = GENERAL_ACCEPTANCE_PROFILES
+        .iter()
+        .find(|profile| profile.profile_id == profile_id)
+    {
+        if profile.version != version {
+            return Err(StoreError::Conflict(format!(
+                "unsupported acceptance profile version {profile_id}/{version}; registered version is {}",
+                profile.version
+            )));
+        }
+        return Ok(Some(*profile));
+    }
+    if matches!(profile_id, "focused" | "reviewed") {
+        if version == 1 {
+            return Ok(None);
+        }
+        return Err(StoreError::Conflict(format!(
+            "unsupported legacy acceptance profile version {profile_id}/{version}"
+        )));
+    }
+    Err(StoreError::Conflict(format!(
+        "acceptance profile {profile_id}/{version} is not registered"
+    )))
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ProfileKey {
@@ -1360,5 +1445,48 @@ fn canonical_value(value: &Value) -> String {
                     .join(",")
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod registered_acceptance_profile_tests {
+    use super::{registered_acceptance_profile, RegisteredAcceptanceMode};
+
+    #[test]
+    fn registered_general_profiles_resolve_only_their_exact_versions() {
+        assert_eq!(
+            registered_acceptance_profile("general-attestation", 1)
+                .unwrap()
+                .unwrap()
+                .mode,
+            RegisteredAcceptanceMode::GeneralAttestation
+        );
+        assert_eq!(
+            registered_acceptance_profile("validated-deliverables", 1)
+                .unwrap()
+                .unwrap()
+                .required_result_fact,
+            "artifact_inspection/1"
+        );
+        assert_eq!(
+            registered_acceptance_profile("reviewed-artifacts", 1)
+                .unwrap()
+                .unwrap()
+                .required_result_fact,
+            "artifact_inspection/1 + independent_artifact_decision/1"
+        );
+        assert!(registered_acceptance_profile("focused", 1)
+            .unwrap()
+            .is_none());
+        assert!(registered_acceptance_profile("reviewed", 1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn unknown_profiles_and_versions_fail_closed() {
+        assert!(registered_acceptance_profile("general-attestation", 2).is_err());
+        assert!(registered_acceptance_profile("unregistered", 1).is_err());
+        assert!(registered_acceptance_profile("focused", 2).is_err());
     }
 }

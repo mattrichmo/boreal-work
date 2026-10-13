@@ -15,6 +15,8 @@ pub mod knowledge_maintenance;
 pub use knowledge_maintenance::*;
 pub mod artifact_context;
 pub use artifact_context::*;
+pub mod artifact_acceptance;
+pub use artifact_acceptance::*;
 mod work_split;
 pub use work_split::*;
 mod agent_tools;

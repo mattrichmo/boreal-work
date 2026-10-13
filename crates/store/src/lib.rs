@@ -10097,6 +10097,9 @@ impl SqliteStore {
                 diagnostics.missing.sort();
                 diagnostics.missing.dedup();
             }
+            if let Some(reason) = self.typed_acceptance_close_blocker(request)? {
+                diagnostics.missing.push(reason);
+            }
             diagnostics.missing.sort();
             diagnostics.missing.dedup();
             if !diagnostics.missing.is_empty() {
