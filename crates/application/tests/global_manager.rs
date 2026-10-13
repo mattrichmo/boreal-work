@@ -529,7 +529,7 @@ fn related_transfer_rejects_atomically_and_status_history_is_portable() {
     call(
         &app,
         "relationship add",
-        json!({"source_id":x["id"],"target_id":y["id"],"kind":"related"}),
+        json!({"source_id":x["id"],"target_id":y["id"],"kind":"depends_on"}),
         "edge",
     )
     .unwrap();
@@ -545,7 +545,7 @@ fn related_transfer_rejects_atomically_and_status_history_is_portable() {
     let removed = call(
         &app,
         "relationship remove",
-        json!({"source_id":x["id"],"target_id":y["id"],"kind":"related"}),
+        json!({"source_id":x["id"],"target_id":y["id"],"kind":"depends_on"}),
         "edge-remove",
     )
     .unwrap();
@@ -790,23 +790,83 @@ fn concurrent_bootstrap_revision_guard_admits_one_writer() {
         let path = path.clone();
         let barrier = barrier.clone();
         threads.push(std::thread::spawn(move || {
-            let app = GlobalManagerApplication::open(path).unwrap();
+            let open_attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                GlobalManagerApplication::open(path)
+            }));
+            // Every open outcome reaches the rendezvous, so an error or panic
+            // cannot strand its peer before the revision-guarded write.
             barrier.wait();
-            call(
-                &app,
-                "project add",
-                json!({"name":name,"expected_revision":0}),
-                name,
-            )
-            .is_ok()
+            match open_attempt {
+                Ok(Ok(app)) => {
+                    let write_attempt =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            call(
+                                &app,
+                                "project add",
+                                json!({"name":name,"expected_revision":0}),
+                                name,
+                            )
+                        }));
+                    let write_result = match write_attempt {
+                        Ok(Ok(_)) => Ok(true),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(_) => Err("revision-guarded write panicked".to_owned()),
+                    };
+                    (name, Ok(()), Some(write_result))
+                }
+                Ok(Err(error)) => (name, Err(error.to_string()), None),
+                Err(_) => (
+                    name,
+                    Err("GlobalManagerApplication::open panicked".to_owned()),
+                    None,
+                ),
+            }
         }));
     }
-    let winners = threads
+    let outcomes = threads
         .into_iter()
-        .map(|thread| thread.join().unwrap())
-        .filter(|won| *won)
+        .map(|thread| {
+            thread
+                .join()
+                .expect("bootstrap worker must report its outcome")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.len(), 2);
+    let open_failures = outcomes
+        .iter()
+        .filter_map(|(name, opened, _)| opened.as_ref().err().map(|error| (name, error)))
+        .collect::<Vec<_>>();
+    assert!(
+        open_failures.is_empty(),
+        "both concurrent first opens must succeed: {open_failures:?}"
+    );
+    let winners = outcomes
+        .iter()
+        .filter(|(_, _, write)| matches!(write, Some(Ok(true))))
         .count();
-    assert_eq!(winners, 1);
+    assert_eq!(
+        winners, 1,
+        "exactly one revision-0 write must win: {outcomes:?}"
+    );
+    let stale_rejections = outcomes
+        .iter()
+        .filter(|(_, _, write)| {
+            matches!(
+                write,
+                Some(Err(error)) if error == "stale revision: expected 0, actual 1"
+            )
+        })
+        .count();
+    assert_eq!(
+        stale_rejections, 1,
+        "the losing write must be rejected by the expected-revision guard: {outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .all(|(_, opened, write)| opened.is_ok() && write.is_some()),
+        "both successful opens must report a write outcome: {outcomes:?}"
+    );
     let app = GlobalManagerApplication::open(&path).unwrap();
     assert_eq!(app.revision().unwrap(), 1);
     drop(app);

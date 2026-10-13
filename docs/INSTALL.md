@@ -14,9 +14,10 @@ builds are verified.
 The CLI works without Node.js. The project and Global dashboards require
 Node.js 20 through 26 and report an actionable error before starting their
 private service when that runtime is unavailable or outside the supported
-range. Set `BOREAL_NODE` to select the project dashboard runtime or
-`BOREAL_NODE_BINARY` for the Global dashboard. JSON snapshots remain usable
-without Node.js.
+range. Boreal checks the selected executable's version before starting the
+service or TUI. Set `BOREAL_NODE` to select the project dashboard runtime or
+`BOREAL_NODE_BINARY` for the Global dashboard; each can be an executable path
+or a command name. JSON snapshots remain usable without Node.js.
 
 ## Install or update from GitHub
 
@@ -143,8 +144,11 @@ brew install boreal
 brew upgrade boreal
 ```
 
-The formula installs the CLI and both TUIs and supplies Node.js for
-`bwrk dashboard` and `bwrk dashboard global`.
+The formula installs the CLI and both TUIs and declares Node.js as a runtime
+dependency for `bwrk dashboard` and `bwrk dashboard global`. Dashboard startup
+still requires Node.js 20–26; if the selected Homebrew runtime is outside that
+range, point `BOREAL_NODE` and/or `BOREAL_NODE_BINARY` at a supported
+executable. CLI commands and JSON snapshots do not require Node.js.
 
 ## Advanced archive install
 

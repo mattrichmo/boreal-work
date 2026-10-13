@@ -117,7 +117,7 @@ fn global_service_survives_abandoned_connections_and_answers_next_snapshot() {
             "--socket",
             socket.to_str().unwrap(),
             "--max-requests",
-            "7",
+            "8",
         ])
         .env("BOREAL_GLOBAL_ROOT", root.join("state"))
         .stdout(Stdio::null())
@@ -191,9 +191,13 @@ fn global_service_survives_abandoned_connections_and_answers_next_snapshot() {
     raw.write_all(&(encoded.len() as u32).to_be_bytes())
         .unwrap();
     raw.write_all(&encoded).unwrap();
-    raw.shutdown(std::net::Shutdown::Both).unwrap();
-    drop(raw);
+    // Stop reading the response but keep the client-to-service direction open
+    // so the complete mutation reaches dispatch before the connection drops.
+    // A full shutdown races the server before dispatch and tests only an
+    // incomplete request rather than readback after an unknown write outcome.
+    raw.shutdown(std::net::Shutdown::Read).unwrap();
     thread::sleep(Duration::from_millis(150));
+    drop(raw);
     let request = JsonRequest::new("read-receipt",json!({"api_version":"2","schema_version":"boreal.global.request.v1","operation_id":"op_receipt_readback","command":"operation show","payload":{"operation_id":operation_id}}).to_string()).unwrap();
     let mut client = UnixSocketClient::connect(&socket, TransportConfig::default()).unwrap();
     let response = client.request(request).unwrap();

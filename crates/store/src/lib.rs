@@ -33,6 +33,7 @@ pub mod acceptance;
 pub mod completion;
 mod completion_migrations;
 pub mod cycle_commands;
+pub mod deliverables;
 pub mod execution;
 pub mod identity;
 pub mod jobs;
@@ -47,6 +48,7 @@ mod status_evaluation;
 mod status_facts;
 pub mod transactions;
 mod work_model_v3;
+pub use deliverables::*;
 pub use knowledge::*;
 pub use maintenance::{MaintenanceJobInput, MaintenanceJobRecord, MaintenanceJobTransition};
 pub use migrations::{
@@ -1545,6 +1547,7 @@ impl SqliteStore {
                 orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_VERSION as u64,
                 orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_SQL,
             )?;
+            store.ensure_deliverables_schema()?;
             store.ensure_summary_body_schema()?;
             store.ensure_legacy_summary_schema()?;
         }
@@ -2422,10 +2425,6 @@ impl SqliteStore {
         let next_epoch = current_epoch
             .checked_add(1)
             .ok_or_else(|| StoreError::Invalid("restore epoch overflow".to_owned()))?;
-        let current_database_instance_id = format!(
-            "{}-restore-{next_epoch}",
-            source_identity.database_instance_id.as_str()
-        );
         let staging = if let Some(job) = job {
             maintenance_restore_staging_path(destination, &job.operation_id)?
         } else {
@@ -2437,6 +2436,14 @@ impl SqliteStore {
                 staging.display()
             )));
         }
+        let current_database_instance_id = identity::IdentityStore::new(&source)
+            .fresh_restore_database_instance_id()
+            .map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot generate a fresh restore database identity: {error}"
+                ))
+            })?
+            .to_string();
         let staging_database = staging.join(BACKUP_DATABASE_FILE);
         fs::create_dir(&staging).map_err(|error| {
             StoreError::Unavailable(format!(
@@ -2447,69 +2454,48 @@ impl SqliteStore {
         let result = (|| {
             let backup = source.backup_to(&staging_database)?;
             let restored = Self::open(&staging_database, PRODUCTION_SCHEMA_SQL)?;
-            restored.execute_batch("BEGIN IMMEDIATE")?;
-            let restore_result = identity::IdentityStore::new(&restored).restore(
-                current_database_instance_id.clone(),
-                next_epoch,
-                &production_now(),
-            );
-            if let Err(error) = restore_result {
-                let _ = restored.execute_batch("ROLLBACK");
-                return Err(StoreError::Corrupt(error.to_string()));
-            }
-            restored.execute_batch("COMMIT")?;
             let previous_database_path = if destination.exists() {
                 Some(restore_previous_path(destination, next_epoch)?)
             } else {
                 None
             };
-            if let Some(job) = job {
-                let receipt = json!({
-                    "package_path": package,
-                    "destination_path": destination,
-                    "previous_database_path": previous_database_path.clone(),
-                    "source_database_instance_id": source_identity.database_instance_id.as_str(),
-                    "source_restore_epoch": source_identity.restore_epoch.get(),
-                    "current_database_instance_id": current_database_instance_id.clone(),
-                    "current_restore_epoch": next_epoch,
-                    "source_page_count": backup.source_page_count,
-                    "pages_copied": backup.pages_copied,
-                    "busy_retries": backup.busy_retries,
-                });
-                let receipt_json = serde_json::to_string(&receipt).map_err(|error| {
-                    StoreError::Invalid(format!("restore receipt encoding failed: {error}"))
-                })?;
-                let registration = restored.register_maintenance_job(job)?;
-                let mut current = registration.job;
-                if !registration.replayed {
-                    current = restored.transition_maintenance_job(&MaintenanceJobTransition {
-                        operation_id: job.operation_id.clone(),
-                        expected_stage: "registered".to_owned(),
-                        next_stage: "running".to_owned(),
-                        at: job.created_at.clone(),
-                        result_json: None,
-                        error_message: None,
-                    })?;
-                }
-                if current.stage != "committed" {
-                    current = restored.transition_maintenance_job(&MaintenanceJobTransition {
-                        operation_id: job.operation_id.clone(),
-                        expected_stage: current.stage,
-                        next_stage: "committed".to_owned(),
-                        at: job.created_at.clone(),
-                        result_json: Some(receipt_json.clone()),
-                        error_message: None,
-                    })?;
-                }
-                if current.request_digest != job.request_digest
-                    || current.kind != "restore"
-                    || current.result_json.as_deref() != Some(receipt_json.as_str())
-                {
-                    return Err(StoreError::Conflict(
-                        "restore receipt operation ID is already bound to another request".into(),
-                    ));
-                }
+            if job.is_some() {
+                restored.ensure_maintenance_job_schema()?;
             }
+            restored.execute_batch("BEGIN IMMEDIATE")?;
+            let restore_result = (|| {
+                identity::IdentityStore::new(&restored)
+                    .restore(
+                        current_database_instance_id.clone(),
+                        next_epoch,
+                        &production_now(),
+                    )
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                if let Some(job) = job {
+                    let receipt = json!({
+                        "package_path": package,
+                        "destination_path": destination,
+                        "previous_database_path": previous_database_path.clone(),
+                        "source_database_instance_id": source_identity.database_instance_id.as_str(),
+                        "source_restore_epoch": source_identity.restore_epoch.get(),
+                        "current_database_instance_id": current_database_instance_id.clone(),
+                        "current_restore_epoch": next_epoch,
+                        "source_page_count": backup.source_page_count,
+                        "pages_copied": backup.pages_copied,
+                        "busy_retries": backup.busy_retries,
+                    });
+                    let receipt_json = serde_json::to_string(&receipt).map_err(|error| {
+                        StoreError::Invalid(format!("restore receipt encoding failed: {error}"))
+                    })?;
+                    persist_restore_maintenance_receipt(&restored, job, &receipt_json)?;
+                }
+                Ok::<(), StoreError>(())
+            })();
+            if let Err(error) = restore_result {
+                let _ = restored.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+            restored.execute_batch("COMMIT")?;
             restored.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
             drop(restored);
             let staged_wal = staging_database.with_extension("sqlite-wal");
@@ -10111,6 +10097,9 @@ impl SqliteStore {
                 diagnostics.missing.sort();
                 diagnostics.missing.dedup();
             }
+            if let Some(reason) = self.typed_acceptance_close_blocker(request)? {
+                diagnostics.missing.push(reason);
+            }
             diagnostics.missing.sort();
             diagnostics.missing.dedup();
             if !diagnostics.missing.is_empty() {
@@ -12616,6 +12605,131 @@ fn manifest_database_identity(manifest: &Value) -> Result<identity::DatabaseIden
         .map_err(|error| StoreError::Corrupt(error.to_string()))
 }
 
+/// Stores the staged restore identity and its maintenance receipt in the
+/// same SQLite transaction. Once a receipt is visible, reconciliation can
+/// finish publication with the exact chosen physical identity and source
+/// provenance rather than running identity generation again.
+fn persist_restore_maintenance_receipt(
+    store: &SqliteStore,
+    job: &MaintenanceJobInput,
+    receipt_json: &str,
+) -> Result<(), StoreError> {
+    for (field, value) in [
+        ("operation_id", job.operation_id.as_str()),
+        ("kind", job.kind.as_str()),
+        ("database_path", job.database_path.as_str()),
+        ("package_path", job.package_path.as_str()),
+        ("request_digest", job.request_digest.as_str()),
+        ("created_at", job.created_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Invalid(format!(
+                "maintenance job requires non-empty {field}"
+            )));
+        }
+    }
+    if job.kind != "restore" {
+        return Err(StoreError::Invalid(
+            "restore receipt requires a restore maintenance job".into(),
+        ));
+    }
+    serde_json::from_str::<Value>(receipt_json)
+        .map_err(|_| StoreError::Invalid("restore readback must be valid JSON".into()))?;
+
+    let mut current = if let Some(existing) = store.maintenance_job(&job.operation_id)? {
+        if existing.kind != job.kind
+            || existing.database_path != job.database_path
+            || existing.package_path != job.package_path
+            || existing.request_digest != job.request_digest
+        {
+            return Err(StoreError::Conflict(
+                "restore receipt operation ID is already bound to another request".into(),
+            ));
+        }
+        existing
+    } else {
+        let mut insert = store.prepare(
+            "INSERT INTO boreal_maintenance_job
+             (operation_id,kind,database_path,package_path,request_digest,stage,created_at,updated_at)
+             VALUES (?1,?2,?3,?4,?5,'registered',?6,?6)",
+        )?;
+        insert.bind_text(1, &job.operation_id)?;
+        insert.bind_text(2, &job.kind)?;
+        insert.bind_text(3, &job.database_path)?;
+        insert.bind_text(4, &job.package_path)?;
+        insert.bind_text(5, &job.request_digest)?;
+        insert.bind_text(6, &job.created_at)?;
+        insert.run()?;
+        store
+            .maintenance_job(&job.operation_id)?
+            .ok_or_else(|| StoreError::Corrupt("restore receipt registration disappeared".into()))?
+    };
+
+    if current.stage == "committed" {
+        if current.result_json.as_deref() == Some(receipt_json) {
+            return Ok(());
+        }
+        return Err(StoreError::Conflict(
+            "restore receipt operation ID is already committed with another result".into(),
+        ));
+    }
+
+    if current.stage == "registered" {
+        transition_restore_maintenance_stage(store, job, &current.stage, "running", None)?;
+        current = store.maintenance_job(&job.operation_id)?.ok_or_else(|| {
+            StoreError::Corrupt("restore receipt registration disappeared".into())
+        })?;
+    }
+
+    transition_restore_maintenance_stage(
+        store,
+        job,
+        &current.stage,
+        "committed",
+        Some(receipt_json),
+    )?;
+    let committed = store
+        .maintenance_job(&job.operation_id)?
+        .ok_or_else(|| StoreError::Corrupt("committed restore receipt disappeared".into()))?;
+    if committed.stage != "committed" || committed.result_json.as_deref() != Some(receipt_json) {
+        return Err(StoreError::Conflict(
+            "restore receipt did not persist the selected restore identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn transition_restore_maintenance_stage(
+    store: &SqliteStore,
+    job: &MaintenanceJobInput,
+    current_stage: &str,
+    next_stage: &str,
+    result_json: Option<&str>,
+) -> Result<(), StoreError> {
+    if !boreal_domain::maintenance::transition_allowed(current_stage, next_stage) {
+        return Err(StoreError::Conflict(format!(
+            "maintenance stage changed from {current_stage} to {next_stage}"
+        )));
+    }
+    let mut update = store.prepare(
+        "UPDATE boreal_maintenance_job
+         SET stage=?2,result_json=?3,error_message=NULL,updated_at=?4
+         WHERE operation_id=?1 AND stage=?5",
+    )?;
+    update.bind_text(1, &job.operation_id)?;
+    update.bind_text(2, next_stage)?;
+    update.bind_optional_text(3, result_json)?;
+    update.bind_text(4, &job.created_at)?;
+    update.bind_text(5, current_stage)?;
+    update.run()?;
+    if update.changes()? != 1 {
+        return Err(StoreError::Conflict(format!(
+            "maintenance stage changed from {current_stage} before restore receipt commit"
+        )));
+    }
+    Ok(())
+}
+
 fn schema_requests_work_model_v3(schema_sql: &str) -> bool {
     schema_sql.contains("work_model_v3_meta")
         && schema_sql.contains("boreal.work-model/3")
@@ -14027,5 +14141,165 @@ mod sqlite_release_floor_tests {
             "boreal-sqlite-release-floor-{}-{timestamp}.sqlite",
             std::process::id()
         ))
+    }
+}
+
+#[cfg(test)]
+mod production_restore_identity_tests {
+    use super::{
+        identity::{IdentityStore, WorkspaceBinding},
+        MaintenanceJobInput, SqliteStore, PRODUCTION_SCHEMA_SQL,
+    };
+    use serde_json::Value;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn independent_empty_restores_get_fresh_identity_and_keep_source_provenance() {
+        let source_path = unique_path("source.sqlite");
+        let package_path = unique_path("package");
+        let first_destination = unique_path("first.sqlite");
+        let second_destination = unique_path("second.sqlite");
+        remove_database(&source_path);
+        remove_database(&first_destination);
+        remove_database(&second_destination);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let source = SqliteStore::open(&source_path, PRODUCTION_SCHEMA_SQL)
+            .expect("production source opens");
+        source
+            .create_project("restore-project", "unix-ms:1")
+            .expect("project creates");
+        let binding = WorkspaceBinding::new(
+            "/tmp/boreal-restore-root",
+            "/tmp/boreal-restore-root/worktree",
+            "sha256:restore-binding",
+        )
+        .expect("workspace binding validates");
+        IdentityStore::new(&source)
+            .bind_project("restore-project", &binding, "unix-ms:1")
+            .expect("project binds");
+        let source_identity = IdentityStore::new(&source)
+            .database_identity()
+            .expect("source identity reads");
+        source
+            .backup_package_to(&package_path)
+            .expect("source backup package is created");
+        drop(source);
+
+        let first_job = restore_job(&package_path, &first_destination, "restore-first");
+        let first = SqliteStore::restore_package_to_with_maintenance_job(
+            &package_path,
+            &first_destination,
+            Some(&first_job),
+        )
+        .expect("first independent restore succeeds");
+        let first_receipt =
+            SqliteStore::reconcile_restore_maintenance_job(&first_destination, &first_job)
+                .expect("first restore receipt reads back")
+                .expect("first restore receipt is committed");
+
+        let second_job = restore_job(&package_path, &second_destination, "restore-second");
+        let second = SqliteStore::restore_package_to_with_maintenance_job(
+            &package_path,
+            &second_destination,
+            Some(&second_job),
+        )
+        .expect("second independent restore succeeds");
+        let second_receipt =
+            SqliteStore::reconcile_restore_maintenance_job(&second_destination, &second_job)
+                .expect("second restore receipt reads back")
+                .expect("second restore receipt is committed");
+
+        assert_ne!(
+            first.current_database_instance_id, second.current_database_instance_id,
+            "independent activations of one backup must receive distinct physical identities"
+        );
+        assert_eq!(
+            first.current_restore_epoch,
+            source_identity.restore_epoch.get() + 1
+        );
+        assert_eq!(first.current_restore_epoch, second.current_restore_epoch);
+        for (report, receipt, destination) in [
+            (&first, first_receipt, &first_destination),
+            (&second, second_receipt, &second_destination),
+        ] {
+            let result: Value = serde_json::from_str(
+                receipt
+                    .result_json
+                    .as_deref()
+                    .expect("committed receipt has result"),
+            )
+            .expect("receipt JSON is valid");
+            assert_eq!(
+                result
+                    .get("source_database_instance_id")
+                    .and_then(Value::as_str),
+                Some(source_identity.database_instance_id.as_str()),
+                "restore receipt must retain the source backup identity"
+            );
+            assert_eq!(
+                result
+                    .get("current_database_instance_id")
+                    .and_then(Value::as_str),
+                Some(report.current_database_instance_id.as_str())
+            );
+            assert_eq!(
+                result.get("current_restore_epoch").and_then(Value::as_u64),
+                Some(report.current_restore_epoch)
+            );
+
+            let restored = SqliteStore::open(destination, PRODUCTION_SCHEMA_SQL)
+                .expect("restored database opens");
+            assert_eq!(
+                IdentityStore::new(&restored)
+                    .workspace_binding("restore-project")
+                    .expect("restored workspace binding reads"),
+                binding,
+                "restore must retain the source project's workspace binding"
+            );
+            assert_eq!(
+                IdentityStore::new(&restored)
+                    .database_identity()
+                    .expect("restored identity reads")
+                    .database_instance_id
+                    .as_str(),
+                report.current_database_instance_id
+            );
+        }
+
+        let _ = fs::remove_dir_all(&package_path);
+        remove_database(&source_path);
+        remove_database(&first_destination);
+        remove_database(&second_destination);
+    }
+
+    fn restore_job(package: &Path, destination: &Path, operation_id: &str) -> MaintenanceJobInput {
+        MaintenanceJobInput {
+            operation_id: operation_id.to_owned(),
+            kind: "restore".to_owned(),
+            database_path: destination.to_string_lossy().into_owned(),
+            package_path: package.to_string_lossy().into_owned(),
+            request_digest: format!("sha256:{operation_id}"),
+            created_at: "unix-ms:2".to_owned(),
+        }
+    }
+
+    fn unique_path(name: &str) -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "boreal-restore-identity-{}-{timestamp}-{name}",
+            std::process::id()
+        ))
+    }
+
+    fn remove_database(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     }
 }

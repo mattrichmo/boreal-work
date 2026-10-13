@@ -1,7 +1,7 @@
 //! Managed launcher for the separate global dashboard.
 
 use super::*;
-use std::io::IsTerminal;
+use std::{ffi::OsStr, io::IsTerminal};
 static DASHBOARD_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(unix)]
 use boreal_service::{JsonRequest, TransportConfig, UnixSocketClient};
@@ -55,8 +55,12 @@ fn launch(_parsed: &ParsedCommand) -> Result<(), CliError> {
             format!("cannot install global dashboard signal handlers: {error}"),
         )
     })?;
-    global_commands::ensure_global_root()?;
     let tui_entrypoint = find_tui_entrypoint()?;
+    let node = match &tui_entrypoint {
+        TuiEntrypoint::JavaScript(_) => Some(resolve_node_runtime("BOREAL_NODE_BINARY")?),
+        TuiEntrypoint::Executable(_) => None,
+    };
+    global_commands::ensure_global_root()?;
     let runtime = env::temp_dir().join(format!(
         "bg{}{}",
         std::process::id(),
@@ -117,7 +121,7 @@ fn launch(_parsed: &ParsedCommand) -> Result<(), CliError> {
             .arg("--interactive")
             .spawn(),
         TuiEntrypoint::JavaScript(path) => {
-            Command::new(env::var_os("BOREAL_NODE_BINARY").unwrap_or_else(|| "node".into()))
+            Command::new(node.as_ref().expect("Node was preflighted"))
                 .env("BOREAL_DASHBOARD_BINARY", &executable)
                 .arg(path)
                 .arg("--socket")
@@ -427,5 +431,112 @@ fn classify_tui(path: PathBuf) -> Result<TuiEntrypoint, CliError> {
         Ok(TuiEntrypoint::JavaScript(path))
     } else {
         Ok(TuiEntrypoint::Executable(path))
+    }
+}
+
+fn resolve_node_runtime(variable: &str) -> Result<PathBuf, CliError> {
+    let requested = env::var_os(variable).unwrap_or_else(|| "node".into());
+    resolve_node_executable(&requested, variable)
+}
+
+fn resolve_node_executable(requested: &OsStr, variable: &str) -> Result<PathBuf, CliError> {
+    let label = requested.to_string_lossy();
+    let output = Command::new(&requested)
+        .arg("--version")
+        .output()
+        .map_err(|error| {
+            node_runtime_error(
+                variable,
+                format!("could not run `{label} --version`: {error}"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(node_runtime_error(
+            variable,
+            format!(
+                "`{label} --version` exited with {}; stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+    let version_output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let version = version_output
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("(empty version output)");
+    if !supported_node_version(version) {
+        return Err(node_runtime_error(
+            variable,
+            format!("`{label}` reports unsupported version `{version}`"),
+        ));
+    }
+    Ok(PathBuf::from(requested))
+}
+
+fn supported_node_version(version: &str) -> bool {
+    version
+        .strip_prefix('v')
+        .unwrap_or(version)
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u64>().ok())
+        .is_some_and(|major| (20..27).contains(&major))
+}
+
+fn node_runtime_error(variable: &str, detail: String) -> CliError {
+    CliError::with(
+        ErrorCode::ServiceUnavailable,
+        ApplicationOutcome::Failed,
+        format!(
+            "Global dashboard requires Node.js 20–26; {detail}. Install a supported Node.js release or set {variable} to its executable. CLI commands and `bwrk dashboard global --json` do not require Node.js."
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_dashboard_node_version_range_is_20_through_26() {
+        assert!(!supported_node_version("v19.9.0"));
+        assert!(supported_node_version("v20.0.0"));
+        assert!(supported_node_version("v26.8.2"));
+        assert!(!supported_node_version("v27.0.0"));
+        assert!(!supported_node_version("not-node"));
+        assert!(node_runtime_error("BOREAL_NODE_BINARY", "missing".into())
+            .message
+            .contains("requires Node.js 20–26"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn global_dashboard_node_preflight_runs_selected_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let suffix = DASHBOARD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!(
+            "boreal-global-dashboard-node-check-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let node = root.join("node");
+        fs::write(&node, "#!/bin/sh\nprintf 'v27.0.0\\n'\n").unwrap();
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = resolve_node_executable(node.as_os_str(), "BOREAL_NODE_BINARY").unwrap_err();
+        assert!(error.message.contains("unsupported version `v27.0.0`"));
+        assert!(error.message.contains("set BOREAL_NODE_BINARY"));
+
+        fs::write(&node, "#!/bin/sh\nprintf 'v26.8.2\\n'\n").unwrap();
+        let resolved = resolve_node_executable(node.as_os_str(), "BOREAL_NODE_BINARY").unwrap();
+        assert_eq!(resolved, node);
+        fs::remove_dir_all(root).unwrap();
     }
 }

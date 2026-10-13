@@ -1,0 +1,216 @@
+{
+  "probe": "BW-S04 Global Next candidate/session coverage at association index 100",
+  "source_commit": "eabc70e4d202f6bc924a73d2ef88d2364e4b7597",
+  "binary_sha256": "4f34f4f1279a934ff49a0c9226efdc273e184cd9193f1646eb64d4719381c8ad",
+  "disposable_only": true,
+  "workspace_id": "candidate-workspace",
+  "management_project_id": "project-86960-1791919272237-1",
+  "work_id": "candidate-beyond-cap",
+  "claimable_actor_id": "agent-a",
+  "claimable_session_id": "candidate-session",
+  "setup_operator_actor_before_fixture_rebind": "operator",
+  "setup_operator_session_before_fixture_rebind": "session-operator",
+  "setup_operator_actor_matches_claimable_actor": false,
+  "configured_operator_actor_used_by_global_next": "agent-a",
+  "configured_operator_session_in_disposable_metadata": "candidate-session",
+  "actor_identity_matches": true,
+  "global_next_syntax": "bwrk global next [--limit N] [--json]",
+  "global_next_has_typed_actor_or_session_input": false,
+  "fixture_metadata_was_rebound_for_same_actor_test": true,
+  "work_create_revision": 5,
+  "other_actor_grant_revision": 6,
+  "other_actor_session_start_revision": 7,
+  "agent_status_revision": 7,
+  "claimable_for_agent_with_active_session": true,
+  "association_index_zero_based": 100,
+  "global_association_count": 101,
+  "summary_cap": 100,
+  "beyond_summary_cap": true,
+  "active_session_result": {
+    "configured_session_id": "candidate-session",
+    "coverage": {
+      "associations": {
+        "limit": 1000,
+        "read": 101,
+        "total": 101
+      },
+      "complete": true,
+      "projects": {
+        "limit": 1000,
+        "read": 101,
+        "total": 101
+      },
+      "reason": null,
+      "registry_complete": true,
+      "state": "complete"
+    },
+    "passed": true,
+    "candidate_count": 1,
+    "selected": {
+      "as_of": "unix-ms:1791919272345",
+      "authority": "advisory_snapshot_only",
+      "management_priority": 0,
+      "management_project_id": "project-86960-1791919272237-1",
+      "priority": 0,
+      "project_revision": 7,
+      "safe_argv": [
+        "bwrk",
+        "prime",
+        "--project",
+        "candidate-workspace",
+        "--json"
+      ],
+      "title": "Candidate beyond summary cap",
+      "work_id": "candidate-beyond-cap",
+      "working_directory": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+      "workspace_id": "candidate-workspace"
+    },
+    "candidates": [
+      {
+        "as_of": "unix-ms:1791919272345",
+        "authority": "advisory_snapshot_only",
+        "management_priority": 0,
+        "management_project_id": "project-86960-1791919272237-1",
+        "priority": 0,
+        "project_revision": 7,
+        "safe_argv": [
+          "bwrk",
+          "prime",
+          "--project",
+          "candidate-workspace",
+          "--json"
+        ],
+        "title": "Candidate beyond summary cap",
+        "work_id": "candidate-beyond-cap",
+        "working_directory": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "workspace_id": "candidate-workspace"
+      }
+    ],
+    "workspace_checks": [
+      {
+        "management_project_id": "project-86960-1791919272237-1",
+        "participates": true,
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "state": "valid",
+        "workspace_id": "candidate-workspace"
+      }
+    ]
+  },
+  "missing_session_result": {
+    "configured_session_id": "missing-session",
+    "coverage": {
+      "associations": {
+        "limit": 1000,
+        "read": 101,
+        "total": 101
+      },
+      "complete": false,
+      "projects": {
+        "limit": 1000,
+        "read": 101,
+        "total": 101
+      },
+      "reason": "eligible_workspace_read_failed",
+      "registry_complete": true,
+      "state": "partial"
+    },
+    "passed": false,
+    "candidate_count": 0,
+    "selected": null,
+    "candidates": [],
+    "workspace_checks": [
+      {
+        "management_project_id": "project-86960-1791919272237-1",
+        "participates": true,
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "state": "valid",
+        "workspace_id": "candidate-workspace"
+      },
+      {
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "reason": "workspace operator session does not exist",
+        "state": "read_failed",
+        "workspace_id": "candidate-workspace"
+      }
+    ]
+  },
+  "wrong_actor_session_result": {
+    "configured_session_id": "other-actor-session",
+    "coverage": {
+      "associations": {
+        "limit": 1000,
+        "read": 101,
+        "total": 101
+      },
+      "complete": false,
+      "projects": {
+        "limit": 1000,
+        "read": 101,
+        "total": 101
+      },
+      "reason": "eligible_workspace_read_failed",
+      "registry_complete": true,
+      "state": "partial"
+    },
+    "passed": false,
+    "candidate_count": 0,
+    "selected": null,
+    "candidates": [],
+    "workspace_checks": [
+      {
+        "management_project_id": "project-86960-1791919272237-1",
+        "participates": true,
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "state": "valid",
+        "workspace_id": "candidate-workspace"
+      },
+      {
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "reason": "workspace operator session is bound to a different actor",
+        "state": "read_failed",
+        "workspace_id": "candidate-workspace"
+      }
+    ]
+  },
+  "ended_session_result": {
+    "configured_session_id": "candidate-session",
+    "coverage": {
+      "associations": {
+        "limit": 1000,
+        "read": 101,
+        "total": 101
+      },
+      "complete": false,
+      "projects": {
+        "limit": 1000,
+        "read": 101,
+        "total": 101
+      },
+      "reason": "eligible_workspace_read_failed",
+      "registry_complete": true,
+      "state": "partial"
+    },
+    "passed": false,
+    "candidate_count": 0,
+    "selected": null,
+    "candidates": [],
+    "workspace_checks": [
+      {
+        "management_project_id": "project-86960-1791919272237-1",
+        "participates": true,
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "state": "valid",
+        "workspace_id": "candidate-workspace"
+      },
+      {
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "reason": "workspace operator session is not active",
+        "state": "read_failed",
+        "workspace_id": "candidate-workspace"
+      }
+    ]
+  },
+  "candidate_selected": true,
+  "invalid_sessions_are_partial": true,
+  "result": "PASS"
+}

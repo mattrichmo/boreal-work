@@ -22,7 +22,7 @@ export interface GlobalActivityEvent { operation_id: string; revision: number; c
 export interface GlobalHistory { events: GlobalActivityEvent[]; current_revision: number; total: number; limit: number; offset: number; has_more: boolean; next_offset: number | null }
 export interface TodoReorderResult extends Item { moved: boolean; ordered_ids: string[]; revision: number }
 export interface GlobalSnapshot { schema_version: number; revision: number; snapshot_limit?:number; totals?:Record<string,number>; attention?:{portfolio:Record<string,number>;projects:Record<string,ProjectAttention>}; projects: Project[]; items: Item[]; notes: Note[]; note_links?:NoteLink[]; statuses: Status[]; status_history?: StatusHistoryEntry[]; relationships: Relationship[]; associations: Association[]; activity?: GlobalHistory; linked_projects?: LinkedProject[] }
-export interface GlobalPage<T> { rows:T[]; total:number; limit:number; offset:number; has_more:boolean; next_offset:number|null; revision:number }
+export interface GlobalPage<T> { rows:T[]; total:number; limit:number; offset:number; has_more:boolean; next_offset:number|null; revision:number; resnapshot_required?:boolean; requested_revision?:number|null }
 export interface LinkedPage { items:LinkedWorkItem[]; total?:number|null; items_total?:number|null; limit?:number; items_limit?:number; offset?:number; items_offset?:number; has_more?:boolean; items_has_more?:boolean; next_offset?:number|null; revision:number|null; as_of:string|null; availability:string; error:string|null; job_id?:string|null }
 export interface LinkedJobResult { job_id:string; state:"refreshing"|"complete"|"failed"; page?:LinkedPage; error?:string|null }
 export interface GlobalEnvelopeError { code: string; message: string; operation_id?: string | null; operation_preserved?: boolean | null; readback_required?: boolean | null; retryable?: boolean | null }
@@ -125,8 +125,8 @@ export class GlobalServiceClient {
       ...(options.offset === undefined ? {} : { offset: options.offset }),
     });
   }
-  detailPage<T = unknown>(collection: string, options: { projectId?:string; limit?:number; offset?:number; includeArchived?:boolean; kind?:string; query?:string } = {}): Promise<GlobalPage<T>> {
-    return this.execute<GlobalPage<T>>("detail page", { collection, ...(options.projectId ? {project_id:options.projectId}:{}), ...(options.limit === undefined ? {}:{limit:options.limit}), ...(options.offset === undefined ? {}:{offset:options.offset}), ...(options.includeArchived ? {include_archived:true}:{}), ...(options.kind ? {kind:options.kind}:{}), ...(options.query ? {query:options.query}:{}) });
+  detailPage<T = unknown>(collection: string, options: { projectId?:string; limit?:number; offset?:number; includeArchived?:boolean; kind?:string; query?:string; expectedRevision?:number } = {}): Promise<GlobalPage<T>> {
+    return this.execute<GlobalPage<T>>("detail page", { collection, ...(options.projectId ? {project_id:options.projectId}:{}), ...(options.limit === undefined ? {}:{limit:options.limit}), ...(options.offset === undefined ? {}:{offset:options.offset}), ...(options.includeArchived ? {include_archived:true}:{}), ...(options.kind ? {kind:options.kind}:{}), ...(options.query ? {query:options.query}:{}), ...(options.expectedRevision === undefined ? {}:{expected_revision:options.expectedRevision}) });
   }
   noteShow(noteId:string): Promise<Note> { return this.execute<Note>("note show",{note_id:noteId}); }
   linkedPage(projectId:string, identity:string, options:{limit?:number;offset?:number}={}): Promise<LinkedPage> {

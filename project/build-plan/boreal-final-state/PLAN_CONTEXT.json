@@ -182,7 +182,8 @@
       ],
       "shared_paths": [
         "crates/store/src/global_manager.rs",
-        "crates/cli/src/global_commands.rs"
+        "crates/cli/src/global_commands.rs",
+        "crates/cli/src/command_registry.rs"
       ],
       "dependencies": [
         "BW-S00-T90",

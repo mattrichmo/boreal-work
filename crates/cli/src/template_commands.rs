@@ -1,6 +1,9 @@
 //! Versioned work-template discovery, validation, dry-run, capture, and apply.
 use super::*;
-use boreal_application::{instantiate_template, TemplateParameter, TemplateWorkItem, WorkTemplate};
+use boreal_application::{
+    instantiate_template, TemplateParameter, TemplateWorkItem, WorkTemplate,
+    WORK_TEMPLATE_SCHEMA_VERSION,
+};
 use std::collections::BTreeMap;
 
 pub(crate) fn supported(path: &[String]) -> bool {
@@ -160,7 +163,7 @@ fn run_template(
         },
         revision: Some(created.revision),
         data: Some(
-            json!({"dry_run":false,"template_id":plan.template_id,"created":created.works.iter().map(|work|{let item=plan.rendered.iter().find(|item|format!("{}-{}",prefix,item.key)==work.work_id);json!({"work_id":work.work_id,"project_id":work.project_id,"kind":work.kind,"parent_id":work.parent_id,"lifecycle":work.lifecycle,"dispatch_policy":work.dispatch_policy,"priority":work.priority,"title":work.title,"description":work.description,"labels":item.map(|i|&i.labels),"dependencies":item.map(|i|&i.dependencies),"acceptance_profile":item.map(|i|&i.acceptance_profile)})}).collect::<Vec<_>>()}),
+            json!({"dry_run":false,"template_id":plan.template_id,"created":created.works.iter().map(|work|{let item=plan.rendered.iter().find(|item|format!("{}-{}",prefix,item.key)==work.work_id);json!({"work_id":work.work_id,"project_id":work.project_id,"kind":work.kind,"parent_id":work.parent_id,"lifecycle":work.lifecycle,"dispatch_policy":work.dispatch_policy,"priority":work.priority,"title":work.title,"description":work.description,"labels":item.map(|i|&i.labels),"dependencies":item.map(|i|&i.dependencies),"acceptance_profile":item.map(|i|&i.acceptance_profile),"deliverables":item.map(|i|i.deliverables.iter().map(deliverable_json).collect::<Vec<_>>()),"inputs":item.map(|i|i.inputs.iter().map(input_reference_json).collect::<Vec<_>>())})}).collect::<Vec<_>>()}),
         ),
         ..CliResult::default()
     })
@@ -369,10 +372,12 @@ fn capture_template(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliRe
             dependencies,
             labels,
             acceptance_profile: acceptance_profile.to_owned(),
+            deliverables: Vec::new(),
+            inputs: Vec::new(),
         });
     }
     let template = WorkTemplate {
-        schema_version: 1,
+        schema_version: WORK_TEMPLATE_SCHEMA_VERSION,
         id: format!(
             "captured-{}",
             work.to_ascii_lowercase().replace(
@@ -475,7 +480,7 @@ fn discover_templates(parsed: &ParsedCommand) -> Result<Vec<WorkTemplate>, CliEr
 
 fn builtins() -> Vec<WorkTemplate> {
     vec![WorkTemplate {
-        schema_version: 1,
+        schema_version: WORK_TEMPLATE_SCHEMA_VERSION,
         id: "project-kickoff".into(),
         version: 1,
         title: "Project kickoff".into(),
@@ -496,6 +501,7 @@ fn builtins() -> Vec<WorkTemplate> {
                 priority: 5,
                 dispatch: "operator_only".into(),
                 dependencies: vec![], labels: vec!["planning".into()], acceptance_profile: "focused".into(),
+                deliverables: Vec::new(), inputs: Vec::new(),
             },
             TemplateWorkItem {
                 key: "sprint".into(),
@@ -506,6 +512,7 @@ fn builtins() -> Vec<WorkTemplate> {
                 priority: 5,
                 dispatch: "operator_only".into(),
                 dependencies: vec![], labels: vec!["planning".into(),"cycle".into()], acceptance_profile: "focused".into(),
+                deliverables: Vec::new(), inputs: Vec::new(),
             },
             TemplateWorkItem {
                 key: "first-task".into(),
@@ -517,6 +524,7 @@ fn builtins() -> Vec<WorkTemplate> {
                 priority: 5,
                 dispatch: "automatic".into(),
                 dependencies: vec![], labels: vec!["acceptance".into()], acceptance_profile: "reviewed".into(),
+                deliverables: Vec::new(), inputs: Vec::new(),
             },
             TemplateWorkItem {
                 key: "acceptance-review".into(), kind: "task".into(), parent: Some("sprint".into()),
@@ -524,6 +532,7 @@ fn builtins() -> Vec<WorkTemplate> {
                 description: "Independently review the acceptance plan after the initial criteria are complete.".into(),
                 priority: 4, dispatch: "operator_only".into(), dependencies: vec!["first-task".into()],
                 labels: vec!["review".into()], acceptance_profile: "reviewed".into(),
+                deliverables: Vec::new(), inputs: Vec::new(),
             },
         ],
     }]
@@ -539,7 +548,51 @@ fn rendered_json(item: &boreal_application::RenderedTemplateItem) -> Value {
         boreal_domain::DispatchPolicy::OperatorOnly => "operator_only",
         boreal_domain::DispatchPolicy::Paused => "paused",
     };
-    json!({"key": item.key, "kind": kind, "parent": item.parent, "dependencies":item.dependencies,"labels":item.labels,"acceptance_profile":item.acceptance_profile,"title": item.title, "description": item.description, "priority": item.priority, "dispatch": dispatch})
+    json!({"key": item.key, "kind": kind, "parent": item.parent, "dependencies":item.dependencies,"labels":item.labels,"acceptance_profile":item.acceptance_profile,"title": item.title, "description": item.description, "priority": item.priority, "dispatch": dispatch,"deliverables":item.deliverables.iter().map(deliverable_json).collect::<Vec<_>>(),"inputs":item.inputs.iter().map(input_reference_json).collect::<Vec<_>>()})
+}
+
+fn deliverable_json(requirement: &boreal_domain::DeliverableRequirement) -> Value {
+    let criteria = requirement
+        .criteria
+        .iter()
+        .map(|criterion| match criterion {
+            boreal_domain::DeliverableCriterion::MinBytes(value) => {
+                json!({"kind":"min_bytes","value":value})
+            }
+            boreal_domain::DeliverableCriterion::MaxBytes(value) => {
+                json!({"kind":"max_bytes","value":value})
+            }
+            boreal_domain::DeliverableCriterion::JsonDocument => json!({"kind":"json_document"}),
+            boreal_domain::DeliverableCriterion::TextContains(text) => {
+                json!({"kind":"text_contains","text":text})
+            }
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "key":requirement.key,
+        "purpose":requirement.purpose,
+        "required":requirement.required,
+        "deliverable_type":requirement.deliverable_type.as_str(),
+        "allowed_media_types":requirement.allowed_media_types,
+        "min_count":requirement.min_count,
+        "max_count":requirement.max_count,
+        "criteria":criteria,
+    })
+}
+
+fn input_reference_json(input: &boreal_domain::InputArtifactRef) -> Value {
+    json!({
+        "project_id":input.project_id.as_str(),
+        "source_version_id":input.source_version_id.as_str(),
+        "content_digest":input.content_digest,
+        "role":input.role.as_str(),
+        "scope":input.scope.as_str(),
+        "produced_by":input.produced_by.as_ref().map(|producer|json!({
+            "work_id":producer.work_id.as_str(),
+            "attempt_id":producer.attempt_id.as_str(),
+            "result_id":producer.result_id,
+        })),
+    })
 }
 fn extra<'a>(parsed: &'a ParsedCommand, key: &str) -> Option<&'a str> {
     parsed
@@ -566,4 +619,28 @@ fn write_new_output(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     file.write_all(bytes)
         .map_err(|e| CliError::invalid(format!("cannot write {}: {e}", path.display())))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_templates_render_the_additive_planning_fields() {
+        for template in builtins() {
+            template.validate().unwrap();
+            assert_eq!(template.schema_version, WORK_TEMPLATE_SCHEMA_VERSION);
+            let plan = template
+                .plan(&BTreeMap::from([(
+                    "project".to_owned(),
+                    "Example".to_owned(),
+                )]))
+                .unwrap();
+            for item in &plan.rendered {
+                let rendered = rendered_json(item);
+                assert!(rendered.get("deliverables").unwrap().is_array());
+                assert!(rendered.get("inputs").unwrap().is_array());
+            }
+        }
+    }
 }

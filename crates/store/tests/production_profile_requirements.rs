@@ -12,8 +12,8 @@ use boreal_store::profiles::{
     RegistrationOutcome, RequirementFinding, RequirementSubjectKind,
 };
 use boreal_store::{
-    CloseIntentRequest, ReceiptAcceptanceExpectation, ReceiptAttestation, ReceiptInsertRequest,
-    ReceiptOutcome, ReceiptSubmissionKind, SqliteStore, StoreError,
+    CloseIntentRequest, OperationOutcome, ReceiptAcceptanceExpectation, ReceiptAttestation,
+    ReceiptInsertRequest, ReceiptOutcome, ReceiptSubmissionKind, SqliteStore, StoreError,
 };
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -774,6 +774,14 @@ fn closeout_rejects_corrupt_pinned_requirements_as_a_requirement_diagnostic() {
     assert_eq!(
         result.close_intent.state,
         boreal_store::CloseIntentState::Open
+    );
+    assert_eq!(
+        store
+            .operation("op-close-finalize-corrupt")
+            .unwrap()
+            .expect("rejected closeout is durable")
+            .outcome,
+        OperationOutcome::Rejected
     );
     assert_eq!(
         store

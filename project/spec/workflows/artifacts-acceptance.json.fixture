@@ -1,0 +1,130 @@
+{
+  "fixture_id": "bw-s12-t01.artifacts-acceptance.v1",
+  "routes": [
+    {"path": "source add", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "source list", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "source show", "direct_cli": "implemented", "service_dispatch": "unavailable", "contract_status": "partial"},
+    {"path": "source verify", "direct_cli": "implemented", "service_dispatch": "unavailable", "contract_status": "partial"},
+    {"path": "evidence add", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "evidence run", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "review approve", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"behavior": "general-work deliverable artifact submission", "public_route": "unavailable", "contract_status": "unavailable"}
+  ],
+  "profile_registry": {
+    "contract_revision": "boreal.acceptance_profile_registry.v1",
+    "profiles": [
+      {
+        "id": "focused",
+        "version": "1",
+        "required_gates": [
+          {"id": "checkpoint", "kind": "checkpoint"},
+          {"id": "verification", "kind": "verification"},
+          {"id": "summary", "kind": "summary"}
+        ],
+        "compatibility": "Existing software verification profile; immutable."
+      },
+      {
+        "id": "reviewed",
+        "version": "1",
+        "required_gates": [
+          {"id": "checkpoint", "kind": "checkpoint"},
+          {"id": "verification", "kind": "verification"},
+          {"id": "review", "kind": "review"},
+          {"id": "summary", "kind": "summary"}
+        ],
+        "compatibility": "Existing software verification plus independent review; immutable."
+      },
+      {
+        "id": "general-attestation",
+        "version": "1",
+        "required_gates": [{"id": "summary", "kind": "summary"}],
+        "required_typed_facts": ["completion_attestation/1"],
+        "deliverable_rule": "No required deliverables may be declared; optional outputs may be absent and remain visible.",
+        "review_rule": "No independent reviewer required."
+      },
+      {
+        "id": "validated-deliverables",
+        "version": "1",
+        "required_gates": [{"id": "summary", "kind": "summary"}],
+        "required_typed_facts": ["artifact_inspection/1"],
+        "deliverable_rule": "Every required deliverable must have exact current-attempt submission coverage and pass its declared type, cardinality, availability, and bounded criteria.",
+        "review_rule": "No independent reviewer required."
+      },
+      {
+        "id": "reviewed-artifacts",
+        "version": "1",
+        "required_gates": [
+          {"id": "summary", "kind": "summary"},
+          {"id": "artifact_review", "kind": "review"}
+        ],
+        "required_typed_facts": ["artifact_inspection/1", "independent_artifact_decision/1"],
+        "deliverable_rule": "Every required deliverable must pass exact current-attempt typed inspection before review.",
+        "review_rule": "An independent reviewer decision binds the exact sealed submission and artifact-set digest."
+      }
+    ],
+    "rules": [
+      "Profile ID, version, required gate identities, and typed-fact identities are pinned; unknown values and shapes fail closed.",
+      "Changing result, source/config identity, profile, requirements, or proof applicability preserves prior history but makes prior acceptance stale.",
+      "Artifact observations and human decisions are typed facts, never synthesized executable receipts."
+    ]
+  },
+  "source_version": {
+    "project_id": "project_demo",
+    "source_version_id": "source_version_01",
+    "origin": "file:docs/design.md",
+    "media_type": "text/markdown",
+    "byte_count": 128,
+    "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "availability": "available",
+    "parser_identity": null
+  },
+  "receipt": {
+    "schema_version": "boreal.receipt.v1",
+    "fixture_id": "receipt.success.v1",
+    "receipt_id": "receipt_01J8V2RECEIPT00000000001",
+    "operation_id": "op_evidence_01J8V2RECEIPT0000001",
+    "subject": {"work_id":"work_task_01","attempt_id":"attempt_01J8V2ATTEMPT00000000001","fence":7,"gate_id":"gate_verification_01"},
+    "executable": "./scripts/check-task",
+    "argv": ["./scripts/check-task","--json"],
+    "cwd": "/workspace/projects/demo",
+    "exit_code": 0,
+    "started_at": "2026-09-14T22:20:00Z",
+    "ended_at": "2026-09-14T22:20:02Z",
+    "source_snapshot_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "config_identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "environment_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "output_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "output_ref": null,
+    "coverage": {"kind":"verification","profile_id":"focused","profile_version":"1"},
+    "attestation": "boreal_witnessed",
+    "result": "passed",
+    "retention": null
+  },
+  "human_acceptance": {
+    "command": "review.approve",
+    "request": {
+      "kind": "review.approve",
+      "work_id": "work_task_01",
+      "expected_revision": 44,
+      "expected_entity_revision": 12,
+      "expected_proof_revision": 9,
+      "submission_id": null,
+      "target_id": null,
+      "predecessor_revision": null,
+      "exception_reason": null,
+      "reason": "Reviewed the current proof.",
+      "expires_at_ms": null,
+      "confirmed": true
+    },
+    "contract_status": "implemented",
+    "authority": "The authenticated actor/session and application role policy authorize review; reviewer identity is not supplied as an unauthenticated payload field."
+  },
+  "v4_optional_contracts": {
+    "immutable_source_input_identity": "implemented",
+    "gate_receipt_and_attempt_proof": "implemented",
+    "generic_deliverable_submission_identity": "unavailable",
+    "typed_output_inspection": "unavailable",
+    "requirement_coverage_for_deliverables": "unavailable",
+    "generic_human_acceptance_of_deliverables": "unavailable"
+  }
+}

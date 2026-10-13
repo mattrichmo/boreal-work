@@ -6,6 +6,7 @@ export type InspectorTab = "details" | "relationships" | "history" | "linked";
 export type TodoFilter = "today" | "overdue" | "unscheduled" | "waiting" | "all_open";
 export type ActivityRow = GlobalActivityEvent & { id: string };
 export type Row = Project | Item | Note | Status | Association | ActivityRow;
+export type ChoiceCollection = "projects" | "items" | "statuses";
 type EntityKey = string;
 
 export class GlobalController {
@@ -64,9 +65,10 @@ export class GlobalController {
           const next = await this.client.snapshot(); validateSnapshot(next);
           this.reconcileLinkedSamples(next);
           this.snapshot = next;
-          this.pageOffsets.clear();this.pageTotals.clear();this.linkedOffsets.clear();this.archiveCollectionIndex=0;this.overviewCollectionIndex=0;
+          this.pageOffsets.clear();this.pageTotals.clear();this.linkedOffsets.clear();this.archiveCollectionIndex=0;this.overviewCollectionIndex=0;this.searchMatchedIds.clear();this.pageError=undefined;
           if(prior)await this.retainSelectedRow(prior);
           await this.loadHistory();if(prior&&"operation_id" in prior&&!this.historyEvents.some(e=>e.operation_id===prior.operation_id))this.historyEvents.push(prior); this.sampledAt = Date.now(); this.lastRefreshError = undefined;
+          if(this.searchQuery.trim()&&this.route!=="history")await this.loadMoreRows();
           this.reconcileSelection();
         } catch (error) { this.lastRefreshError = error instanceof Error ? error.message : String(error); throw error; }
       } while (this.refreshQueued);
@@ -81,6 +83,46 @@ export class GlobalController {
     catch(error){this.historyError=error instanceof Error?error.message:String(error);}
   }
 
+  /**
+   * Return complete picker choices. Snapshot rows remain the fast path when
+   * the summary is known complete; a capped summary is filled from bounded,
+   * revision-pinned service pages before it is offered to a form.
+   */
+  async completeChoices<T extends Project|Item|Status>(collection:ChoiceCollection,projectId?:string|null):Promise<T[]>{
+    const snapshot=this.snapshot;if(!snapshot)throw new Error("a current Global snapshot is required to load choices");
+    this.pageError=undefined;
+    const visible=snapshot[collection] as T[];
+    const knownTotal=snapshot.totals?.[collection];
+    const incomplete=typeof knownTotal==="number"?knownTotal>visible.length:snapshot.snapshot_limit!==undefined&&visible.length>=snapshot.snapshot_limit;
+    const belongs=(row:T):boolean=>collection==="projects"?true:projectId===undefined||((row as Item|Status).project_id===projectId);
+    if(!incomplete){return visible.filter(row=>belongs(row)&&!(collection==="projects"&&(row as Project).archived)&&!(collection==="items"&&(row as Item).archived));}
+
+    const client=this.client as GlobalServiceClient&{detailPage?<U=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;expectedRevision?:number}):Promise<GlobalPage<U>>};
+    if(!client.detailPage)throw new Error(`the ${collection} summary is incomplete and complete choices are unavailable`);
+    const revision=snapshot.revision;let expectedRevision=revision,offset=0,total:number|undefined;const rows:T[]=[];
+    this.pageLoading=true;this.pageError=undefined;
+    try{
+      for(;;){
+        const page=await client.detailPage<T>(collection,{...(typeof projectId==="string"?{projectId}:{}),limit:100,offset,expectedRevision});
+        if(page.resnapshot_required||page.revision!==expectedRevision){
+          if(!this.refreshing){this.pageLoading=false;await this.refresh();}
+          throw new Error(`the Global revision changed while loading ${collection} choices; the snapshot was refreshed, reopen the picker`);
+        }
+        if(page.offset!==offset||!Number.isSafeInteger(page.total)||page.total<0||page.rows.length>page.limit||page.limit<1){
+          throw new Error(`the service returned an invalid ${collection} page`);
+        }
+        if(total!==undefined&&page.total!==total)throw new Error(`the ${collection} total changed within a revision`);
+        total=page.total;rows.push(...page.rows);
+        const next=page.next_offset;
+        if(next===null){if(rows.length!==total)throw new Error(`the ${collection} choices were incomplete (${rows.length} of ${total} rows loaded)`);break;}
+        if(!Number.isSafeInteger(next)||next<=offset||next!==offset+page.rows.length||!page.has_more)throw new Error(`the service returned an invalid ${collection} page cursor`);
+        offset=next;expectedRevision=page.revision;
+      }
+      return rows.filter(row=>belongs(row)&&!(collection==="projects"&&(row as Project).archived)&&!(collection==="items"&&(row as Item).archived));
+    }catch(error){this.pageError=error instanceof Error?error.message:String(error);throw error;}
+    finally{this.pageLoading=false;}
+  }
+
   async loadMoreRows():Promise<boolean>{
     if(this.pageLoading||!this.snapshot)return false;
     if(this.route==="history"){
@@ -89,15 +131,22 @@ export class GlobalController {
     }
     if(this.inspectorTab==="linked"&&this.selectedRow()&&"identity" in (this.selectedRow() as object))return this.loadMoreLinked();
     const routes:Record<string,string>={projects:"projects",board:"items",list:"items",planning:"items",todos:"items",inbox:"items",notes:"notes",workflow:"statuses",links:"associations"};const archiveCollections=["projects","items","notes"];const overviewCollections=["items","projects"];let collection=this.route==="archive"?archiveCollections[this.archiveCollectionIndex]:this.route==="overview"?overviewCollections[this.overviewCollectionIndex]:routes[this.route];if(!collection)return false;
-    const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;includeArchived?:boolean;kind?:string}):Promise<GlobalPage<T>>};if(!client.detailPage)return false;
+    const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;includeArchived?:boolean;kind?:string;query?:string;expectedRevision?:number}):Promise<GlobalPage<T>>};if(!client.detailPage){this.pageError="complete paging is unavailable from this Global service client";return false;}
     const includeArchived=this.route==="archive";
-    const key=`${collection}:${this.projectId??"*"}:${this.route}:${this.searchQuery}:${includeArchived}`;let offset=this.pageOffsets.get(key);if(offset===undefined){const data=this.snapshot[collection as "projects"|"items"|"notes"|"statuses"|"associations"] as unknown[];offset=this.searchQuery?0:summaryVisibleCount(this.snapshot,collection,data,this.projectId,includeArchived);}
+    const activeSnapshot=this.snapshot,activeRoute=this.route,activeScope=this.projectId,activeQuery=this.searchQuery;
+    const key=`${collection}:${activeScope??"*"}:${activeRoute}:${activeQuery}:${includeArchived}`;let offset=this.pageOffsets.get(key);if(offset===undefined){const data=activeSnapshot[collection as "projects"|"items"|"notes"|"statuses"|"associations"] as unknown[];offset=activeQuery.trim()?0:summaryVisibleCount(activeSnapshot,collection,data,activeScope,includeArchived);}
     this.pageLoading=true;this.pageError=undefined;
     try{
-      const page=await client.detailPage(collection,{...(this.projectId?{projectId:this.projectId}:{}),limit:100,offset,includeArchived,...(this.searchQuery?{query:this.searchQuery}:{})});
-      if(page.revision!==this.snapshot.revision){await this.refresh();this.pageError=`The portfolio changed while loading this page (revision ${page.revision} vs ${this.snapshot?.revision??"unknown"}); refreshed. Load more again to continue.`;return false;}
-      if(this.searchQuery)for(const row of page.rows as unknown[]){const id=keyOf(row as Row);if(id)this.searchMatchedIds.add(id);}
-      this.pageTotals.set(`${this.route}:${this.projectId??"*"}:${this.searchQuery}:${collection}`,page.total);
+      const page=await client.detailPage(collection,{...(activeScope?{projectId:activeScope}:{}),limit:100,offset,includeArchived,...(activeQuery.trim()?{query:activeQuery.trim()}:{}),expectedRevision:activeSnapshot.revision});
+      if(this.snapshot!==activeSnapshot||this.route!==activeRoute||this.projectId!==activeScope||this.searchQuery!==activeQuery)return false;
+      if(page.resnapshot_required||page.revision!==activeSnapshot.revision){
+        this.pageLoading=false;
+        if(!this.refreshing)await this.refresh();
+        this.pageError=`The Global revision changed while loading this page; refreshed. Search again or load the next page to continue.`;return false;
+      }
+      if(page.offset!==offset||!Number.isSafeInteger(page.total)||page.total<0||page.rows.length>page.limit||page.limit<1||(page.next_offset!==null&&page.next_offset!==page.offset+page.rows.length)||(page.has_more!==undefined&&(page.next_offset!==null)!==page.has_more))throw new Error("the service returned an invalid page or cursor");
+      if(activeQuery.trim())for(const row of page.rows as unknown[]){const id=keyOf(row as Row);if(id)this.searchMatchedIds.add(id);}
+      this.pageTotals.set(`${activeRoute}:${activeScope??"*"}:${activeQuery}:${collection}`,page.total);
       this.appendPage(collection,page.rows as never[]);this.pageOffsets.set(key,page.next_offset??page.offset+page.rows.length);this.reconcileSelection();
       if(this.route==="archive"&&page.next_offset===null){if(this.archiveCollectionIndex+1<archiveCollections.length){this.archiveCollectionIndex++;this.pageLoading=false;return await this.loadMoreRows();}this.archiveCollectionIndex=0;return page.rows.length>0;}
       if(this.route==="overview"&&page.next_offset===null){if(this.overviewCollectionIndex+1<overviewCollections.length){this.overviewCollectionIndex++;this.pageLoading=false;return await this.loadMoreRows();}this.overviewCollectionIndex=0;return page.rows.length>0;}
@@ -105,11 +154,7 @@ export class GlobalController {
     }catch(error){this.pageError=error instanceof Error?error.message:String(error);return false;}finally{this.pageLoading=false;}
   }
 
-  async search(query:string):Promise<void>{this.searchQuery=query;this.selected=0;this.selectedId=undefined;this.searchMatchedIds.clear();this.pageOffsets.clear();this.pageTotals.clear();this.archiveCollectionIndex=0;this.overviewCollectionIndex=0;this.reconcileSelection();if(!query.trim())return;
-    if(this.route==="overview"){
-      const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;query?:string}):Promise<GlobalPage<T>>};
-      if(client.detailPage)try{const page=await client.detailPage("projects",{...(this.projectId?{projectId:this.projectId}:{}),query,limit:100,offset:0});if(this.snapshot&&page.revision!==this.snapshot.revision){await this.refresh();this.pageError=`The portfolio changed while searching (revision ${page.revision} vs ${this.snapshot?.revision??"unknown"}); refreshed. Search again to continue.`;return;}for(const row of page.rows as unknown[]){const id=keyOf(row as Row);if(id)this.searchMatchedIds.add(id);}this.appendPage("projects",page.rows as never[]);this.pageOffsets.set(`projects:${this.projectId??"*"}:overview:${query}:false`,page.next_offset??page.rows.length);}catch(error){this.pageError=error instanceof Error?error.message:String(error);}
-    }
+  async search(query:string):Promise<void>{this.searchQuery=query.trim();this.selected=0;this.selectedId=undefined;this.searchMatchedIds.clear();this.pageOffsets.clear();this.pageTotals.clear();this.archiveCollectionIndex=0;this.overviewCollectionIndex=0;this.pageError=undefined;this.reconcileSelection();if(!this.searchQuery)return;
     await this.loadMoreRows();
   }
 

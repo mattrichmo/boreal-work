@@ -1326,6 +1326,7 @@ impl BorealBackend {
             include_archived: false,
             limit: Some(limit),
             offset: Some(offset),
+            expected_revision: None,
         };
         let request = GlobalManagerRequest {
             api_version: API_VERSION.into(),

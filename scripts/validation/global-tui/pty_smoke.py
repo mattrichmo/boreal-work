@@ -17,6 +17,9 @@ import time
 import unicodedata
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from identity import collect_identity, write_identity
+
 
 ROOT = Path(__file__).resolve().parents[3]
 TUI_ENTRY = ROOT / "apps/global-tui/dist/entrypoint.js"
@@ -243,6 +246,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin", type=Path, default=ROOT / "target/debug/bwrk")
     parser.add_argument("--tui-entry", type=Path, default=TUI_ENTRY)
+    parser.add_argument(
+        "--identity-output",
+        type=Path,
+        help="write the exact source, binary, Global TUI bundle and Node identity as JSON",
+    )
     args = parser.parse_args()
     if os.name != "posix":
         print("BOREAL_VALIDATION_SKIP: Global TUI PTY smoke requires POSIX")
@@ -255,6 +263,11 @@ def main() -> int:
         raise RuntimeError(f"Boreal binary is missing: {binary}")
     if not tui_entry.is_file():
         raise RuntimeError(f"Global TUI entrypoint is missing: {tui_entry}; run npm test --prefix apps/global-tui")
+
+    identity = collect_identity(ROOT, binary, tui_entry)
+    if args.identity_output is not None:
+        write_identity(args.identity_output, identity)
+    print("BOREAL_VALIDATION_IDENTITY_JSON=" + json.dumps(identity, sort_keys=True))
 
     with external_temporary_directory() as temporary:
         root = Path(temporary)

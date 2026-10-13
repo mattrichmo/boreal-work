@@ -3,17 +3,16 @@
 ## Frozen source identity
 
 - Repository: `mattrichmo/boreal-work`
-- Verified `main` at the V4 planning commit:
-  `123f3458f37172d71a068af894e63ab01a92fb59`
-- Commit: `docs(plan): expand Boreal milestone v4 for general work and deliverables`
-- Commit time: `2026-10-02T16:53:37-06:00`
+- Verified `main` at current-head requalification:
+  `1cee693279a0fdb997f3f29cc3537b7ff0f6157a`
+- Commit: `docs: rewrite Boreal product guide and add README banner`
+- Commit date: `2026-10-13`
+- Previous exact-head V4 planning snapshot:
+  `123f3458f37172d71a068af894e63ab01a92fb59` (2026-10-02).
 - Historical implementation baseline: `6ab1c078150993936d5d381822e7774d9e5cfade`
-- Later code commit in this tree: `e084dac` — reuse the project service for
-  dashboard and `next`.
-- Local working branch: `boreal-final-push`. The verified clone was clean
-  before project setup; `bwrk init` changed only `.gitignore` to ignore the
-  new project's private `.boreal/` runtime and memory-publication artifacts.
-  No production-code changes were present at T01 start.
+- The local `main` and `origin/main` matched this SHA with a clean working tree
+  before the coordinator worktree was created. Implementation is isolated in
+  the coordinator worktree; the user's previous stash remains untouched.
 
 V4 plan identity is `BW-final-state-2026-10-01`, revision 4, with active
 template `BOREAL_TEMPLATE_V4.json` (`boreal-final-state-v4`, version 4,
@@ -22,7 +21,10 @@ and 100 work items. S10-T04/T05/T06 remain historical deferred cards outside
 the required import. The graph is a delta from the implementation; plan import
 does not imply task publication, acceptance or restored project history.
 
-## Exact local build and application qualification
+## Historical local build and application qualification — 2026-10-02
+
+These observations belong to the previous exact head and have not been
+re-established at `1cee693279a0fdb997f3f29cc3537b7ff0f6157a`.
 
 Every shell that invokes Rust tools sources
 `/workspace/.toolchains/boreal-env.sh`. At the exact source head:
@@ -51,7 +53,33 @@ Every shell that invokes Rust tools sources
   `AUDIT_REMEDIATION_RESULTS.md` concern earlier snapshots. T01's card has no
   local test requirement. S00-T90 owns exact-combined-tree validation.
 
+## Current-head source requalification — 2026-10-13
+
+Three Luna Extra High agents performed read-only audits at the frozen source
+identity above. They read source and existing tests but did not run tests,
+builds, release jobs, or canonical runtime database operations. Findings are
+source assessments, not claims of runtime reproduction.
+
+| Area | Current source finding | V4 response |
+| --- | --- | --- |
+| Global recovery and transfer | Global has logical JSON export/import but no Global physical backup/restore or maintenance admission. Export can contain full history beyond the importer's 64 MiB limit; import reads the entire file before checking size. | S01 physical recovery/maintenance and transfer symmetry; S04 bound/refuse oversized transfers while retaining history. |
+| Global reads and linked work | Attention is unbounded and scales with projects × items; form pickers use capped snapshot arrays; `global next` uses a capped association sample and can miss links. Large individual note reads can exceed the interactive frame. | S04 paged attention, complete pickers/association reads, deadline isolation and bounded detail behavior. |
+| Global daily workflow | Date classification uses UTC, `next_action` ignores unresolved prerequisites, Today includes undated work, and quick capture follows project scope. | S05 civil-time and dependency-honest daily rules; S06/S07 persistent Personal Inbox, provenance, grouped views and personal quick capture. |
+| Issue status | #1, #3, #5 and #6 appear fixed in current source; #4 and #7 remain partial. All six issues (#1, #3–#7) are still open on GitHub; no open PRs were found. | Recheck on each implementation branch; update issue disposition only after integrated regression evidence. |
+| Project restore, Intake and Send | Restore identity is derived deterministically from source ID and epoch; immutable Intake delivery receipts/readback and Global Send reconciliation are absent. | S08 unique restore activation and receipt-bearing Intake; S09 frozen Send intent, readback, reconciliation and archive-not-complete semantics. |
+| General work | Work items lack typed output requirements and exact artifact-set binding. Accepted input lineage is partial; artifact recovery across relocation is incomplete. Structured external waits and full work-level date persistence are missing/partial. | S12 optional output/input/artifact contracts and portable context; S13 dates, typed waits, UI parity and reusable mixed-work journeys. |
+| Runtime and release | Update remains project-scoped; installer crash recovery is trap-based and not durably paired with Global recovery. Node version preflight is missing. Global scale benchmarks, root CI/release workflows and exact-current candidate evidence are absent. | S02/S03 runtime and recovery; S10 Global scale qualification; S11 exact-artifact journeys and handover. |
+| Existing foundations | Project backup/restore, installer checksumming/staging, Global service isolation, Global TUI tests, lifecycle fences/reviews, and the content-addressed source catalog are present. | Retain and extend these paths; do not recreate them. |
+
+The detailed evidence and acceptance implications are recorded in the task
+cards. Re-read source at dispatch because line numbers may move as patches land.
+
 ## Fresh-project bootstrap observations
+
+The following observations were made in the separate local execution project
+at the 2026-10-02 snapshot. They are historical and were not re-read from the
+canonical runtime database during the 2026-10-13 source requalification. Do not
+infer current attempt ownership, enrollment, or readiness from this table.
 
 Execution is in the newly initialized local project `boreal-final-push-cloud`
 inside this verified clone. It is a new local execution state, not restoration

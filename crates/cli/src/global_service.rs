@@ -131,13 +131,13 @@ pub(crate) fn request(parsed: &ParsedCommand, operation: &str) -> Result<CliResu
     let (command, payload) = global_commands::build_command(parsed)?;
     if command == "export" && !parsed.options.extra.contains_key("--out") {
         return Err(CliError::invalid(
-            "global export through the service requires --out PATH so the backup can bypass interactive frame limits",
+            "global export through the service requires --out PATH so the logical transfer can bypass interactive frame limits",
         ));
     }
     if command == "export" && parsed.options.extra.contains_key("--out") {
-        // Backup payloads may exceed the interactive frame limit. Read and
-        // write the consistent bundle through the same application/store
-        // boundary, then return only bounded metadata to the CLI caller.
+        // Logical export payloads may exceed the interactive frame limit.
+        // Read and write the consistent transfer document through the same
+        // application/store boundary, then return only bounded metadata.
         let data = global_commands::execute_request(&command, &payload, operation)?;
         return Ok(CliResult {
             outcome: ApplicationOutcome::Unchanged,
@@ -175,7 +175,7 @@ pub(crate) fn request(parsed: &ParsedCommand, operation: &str) -> Result<CliResu
         .with_write_timeout(Some(Duration::from_secs(3)));
     let mut client = UnixSocketClient::connect(socket, config).map_err(transport_error)?;
     let response = client.request(request).map_err(|error| {
-        if global_commands::mutation(&command) {
+        if global_commands::may_have_delivery_effect(&command) {
             CliError::unknown_delivery(
                 operation,
                 format!("global service delivery is uncertain: {error}"),
@@ -186,35 +186,35 @@ pub(crate) fn request(parsed: &ParsedCommand, operation: &str) -> Result<CliResu
     })?;
     if response.request_id() != unique_id {
         return Err(uncertain_response(
-            global_commands::mutation(&command),
+            global_commands::may_have_delivery_effect(&command),
             operation,
             "global service response correlation did not match request",
         ));
     }
     let body = response.payload().ok_or_else(|| {
         uncertain_response(
-            global_commands::mutation(&command),
+            global_commands::may_have_delivery_effect(&command),
             operation,
             "global service returned no response payload",
         )
     })?;
     let envelope: Envelope<Value> = serde_json::from_str(body).map_err(|error| {
         uncertain_response(
-            global_commands::mutation(&command),
+            global_commands::may_have_delivery_effect(&command),
             operation,
             format!("invalid global service envelope: {error}"),
         )
     })?;
     envelope.validate().map_err(|error| {
         uncertain_response(
-            global_commands::mutation(&command),
+            global_commands::may_have_delivery_effect(&command),
             operation,
             error.to_string(),
         )
     })?;
     if envelope.operation_id != operation {
         return Err(uncertain_response(
-            global_commands::mutation(&command),
+            global_commands::may_have_delivery_effect(&command),
             operation,
             "global service operation ID did not match request",
         ));
@@ -516,4 +516,82 @@ fn transport_error(error: impl std::fmt::Display) -> CliError {
         ApplicationOutcome::Failed,
         error.to_string(),
     )
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    struct GlobalRootGuard(Option<OsString>);
+
+    impl GlobalRootGuard {
+        fn set(path: &Path) -> Self {
+            let previous = env::var_os("BOREAL_GLOBAL_ROOT");
+            env::set_var("BOREAL_GLOBAL_ROOT", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for GlobalRootGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                env::set_var("BOREAL_GLOBAL_ROOT", previous);
+            } else {
+                env::remove_var("BOREAL_GLOBAL_ROOT");
+            }
+        }
+    }
+
+    #[test]
+    fn physical_backup_service_returns_bounded_metadata_not_database_bytes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "boreal-global-service-backup-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let _root_guard = GlobalRootGuard::set(&root);
+        let request = GlobalManagerRequest {
+            api_version: API_VERSION.to_owned(),
+            schema_version: REQUEST_SCHEMA.to_owned(),
+            operation_id: "op_service_backup_1".to_owned(),
+            command: "backup".to_owned(),
+            payload: json!({}),
+        };
+        let frame = JsonRequest::new("backup-request-1", request_json(&request)).unwrap();
+        let response = dispatch_request(frame, &AtomicBool::new(false)).unwrap();
+        let response_body = response.payload().unwrap();
+        assert!(response_body.len() < 16 * 1024);
+
+        let envelope: Envelope<Value> = serde_json::from_str(response_body).unwrap();
+        envelope.validate().unwrap();
+        assert_eq!(envelope.outcome, ApplicationOutcome::Unchanged);
+        let data = envelope.data.unwrap();
+        assert_eq!(data["validated"], true);
+        assert_eq!(
+            data["contents"],
+            "private management notes and complete revision history"
+        );
+        assert!(data["database_bytes"].as_u64().unwrap() > 0);
+        assert!(data.get("database").is_none());
+        assert!(data.get("database_contents").is_none());
+
+        let package = PathBuf::from(data["path"].as_str().unwrap());
+        assert!(package.starts_with(fs::canonicalize(root.join("backups")).unwrap()));
+        assert!(package.join("database.sqlite").is_file());
+        assert_eq!(
+            fs::metadata(package.join("database.sqlite")).unwrap().len(),
+            data["database_bytes"].as_u64().unwrap()
+        );
+        drop(_root_guard);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn request_json(request: &GlobalManagerRequest) -> String {
+        serde_json::to_string(request).unwrap()
+    }
 }

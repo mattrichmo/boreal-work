@@ -24,6 +24,7 @@ use boreal_store::{
     AttemptRecord, ContainerDispositionV3Input, CycleAssignmentV3Input, CycleSeriesV3Input,
     CycleTemplateV3Input, CycleV3Input, IntakeBucketV3Input, IntakeItemV3Input, IntakeItemV3Record,
     IntakePromotionV3Input, MutationResult, SessionRecord, V3MutationContext, WorkNodeV3Input,
+    WorkPlanningContractRecord,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -89,7 +90,34 @@ pub struct IntakeItemsView {
     pub items: Vec<IntakeItemV3Record>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkPlanningContractView {
+    pub project_id: ProjectId,
+    pub work_id: String,
+    pub revision: u64,
+    pub contract: Option<WorkPlanningContractRecord>,
+}
+
 impl WorkApplication<'_> {
+    /// Read one work item's current output requirements and exact-version
+    /// input references together with the project revision they were read at.
+    /// Legacy work has an empty optional contract.
+    pub fn work_planning_contract(
+        &self,
+        project_id: &ProjectId,
+        work_id: &WorkId,
+    ) -> Result<WorkPlanningContractView, ApplicationError> {
+        let snapshot = self
+            .store_ref()
+            .work_planning_contract_snapshot(project_id.as_str(), work_id.as_str())?;
+        Ok(WorkPlanningContractView {
+            project_id: project_id.clone(),
+            work_id: work_id.as_str().to_owned(),
+            revision: snapshot.project_revision,
+            contract: snapshot.contract,
+        })
+    }
+
     /// Return the canonical dependency graph and deterministic cycle
     /// diagnostics from one store snapshot. This read model is shared by
     /// CLI, service, and dashboard adapters.

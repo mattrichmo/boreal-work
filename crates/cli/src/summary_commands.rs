@@ -1,6 +1,10 @@
 //! Durable summary and handoff command handlers.
 use super::*;
 use boreal_application::{SummaryPayload, SummaryQueries};
+use boreal_source::{
+    ArtifactProducer, ArtifactRelationshipInput, ArtifactRightsProvenance, ArtifactRole,
+    ArtifactScope, SourceCaptureRequest, SourceIdentity,
+};
 
 pub(crate) fn supported(path: &[String]) -> bool {
     matches!(
@@ -50,12 +54,21 @@ fn run_summary(
                 .or_else(|| extra(parsed, "summary"))
                 .ok_or_else(|| CliError::invalid("summary show requires SUMMARY_ID"))?;
             let artifact = queries.show(&project, id).map_err(map_store_error)?;
+            let (source_artifact, source_body) = summary_source_artifact(
+                parsed,
+                &project,
+                &artifact.summary.work_id,
+                &artifact.summary.attempt_id,
+                &artifact.summary.summary_id,
+                &artifact.summary.body_digest,
+                artifact.summary.body_size,
+            )?;
             if action == "render" {
-                let body = artifact.body.ok_or_else(|| {
+                let body = artifact.body.or(source_body).ok_or_else(|| {
                     CliError::with(
                         ErrorCode::NotFound,
                         ApplicationOutcome::Rejected,
-                        "summary body is unavailable; this summary predates durable body storage",
+                        "the exact summary bytes are unavailable from both the summary body store and source artifact catalog",
                     )
                 })?;
                 if let Some(path) = extra(parsed, "out") {
@@ -67,7 +80,7 @@ fn run_summary(
                 return Ok(CliResult {
                     outcome: ApplicationOutcome::Unchanged,
                     data: Some(
-                        json!({"summary_id": artifact.summary.summary_id, "body": body, "written_to": extra(parsed, "out")}),
+                        json!({"summary_id": artifact.summary.summary_id, "body": body, "body_digest": artifact.summary.body_digest, "body_size": artifact.summary.body_size, "source_artifact": source_artifact, "written_to": extra(parsed, "out")}),
                     ),
                     human: Some(body),
                     ..CliResult::default()
@@ -76,7 +89,7 @@ fn run_summary(
             Ok(CliResult {
                 outcome: ApplicationOutcome::Unchanged,
                 data: Some(
-                    json!({"summary": summary_json(&artifact.summary), "body": artifact.body}),
+                    json!({"summary": summary_json(&artifact.summary), "body": artifact.body, "source_artifact": source_artifact}),
                 ),
                 ..CliResult::default()
             })
@@ -189,6 +202,16 @@ fn create_or_compose(
             TimestampMs::from_millis(now_ms_u64()),
         )
         .map_err(map_application_error)?;
+    let source_artifact = persist_summary_artifact(
+        parsed,
+        &project,
+        &summary_id,
+        work,
+        attempt_id,
+        &body,
+        &payload.body_digest,
+        payload.body_size,
+    )?;
     Ok(CliResult {
         outcome: if result.replayed {
             ApplicationOutcome::Unchanged
@@ -196,7 +219,9 @@ fn create_or_compose(
             ApplicationOutcome::Changed
         },
         revision: Some(result.revision),
-        data: Some(json!({"summary": summary_json(&result.summary), "body": body})),
+        data: Some(
+            json!({"summary": summary_json(&result.summary), "body": body, "source_artifact": source_artifact}),
+        ),
         ..CliResult::default()
     })
 }
@@ -213,16 +238,39 @@ fn run_handoff(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult,
     let summary = SummaryQueries::new(store)
         .current_for_work(&project, work)
         .map_err(map_store_error)?;
-    let (summary_id, attempt_id, fence, body) = if let Some(summary) = summary {
-        let body = match summary.body {
-            Some(body) => body,
-            None => compose_work_brief(parsed, store, &project, work)?,
-        };
+    let (
+        summary_id,
+        attempt_id,
+        fence,
+        body,
+        source_artifact,
+        summary_body_digest,
+        summary_body_size,
+    ) = if let Some(summary) = summary {
+        let (source_artifact, source_body) = summary_source_artifact(
+            parsed,
+            &project,
+            &summary.summary.work_id,
+            &summary.summary.attempt_id,
+            &summary.summary.summary_id,
+            &summary.summary.body_digest,
+            summary.summary.body_size,
+        )?;
+        let body = summary.body.or(source_body).ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                "the current handoff summary's exact bytes are unavailable; refusing to replace them with a newly composed brief",
+            )
+        })?;
         (
             Some(summary.summary.summary_id),
             Some(summary.summary.attempt_id),
             Some(summary.summary.fence),
             body,
+            source_artifact,
+            Some(summary.summary.body_digest),
+            Some(summary.summary.body_size),
         )
     } else {
         (
@@ -230,6 +278,9 @@ fn run_handoff(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult,
             None,
             None,
             compose_work_brief(parsed, store, &project, work)?,
+            json!({"availability":"not_persisted"}),
+            None,
+            None,
         )
     };
     let extra_note = extra(parsed, "note").unwrap_or("");
@@ -247,14 +298,152 @@ fn run_handoff(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult,
     } else {
         None
     };
+    let persisted = summary_id.is_some();
     Ok(CliResult {
         outcome: ApplicationOutcome::Unchanged,
         data: Some(
-            json!({"project_id": project, "work_id": work, "summary_id": summary_id, "attempt_id": attempt_id, "fence": fence, "body": bounded, "written_to": written_to, "truncated": bounded.len() < rendered.len()}),
+            json!({"project_id": project, "work_id": work, "summary_id": summary_id, "attempt_id": attempt_id, "fence": fence, "body": bounded, "body_digest": sha256_content_digest(bounded.as_bytes()), "body_size": bounded.len() as u64, "summary_body_digest": summary_body_digest, "summary_body_size": summary_body_size, "source_artifact": source_artifact, "persisted": persisted, "written_to": written_to, "truncated": bounded.len() < rendered.len()}),
         ),
         human: Some(bounded.to_owned()),
         ..CliResult::default()
     })
+}
+
+fn persist_summary_artifact(
+    parsed: &ParsedCommand,
+    project_id: &str,
+    summary_id: &str,
+    work_id: &str,
+    attempt_id: &str,
+    body: &str,
+    digest: &str,
+    byte_count: u64,
+) -> Result<Value, CliError> {
+    let catalog_root = source_catalog_root(&parsed.options.db);
+    let catalog = source_catalog_create(&catalog_root)?;
+    let key = sha256_content_digest(summary_id.as_bytes());
+    let source_version_id = format!("sv_{project_id}_{digest}");
+    let identity = match catalog.show_version(project_id, &source_version_id) {
+        Ok(version) => {
+            let identity = SourceIdentity::from_version(&version);
+            let readback = catalog
+                .read_identity_bounded(&identity, 65_536)
+                .map_err(map_source_error)?;
+            if readback.bytes != body.as_bytes() || readback.byte_count as u64 != byte_count {
+                return Err(CliError::with(
+                    ErrorCode::IntegrityQuarantined,
+                    ApplicationOutcome::Failed,
+                    "source catalog summary bytes conflict with the immutable summary body",
+                ));
+            }
+            identity
+        }
+        Err(boreal_source::SourceError::ScopeViolation) => {
+            let captured = catalog
+                .capture_with_operation(&SourceCaptureRequest::new(
+                    format!("summary-body-{key}"),
+                    project_id,
+                    format!("boreal-summary:{key}"),
+                    "text/markdown",
+                    body.as_bytes().to_vec(),
+                ))
+                .map_err(map_source_error)?;
+            SourceIdentity::from_version(&captured.source_version)
+        }
+        Err(error) => return Err(map_source_error(error)),
+    };
+    let relationship = catalog
+        .record_artifact_relationship(ArtifactRelationshipInput {
+            relationship_id: format!("summary-{key}"),
+            source: identity.clone(),
+            role: ArtifactRole::HandoffSummary,
+            scope: ArtifactScope::Project,
+            requirement_key: None,
+            produced_by: Some(ArtifactProducer {
+                work_id: work_id.to_owned(),
+                attempt_id: attempt_id.to_owned(),
+                result_id: summary_id.to_owned(),
+            }),
+            rights: ArtifactRightsProvenance::default(),
+            operation_id: format!("summary-link-{key}"),
+        })
+        .map_err(map_source_error)?;
+    Ok(json!({
+        "availability": "available",
+        "source": relationship.relationship.source,
+        "role": relationship.relationship.role,
+        "scope": relationship.relationship.scope,
+        "produced_by": relationship.relationship.produced_by,
+        "rights": relationship.relationship.rights,
+        "media_type": "text/markdown",
+        "byte_count": byte_count,
+    }))
+}
+
+/// Reads only a relationship that names this exact summary result and body
+/// digest. The catalog path itself is resolved from the selected project DB;
+/// it is never persisted as artifact identity.
+fn summary_source_artifact(
+    parsed: &ParsedCommand,
+    project_id: &str,
+    work_id: &str,
+    attempt_id: &str,
+    summary_id: &str,
+    body_digest: &str,
+    body_size: u64,
+) -> Result<(Value, Option<String>), CliError> {
+    let catalog_root = source_catalog_root(&parsed.options.db);
+    if !catalog_root.is_dir() {
+        return Ok((json!({"availability":"missing"}), None));
+    }
+    let catalog = match source_catalog(&catalog_root) {
+        Ok(catalog) => catalog,
+        Err(_) => return Ok((json!({"availability":"unavailable"}), None)),
+    };
+    let relationship_id = format!("summary-{}", sha256_content_digest(summary_id.as_bytes()));
+    let relationship = match catalog.show_artifact_relationship(project_id, &relationship_id) {
+        Ok(Some(relationship)) => relationship,
+        Ok(None) => return Ok((json!({"availability":"unlinked"}), None)),
+        Err(_) => return Ok((json!({"availability":"unavailable"}), None)),
+    };
+    if relationship.role != ArtifactRole::HandoffSummary
+        || relationship.source.content_digest != body_digest
+        || !relationship.produced_by.as_ref().is_some_and(|producer| {
+            producer.work_id == work_id
+                && producer.attempt_id == attempt_id
+                && producer.result_id == summary_id
+        })
+    {
+        return Ok((json!({"availability":"unlinked"}), None));
+    }
+    let readback = match catalog.read_identity_bounded(&relationship.source, 65_536) {
+        Ok(readback) if readback.byte_count as u64 == body_size => readback,
+        Ok(_) => return Ok((json!({"availability":"corrupt"}), None)),
+        Err(boreal_source::SourceError::MissingBlob) => {
+            return Ok((json!({"availability":"missing"}), None));
+        }
+        Err(boreal_source::SourceError::ArtifactTooLarge { .. }) => {
+            return Ok((json!({"availability":"too_large"}), None));
+        }
+        Err(_) => return Ok((json!({"availability":"corrupt"}), None)),
+    };
+    let text = match String::from_utf8(readback.bytes) {
+        Ok(text) => text,
+        Err(_) => return Ok((json!({"availability":"corrupt"}), None)),
+    };
+    Ok((
+        json!({
+            "availability":"available",
+            "source": relationship.source,
+            "role": relationship.role,
+            "scope": relationship.scope,
+            "produced_by": relationship.produced_by,
+            "rights": relationship.rights,
+            "media_type": readback.media_type,
+            "byte_count": readback.byte_count,
+        }),
+        Some(text),
+    ))
 }
 
 fn read_summary_body_input(parsed: &ParsedCommand) -> Result<String, CliError> {

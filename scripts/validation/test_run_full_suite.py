@@ -204,6 +204,26 @@ class RunCheckTests(unittest.TestCase):
         self.assertIn("scripts/validation/global-tui/pty_smoke.py", full[-1][1])
         self.assertNotIn("/private/tmp", " ".join(full[-1][1]))
 
+    def test_markdown_report_contains_exact_source_binary_and_tui_identity(self) -> None:
+        report = {
+            "profile": "smoke",
+            "binary": "/tmp/bwrk",
+            "counts": {"pass": 1, "skip": 0, "fail": 0},
+            "checks": [],
+            "log_dir": "/tmp/logs",
+            "validation_identity": {
+                "source": {"commit": "abc123", "dirty": False, "sha256": "source-sha"},
+                "binary": {"sha256": "binary-sha"},
+                "global_tui": {"bundle": {"sha256": "tui-sha", "file_count": 11}},
+            },
+        }
+
+        rendered = RUNNER.markdown(report)
+
+        self.assertIn("Source: `abc123`; dirty: **false**; source SHA-256: `source-sha`", rendered)
+        self.assertIn("Binary SHA-256: `binary-sha`", rendered)
+        self.assertIn("Global TUI bundle SHA-256: `tui-sha` (11 files)", rendered)
+
     def test_non_posix_import_and_platform_skip_do_not_load_pty_modules(self) -> None:
         real_import = __import__
 

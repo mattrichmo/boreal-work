@@ -142,6 +142,11 @@ records, status history and revision snapshots; import validates references,
 workflows and cycles and preserves imported history. Splitting record families
 into indexed relational tables remains a future scaling migration.
 
+Logical `global export` and `global import` share a 64 MiB compact-JSON transfer
+limit. Export refuses an oversized complete artifact and never drops history to
+fit. Use `bwrk global backup --out PATH` to create a complete physical backup;
+that recovery artifact is separate from logical transfer.
+
 The following families describe the broader product model; individual tables,
 saved board views, inbox provenance and cached rollups are not all implemented:
 

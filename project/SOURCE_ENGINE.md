@@ -28,6 +28,32 @@ metadata, parser records, and rebuildable index state in `catalog.json`.
 Reopening the catalog restores searchable state; a missing or corrupt blob is
 still reported by doctor rather than silently recreated.
 
+## Artifact identity and portability
+
+Every source or generated artifact read uses the immutable triple
+`(project_id, source_version_id, content_digest)`. A read verifies the catalog
+record, the declared byte count, and the SHA-256 digest before returning bytes;
+callers also provide a byte ceiling. A missing version, missing blob, digest
+mismatch, and size-limit rejection remain distinct outcomes. Binary outputs
+use the same byte path and do not need to be parsed or indexed.
+
+The source catalog may record artifact relationships with a role, project or
+private scope, requirement key, producing work/attempt/result identity, and
+rights/attribution provenance. These records identify lineage; they do not
+decide that a deliverable was accepted. Acceptance and publication remain in
+the work and memory lifecycles. Relationships contain no absolute host path.
+Materialization requires a caller-authorized root and a relative path, verifies
+the exact identity again, rejects traversal and symlink components, and never
+overwrites conflicting bytes. The returned path is relative to that root and
+is not part of artifact identity.
+
+A complete portable backup therefore preserves the work database and its
+attempt/evidence history, the source catalog metadata and referenced content
+blobs, and the published memory Git history as separate components. Restoring
+the database alone does not make source bytes available; relationships whose
+bytes were omitted must be reported unavailable, not reconstructed from a
+mutable local path.
+
 ## Work split
 
 1. Register a source intent and validate its path/URI and scope.

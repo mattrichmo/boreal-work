@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validation:
+    name: Rust, project TUI, and Global TUI validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run smoke validation
+        run: >-
+          python3 scripts/validation/run_full_suite.py
+          --profile smoke
+          --online
+          --require-current-binary
+          --output "$RUNNER_TEMP/boreal-validation.json"
+
+      - name: Test validation identity and report contracts
+        run: |
+          python3 scripts/validation/test_run_full_suite.py
+          python3 scripts/validation/global-tui/test_identity.py
+
+      - name: Run Global service smoke
+        run: >-
+          python3 scripts/validation/global/smoke.py
+          --binary target/debug/bwrk
+
+      - name: Run Global TUI PTY resize smoke
+        run: >-
+          python3 scripts/validation/global-tui/pty_smoke.py
+          --bin target/debug/bwrk
+          --identity-output "$RUNNER_TEMP/global-tui-pty-identity.json"
+
+      - name: Retain validation report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boreal-validation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/boreal-validation.json
+            ${{ runner.temp }}/full-suite-*
+            ${{ runner.temp }}/global-tui-pty-identity.json
+          if-no-files-found: ignore
+          retention-days: 14

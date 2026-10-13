@@ -21,6 +21,7 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
     let app =
         GlobalManagerApplication::open(database).map_err(|e| CliError::invalid(e.to_string()))?;
     let mut changed = false;
+    let mut result_revision = None;
     let replayed = match app.execute(
         "operation show",
         &json!({"operation_id":operation}),
@@ -64,55 +65,188 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
         )
         .map_err(|e| CliError::invalid(e.to_string()))?
     } else {
-        let snapshot = app
-            .execute("snapshot", &json!({}), operation)
-            .map_err(|e| CliError::invalid(e.to_string()))?;
-        let projects = snapshot["projects"].as_array().cloned().unwrap_or_default();
-        let links = snapshot["associations"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        if links.len() > 1000 {
-            return Err(CliError::invalid("global discovery exceeds 1000 associations; narrow the registry before requesting a complete diagnostic"));
+        let limit = parsed.options.limit.unwrap_or(25);
+        if !(1..=100).contains(&limit) {
+            return Err(CliError::invalid("global discovery limit must be 1..100"));
         }
+
+        // Summary snapshots intentionally cap each collection at 100 rows.
+        // Read the full bounded detail pages and require one stable Global
+        // revision across both collections and the final readback.
+        let projects = global_commands::read_global_detail_pages(
+            &app,
+            "projects",
+            operation,
+            global_commands::GLOBAL_DISCOVERY_ROW_LIMIT,
+            true,
+        )?;
+        let associations = global_commands::read_global_detail_pages(
+            &app,
+            "associations",
+            operation,
+            global_commands::GLOBAL_DISCOVERY_ROW_LIMIT,
+            false,
+        )?;
+        let page_final_revision = app
+            .revision()
+            .map_err(|error| CliError::invalid(error.to_string()))?;
+        let revision_matches = projects.revision == associations.revision
+            && projects.revision == Some(page_final_revision)
+            && !projects.stale
+            && !associations.stale;
+        let mut stale = !revision_matches;
+        let mut registry_complete = projects.complete && associations.complete && revision_matches;
+        let mut reason = if stale {
+            projects
+                .reason
+                .or(associations.reason)
+                .or(Some("global_revision_changed_during_enumeration"))
+        } else {
+            projects.reason.or(associations.reason)
+        };
+        let project_by_id = projects
+            .rows
+            .iter()
+            .filter_map(|project| {
+                project
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| (id.to_owned(), project.clone()))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut checks = Vec::new();
         let mut candidates = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        for link in links.iter().filter(|l| l["kind"] == "folder") {
-            let path = link["path"].as_str().unwrap_or("");
-            checks.push(json!({"management_project_id":link["project_id"],"path":path,"state":if Path::new(path).is_absolute()&&Path::new(path).is_dir(){"valid"}else{"unavailable"},"kind":"folder"}));
-        }
-        for link in links.iter().filter(|l| l["kind"] == "workspace") {
-            let identity = link["identity"].as_str().unwrap_or("");
-            let path = link["path"].as_str().unwrap_or("");
-            let parent = projects.iter().find(|p| p["id"] == link["project_id"]);
-            let eligible = parent.is_some_and(|p| {
-                p["archived"] != true
-                    && !matches!(
-                        p["lifecycle"].as_str(),
-                        Some("on_hold" | "completed" | "cancelled")
-                    )
-            });
-            let checked = global_commands::validate_workspace(path).and_then(|(id, root)| {
-                if id != identity {
-                    return Err(CliError::invalid("linked workspace identity changed"));
-                }
-                Ok(root)
-            });
-            let root = match checked {
-                Ok(root) => root,
-                Err(e) => {
-                    checks.push(json!({"management_project_id":link["project_id"],"workspace_id":identity,"path":path,"state":"unavailable","reason":e.message}));
-                    continue;
-                }
-            };
-            let unique = seen.insert(identity.to_owned());
-            checks.push(json!({"management_project_id":link["project_id"],"workspace_id":identity,"path":root,"state":if unique{"valid"}else{"duplicate_association"},"participates":eligible}));
-            if parsed.path == ["global", "next"] && eligible && unique {
-                let result = fresh_candidate(parsed, &root, identity);
-                match result{Ok(mut row)=>{row["management_project_id"]=link["project_id"].clone();row["management_priority"]=parent.and_then(|p|p.get("priority")).cloned().unwrap_or(json!(0));if row.get("work_id").is_some(){candidates.push(row);}},Err(e)=>checks.push(json!({"workspace_id":identity,"path":root,"state":"read_failed","reason":e.message}))}
+        let mut seen_associations = std::collections::BTreeSet::new();
+        let mut seen_candidates = std::collections::BTreeSet::new();
+        let mut candidate_coverage_complete = registry_complete;
+
+        if !stale {
+            for link in associations
+                .rows
+                .iter()
+                .filter(|link| link["kind"] == "folder")
+            {
+                let path = link["path"].as_str().unwrap_or("");
+                checks.push(json!({
+                    "management_project_id":link["project_id"],
+                    "path":path,
+                    "state":if Path::new(path).is_absolute() && Path::new(path).is_dir() { "valid" } else { "unavailable" },
+                    "kind":"folder"
+                }));
             }
+            for link in associations
+                .rows
+                .iter()
+                .filter(|link| link["kind"] == "workspace")
+            {
+                let identity = link["identity"].as_str().unwrap_or("");
+                let path = link["path"].as_str().unwrap_or("");
+                let management_project_id = link["project_id"].as_str().unwrap_or("");
+                let parent = project_by_id.get(management_project_id);
+                let Some(parent) = parent else {
+                    checks.push(json!({
+                        "management_project_id":link["project_id"],
+                        "workspace_id":identity,
+                        "path":path,
+                        "state":"unavailable",
+                        "reason":"management project is absent from the bounded registry read"
+                    }));
+                    candidate_coverage_complete = false;
+                    if reason.is_none() {
+                        reason = Some("management_project_missing_from_registry_read");
+                    }
+                    continue;
+                };
+                let eligible = parent["archived"] != true
+                    && !matches!(
+                        parent["lifecycle"].as_str(),
+                        Some("on_hold" | "completed" | "cancelled")
+                    );
+                let checked = global_commands::validate_workspace(path).and_then(|(id, root)| {
+                    if id != identity {
+                        return Err(CliError::invalid("linked workspace identity changed"));
+                    }
+                    Ok(root)
+                });
+                let root = match checked {
+                    Ok(root) => root,
+                    Err(error) => {
+                        checks.push(json!({
+                            "management_project_id":link["project_id"],
+                            "workspace_id":identity,
+                            "path":path,
+                            "state":"unavailable",
+                            "reason":error.message
+                        }));
+                        if parsed.path == ["global", "next"] && eligible {
+                            candidate_coverage_complete = false;
+                            if reason.is_none() {
+                                reason = Some("eligible_workspace_unavailable");
+                            }
+                        }
+                        continue;
+                    }
+                };
+                let unique = seen_associations.insert(identity.to_owned());
+                checks.push(json!({
+                    "management_project_id":link["project_id"],
+                    "workspace_id":identity,
+                    "path":root,
+                    "state":if unique { "valid" } else { "duplicate_association" },
+                    "participates":eligible
+                }));
+                if parsed.path == ["global", "next"] && eligible {
+                    if !unique {
+                        candidate_coverage_complete = false;
+                        if reason.is_none() {
+                            reason = Some("duplicate_eligible_workspace_association");
+                        }
+                    }
+                    if seen_candidates.insert(identity.to_owned()) {
+                        match fresh_candidate(parsed, &root, identity) {
+                            Ok(mut row) => {
+                                row["management_project_id"] = link["project_id"].clone();
+                                row["management_priority"] =
+                                    parent.get("priority").cloned().unwrap_or(json!(0));
+                                if row.get("work_id").is_some() {
+                                    candidates.push(row);
+                                }
+                            }
+                            Err(error) => {
+                                checks.push(json!({
+                                    "workspace_id":identity,
+                                    "path":root,
+                                    "state":"read_failed",
+                                    "reason":error.message
+                                }));
+                                candidate_coverage_complete = false;
+                                if reason.is_none() {
+                                    reason = Some("eligible_workspace_read_failed");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            candidate_coverage_complete = false;
         }
+
+        // Workspace validation and advisory discovery happen after Global
+        // pages are read. Recheck the registry revision so an unlink or
+        // lifecycle change during those reads cannot be presented as current.
+        let final_revision = app
+            .revision()
+            .map_err(|error| CliError::invalid(error.to_string()))?;
+        result_revision = Some(final_revision);
+        if !stale && projects.revision != Some(final_revision) {
+            stale = true;
+            registry_complete = false;
+            candidate_coverage_complete = false;
+            reason = Some("global_revision_changed_during_workspace_validation");
+            candidates.clear();
+        }
+
         candidates.sort_by(|a, b| {
             b["priority"]
                 .as_u64()
@@ -125,13 +259,68 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
                 .then_with(|| a["workspace_id"].as_str().cmp(&b["workspace_id"].as_str()))
                 .then_with(|| a["work_id"].as_str().cmp(&b["work_id"].as_str()))
         });
-        let limit = parsed.options.limit.unwrap_or(25);
-        if !(1..=100).contains(&limit) {
-            return Err(CliError::invalid("global discovery limit must be 1..100"));
-        }
-        let total = candidates.len();
+        let candidate_count = candidates.len();
+        let candidates_have_more = candidate_count > limit as usize;
         candidates.truncate(limit as usize);
-        json!({"revision":snapshot["revision"],"read_only":true,"advisory":true,"freshness":"live_project_revision","checks":checks,"passed":checks.iter().all(|c|c["state"]=="valid"),"candidate_count":total,"selected":candidates.first(),"candidates":candidates,"note":"Run prime from the returned working_directory to authenticate and obtain current trusted guidance; no work was claimed."})
+        let candidate_coverage_complete = if parsed.path == ["global", "next"] {
+            candidate_coverage_complete
+        } else {
+            registry_complete
+        };
+        if candidate_coverage_complete {
+            reason = None;
+        }
+        let coverage_state = if stale {
+            "stale"
+        } else if candidate_coverage_complete {
+            "complete"
+        } else {
+            "partial"
+        };
+        let selected = if parsed.path == ["global", "next"] && candidate_coverage_complete {
+            candidates.first().cloned().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
+        let passed = !stale
+            && registry_complete
+            && candidate_coverage_complete
+            && checks.iter().all(|check| check["state"] == "valid");
+        json!({
+            "revision":projects.revision,
+            "project_revision":projects.revision,
+            "association_revision":associations.revision,
+            "observed_revision":if stale {
+                json!({
+                    "projects":projects.observed_revision,
+                    "associations":associations.observed_revision,
+                    "current":final_revision
+                })
+            } else {
+                Value::Null
+            },
+            "read_only":true,
+            "advisory":true,
+            "freshness":"live_project_revision",
+            "global_freshness":if stale { "stale" } else { "revision_consistent" },
+            "partial":!candidate_coverage_complete,
+            "coverage":{
+                "state":coverage_state,
+                "complete":candidate_coverage_complete,
+                "registry_complete":registry_complete,
+                "associations":{"read":associations.rows.len(),"total":associations.total,"limit":global_commands::GLOBAL_DISCOVERY_ROW_LIMIT},
+                "projects":{"read":projects.rows.len(),"total":projects.total,"limit":global_commands::GLOBAL_DISCOVERY_ROW_LIMIT},
+                "reason":reason
+            },
+            "checks":checks,
+            "passed":passed,
+            "candidate_count":candidate_count,
+            "candidate_count_is_lower_bound":!candidate_coverage_complete,
+            "candidate_list_has_more":candidates_have_more,
+            "selected":selected,
+            "candidates":candidates,
+            "note":"Run prime from a returned working_directory to authenticate and obtain current trusted guidance; no work was claimed. A null selected value with partial coverage does not establish that no eligible work exists."
+        })
     };
     Ok(CliResult {
         outcome: if parsed.path == ["registry", "doctor"] && data["passed"] == false {
@@ -141,10 +330,12 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
         } else {
             ApplicationOutcome::Unchanged
         },
-        revision: Some(
-            app.revision()
-                .map_err(|e| CliError::invalid(e.to_string()))?,
-        ),
+        revision: Some(match result_revision {
+            Some(revision) => revision,
+            None => app
+                .revision()
+                .map_err(|error| CliError::invalid(error.to_string()))?,
+        }),
         data: Some(data),
         ..CliResult::default()
     })
@@ -178,6 +369,11 @@ fn fresh_candidate(parsed: &ParsedCommand, root: &str, project: &str) -> Result<
     let actor = metadata["operator_actor"]
         .as_str()
         .ok_or_else(|| CliError::invalid("workspace has no registered local operator"))?;
+    let session = metadata["operator_session"]
+        .as_str()
+        .filter(|session| !session.trim().is_empty())
+        .ok_or_else(|| CliError::invalid("workspace has no registered local operator session"))?;
+    validate_operator_session(&store, project, actor, session)?;
     let role = store
         .principal_authority(project, actor)
         .map_err(map_store_error)?
@@ -189,10 +385,17 @@ fn fresh_candidate(parsed: &ParsedCommand, root: &str, project: &str) -> Result<
             actor_id: ActorId::new(actor),
             role,
         },
-        None,
+        Some(session),
         TimestampMs::from_millis(now_ms_u64()),
     )
     .map_err(CliError::invalid)?;
+    validate_operator_session(&store, project, actor, session)?;
+    let current_revision = store.project_revision(project).map_err(map_store_error)?.0;
+    if current_revision != snapshot.revision.0 {
+        return Err(CliError::invalid(
+            "workspace changed during advisory discovery",
+        ));
+    }
     let Some(item) = snapshot
         .items
         .iter()
@@ -205,4 +408,34 @@ fn fresh_candidate(parsed: &ParsedCommand, root: &str, project: &str) -> Result<
     Ok(
         json!({"workspace_id":project,"working_directory":ctx.root,"project_revision":snapshot.revision.0,"as_of":stamp(now_ms_u64()),"work_id":item.work.id.as_str(),"title":item.work.title,"priority":item.work.priority,"safe_argv":["bwrk","prime","--project",project,"--json"],"authority":"advisory_snapshot_only"}),
     )
+}
+
+fn validate_operator_session(
+    store: &SqliteStore,
+    project: &str,
+    actor: &str,
+    session_id: &str,
+) -> Result<(), CliError> {
+    let session = store
+        .session(project, session_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CliError::invalid("workspace operator session does not exist"))?;
+    if session.registration_operation_id.is_none() || session.project_id != project {
+        return Err(CliError::invalid(
+            "workspace operator session is not bound to this project",
+        ));
+    }
+    if session.actor_id != actor {
+        return Err(CliError::invalid(
+            "workspace operator session is bound to a different actor",
+        ));
+    }
+    if session.state != boreal_store::SessionState::Active {
+        return Err(CliError::invalid(
+            "workspace operator session is not active",
+        ));
+    }
+    store
+        .validate_project_session(project, actor, session_id)
+        .map_err(map_store_error)
 }

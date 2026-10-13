@@ -10,6 +10,89 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static GLOBAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 const GLOBAL_PATH_MAX_BYTES: usize = 4096;
 const INTERACTIVE_RESPONSE_MAX_BYTES: usize = 900 * 1024;
+const GLOBAL_TRANSFER_MAX_BYTES: usize = 64 * 1024 * 1024;
+const GLOBAL_ATTENTION_PROJECTS_LIMIT: usize = 100;
+const GLOBAL_PAGE_LIMIT_MAX: u64 = 200;
+
+fn serialized_json_size(value: &Value) -> Result<usize, serde_json::Error> {
+    struct CountingWriter(usize);
+
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = CountingWriter(0);
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.0)
+}
+
+fn validate_global_transfer_size(size: usize, limit: usize) -> Result<(), String> {
+    if size <= limit {
+        return Ok(());
+    }
+    let limit_description = if limit == GLOBAL_TRANSFER_MAX_BYTES {
+        "64 MiB".to_owned()
+    } else {
+        format!("{limit} bytes")
+    };
+    Err(format!(
+        "global logical transfer is {size} bytes, exceeding the {limit_description} import limit; refusing the transfer without dropping history. Use `bwrk global backup --out PATH` for a complete physical backup."
+    ))
+}
+
+fn validate_global_transfer(value: &Value, limit: usize) -> Result<(), String> {
+    let size = serialized_json_size(value).map_err(|error| error.to_string())?;
+    validate_global_transfer_size(size, limit)
+}
+
+fn validate_global_import_bundle(snapshot: &Value, limit: usize) -> Result<(), StoreError> {
+    for key in [
+        "projects",
+        "items",
+        "notes",
+        "statuses",
+        "relationships",
+        "associations",
+    ] {
+        if !snapshot.get(key).is_some_and(Value::is_array) {
+            return Err(StoreError::Invalid(format!(
+                "import snapshot requires {key} array"
+            )));
+        }
+    }
+    if !snapshot.get("status_history").is_some_and(Value::is_array) {
+        return Err(StoreError::Invalid(
+            "import snapshot requires status_history array".into(),
+        ));
+    }
+    if snapshot
+        .get("revision_history")
+        .is_some_and(|value| !value.is_array())
+        || snapshot
+            .get("imported_history")
+            .is_some_and(|value| !value.is_array())
+    {
+        return Err(StoreError::Invalid(
+            "import revision history must be arrays".into(),
+        ));
+    }
+    if snapshot.get("schema_version").and_then(Value::as_u64) != Some(2) {
+        return Err(StoreError::Invalid(
+            "unsupported global backup schema version".into(),
+        ));
+    }
+    validate_global_transfer(snapshot, limit).map_err(StoreError::Invalid)?;
+    validate_import_snapshot(snapshot)?;
+    let mut history_entries = 0usize;
+    validate_import_history(snapshot, 0, &mut history_entries)
+}
 
 #[derive(Debug)]
 pub enum GlobalManagerError {
@@ -159,6 +242,9 @@ impl GlobalManagerApplication {
             }
         }
         self.validate(command, &prepared)?;
+        if command == "import" {
+            self.preflight_import_export(&prepared)?;
+        }
         if is_mutation(command) {
             let result =
                 self.store
@@ -279,24 +365,57 @@ impl GlobalManagerApplication {
                     "detail page query must be a string".into(),
                 ));
             }
+            if payload
+                .get("expected_revision")
+                .is_some_and(|v| v.as_u64().is_none())
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "detail page expected_revision must be a non-negative integer".into(),
+                ));
+            }
+        }
+        if command == "attention page" {
+            if payload.get("limit").is_some_and(|v| {
+                v.as_u64()
+                    .is_none_or(|n| !(1..=GLOBAL_PAGE_LIMIT_MAX).contains(&n))
+            }) {
+                return Err(GlobalManagerError::Invalid(
+                    "attention page limit must be from 1 to 200".into(),
+                ));
+            }
+            if payload.get("offset").is_some_and(|v| v.as_u64().is_none()) {
+                return Err(GlobalManagerError::Invalid(
+                    "attention page offset must be a non-negative integer".into(),
+                ));
+            }
+            if payload
+                .get("expected_revision")
+                .is_some_and(|v| v.as_u64().is_none())
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "attention page expected_revision must be a non-negative integer".into(),
+                ));
+            }
         }
         if command == "export" {
-            let (mut state, revision, history) = self.store.export_bundle()?;
-            state["schema_version"] = json!(2);
-            state["revision"] = json!(revision);
-            state["revision_history"] = json!(history);
-            return Ok(state);
+            return self.logical_export(GLOBAL_TRANSFER_MAX_BYTES);
         }
-        let (mut state, revision) = if matches!(command, "snapshot" | "detail page") {
-            self.store.snapshot()?
-        } else {
-            (self.store.state()?, self.store.revision()?)
-        };
+        let (mut state, revision) =
+            if matches!(command, "snapshot" | "detail page" | "attention page") {
+                self.store.snapshot()?
+            } else {
+                (self.store.state()?, self.store.revision()?)
+            };
         match command {
             "snapshot" => {
                 state["schema_version"] = serde_json::json!(2);
                 state["revision"] = serde_json::json!(revision);
-                let attention = attention_summary(&state);
+                let attention_sample_ids = arr(&state, "projects")
+                    .iter()
+                    .take(GLOBAL_ATTENTION_PROJECTS_LIMIT)
+                    .filter_map(|project| project["id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>();
+                let attention = attention_summary(&state, &attention_sample_ids);
                 let mut totals = serde_json::Map::new();
                 let archived_projects = state
                     .get("projects")
@@ -418,7 +537,8 @@ impl GlobalManagerApplication {
                     .and_then(Value::as_u64)
                     .unwrap_or(50)
                     .clamp(1, 200) as usize;
-                let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0);
+                let page_offset = usize::try_from(offset).unwrap_or(usize::MAX);
                 let project_id = payload.get("project_id").and_then(Value::as_str);
                 let kind = payload.get("kind").and_then(Value::as_str);
                 let query = payload
@@ -429,6 +549,7 @@ impl GlobalManagerApplication {
                     .get("include_archived")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let expected_revision = payload.get("expected_revision").and_then(Value::as_u64);
                 let source = state
                     .get(collection)
                     .and_then(Value::as_array)
@@ -467,7 +588,7 @@ impl GlobalManagerApplication {
                         ))
                     })
                     .collect::<std::collections::BTreeMap<_, _>>();
-                let rows = source
+                let mut rows = source
                     .into_iter()
                     .filter(|row| {
                         let owner = if collection == "projects" {
@@ -518,46 +639,55 @@ impl GlobalManagerApplication {
                                     .is_some_and(|owner| archived_projects.contains(owner)))
                     })
                     .collect::<Vec<_>>();
-                let total = rows.len();
-                let mut page = rows
-                    .into_iter()
-                    .skip(offset)
-                    .take(limit)
-                    .map(|mut row| {
-                        if let Some(object) = row.as_object_mut() {
-                            match collection {
-                                "notes" => {
-                                    object.remove("body");
+                rows.sort_by(|left, right| {
+                    detail_row_order_key(collection, left)
+                        .cmp(&detail_row_order_key(collection, right))
+                });
+                let total = rows.len() as u64;
+                let resnapshot_required =
+                    expected_revision.is_some_and(|expected| expected != revision);
+                let mut page = if resnapshot_required {
+                    Vec::new()
+                } else {
+                    rows.into_iter()
+                        .skip(page_offset)
+                        .take(limit)
+                        .map(|mut row| {
+                            if let Some(object) = row.as_object_mut() {
+                                match collection {
+                                    "notes" => {
+                                        object.remove("body");
+                                    }
+                                    "items" => {
+                                        object.remove("description");
+                                    }
+                                    "projects" => {
+                                        object.remove("description");
+                                    }
+                                    // Prior imported database images are available to restore/export
+                                    // flows but can be portfolio-sized. Keep their revision metadata
+                                    // browsable without putting nested full states in an interactive page.
+                                    "imported_history" => {
+                                        object.remove("snapshot");
+                                    }
+                                    _ => {}
                                 }
-                                "items" => {
-                                    object.remove("description");
-                                }
-                                "projects" => {
-                                    object.remove("description");
-                                }
-                                // Prior imported database images are available to restore/export
-                                // flows but can be portfolio-sized. Keep their revision metadata
-                                // browsable without putting nested full states in an interactive page.
-                                "imported_history" => {
-                                    object.remove("snapshot");
-                                }
-                                _ => {}
                             }
-                        }
-                        row
-                    })
-                    .collect::<Vec<_>>();
+                            row
+                        })
+                        .collect::<Vec<_>>()
+                };
                 let mut page_value = Value::Array(std::mem::take(&mut page));
                 bound_summary_text(&mut page_value, 512);
                 let mut page = page_value.as_array().cloned().unwrap_or_default();
                 while page.len() > 1
-                    && serde_json::to_vec(&json!({"collection":collection,"rows":&page,"total":total,"limit":limit,"offset":offset,"revision":revision}))
+                    && serde_json::to_vec(&json!({"collection":collection,"rows":&page,"total":total,"limit":limit,"offset":offset,"revision":revision,"resnapshot_required":resnapshot_required,"requested_revision":expected_revision}))
                         .map(|bytes| bytes.len() > INTERACTIVE_RESPONSE_MAX_BYTES)
                         .unwrap_or(true)
                 {
                     page.truncate((page.len() / 2).max(1));
                 }
-                if serde_json::to_vec(&json!({"collection":collection,"rows":&page,"total":total,"limit":limit,"offset":offset,"revision":revision}))
+                if serde_json::to_vec(&json!({"collection":collection,"rows":&page,"total":total,"limit":limit,"offset":offset,"revision":revision,"resnapshot_required":resnapshot_required,"requested_revision":expected_revision}))
                     .map(|bytes| bytes.len() > INTERACTIVE_RESPONSE_MAX_BYTES)
                     .unwrap_or(true)
                 {
@@ -565,10 +695,90 @@ impl GlobalManagerApplication {
                         "a detail record exceeds the interactive response size limit".into(),
                     ));
                 }
-                let next = offset.saturating_add(page.len());
+                let next = offset.saturating_add(page.len() as u64);
+                let has_more = !resnapshot_required && next < total;
                 Ok(
-                    json!({"collection":collection,"rows":page,"total":total,"limit":limit,"offset":offset,"has_more":next < total,"next_offset":if next < total {json!(next)} else {Value::Null},"revision":revision}),
+                    json!({"collection":collection,"rows":page,"total":total,"limit":limit,"offset":offset,"has_more":has_more,"next_offset":if has_more {json!(next)} else {Value::Null},"revision":revision,"resnapshot_required":resnapshot_required,"requested_revision":expected_revision}),
                 )
+            }
+            "attention page" => {
+                let limit = payload
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(50)
+                    .clamp(1, GLOBAL_PAGE_LIMIT_MAX) as usize;
+                let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0);
+                let page_offset = usize::try_from(offset).unwrap_or(usize::MAX);
+                let expected_revision = payload.get("expected_revision").and_then(Value::as_u64);
+                let resnapshot_required =
+                    expected_revision.is_some_and(|expected| expected != revision);
+                let mut all_project_ids = arr(&state, "projects")
+                    .iter()
+                    .filter_map(|project| project["id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>();
+                all_project_ids.sort();
+                let projects_total = all_project_ids.len() as u64;
+                let selected_project_ids = all_project_ids
+                    .iter()
+                    .skip(page_offset)
+                    .take(limit)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let attention = (!resnapshot_required)
+                    .then(|| attention_summary(&state, &selected_project_ids));
+                let attention_projects = attention
+                    .as_ref()
+                    .and_then(|value| value.get("projects"))
+                    .and_then(Value::as_object);
+                let page_rows = selected_project_ids
+                    .iter()
+                    .filter_map(|project_id| {
+                        attention_projects
+                            .and_then(|projects| projects.get(project_id))
+                            .map(|value| json!({"project_id":project_id,"attention":value}))
+                    })
+                    .collect::<Vec<_>>();
+                let total = projects_total;
+                let mut page_rows = page_rows;
+                let mut response = json!({
+                    "rows": &page_rows,
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                    "revision": revision,
+                    "resnapshot_required": resnapshot_required,
+                    "requested_revision": expected_revision
+                });
+                while serde_json::to_vec(&response)
+                    .map(|bytes| bytes.len() > INTERACTIVE_RESPONSE_MAX_BYTES)
+                    .unwrap_or(true)
+                    && page_rows.len() > 1
+                {
+                    page_rows.truncate((page_rows.len() / 2).max(1));
+                    response["rows"] = json!(&page_rows);
+                }
+                if serde_json::to_vec(&response)
+                    .map(|bytes| bytes.len() > INTERACTIVE_RESPONSE_MAX_BYTES)
+                    .unwrap_or(true)
+                {
+                    return Err(GlobalManagerError::Invalid(
+                        "a project attention record exceeds the interactive response size limit"
+                            .into(),
+                    ));
+                }
+                let next = offset.saturating_add(page_rows.len() as u64);
+                let has_more = !resnapshot_required && next < total;
+                Ok(json!({
+                    "rows": page_rows,
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                    "has_more": has_more,
+                    "next_offset": if has_more { json!(next) } else { Value::Null },
+                    "revision": revision,
+                    "resnapshot_required": resnapshot_required,
+                    "requested_revision": expected_revision
+                }))
             }
             "project list" => Ok(filter_project_list(&state["projects"], payload)),
             "project show" => Ok(one_from(
@@ -640,6 +850,44 @@ impl GlobalManagerApplication {
                 "unsupported global command: {command}"
             ))),
         }
+    }
+
+    fn logical_export(&self, size_limit: usize) -> Result<Value, GlobalManagerError> {
+        let (mut state, revision, history) = self.store.export_bundle()?;
+        state["schema_version"] = json!(2);
+        state["revision"] = json!(revision);
+        state["revision_history"] = json!(history);
+        validate_global_import_bundle(&state, size_limit)
+            .map_err(|error| GlobalManagerError::Invalid(error.to_string()))?;
+        Ok(state)
+    }
+
+    fn preflight_import_export(&self, payload: &Value) -> Result<(), GlobalManagerError> {
+        let (before, revision, mut history) = self.store.export_bundle()?;
+        let next_revision = revision
+            .checked_add(1)
+            .ok_or_else(|| GlobalManagerError::Invalid("global revision overflow".into()))?;
+        let mut replacement = before.clone();
+        apply_mutation("import", payload, &mut replacement, next_revision)?;
+
+        // The store records the pre-import state at the current revision as
+        // part of the same transaction. Include that exact future history row
+        // when checking that the accepted import remains logically portable.
+        if !history
+            .iter()
+            .any(|entry| entry.get("revision").and_then(Value::as_u64) == Some(revision))
+        {
+            history.push(json!({
+                "revision": revision,
+                "snapshot": before,
+                "created_at": now(),
+            }));
+        }
+        replacement["schema_version"] = json!(2);
+        replacement["revision"] = json!(next_revision);
+        replacement["revision_history"] = json!(history);
+        validate_global_import_bundle(&replacement, GLOBAL_TRANSFER_MAX_BYTES)
+            .map_err(|error| GlobalManagerError::Invalid(error.to_string()))
     }
 
     fn validate(&self, command: &str, p: &Value) -> Result<(), GlobalManagerError> {
@@ -1124,6 +1372,7 @@ fn is_mutation(command: &str) -> bool {
             | "export"
             | "history"
             | "detail page"
+            | "attention page"
             | "operation show"
     )
 }
@@ -1906,52 +2155,7 @@ fn apply_mutation(
         }
         "import" => {
             let incoming = p.get("snapshot").unwrap_or(p);
-            for key in [
-                "projects",
-                "items",
-                "notes",
-                "statuses",
-                "relationships",
-                "associations",
-            ] {
-                if !incoming.get(key).is_some_and(Value::is_array) {
-                    return Err(StoreError::Invalid(format!(
-                        "import snapshot requires {key} array"
-                    )));
-                }
-            }
-            if !incoming.get("status_history").is_some_and(Value::is_array) {
-                return Err(StoreError::Invalid(
-                    "import snapshot requires status_history array".into(),
-                ));
-            }
-            if incoming
-                .get("revision_history")
-                .is_some_and(|v| !v.is_array())
-                || incoming
-                    .get("imported_history")
-                    .is_some_and(|v| !v.is_array())
-            {
-                return Err(StoreError::Invalid(
-                    "import revision history must be arrays".into(),
-                ));
-            }
-            if incoming.get("schema_version").and_then(Value::as_u64) != Some(2) {
-                return Err(StoreError::Invalid(
-                    "unsupported global backup schema version".into(),
-                ));
-            }
-            let serialized_size = serde_json::to_vec(incoming)
-                .map_err(|error| StoreError::Invalid(error.to_string()))?
-                .len();
-            if serialized_size > 64 * 1024 * 1024 {
-                return Err(StoreError::Invalid(
-                    "global backup exceeds the 64 MiB import limit".into(),
-                ));
-            }
-            validate_import_snapshot(incoming)?;
-            let mut history_entries = 0usize;
-            validate_import_history(incoming, 0, &mut history_entries)?;
+            validate_global_import_bundle(incoming, GLOBAL_TRANSFER_MAX_BYTES)?;
             let mut imported_history = incoming
                 .get("imported_history")
                 .and_then(Value::as_array)
@@ -2182,19 +2386,30 @@ fn status_for_category(
         })
 }
 
-fn attention_summary(state: &Value) -> Value {
+fn attention_summary(state: &Value, selected_project_ids: &[String]) -> Value {
     let today = utc_today();
     let archived = arr(state, "projects")
         .iter()
         .filter(|p| p["archived"] == true)
-        .filter_map(|p| p["id"].as_str())
+        .filter_map(|p| p["id"].as_str().map(str::to_owned))
         .collect::<std::collections::BTreeSet<_>>();
     let categories = arr(state, "statuses");
     let mut portfolio = [0_u64; 5];
-    let mut projects = arr(state, "projects").iter().filter_map(|project| {
-        let id = project["id"].as_str()?;
-        Some((id.to_owned(), json!({"open":0,"waiting":0,"overdue":0,"unscheduled":0,"due_today":0,"next_action":null,"next_milestone":null})))
-    }).collect::<serde_json::Map<_, _>>();
+    let project_ids = arr(state, "projects")
+        .iter()
+        .filter_map(|project| project["id"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let projects_total = project_ids.len() as u64;
+    let included_project_ids = selected_project_ids
+        .iter()
+        .filter(|id| project_ids.contains(id))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut projects = included_project_ids
+        .iter()
+        .map(|id| (id.clone(), empty_project_attention()))
+        .collect::<serde_json::Map<_, _>>();
+    let mut personal = empty_project_attention();
     for item in arr(state, "items") {
         if item["archived"] == true
             || item["project_id"]
@@ -2203,7 +2418,6 @@ fn attention_summary(state: &Value) -> Value {
         {
             continue;
         }
-        let owner = item["project_id"].as_str().unwrap_or("personal");
         let category = categories
             .iter()
             .find(|s| {
@@ -2216,21 +2430,55 @@ fn attention_summary(state: &Value) -> Value {
             continue;
         }
         let due = item["due_at"].as_str().and_then(utc_date_from_iso);
-        let counts = projects.entry(owner.to_owned()).or_insert_with(
-            || json!({"open":0,"waiting":0,"overdue":0,"unscheduled":0,"due_today":0}),
-        );
-        let mut inc = |idx: usize, key: &str| {
-            portfolio[idx] += 1;
-            counts[key] = json!(counts[key].as_u64().unwrap_or(0) + 1);
-        };
-        inc(0, "open");
+        let counts = item["project_id"]
+            .as_str()
+            .and_then(|owner| projects.get_mut(owner))
+            .or_else(|| item["project_id"].is_null().then_some(&mut personal));
+        portfolio[0] += 1;
+        if let Some(counts) = counts {
+            counts["open"] = json!(counts["open"].as_u64().unwrap_or(0) + 1);
+        }
         if category == "waiting" {
-            inc(1, "waiting");
+            portfolio[1] += 1;
+            if let Some(counts) = item["project_id"]
+                .as_str()
+                .and_then(|owner| projects.get_mut(owner))
+                .or_else(|| item["project_id"].is_null().then_some(&mut personal))
+            {
+                counts["waiting"] = json!(counts["waiting"].as_u64().unwrap_or(0) + 1);
+            }
         }
         match due.as_deref() {
-            Some(d) if d < today.as_str() => inc(2, "overdue"),
-            None => inc(3, "unscheduled"),
-            Some(d) if d == today => inc(4, "due_today"),
+            Some(d) if d < today.as_str() => {
+                portfolio[2] += 1;
+                if let Some(counts) = item["project_id"]
+                    .as_str()
+                    .and_then(|owner| projects.get_mut(owner))
+                    .or_else(|| item["project_id"].is_null().then_some(&mut personal))
+                {
+                    counts["overdue"] = json!(counts["overdue"].as_u64().unwrap_or(0) + 1);
+                }
+            }
+            None => {
+                portfolio[3] += 1;
+                if let Some(counts) = item["project_id"]
+                    .as_str()
+                    .and_then(|owner| projects.get_mut(owner))
+                    .or_else(|| item["project_id"].is_null().then_some(&mut personal))
+                {
+                    counts["unscheduled"] = json!(counts["unscheduled"].as_u64().unwrap_or(0) + 1);
+                }
+            }
+            Some(d) if d == today => {
+                portfolio[4] += 1;
+                if let Some(counts) = item["project_id"]
+                    .as_str()
+                    .and_then(|owner| projects.get_mut(owner))
+                    .or_else(|| item["project_id"].is_null().then_some(&mut personal))
+                {
+                    counts["due_today"] = json!(counts["due_today"].as_u64().unwrap_or(0) + 1);
+                }
+            }
             _ => {}
         }
     }
@@ -2238,95 +2486,162 @@ fn attention_summary(state: &Value) -> Value {
         if archived.contains(project_id.as_str()) {
             continue;
         }
-        let mut active_items = arr(state, "items")
-            .iter()
-            .filter(|item| {
-                item["project_id"] == project_id.as_str()
-                    && item["archived"] != true
-                    && !matches!(item_category(state, item), "completed" | "cancelled")
-            })
-            .collect::<Vec<_>>();
-        let mut actions = active_items
-            .iter()
-            .copied()
-            .filter(|item| {
-                matches!(item["kind"].as_str(), Some("task" | "subtask"))
-                    && matches!(item_category(state, item), "open" | "active")
-            })
-            .collect::<Vec<_>>();
-        actions.sort_by(|left, right| {
-            let due_key = |item: &Value| {
-                item["due_at"]
-                    .as_str()
-                    .and_then(utc_date_from_iso)
-                    .unwrap_or_else(|| "9999-99-99".into())
-            };
-            due_key(left)
-                .cmp(&due_key(right))
-                .then_with(|| {
-                    right["priority"]
-                        .as_u64()
-                        .unwrap_or(0)
-                        .cmp(&left["priority"].as_u64().unwrap_or(0))
-                })
-                .then_with(|| {
-                    left["position"]
-                        .as_i64()
-                        .unwrap_or(0)
-                        .cmp(&right["position"].as_i64().unwrap_or(0))
-                })
-                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
-        });
-        if let Some(item) = actions.first() {
-            let status_id = item["status_id"].as_str().unwrap_or_default();
-            let label = arr(state, "statuses")
-                .iter()
-                .find(|status| {
-                    status["project_id"].as_str() == Some(project_id)
-                        && status["status_id"] == status_id
-                })
-                .and_then(|status| status["label"].as_str())
-                .unwrap_or(status_id);
-            summary["next_action"] = json!({"item_id":item["id"],"title":bound_text(item["title"].as_str().unwrap_or_default(),160),"due_at":item["due_at"],"priority":item["priority"],"status_id":status_id,"status_label":label,"kind":item["kind"]});
-        }
-        let mut milestones = active_items
-            .drain(..)
-            .filter(|item| item["kind"] == "milestone")
-            .collect::<Vec<_>>();
-        milestones.sort_by(|left, right| {
-            let due_key = |item: &Value| {
-                item["due_at"]
-                    .as_str()
-                    .and_then(utc_date_from_iso)
-                    .unwrap_or_else(|| "9999-99-99".into())
-            };
-            due_key(left)
-                .cmp(&due_key(right))
-                .then_with(|| {
-                    left["position"]
-                        .as_i64()
-                        .unwrap_or(0)
-                        .cmp(&right["position"].as_i64().unwrap_or(0))
-                })
-                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
-        });
-        if let Some(milestone) = milestones.first() {
-            let children = arr(state, "items")
-                .iter()
-                .filter(|child| {
-                    child["parent_id"] == milestone["id"]
-                        && child["project_id"] == project_id.as_str()
-                        && child["archived"] != true
-                })
-                .collect::<Vec<_>>();
-            let completed = children
-                .iter()
-                .filter(|child| item_category(state, child) == "completed")
-                .count();
-            summary["next_milestone"] = json!({"item_id":milestone["id"],"title":bound_text(milestone["title"].as_str().unwrap_or_default(),160),"due_at":milestone["due_at"],"completed_children":completed,"total_children":children.len()});
-        }
+        populate_attention_details(state, Some(project_id), summary);
     }
-    json!({"portfolio":{"open":portfolio[0],"waiting":portfolio[1],"overdue":portfolio[2],"unscheduled":portfolio[3],"due_today":portfolio[4]},"projects":projects})
+    if personal["open"].as_u64().unwrap_or(0) > 0 {
+        populate_attention_details(state, None, &mut personal);
+        // Keep the established snapshot key for existing clients while also
+        // exposing personal attention explicitly outside the project totals.
+        projects
+            .entry("personal".to_owned())
+            .or_insert_with(|| personal.clone());
+    }
+    let projects_sampled = included_project_ids.len() as u64;
+    let projects_truncated = projects_sampled < projects_total;
+    json!({
+        "portfolio":{"open":portfolio[0],"waiting":portfolio[1],"overdue":portfolio[2],"unscheduled":portfolio[3],"due_today":portfolio[4]},
+        "projects":projects,
+        "projects_total":projects_total,
+        "projects_limit":projects_sampled,
+        "projects_has_more":projects_truncated,
+        "projects_truncated":projects_truncated,
+        "personal":personal
+    })
+}
+
+fn empty_project_attention() -> Value {
+    json!({"open":0,"waiting":0,"overdue":0,"unscheduled":0,"due_today":0,"next_action":null,"next_milestone":null})
+}
+
+fn populate_attention_details(state: &Value, project_id: Option<&str>, summary: &mut Value) {
+    let owns = |item: &Value| match project_id {
+        Some(project_id) => item["project_id"].as_str() == Some(project_id),
+        None => item["project_id"].is_null(),
+    };
+    let mut active_items = arr(state, "items")
+        .iter()
+        .filter(|item| {
+            owns(item)
+                && item["archived"] != true
+                && !matches!(item_category(state, item), "completed" | "cancelled")
+        })
+        .collect::<Vec<_>>();
+    let mut actions = active_items
+        .iter()
+        .copied()
+        .filter(|item| {
+            matches!(item["kind"].as_str(), Some("task" | "subtask"))
+                && matches!(item_category(state, item), "open" | "active")
+        })
+        .collect::<Vec<_>>();
+    actions.sort_by(|left, right| {
+        let due_key = |item: &Value| {
+            item["due_at"]
+                .as_str()
+                .and_then(utc_date_from_iso)
+                .unwrap_or_else(|| "9999-99-99".into())
+        };
+        due_key(left)
+            .cmp(&due_key(right))
+            .then_with(|| {
+                right["priority"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .cmp(&left["priority"].as_u64().unwrap_or(0))
+            })
+            .then_with(|| {
+                left["position"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .cmp(&right["position"].as_i64().unwrap_or(0))
+            })
+            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+    });
+    if let Some(item) = actions.first() {
+        let status_id = item["status_id"].as_str().unwrap_or_default();
+        let label = arr(state, "statuses")
+            .iter()
+            .find(|status| {
+                status["project_id"].as_str() == project_id && status["status_id"] == status_id
+            })
+            .and_then(|status| status["label"].as_str())
+            .unwrap_or(status_id);
+        summary["next_action"] = json!({"item_id":item["id"],"title":bound_text(item["title"].as_str().unwrap_or_default(),160),"due_at":item["due_at"],"priority":item["priority"],"status_id":status_id,"status_label":bound_text(label,160),"kind":item["kind"]});
+    }
+    let mut milestones = active_items
+        .drain(..)
+        .filter(|item| item["kind"] == "milestone")
+        .collect::<Vec<_>>();
+    milestones.sort_by(|left, right| {
+        let due_key = |item: &Value| {
+            item["due_at"]
+                .as_str()
+                .and_then(utc_date_from_iso)
+                .unwrap_or_else(|| "9999-99-99".into())
+        };
+        due_key(left)
+            .cmp(&due_key(right))
+            .then_with(|| {
+                left["position"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .cmp(&right["position"].as_i64().unwrap_or(0))
+            })
+            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+    });
+    if let Some(milestone) = milestones.first() {
+        let children = arr(state, "items")
+            .iter()
+            .filter(|child| {
+                child["parent_id"] == milestone["id"] && owns(child) && child["archived"] != true
+            })
+            .collect::<Vec<_>>();
+        let completed = children
+            .iter()
+            .filter(|child| item_category(state, child) == "completed")
+            .count();
+        summary["next_milestone"] = json!({"item_id":milestone["id"],"title":bound_text(milestone["title"].as_str().unwrap_or_default(),160),"due_at":milestone["due_at"],"completed_children":completed,"total_children":children.len()});
+    }
+}
+
+fn detail_row_order_key(collection: &str, row: &Value) -> String {
+    let text = |field: &str| row.get(field).and_then(Value::as_str).unwrap_or_default();
+    let number = |field: &str| {
+        format!(
+            "{:020}",
+            row.get(field).and_then(Value::as_u64).unwrap_or(0)
+        )
+    };
+    let fields = match collection {
+        "projects" => vec![text("id").to_owned()],
+        "items" | "notes" => vec![text("id").to_owned()],
+        "statuses" => vec![text("project_id").to_owned(), text("status_id").to_owned()],
+        "relationships" => vec![
+            text("source_id").to_owned(),
+            text("target_id").to_owned(),
+            text("kind").to_owned(),
+        ],
+        "note_links" => vec![text("note_id").to_owned(), text("item_id").to_owned()],
+        "associations" => vec![
+            text("project_id").to_owned(),
+            text("kind").to_owned(),
+            text("identity").to_owned(),
+        ],
+        "status_history" => vec![
+            number("revision"),
+            text("item_id").to_owned(),
+            text("changed_at").to_owned(),
+            text("to_status_id").to_owned(),
+        ],
+        "imported_history" => vec![number("source_revision"), text("created_at").to_owned()],
+        _ => Vec::new(),
+    };
+    let stable_row = serde_json::to_string(row).unwrap_or_default();
+    fields
+        .into_iter()
+        .chain(std::iter::once(stable_row))
+        .collect::<Vec<_>>()
+        .join("\u{0}")
 }
 
 fn item_category<'a>(state: &'a Value, item: &Value) -> &'a str {
@@ -2602,7 +2917,7 @@ fn validate_import_history(
 ) -> Result<(), StoreError> {
     if depth > 8 {
         return Err(StoreError::Invalid(
-            "global backup revision history exceeds the maximum nesting depth of 8".into(),
+            "global backup revision history exceeds the maximum nesting depth of 8; use `bwrk global backup --out PATH` for a complete physical backup".into(),
         ));
     }
     let error = |message: &str| StoreError::Invalid(format!("invalid global backup: {message}"));
@@ -2619,7 +2934,7 @@ fn validate_import_history(
             *entry_count = entry_count.saturating_add(1);
             if *entry_count > 10_000 {
                 return Err(StoreError::Invalid(
-                    "global backup contains more than 10000 revision history entries".into(),
+                    "global backup contains more than 10000 revision history entries; use `bwrk global backup --out PATH` for a complete physical backup".into(),
                 ));
             }
             if key == "revision_history" && !entry.get("revision").and_then(Value::as_u64).is_some()
@@ -3107,5 +3422,347 @@ mod global_date_tests {
         );
         assert_eq!(utc_date_from_iso("2026-02-30"), None);
         assert_eq!(utc_date_from_iso("2026-01-02T00:30:00"), None);
+    }
+}
+
+#[cfg(test)]
+mod global_attention_page_tests {
+    use super::{GlobalManagerApplication, INTERACTIVE_RESPONSE_MAX_BYTES};
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DB: AtomicU64 = AtomicU64::new(1);
+
+    fn database_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "boreal-global-attention-{}-{}.sqlite",
+            std::process::id(),
+            NEXT_DB.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn call(
+        app: &GlobalManagerApplication,
+        command: &str,
+        payload: Value,
+        operation: &str,
+    ) -> Value {
+        app.execute(command, &payload, operation).unwrap()
+    }
+
+    fn import_portfolio(app: &GlobalManagerApplication, project_count: usize) {
+        let project = call(app, "project add", json!({"name":"Seed"}), "seed-project");
+        let project_id = project["id"].as_str().unwrap();
+        call(
+            app,
+            "todo add",
+            json!({"project_id":project_id,"title":"Seed task","due_at":"2000-01-01T00:00:00Z"}),
+            "seed-item",
+        );
+        let mut bundle = call(app, "export", json!({}), "seed-export");
+        let project_template = bundle["projects"][0].clone();
+        let item_template = bundle["items"][0].clone();
+        let status_templates = bundle["statuses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|status| status["project_id"].as_str() == Some(project_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let global_statuses = bundle["statuses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|status| status["project_id"].is_null())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut projects = Vec::with_capacity(project_count);
+        let mut items = Vec::with_capacity(project_count);
+        let mut statuses = global_statuses;
+        for index in 0..project_count {
+            let id = format!("attention-project-{index:03}");
+            let mut next_project = project_template.clone();
+            next_project["id"] = json!(id);
+            next_project["name"] = json!(format!("Portfolio {index:03}"));
+            projects.push(next_project);
+
+            let mut next_item = item_template.clone();
+            next_item["id"] = json!(format!("attention-item-{index:03}"));
+            next_item["project_id"] = json!(id);
+            next_item["title"] = json!(format!("Action {index:03}"));
+            next_item["due_at"] = json!("2000-01-01T00:00:00Z");
+            items.push(next_item);
+
+            for template in &status_templates {
+                let mut status = template.clone();
+                status["project_id"] = json!(id);
+                statuses.push(status);
+            }
+        }
+        bundle["projects"] = json!(projects);
+        bundle["items"] = json!(items);
+        bundle["statuses"] = json!(statuses);
+        bundle["status_history"] = json!([]);
+        let expected_revision = app.revision().unwrap();
+        call(
+            app,
+            "import",
+            json!({"snapshot":bundle,"replace":true,"expected_revision":expected_revision}),
+            "bulk-portfolio-import",
+        );
+    }
+
+    #[test]
+    fn snapshot_attention_is_bounded_and_pages_are_revision_bound_and_complete() {
+        const PROJECTS: usize = 125;
+        let path = database_path();
+        let app = GlobalManagerApplication::open(&path).unwrap();
+        import_portfolio(&app, PROJECTS);
+
+        let snapshot = call(&app, "snapshot", json!({}), "bounded-snapshot");
+        let snapshot_revision = snapshot["revision"].as_u64().unwrap();
+        assert_eq!(snapshot["totals"]["projects"], PROJECTS);
+        assert_eq!(snapshot["totals"]["items"], PROJECTS);
+        assert_eq!(snapshot["attention"]["projects_total"], PROJECTS);
+        assert_eq!(snapshot["attention"]["projects_limit"], 100);
+        assert_eq!(
+            snapshot["attention"]["projects"].as_object().unwrap().len(),
+            100
+        );
+        assert_eq!(snapshot["attention"]["projects_truncated"], true);
+        assert_eq!(snapshot["attention"]["projects_has_more"], true);
+        assert_eq!(snapshot["attention"]["portfolio"]["open"], PROJECTS);
+        assert_eq!(snapshot["attention"]["portfolio"]["overdue"], PROJECTS);
+        assert!(serde_json::to_vec(&snapshot).unwrap().len() < INTERACTIVE_RESPONSE_MAX_BYTES);
+
+        let mut attention_ids = Vec::new();
+        let mut offset = 0_u64;
+        loop {
+            let page = call(
+                &app,
+                "attention page",
+                json!({"limit":37,"offset":offset,"expected_revision":snapshot_revision}),
+                &format!("attention-page-{offset}"),
+            );
+            assert_eq!(page["revision"], snapshot_revision);
+            assert_eq!(page["resnapshot_required"], false);
+            assert_eq!(page["total"], PROJECTS);
+            assert!(serde_json::to_vec(&page).unwrap().len() < INTERACTIVE_RESPONSE_MAX_BYTES);
+            let rows = page["rows"].as_array().unwrap();
+            assert!(rows.len() <= 37);
+            attention_ids.extend(
+                rows.iter()
+                    .map(|row| row["project_id"].as_str().unwrap().to_owned()),
+            );
+            match page["next_offset"].as_u64() {
+                Some(next) => {
+                    assert_eq!(next, offset + rows.len() as u64);
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        let expected_ids = (0..PROJECTS)
+            .map(|index| format!("attention-project-{index:03}"))
+            .collect::<Vec<_>>();
+        assert_eq!(attention_ids, expected_ids);
+
+        let mut detail_ids = Vec::new();
+        let mut offset = 0_u64;
+        loop {
+            let page = call(
+                &app,
+                "detail page",
+                json!({"collection":"projects","limit":41,"offset":offset,"expected_revision":snapshot_revision}),
+                &format!("detail-page-{offset}"),
+            );
+            assert_eq!(page["revision"], snapshot_revision);
+            assert_eq!(page["resnapshot_required"], false);
+            assert_eq!(page["total"], PROJECTS);
+            assert!(serde_json::to_vec(&page).unwrap().len() < INTERACTIVE_RESPONSE_MAX_BYTES);
+            let rows = page["rows"].as_array().unwrap();
+            assert!(rows.len() <= 41);
+            detail_ids.extend(
+                rows.iter()
+                    .map(|row| row["id"].as_str().unwrap().to_owned()),
+            );
+            match page["next_offset"].as_u64() {
+                Some(next) => {
+                    assert_eq!(next, offset + rows.len() as u64);
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(detail_ids, expected_ids);
+
+        call(
+            &app,
+            "project add",
+            json!({"name":"Concurrent"}),
+            "concurrent-project",
+        );
+        let current_revision = app.revision().unwrap();
+        for (command, payload, operation) in [
+            (
+                "attention page",
+                json!({"limit":37,"offset":37,"expected_revision":snapshot_revision}),
+                "stale-attention-page",
+            ),
+            (
+                "detail page",
+                json!({"collection":"projects","limit":41,"offset":41,"expected_revision":snapshot_revision}),
+                "stale-detail-page",
+            ),
+        ] {
+            let stale = call(&app, command, payload, operation);
+            assert_eq!(stale["revision"], current_revision);
+            assert_eq!(stale["requested_revision"], snapshot_revision);
+            assert_eq!(stale["resnapshot_required"], true);
+            assert_eq!(stale["rows"].as_array().unwrap().len(), 0);
+            assert_eq!(stale["has_more"], false);
+            assert!(stale["next_offset"].is_null());
+        }
+
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn personal_attention_keeps_legacy_snapshot_summary() {
+        let path = database_path();
+        let app = GlobalManagerApplication::open(&path).unwrap();
+        let item = call(
+            &app,
+            "todo add",
+            json!({"title":"Personal action","due_at":"2099-01-01"}),
+            "personal-action",
+        );
+
+        let snapshot = call(&app, "snapshot", json!({}), "personal-snapshot");
+        assert_eq!(snapshot["totals"]["projects"], 0);
+        assert_eq!(snapshot["attention"]["projects_total"], 0);
+        assert_eq!(snapshot["attention"]["personal"]["open"], 1);
+        assert_eq!(
+            snapshot["attention"]["personal"]["next_action"]["item_id"],
+            item["id"]
+        );
+        assert_eq!(snapshot["attention"]["projects"]["personal"]["open"], 1);
+        assert_eq!(
+            snapshot["attention"]["projects"]["personal"]["next_action"]["item_id"],
+            item["id"]
+        );
+
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod global_transfer_tests {
+    use super::{
+        serialized_json_size, validate_global_transfer, GlobalManagerApplication,
+        GLOBAL_TRANSFER_MAX_BYTES,
+    };
+    use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DB: AtomicU64 = AtomicU64::new(1);
+
+    fn database_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "boreal-global-transfer-{}-{}.sqlite",
+            std::process::id(),
+            NEXT_DB.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn call(
+        app: &GlobalManagerApplication,
+        command: &str,
+        payload: Value,
+        operation: &str,
+    ) -> Value {
+        app.execute(command, &payload, operation).unwrap()
+    }
+
+    #[test]
+    fn logical_transfer_limit_matches_compact_import_size_and_refuses_without_pruning() {
+        let sample = json!({"revision_history":[{"revision":1,"snapshot":{"id":"kept"}}]});
+        assert_eq!(
+            serialized_json_size(&sample).unwrap(),
+            serde_json::to_vec(&sample).unwrap().len()
+        );
+
+        let at_limit = Value::String("x".repeat(GLOBAL_TRANSFER_MAX_BYTES - 2));
+        assert_eq!(
+            serialized_json_size(&at_limit).unwrap(),
+            GLOBAL_TRANSFER_MAX_BYTES
+        );
+        assert!(validate_global_transfer(&at_limit, GLOBAL_TRANSFER_MAX_BYTES).is_ok());
+        drop(at_limit);
+
+        let over_limit = Value::String("x".repeat(GLOBAL_TRANSFER_MAX_BYTES - 1));
+        assert_eq!(
+            serialized_json_size(&over_limit).unwrap(),
+            GLOBAL_TRANSFER_MAX_BYTES + 1
+        );
+        let error = validate_global_transfer(&over_limit, GLOBAL_TRANSFER_MAX_BYTES).unwrap_err();
+        assert!(error.contains("64 MiB import limit"));
+        assert!(error.contains("without dropping history"));
+        assert!(error.contains("bwrk global backup --out PATH"));
+        assert_eq!(
+            over_limit.as_str().unwrap().len(),
+            GLOBAL_TRANSFER_MAX_BYTES - 1
+        );
+    }
+
+    #[test]
+    fn refused_export_leaves_ids_and_status_history_unchanged() {
+        let path = database_path();
+        let app = GlobalManagerApplication::open(&path).unwrap();
+        let project = call(&app, "project add", json!({"name":"Portable"}), "project");
+        let item = call(
+            &app,
+            "todo add",
+            json!({"project_id":project["id"],"title":"Keep history"}),
+            "item",
+        );
+        call(
+            &app,
+            "todo complete",
+            json!({"item_id":item["id"]}),
+            "complete-item",
+        );
+        let note = call(
+            &app,
+            "note add",
+            json!({"project_id":project["id"],"title":"Transfer note","body":"preserved"}),
+            "note",
+        );
+        let before = call(&app, "snapshot", json!({}), "before-export");
+        let revision = app.revision().unwrap();
+
+        let error = app.logical_export(1).unwrap_err().to_string();
+        assert!(error.contains("without dropping history"));
+        assert!(error.contains("bwrk global backup --out PATH"));
+        assert_eq!(app.revision().unwrap(), revision);
+
+        let after = call(&app, "snapshot", json!({}), "after-export");
+        assert_eq!(after["projects"][0]["id"], project["id"]);
+        assert_eq!(after["items"][0]["id"], item["id"]);
+        assert_eq!(after["notes"][0]["id"], note["id"]);
+        assert_eq!(after["status_history"], before["status_history"]);
+
+        let export = app.logical_export(GLOBAL_TRANSFER_MAX_BYTES).unwrap();
+        assert_eq!(export["projects"][0]["id"], project["id"]);
+        assert_eq!(export["items"][0]["id"], item["id"]);
+        assert_eq!(export["notes"][0]["id"], note["id"]);
+        assert!(!export["revision_history"].as_array().unwrap().is_empty());
+
+        drop(app);
+        let _ = std::fs::remove_file(path);
     }
 }

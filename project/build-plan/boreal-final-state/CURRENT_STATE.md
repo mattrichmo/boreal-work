@@ -1,24 +1,20 @@
-# Current-state inventory — requalified 2026-10-02
+# Current-state inventory — requalified 2026-10-13
 
 ## Exact source
 
 **Repository:** `mattrichmo/boreal-work` · **verified `main` head:**
-`123f3458f37172d71a068af894e63ab01a92fb59` · **commit:**
-`docs(plan): expand Boreal milestone v4 for general work and deliverables` ·
-**commit time:** `2026-10-02T16:53:37-06:00`.
+`1cee693279a0fdb997f3f29cc3537b7ff0f6157a` · **commit:**
+`docs: rewrite Boreal product guide and add README banner` · **commit date:**
+`2026-10-13`.
 
-The code history still includes the 2026-09-30 implementation baseline
-`6ab1c078150993936d5d381822e7774d9e5cfade` and the later code fix
-`e084dac` (`fix(cli): reuse project service for dashboard and next`). The
-commits after `e084dac` through the verified head are plan documentation. The
-V4 task graph is a delta against the inspected code, not a claim that its
-acceptance journeys already pass.
+The earlier exact-head inventory at `123f3458f37172d71a068af894e63ab01a92fb59`
+was re-read against this later main commit. The V4 task graph remains a delta
+against the implementation, not a claim that its acceptance journeys pass.
 
-The verified main tree was clean when cloned. Initializing the separate local
-execution project with `bwrk init` then changed only `.gitignore` to ignore
-project-local Boreal runtime and memory-publication files. No production code
-was changed by setup. The source checkout is on the local
-`boreal-final-push` branch; publication to GitHub is outside this work.
+The local `main` and `origin/main` were both at this SHA with a clean tree
+before this dispatch. Implementation is isolated in a coordinator worktree;
+the user's previous local stash remains untouched. This source requalification
+did not query or mutate the canonical runtime database.
 
 ## Implemented areas and V4 deltas
 
@@ -29,14 +25,15 @@ contract; repair the explicit delta only.
 
 | Area | Retain from current code | Remaining V4 response |
 | --- | --- | --- |
-| Global authority, transactions and history | Separate installation-wide Global store/application, revisioned writes, audit and replayable operation receipts; preserve project execution as the authority for attempts and accepted work. | BW-S00 qualifies current behavior. BW-S01 adds physical Global backup/restore and maintenance ownership; logical export/import is not physical recovery. |
+| Global authority, transactions and history | Separate installation-wide Global store/application, revisioned writes, audit and replayable operation receipts; preserve project execution as the authority for attempts and accepted work. | BW-S00-T05's descriptor-bound `recovery recover` route is present in current source, but sprint-level acceptance remains unrecorded. BW-S01 adds physical Global backup/restore and maintenance ownership; logical export/import is not physical recovery. |
 | Management projects, items, workflows and notes | Folderless projects, optional folder/workspace links, configurable workflow/status identity, hierarchy, relationships, notes, history and bulk triage exist. | BW-S05–S07 complete civil-time daily semantics, Personal Inbox exit/provenance, keyboard triage, truthful Home views and authority-aware guidance. Do not rebuild a generic todo manager. |
-| Global TUI and linked execution | A distinct Global TUI and service client exist. Linked execution is advisory and remains separate from Global-owned completion. | BW-S00/T02 makes the UI and portable PTY path part of normal validation. BW-S04 and S07 close bounded paging, picker completeness, attention and outage-isolation gaps. |
-| Global reads, logical transfer and scaling | Bounded summaries/details, searchable pages, last-good linked counts and validated logical transfer/history exist. | BW-S01/T05 and S04/T05 reconcile transfer bounds. S10 measures representative portfolios before optional storage changes; retain lossless history absent a verified archival path. |
-| Global physical recovery and maintenance | No Global physical backup/restore was established by the earlier logical-transfer work. | BW-S01 adds an online physical backup, staged restore, fresh physical identity and non-destructive maintenance ownership. Never break a live owner lock. |
-| Machine update, install and release | Installer/bootstrap and declared macOS/Linux package paths exist. Project and Global databases have separate authorities. | BW-S02 qualifies checksum/runtime/TUI identity; BW-S03 makes update state machine-scoped and package-plus-Global recovery-capable; S11 qualifies exact release artifacts. Do not widen platform claims from source inspection. |
-| Project planning and execution | The Rust project lifecycle has hierarchy, dependencies, cycles, enrolled sessions, fenced attempts, evidence, reviews, status guidance, source versions and memory publication. Keep one canonical lifecycle. | S08 adds project restore identity and immutable Intake delivery receipts; S09 adds explicit, reconciled Global Send. S12 completes planning amendment, enrolled execution, artifact acceptance, context and portable agent access. |
-| General work and evidence | Existing work/templates carry descriptions, dependency keys, profiles, labels and dispatch. Source versions identify immutable bytes/digests. Project schedules already contain `not_before_at`/`due_at`; cycles carry local/UTC scheduling facts. | These foundations do not establish optional typed output requirements, accepted-input lineage, artifact/decision proof, or review of an exact artifact/input revision. S12 adds the core contract; S13 adds waits/dates, TUI parity and reusable mixed-work journeys. Preserve work that has no deliverable or dates. |
+| Global TUI and linked execution | A distinct Global TUI and service client exist. Linked execution is advisory and remains separate from Global-owned completion. | BW-S00/T02's normal-validation work must be checked against current scripts and workflow wiring. BW-S04 still needs pageable attention, complete form pickers, complete association reads for `global next`, cross-route search, and large-note response handling. |
+| Global reads, logical transfer and scaling | Bounded summaries/details, searchable pages, last-good linked counts and relationship/history validation exist. Issues #1, #3, #5 and #6 appear fixed in source; #4 and #7 remain partial. | BW-S04 closes unbounded attention and association samples, picker/search completeness, worker deadlines and export/import symmetry. BW-S10 still needs Global portfolio fixtures and measured results; retain lossless history absent a verified archival path. |
+| Global physical recovery and maintenance | Global has logical JSON transfer only; no Global-specific physical backup/restore or maintenance admission path was found. | BW-S01 adds online physical backup, staged restore, fresh physical identity and non-destructive maintenance ownership. Never break a live owner lock. |
+| Management daily flow and Inbox | Workflows, items, history, notes, triage and scoped capture exist. Current capture lacks immutable origin provenance and a persistent Personal Inbox status. | BW-S05 needs civil-time classification and prerequisite-aware next actions. BW-S06/S07 add compatible Inbox/provenance behavior, personal quick capture, truthful grouped daily views and authority-aware guidance. |
+| Machine update, install and release | Installer/bootstrap, package identity checks, local package smoke, and project-store backup/restore foundations exist. Project and Global databases have separate authorities. | BW-S02 still needs supported Node preflight and exact target qualification; BW-S03 makes update state machine-scoped and recovery-capable with Global data; S11 needs exact-candidate artifacts and journey evidence. Root CI/release workflows are absent. |
+| Project planning and execution | The Rust project lifecycle has hierarchy, dependencies, cycles, enrolled sessions, fenced attempts, evidence, reviews, status guidance, source versions and memory publication. Keep one canonical lifecycle. | S08 needs unique restore activation identity and immutable Intake delivery receipts/readback; S09 adds explicit, reconciled Global Send. S12 completes planning amendment, artifact acceptance, context and portable agent access. |
+| General work and evidence | Existing work/templates carry descriptions, dependency keys, profiles, labels and dispatch. Source versions identify immutable bytes/digests. Cycle scheduling exists. | Work-level typed output requirements, accepted-input lineage, content-bound artifact/decision proof, portable artifact recovery, persisted civil dates, typed external waits and TUI/CLI parity remain incomplete. S12/S13 own those deltas. |
 | Conditional/deferred work | S10-T04/T05/T06 are retained historical cards, not required release outcomes. Saved views, recurrence/reminders, team sync, Gantt/resource planning, rich document editing and automatic provider launching remain conditional or deferred. | S10-T01 through T03 are required scale qualification. Keep the three historical experiments paused unless the stated product/evidence trigger changes. |
 
 ## V4 required task map
@@ -64,7 +61,22 @@ outside the required release.
 | BW-S13 (BW-S13-T01, BW-S13-T02, BW-S13-T03, BW-S13-T90) | Civil dates and external waits, TUI/CLI parity, versioned reference templates and mixed-work qualification. |
 | BW-S11 (BW-S11-T01, BW-S11-T02, BW-S11-T03, BW-S11-T04, BW-S11-T05, BW-S11-T06, BW-S11-T90) | Final exact-artifact journeys, v1 parity, recovery/security/performance regression and operator handover; joins S09, S10, S12 and S13. |
 
-## Exact-head qualification recorded for dispatch
+## Current-head qualification recorded for dispatch
+
+- Source reviewed at `1cee693279a0fdb997f3f29cc3537b7ff0f6157a` on
+  2026-10-13. The checkout was clean and aligned with `origin/main` before the
+  coordinator worktree was created.
+- Three read-only Luna Extra High source audits covered Global/TUI,
+  project/general-work workflows, and runtime/release qualification. They
+  checked source and existing tests but did not execute tests, builds, release
+  artifacts, or canonical runtime database operations.
+- Issues #1, #3, #5, and #6 appear fixed in source; #4 and #7 are partial.
+  All six reported issues remain open on GitHub. No open PRs were found.
+- Do not treat the 2026-10-02 local build/import observations below as current
+  head validation. They are preserved as historical evidence in
+  `SOURCE_BASELINE.md`.
+
+## Historical exact-head qualification from 2026-10-02
 
 - `python3 project/build-plan/boreal-final-state/validate_plan.py` passes:
   14 sprints, 85 required tasks, 100 native work items, 24 journeys and 3

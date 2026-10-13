@@ -535,6 +535,29 @@ impl<'a> IdentityStore<'a> {
         })
     }
 
+    /// Generates a fresh physical identity for a restore activation.
+    ///
+    /// SQLite's per-connection PRNG supplies the entropy so the store does not
+    /// need a second random-number dependency. The caller persists the chosen
+    /// value with the restore epoch and receipt before publishing the staged
+    /// database; retries then recover the same identity from that durable
+    /// staging record rather than generating another one.
+    pub(crate) fn fresh_restore_database_instance_id(
+        &self,
+    ) -> Result<DatabaseInstanceId, IdentityError> {
+        let mut statement = Statement::new(
+            self.store,
+            "SELECT 'restore-' || lower(hex(randomblob(16)))",
+        )?;
+        if statement.step()? != SQLITE_ROW {
+            return Err(IdentityError::Invalid {
+                field: "database_instance_id".to_owned(),
+                message: "SQLite did not return a fresh restore identity".to_owned(),
+            });
+        }
+        DatabaseInstanceId::new(statement.column_text(0)?)
+    }
+
     /// Binds one existing project to an already validated canonical workspace.
     /// Rebinding to a different root/digest is explicit and never silent.
     pub fn bind_project(

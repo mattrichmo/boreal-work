@@ -4,7 +4,10 @@
 //! open a project database from the current working directory.
 
 use super::*;
-use boreal_application::{GlobalManagerApplication, GlobalManagerError, ResolvedWorkspaceIdentity};
+use boreal_application::{
+    create_global_backup, restore_global_backup, GlobalManagerApplication, GlobalManagerError,
+    ResolvedWorkspaceIdentity, GLOBAL_BACKUP_CONTENTS,
+};
 
 pub(crate) fn supported(path: &[String]) -> bool {
     path.first().is_some_and(|value| value == "global")
@@ -619,6 +622,24 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
             )?);
             "operation show".to_owned()
         }
+        ["backup"] => {
+            if let Some(destination) = value("out") {
+                payload["path"] = json!(destination);
+            }
+            "backup".to_owned()
+        }
+        ["restore"] => {
+            if !parsed.options.setup.yes {
+                return Err(CliError::invalid(
+                    "global restore requires --yes to confirm replacing the active database",
+                ));
+            }
+            payload["path"] = json!(required(
+                positional(0),
+                "global restore requires a physical backup package path"
+            )?);
+            "restore".to_owned()
+        }
         ["export"] => {
             if let Some(out) = value("out") {
                 payload["path"] = json!(out);
@@ -649,11 +670,11 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
             CliError::with(
                 ErrorCode::NotFound,
                 ApplicationOutcome::Rejected,
-                format!("cannot read global backup {}: {error}", source),
+                format!("cannot read Global import document {}: {error}", source),
             )
         })?;
         let snapshot: Value = serde_json::from_slice(&bytes).map_err(|error| {
-            CliError::invalid(format!("global backup is invalid JSON: {error}"))
+            CliError::invalid(format!("Global export document is invalid JSON: {error}"))
         })?;
         let app = GlobalManagerApplication::open(ensure_global_root()?).map_err(global_error)?;
         let current = app
@@ -730,12 +751,190 @@ pub(crate) fn snapshot_data(operation: &str) -> Result<Value, CliError> {
     Ok(data)
 }
 
+const GLOBAL_DETAIL_PAGE_SIZE: u64 = 200;
+pub(crate) const GLOBAL_DISCOVERY_ROW_LIMIT: usize = 1000;
+
+/// A bounded, revision-checked read over a detail-page collection. Global
+/// summaries intentionally cap their arrays, so discovery and diagnostics
+/// must use this read path when they need to account for every association.
+pub(crate) struct GlobalDetailRead {
+    pub(crate) rows: Vec<Value>,
+    pub(crate) total: u64,
+    pub(crate) revision: Option<u64>,
+    pub(crate) observed_revision: Option<u64>,
+    pub(crate) complete: bool,
+    pub(crate) stale: bool,
+    pub(crate) reason: Option<&'static str>,
+}
+
+pub(crate) fn read_global_detail_pages(
+    app: &GlobalManagerApplication,
+    collection: &str,
+    operation: &str,
+    row_limit: usize,
+    include_archived: bool,
+) -> Result<GlobalDetailRead, CliError> {
+    if row_limit == 0 {
+        return Err(CliError::invalid(
+            "global detail read limit must be greater than zero",
+        ));
+    }
+
+    let mut rows = Vec::new();
+    let mut offset = 0u64;
+    let mut revision = None;
+    let mut observed_revision = None;
+    let mut total = None;
+    let mut reason = None;
+    let mut stale = false;
+
+    loop {
+        let payload = json!({
+            "collection": collection,
+            "limit": GLOBAL_DETAIL_PAGE_SIZE,
+            "offset": offset,
+            "include_archived": include_archived,
+        });
+        let page = app
+            .execute(
+                "detail page",
+                &payload,
+                &format!("{operation}-detail-{collection}-{offset}"),
+            )
+            .map_err(global_error)?;
+        let page_revision = page
+            .get("revision")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::invalid("global detail page omitted its revision"))?;
+        if let Some(expected) = revision {
+            if page_revision != expected {
+                observed_revision = Some(page_revision);
+                stale = true;
+                reason = Some("global_revision_changed_during_enumeration");
+                break;
+            }
+        } else {
+            revision = Some(page_revision);
+        }
+
+        let page_total = page
+            .get("total")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::invalid("global detail page omitted its total"))?;
+        if let Some(expected) = total {
+            if page_total != expected {
+                stale = true;
+                reason = Some("global_total_changed_during_enumeration");
+                break;
+            }
+        } else {
+            total = Some(page_total);
+        }
+
+        let page_rows = page
+            .get("rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| CliError::invalid("global detail page omitted its rows"))?;
+        let remaining = row_limit.saturating_sub(rows.len());
+        rows.extend(page_rows.iter().take(remaining).cloned());
+        let has_more = page
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| CliError::invalid("global detail page omitted has_more"))?;
+        if rows.len() >= row_limit && page_total > rows.len() as u64 {
+            reason = Some("configured_global_detail_limit_reached");
+            break;
+        }
+        if !has_more {
+            if rows.len() as u64 != page_total {
+                reason = Some("global_detail_page_coverage_incomplete");
+            }
+            break;
+        }
+        if rows.len() >= row_limit {
+            reason = Some("configured_global_detail_limit_reached");
+            break;
+        }
+        let next_offset = page
+            .get("next_offset")
+            .and_then(Value::as_u64)
+            .filter(|next| *next > offset && *next <= page_total);
+        let Some(next_offset) = next_offset else {
+            stale = true;
+            reason = Some("global_detail_page_did_not_advance");
+            break;
+        };
+        if page_rows.is_empty() {
+            stale = true;
+            reason = Some("global_detail_page_did_not_advance");
+            break;
+        }
+        offset = next_offset;
+    }
+
+    let total = total.unwrap_or(0);
+    let complete = !stale && reason.is_none() && rows.len() as u64 == total;
+    if !complete && reason.is_none() {
+        reason = Some("configured_global_detail_limit_reached");
+    }
+    Ok(GlobalDetailRead {
+        rows,
+        total,
+        revision,
+        observed_revision,
+        complete,
+        stale,
+        reason,
+    })
+}
+
 pub(crate) fn execute_request(
     command: &str,
     payload: &Value,
     operation: &str,
 ) -> Result<Value, CliError> {
     let path = ensure_global_root()?;
+    if command == "backup" {
+        let destination = match payload.get("path") {
+            None => None,
+            Some(Value::String(path)) => Some(Path::new(path)),
+            Some(_) => return Err(CliError::invalid("Global backup path must be a string")),
+        };
+        let metadata = create_global_backup(&path, destination, operation).map_err(global_error)?;
+        return Ok(json!({
+            "operation_id": metadata.operation_id,
+            "path": metadata.package_path.to_string_lossy(),
+            "schema_id": metadata.schema_id,
+            "schema_version": metadata.schema_version,
+            "database_id": metadata.database_id,
+            "revision": metadata.revision,
+            "database_bytes": metadata.database_bytes,
+            "database_checksum": metadata.database_checksum,
+            "created_at": metadata.created_at,
+            "validated": metadata.validated,
+            "idempotent_readback": metadata.idempotent_readback,
+            "contents": GLOBAL_BACKUP_CONTENTS,
+        }));
+    }
+    if command == "restore" {
+        let package = payload
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::invalid("Global restore package path must be a string"))?;
+        let metadata =
+            restore_global_backup(&path, Path::new(package), operation).map_err(global_error)?;
+        return Ok(json!({
+            "operation_id": metadata.operation_id,
+            "path": metadata.database_path.to_string_lossy(),
+            "package_path": metadata.package_path.to_string_lossy(),
+            "source_database_id": metadata.source_database_id,
+            "database_id": metadata.database_id,
+            "revision": metadata.revision,
+            "previous_database_path": metadata.previous_database_path.map(|path| path.to_string_lossy().into_owned()),
+            "validated": metadata.validated,
+            "idempotent_readback": metadata.idempotent_readback,
+        }));
+    }
     let app = GlobalManagerApplication::open(path).map_err(global_error)?;
     if command == "export" {
         let data = app
@@ -927,6 +1126,13 @@ pub(crate) fn mutation(command: &str) -> bool {
     is_mutation(command)
 }
 
+/// A backup does not mutate canonical Global state, but it publishes a local
+/// artifact and therefore needs unknown-delivery handling if the service
+/// response is lost.
+pub(crate) fn may_have_delivery_effect(command: &str) -> bool {
+    is_mutation(command) || command == "backup"
+}
+
 fn is_mutation(command: &str) -> bool {
     !matches!(
         command,
@@ -949,6 +1155,7 @@ fn is_mutation(command: &str) -> bool {
             | "linked show"
             | "linked page"
             | "linked job show"
+            | "backup"
             | "export"
     )
 }
@@ -1172,6 +1379,7 @@ fn normalize_folder_path(input: &str) -> Result<String, CliError> {
 const LINKED_POOL_WORKERS: usize = 8;
 const LINKED_POOL_QUEUE: usize = 64;
 const LINKED_REFRESH_BUDGET: std::time::Duration = std::time::Duration::from_millis(75);
+const LINKED_JOB_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 const LINKED_DETAIL_RETENTION: std::time::Duration = std::time::Duration::from_secs(300);
 const LINKED_DETAIL_RESULT_CAPACITY: usize = 128;
 static LINKED_JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1179,6 +1387,8 @@ static LINKED_JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
 struct LinkedRefreshJob {
     key: (String, String),
     path: String,
+    queued_at: Instant,
+    deadline: Instant,
     kind: LinkedRefreshKind,
 }
 
@@ -1197,6 +1407,11 @@ enum LinkedRefreshKind {
         release: std::sync::mpsc::Receiver<()>,
         fail: bool,
     },
+    #[cfg(test)]
+    BlockRollup {
+        started: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
 }
 
 type LinkedDetailKey = (String, String, String, u64, u64);
@@ -1205,6 +1420,8 @@ struct LinkedDetailRecord {
     key: LinkedDetailKey,
     page: Option<Value>,
     error: Option<String>,
+    pool_wait_ms: Option<u64>,
+    refresh_duration_ms: Option<u64>,
     changed_at: Instant,
 }
 
@@ -1227,6 +1444,7 @@ fn preserve_linked_sample_on_error(
     previous: Option<Value>,
     failure: Value,
     now_ms: u64,
+    pool_wait_ms: u64,
     refresh_duration_ms: u64,
 ) -> Value {
     if failure["availability"] != "unavailable" {
@@ -1240,6 +1458,7 @@ fn preserve_linked_sample_on_error(
     let sampled_at = previous["_sampled_at_ms"].as_u64().unwrap_or(now_ms);
     previous["availability"] = json!("stale");
     previous["sample_age_ms"] = json!(now_ms.saturating_sub(sampled_at));
+    previous["pool_wait_ms"] = json!(pool_wait_ms);
     previous["refresh_duration_ms"] = json!(refresh_duration_ms);
     previous["error"] = failure["error"].clone();
     previous
@@ -1272,21 +1491,22 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                 Ok(job) => job,
                 Err(_) => break,
             };
+            let queued_at = job.queued_at;
+            let deadline = job.deadline;
             match job.kind {
                 LinkedRefreshKind::Rollup => {
                     let started = Instant::now();
-                    let result = linked_workspace_rollup(
-                        &job.key.1,
-                        &job.path,
-                        Instant::now() + Duration::from_secs(3),
-                    );
+                    let pool_wait_ms =
+                        started.saturating_duration_since(queued_at).as_millis() as u64;
+                    let result = linked_workspace_rollup(&job.key.1, &job.path, deadline);
                     let now = now_ms_u64();
+                    let refresh_duration_ms = started.elapsed().as_millis() as u64;
                     let row = match result {
                         Ok(value) => {
-                            json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"refresh_duration_ms":started.elapsed().as_millis() as u64,"counts":value["counts"],"error":null})
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":value["counts"],"error":null})
                         }
                         Err(error) => {
-                            json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"refresh_duration_ms":started.elapsed().as_millis() as u64,"counts":null,"error":error})
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":null,"error":error})
                         }
                     };
                     let mut state = state.lock().expect("linked cache poisoned");
@@ -1295,7 +1515,47 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                         state.rows.get(&job.key).cloned(),
                         row,
                         now,
-                        started.elapsed().as_millis() as u64,
+                        pool_wait_ms,
+                        refresh_duration_ms,
+                    );
+                    state.rows.insert(job.key, row);
+                    changed.notify_all();
+                }
+                #[cfg(test)]
+                LinkedRefreshKind::BlockRollup {
+                    started: signal,
+                    release,
+                } => {
+                    let started = Instant::now();
+                    let pool_wait_ms =
+                        started.saturating_duration_since(queued_at).as_millis() as u64;
+                    let _ = signal.send(());
+                    let _ = release.recv();
+                    let result = if Instant::now() >= deadline {
+                        Err("linked workspace read deadline expired".to_owned())
+                    } else {
+                        Ok(
+                            json!({"revision":9,"as_of":"test","as_of_ms":now_ms_u64(),"counts":{"total":9}}),
+                        )
+                    };
+                    let now = now_ms_u64();
+                    let refresh_duration_ms = started.elapsed().as_millis() as u64;
+                    let row = match result {
+                        Ok(value) => {
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":value["counts"],"error":null})
+                        }
+                        Err(error) => {
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":null,"error":error})
+                        }
+                    };
+                    let mut state = state.lock().expect("linked cache poisoned");
+                    state.pending.remove(&job.key);
+                    let row = preserve_linked_sample_on_error(
+                        state.rows.get(&job.key).cloned(),
+                        row,
+                        now,
+                        pool_wait_ms,
+                        refresh_duration_ms,
                     );
                     state.rows.insert(job.key, row);
                     changed.notify_all();
@@ -1306,13 +1566,16 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                     offset,
                     job_id,
                 } => {
+                    let started = Instant::now();
+                    let pool_wait_ms =
+                        started.saturating_duration_since(queued_at).as_millis() as u64;
                     let result = linked_workspace_detail(
                         &management_project_id,
                         &job.key.1,
                         &job.path,
                         limit,
                         offset,
-                        Instant::now() + Duration::from_secs(3),
+                        deadline,
                     )
                     .map(|mut page| {
                         let items = page
@@ -1331,8 +1594,11 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                             Value::Null
                         };
                         page["job_id"] = Value::Null;
+                        page["pool_wait_ms"] = json!(pool_wait_ms);
+                        page["refresh_duration_ms"] = json!(started.elapsed().as_millis() as u64);
                         page
                     });
+                    let refresh_duration_ms = started.elapsed().as_millis() as u64;
                     let mut state = state.lock().expect("linked cache poisoned");
                     if let Some(record) = state.details.get_mut(&job_id) {
                         match result {
@@ -1345,6 +1611,8 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                                 record.page = None;
                             }
                         }
+                        record.pool_wait_ms = Some(pool_wait_ms);
+                        record.refresh_duration_ms = Some(refresh_duration_ms);
                         record.changed_at = Instant::now();
                     }
                     changed.notify_all();
@@ -1367,6 +1635,12 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                                 json!({"availability":"available","items":[],"items_total":0,"total":0,"revision":7,"as_of":"test","job_id":null}),
                             );
                         }
+                        record.pool_wait_ms = Some(
+                            Instant::now()
+                                .saturating_duration_since(queued_at)
+                                .as_millis() as u64,
+                        );
+                        record.refresh_duration_ms = Some(0);
                         record.changed_at = Instant::now();
                     }
                     changed.notify_all();
@@ -1422,18 +1696,23 @@ fn schedule_linked_detail(
         LINKED_JOB_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     let (project_id, identity, _, limit, offset) = key.clone();
+    let queued_at = Instant::now();
     state.details.insert(
         job_id.clone(),
         LinkedDetailRecord {
             key: key.clone(),
             page: None,
             error: None,
-            changed_at: Instant::now(),
+            pool_wait_ms: None,
+            refresh_duration_ms: None,
+            changed_at: queued_at,
         },
     );
     let job = LinkedRefreshJob {
         key: (project_id, identity),
         path,
+        queued_at,
+        deadline: queued_at + LINKED_JOB_BUDGET,
         kind: LinkedRefreshKind::Detail {
             management_project_id,
             limit,
@@ -1517,12 +1796,18 @@ fn linked_detail_job_from_pool(pool: &LinkedRefreshPool, job_id: &str) -> Result
         )
     })?;
     if let Some(error) = &record.error {
-        return Ok(json!({"job_id":job_id,"state":"failed","page":null,"error":error}));
+        return Ok(
+            json!({"job_id":job_id,"state":"failed","page":null,"error":error,"pool_wait_ms":record.pool_wait_ms,"refresh_duration_ms":record.refresh_duration_ms}),
+        );
     }
     if let Some(page) = &record.page {
-        return Ok(json!({"job_id":job_id,"state":"complete","page":page,"error":null}));
+        return Ok(
+            json!({"job_id":job_id,"state":"complete","page":page,"error":null,"pool_wait_ms":record.pool_wait_ms,"refresh_duration_ms":record.refresh_duration_ms}),
+        );
     }
-    Ok(json!({"job_id":job_id,"state":"refreshing","page":null,"error":null}))
+    Ok(
+        json!({"job_id":job_id,"state":"refreshing","page":null,"error":null,"pool_wait_ms":null,"refresh_duration_ms":null}),
+    )
 }
 
 fn enrich_snapshot(snapshot: &mut Value) {
@@ -1570,14 +1855,34 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
         state.pending.retain(|key| keys.contains(key));
         for (key, _, _, path) in &requests {
             if state.pending.insert(key.clone()) {
+                let queued_at = Instant::now();
                 match pool.sender.try_send(LinkedRefreshJob {
                     key: key.clone(),
                     path: path.clone(),
+                    queued_at,
+                    deadline: queued_at + LINKED_JOB_BUDGET,
                     kind: LinkedRefreshKind::Rollup,
                 }) {
                     Ok(()) => {}
-                    Err(_) => {
+                    Err(error) => {
                         state.pending.remove(key);
+                        let message = match error {
+                            std::sync::mpsc::TrySendError::Full(_) => {
+                                "linked refresh worker queue is full"
+                            }
+                            std::sync::mpsc::TrySendError::Disconnected(_) => {
+                                "linked refresh workers are unavailable"
+                            }
+                        };
+                        let failure = json!({"project_id":key.1,"path":path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":0,"refresh_duration_ms":0,"counts":null,"error":message});
+                        let stale = preserve_linked_sample_on_error(
+                            state.rows.get(key).cloned(),
+                            failure,
+                            now_ms_u64(),
+                            0,
+                            0,
+                        );
+                        state.rows.insert(key.clone(), stale);
                     }
                 }
             }
@@ -1597,7 +1902,7 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
     let state = pool.state.lock().expect("linked cache poisoned");
     let linked = requests.into_iter().map(|(key,management_project_id,identity,path)| {
         let pending = state.pending.contains(&key);
-        let mut row = state.rows.get(&key).cloned().unwrap_or_else(|| json!({"project_id":identity,"path":path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"counts":null,"error":"linked workspace has not produced a sample"}));
+        let mut row = state.rows.get(&key).cloned().unwrap_or_else(|| json!({"project_id":identity,"path":path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":null,"refresh_duration_ms":null,"counts":null,"error":"linked workspace has not produced a sample"}));
         if let Some(sampled_at) = row.get("_sampled_at_ms").and_then(Value::as_u64) {
             row["sample_age_ms"] = json!(now_ms_u64().saturating_sub(sampled_at));
             if let Some(object) = row.as_object_mut() {
@@ -1606,7 +1911,7 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
         }
         row["management_project_id"] = json!(management_project_id);
         if pending {
-            row["availability"] = json!(if state.rows.get(&key).is_some_and(|v| v["availability"] == "available") { "stale" } else { "refreshing" });
+            row["availability"] = json!(if state.rows.get(&key).is_some_and(|v| matches!(v["availability"].as_str(), Some("available" | "stale"))) { "stale" } else { "refreshing" });
             row["error"] = json!("refresh is still running");
         }
         row
@@ -1743,14 +2048,137 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
+    fn physical_backup_has_its_own_command_and_output_path() {
+        let mut options = CliOptions::default();
+        options
+            .extra
+            .insert("--out".to_owned(), vec!["private-copy".to_owned()]);
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "backup".to_owned()],
+            options,
+        };
+        let (command, payload) = build_command(&parsed).unwrap();
+        assert_eq!(command, "backup");
+        assert_eq!(payload, json!({"path":"private-copy"}));
+        assert!(!mutation(&command));
+        assert!(may_have_delivery_effect(&command));
+
+        let export = ParsedCommand {
+            path: vec!["global".to_owned(), "export".to_owned()],
+            options: parsed.options,
+        };
+        let (command, payload) = build_command(&export).unwrap();
+        assert_eq!(command, "export");
+        assert_eq!(payload, json!({"path":"private-copy"}));
+    }
+
+    #[test]
+    fn physical_restore_requires_package_path_and_explicit_confirmation() {
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "restore".to_owned()],
+            options: CliOptions::default(),
+        };
+        assert!(build_command(&parsed)
+            .unwrap_err()
+            .message
+            .contains("requires --yes"));
+
+        let mut options = CliOptions::default();
+        options.setup.yes = true;
+        let missing_package = ParsedCommand {
+            path: vec!["global".to_owned(), "restore".to_owned()],
+            options: options.clone(),
+        };
+        assert!(build_command(&missing_package)
+            .unwrap_err()
+            .message
+            .contains("package path"));
+
+        options.positionals.push("backup.global-backup".to_owned());
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "restore".to_owned()],
+            options,
+        };
+        let (command, payload) = build_command(&parsed).unwrap();
+        assert_eq!(command, "restore");
+        assert_eq!(payload, json!({"path":"backup.global-backup"}));
+        assert!(mutation(&command));
+    }
+
+    #[test]
+    fn global_detail_reads_pass_summary_cap_and_mark_the_configured_limit_partial() {
+        let root = std::env::temp_dir().join(format!(
+            "boreal-global-detail-pages-{}-{}",
+            std::process::id(),
+            now_ms_u64()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let app = GlobalManagerApplication::open(root.join("global.sqlite")).unwrap();
+
+        for index in 0..105 {
+            let project_id = format!("management-{index:03}");
+            let operation = format!("detail-project-{index:03}");
+            app.execute(
+                "project add",
+                &json!({"project_id":project_id,"name":format!("Management {index}")}),
+                &operation,
+            )
+            .unwrap();
+            app.execute_with_workspace_resolver(
+                "project link",
+                &json!({"project_id":project_id,"path":format!("/workspace/{index}")}),
+                &format!("detail-link-{index:03}"),
+                |path| {
+                    Ok(ResolvedWorkspaceIdentity {
+                        project_id: format!("workspace-{index:03}"),
+                        path: path.to_owned(),
+                    })
+                },
+            )
+            .unwrap();
+        }
+
+        let summary = app
+            .execute("snapshot", &json!({}), "detail-summary-check")
+            .unwrap();
+        assert_eq!(summary["associations"].as_array().unwrap().len(), 100);
+
+        let complete =
+            read_global_detail_pages(&app, "associations", "detail-complete", 1000, false).unwrap();
+        assert!(complete.complete);
+        assert!(!complete.stale);
+        assert_eq!(complete.total, 105);
+        assert_eq!(complete.rows.len(), 105);
+        let complete_projects =
+            read_global_detail_pages(&app, "projects", "detail-projects", 1000, true).unwrap();
+        assert!(complete_projects.complete);
+        assert_eq!(complete_projects.total, 105);
+        assert_eq!(complete_projects.rows.len(), 105);
+
+        let partial =
+            read_global_detail_pages(&app, "associations", "detail-partial", 100, false).unwrap();
+        assert!(!partial.complete);
+        assert!(!partial.stale);
+        assert_eq!(partial.total, 105);
+        assert_eq!(partial.rows.len(), 100);
+        assert_eq!(
+            partial.reason,
+            Some("configured_global_detail_limit_reached")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn linked_failure_keeps_last_good_counts_and_updates_sample_age() {
         let previous = json!({"availability":"available","counts":{"open":4},"revision":8,"as_of":"2026-09-30T00:00:00Z","_sampled_at_ms":1000,"sample_age_ms":0,"error":null});
         let failure = json!({"availability":"unavailable","error":"workspace database is busy"});
-        let stale = preserve_linked_sample_on_error(Some(previous), failure, 7250, 31);
+        let stale = preserve_linked_sample_on_error(Some(previous), failure, 7250, 12, 31);
         assert_eq!(stale["availability"], "stale");
         assert_eq!(stale["counts"]["open"], 4);
         assert_eq!(stale["revision"], 8);
         assert_eq!(stale["sample_age_ms"], 6250);
+        assert_eq!(stale["pool_wait_ms"], 12);
         assert_eq!(stale["refresh_duration_ms"], 31);
         assert_eq!(stale["error"], "workspace database is busy");
     }
@@ -1774,13 +2202,18 @@ mod tests {
                 key: key.clone(),
                 page: None,
                 error: None,
+                pool_wait_ms: None,
+                refresh_duration_ms: None,
                 changed_at: Instant::now(),
             },
         );
+        let queued_at = Instant::now();
         pool.sender
             .try_send(LinkedRefreshJob {
                 key: (key.0.clone(), key.1.clone()),
                 path: "synthetic".into(),
+                queued_at,
+                deadline: queued_at + LINKED_JOB_BUDGET,
                 kind: LinkedRefreshKind::Block {
                     job_id: job_id.to_owned(),
                     started,
@@ -1825,6 +2258,8 @@ mod tests {
             let status = linked_detail_job_from_pool(&pool, "job-complete").unwrap();
             if status["state"] == "complete" {
                 assert_eq!(status["page"]["revision"], 7);
+                assert!(status["pool_wait_ms"].is_number());
+                assert!(status["refresh_duration_ms"].is_number());
                 break;
             }
             assert!(Instant::now() < deadline, "detail job did not complete");
@@ -1910,11 +2345,191 @@ mod tests {
                     ),
                     page: Some(json!({"items":[]})),
                     error: None,
+                    pool_wait_ms: Some(0),
+                    refresh_duration_ms: Some(0),
                     changed_at: Instant::now(),
                 },
             );
         }
         prune_linked_detail_results(&mut state, Instant::now());
         assert_eq!(state.details.len(), LINKED_DETAIL_RESULT_CAPACITY);
+    }
+
+    #[test]
+    fn linked_rollup_discards_a_late_success_and_keeps_the_last_good_sample_stale() {
+        let pool = new_linked_refresh_pool();
+        let key = ("management-late".to_owned(), "workspace-late".to_owned());
+        let sampled_at = now_ms_u64().saturating_sub(100);
+        {
+            let mut state = pool.state.lock().unwrap();
+            state.pending.insert(key.clone());
+            state.rows.insert(
+                key.clone(),
+                json!({"project_id":"workspace-late","path":"synthetic","availability":"available","revision":5,"as_of":"sampled","sample_age_ms":100,"_sampled_at_ms":sampled_at,"counts":{"total":9},"error":null}),
+            );
+        }
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let queued_at = Instant::now();
+        pool.sender
+            .try_send(LinkedRefreshJob {
+                key: key.clone(),
+                path: "synthetic".into(),
+                queued_at,
+                deadline: queued_at + Duration::from_millis(30),
+                kind: LinkedRefreshKind::BlockRollup {
+                    started,
+                    release: release_rx,
+                },
+            })
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let mut snapshot = json!({"associations":[{"project_id":"management-late","kind":"workspace","identity":"workspace-late","path":"synthetic"}]});
+        enrich_snapshot_with_pool(&mut snapshot, &pool);
+        let presented = &snapshot["linked_projects"][0];
+        assert_eq!(presented["availability"], "stale");
+        assert_eq!(presented["counts"]["total"], 9);
+
+        std::thread::sleep(Duration::from_millis(40));
+        release.send(()).unwrap();
+        let completion_deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let state = pool.state.lock().unwrap();
+            if !state.pending.contains(&key) {
+                let row = state.rows.get(&key).unwrap();
+                assert_eq!(row["availability"], "stale");
+                assert_eq!(row["counts"]["total"], 9);
+                assert_eq!(row["revision"], 5);
+                assert_eq!(row["error"], "linked workspace read deadline expired");
+                assert!(row["refresh_duration_ms"].as_u64().unwrap() >= 40);
+                break;
+            }
+            drop(state);
+            assert!(
+                Instant::now() < completion_deadline,
+                "late worker did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn linked_worker_and_queue_saturation_leave_global_mutations_available_and_measure_wait() {
+        let pool = new_linked_refresh_pool();
+        let mut blocker_releases = Vec::new();
+        for index in 0..LINKED_POOL_WORKERS {
+            let key = (format!("blocker-{index}"), format!("workspace-{index}"));
+            let (started, started_rx) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            let queued_at = Instant::now();
+            pool.state.lock().unwrap().pending.insert(key.clone());
+            pool.sender
+                .try_send(LinkedRefreshJob {
+                    key,
+                    path: "synthetic".into(),
+                    queued_at,
+                    deadline: queued_at + Duration::from_secs(10),
+                    kind: LinkedRefreshKind::BlockRollup {
+                        started,
+                        release: release_rx,
+                    },
+                })
+                .unwrap();
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            blocker_releases.push(release);
+        }
+
+        let associations = (0..LINKED_POOL_WORKERS + LINKED_POOL_QUEUE + 8)
+            .map(|index| {
+                json!({"project_id":format!("management-{index:03}"),"kind":"workspace","identity":format!("linked-{index:03}"),"path":"/missing/synthetic/workspace"})
+            })
+            .collect::<Vec<_>>();
+        let first_key = ("management-000".to_owned(), "linked-000".to_owned());
+        pool.state.lock().unwrap().rows.insert(
+            first_key,
+            json!({"project_id":"linked-000","path":"/missing/synthetic/workspace","availability":"available","revision":3,"as_of":"last-good","sample_age_ms":0,"_sampled_at_ms":now_ms_u64(),"counts":{"total":1},"error":null}),
+        );
+        let mut snapshot = json!({"associations":associations});
+        let refresh_started = Instant::now();
+        enrich_snapshot_with_pool(&mut snapshot, &pool);
+        let snapshot_elapsed_ms = refresh_started.elapsed().as_millis() as u64;
+        let rows = snapshot["linked_projects"].as_array().unwrap();
+        assert_eq!(rows.len(), LINKED_POOL_WORKERS + LINKED_POOL_QUEUE + 8);
+        assert!(
+            snapshot_elapsed_ms < 500,
+            "snapshot took {snapshot_elapsed_ms} ms"
+        );
+        assert_eq!(rows[0]["availability"], "stale");
+        assert_eq!(rows[0]["counts"]["total"], 1);
+        assert!(rows
+            .iter()
+            .any(|row| row["error"] == "linked refresh worker queue is full"));
+
+        let root = std::env::temp_dir().join(format!(
+            "boreal-global-linked-saturation-{}-{}",
+            std::process::id(),
+            now_ms_u64()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let app = GlobalManagerApplication::open(root.join("global.sqlite")).unwrap();
+        let mutation_started = Instant::now();
+        app.execute(
+            "todo add",
+            &json!({"title":"Global todo under linked saturation"}),
+            "linked-saturation-todo",
+        )
+        .unwrap();
+        app.execute(
+            "note add",
+            &json!({"title":"Global note under linked saturation","body":"The linked queue is busy."}),
+            "linked-saturation-note",
+        )
+        .unwrap();
+        let mutation_elapsed_ms = mutation_started.elapsed().as_millis() as u64;
+        assert!(
+            mutation_elapsed_ms < 1_000,
+            "Global mutations took {mutation_elapsed_ms} ms"
+        );
+        let _ = fs::remove_dir_all(root);
+
+        for release in blocker_releases {
+            release.send(()).unwrap();
+        }
+        let keys = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["management_project_id"].as_str().unwrap().to_owned(),
+                    row["project_id"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let drain_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let state = pool.state.lock().unwrap();
+            if !state.pending.iter().any(|key| keys.contains(key)) {
+                let measured_wait = state
+                    .rows
+                    .iter()
+                    .filter(|(key, _)| keys.contains(*key))
+                    .filter_map(|(_, row)| row["pool_wait_ms"].as_u64())
+                    .max()
+                    .unwrap_or(0);
+                assert!(measured_wait > 0, "pool wait was not measured");
+                assert!(state
+                    .rows
+                    .iter()
+                    .filter(|(key, _)| keys.contains(*key))
+                    .any(|(_, row)| row["refresh_duration_ms"].as_u64().is_some()));
+                break;
+            }
+            drop(state);
+            assert!(
+                Instant::now() < drain_deadline,
+                "saturated linked queue did not drain"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
