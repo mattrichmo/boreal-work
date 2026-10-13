@@ -14,6 +14,8 @@ Use this thin adapter to carry one work item through evidence, verification, rev
 - Use application-owned evidence, verification, summary, finish, close, release, sprint-close, and gate actions. Do not claim completion from prose, a green local command, or an unverified summary.
 - Preserve failed evidence and historical attempts. Attach evidence to the typed work/attempt and report its receipt.
 - Inspect the returned trusted directive/action descriptors and required gates after each action; execute only one state-changing action per response.
+- After implementation, leave the produced artifact in its declared workspace/output and request the authorized Operator to capture that exact result through `source add`. Bind the registered source identity and digest with the fenced `evidence bind-result` action before verification; the application reloads the pinned profile/config and invalidates stale proof applicability.
+- Run verification against the bound result identity. The original claim source remains immutable provenance and must not be substituted for the delivered result.
 - Compose with `summary compose --work ID`; save immutable summary bodies with `summary create` bound to the current attempt, fence and expected revision. Historical `summary backfill` records cannot satisfy live proof.
 
 ## Completion

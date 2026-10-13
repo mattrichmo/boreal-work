@@ -1,0 +1,175 @@
+{
+  "schema_version": "boreal.workflow_asset.v1",
+  "asset_version": "1.3.0",
+  "ref": "boreal.workflow.onboarding.v1",
+  "kind": "onboarding",
+  "title": "Enroll scoped workers and bind immutable project inputs",
+  "refs": {
+    "route": "boreal.workflow.route.v1",
+    "context": "boreal.workflow.context.v1",
+    "plan": "boreal.workflow.plan.v1",
+    "claim": "boreal.workflow.claim.v1",
+    "finish": "boreal.workflow.finish.v1",
+    "review": "boreal.workflow.review.v1",
+    "audit": "boreal.workflow.audit.v1"
+  },
+  "allowed_commands": [
+    "bwrk init --agents <agent_targets> --yes --json",
+    "bwrk status <project_id> --json",
+    "bwrk workflows show <workflow_ref> --json",
+    "bwrk auth key --actor <actor_id> --actor-role <actor_role> --json",
+    "bwrk auth key --actor <actor_id> --actor-role <actor_role> --json",
+    "bwrk auth key --actor <actor_id> --actor-role <actor_role> --json",
+    "bwrk auth grant --input <enrollment_path> --expected-revision <revision> --reason <reason> --yes --json",
+    "bwrk session start --project <project_id> --session <session_id> --harness <harness_id> --json",
+    "bwrk source list <project_id> --json",
+    "bwrk source add <project_id> --input <workspace_path> --origin <origin> --expected-revision <revision> --json",
+    "bwrk source show <project_id> <source_version_id> --json",
+    "bwrk gate policy publish --project <project_id> --gate <gate_id> --input <policy_path> --expected-revision <revision> --yes --json",
+    "bwrk work ready --project <project_id> --json",
+    "bwrk work show <project_id> <work_id> --json",
+    "bwrk agent start <work_id> --project <project_id> --source-version <source_version_id> --config-identity <config_identity> --expected-revision <revision> --session <session_id> --json",
+    "bwrk agent next --project <project_id> --json"
+  ],
+  "typed_inputs": [
+    {
+      "name": "project_id",
+      "type": "project_id",
+      "required": true,
+      "source": "initialized_project_binding",
+      "validation": "exact_project_scope"
+    },
+    {
+      "name": "operator_actor_id",
+      "type": "actor_id",
+      "required": true,
+      "source": "project_operator_credential",
+      "validation": "operator_authority_rechecked_by_each_mutation"
+    },
+    {
+      "name": "worker_actor_id",
+      "type": "actor_id",
+      "required": true,
+      "source": "operator_enrollment_request",
+      "validation": "distinct_project_scoped_agent_principal"
+    },
+    {
+      "name": "reviewer_actor_id",
+      "type": "nullable_actor_id",
+      "required": false,
+      "source": "operator_enrollment_request",
+      "validation": "separate_principal_when_pinned_profile_requires_review"
+    },
+    {
+      "name": "publisher_actor_id",
+      "type": "nullable_actor_id",
+      "required": false,
+      "source": "operator_enrollment_request",
+      "validation": "separate_principal_when_project_memory_publication_is_delegated"
+    },
+    {
+      "name": "expected_project_revision",
+      "type": "revision",
+      "required": true,
+      "source": "latest_canonical_status_or_mutation_receipt",
+      "validation": "refresh_after_each_state_change"
+    },
+    {
+      "name": "enrollment_path",
+      "type": "private_file_path",
+      "required": true,
+      "source": "auth_key_receipt",
+      "validation": "project_local_private_credentials_path"
+    },
+    {
+      "name": "session_id",
+      "type": "session_id",
+      "required": true,
+      "source": "worker_harness",
+      "validation": "unique_project_actor_harness_binding"
+    },
+    {
+      "name": "harness_id",
+      "type": "harness_id",
+      "required": true,
+      "source": "trusted_harness_adapter",
+      "validation": "registered_supported_harness"
+    },
+    {
+      "name": "transport",
+      "type": "transport_context",
+      "required": true,
+      "source": "versioned_request_envelope",
+      "validation": "preserve_direct_or_socket_endpoint_and_request_identity"
+    },
+    {
+      "name": "acceptance_profile_ref",
+      "type": "acceptance_profile_ref",
+      "required": true,
+      "source": "canonical_work_or_operator_plan",
+      "validation": "read_pinned_profile_from_authoritative_work"
+    },
+    {
+      "name": "source_version_id",
+      "type": "source_version_id",
+      "required": true,
+      "source": "operator_source_add_receipt",
+      "validation": "same_project_immutable_workspace_snapshot"
+    },
+    {
+      "name": "config_identity",
+      "type": "config_identity",
+      "required": true,
+      "source": "gate_policy_publish_receipt",
+      "validation": "published_policy_matches_snapshot_and_pinned_gate"
+    },
+    {
+      "name": "server_action",
+      "type": "action_descriptor",
+      "required": true,
+      "source": "canonical_status_or_command_response",
+      "validation": "target_project_actor_session_revisions_confirmation_and_denials_must_match; guidance_is_not_authority"
+    }
+  ],
+  "finish_criteria": [
+    {
+      "id": "onboarding.operator",
+      "type": "initialized_project_and_saved_operator_session",
+      "required": true
+    },
+    {
+      "id": "onboarding.roles",
+      "type": "worker_reviewer_and_publisher_use_separate_explicitly_granted_principals",
+      "required": true
+    },
+    {
+      "id": "onboarding.source",
+      "type": "empty_source_bank_routes_to_operator_capture_and_exact_source_readback",
+      "required": true
+    },
+    {
+      "id": "onboarding.configuration",
+      "type": "published_verifier_policy_returns_the_configuration_identity",
+      "required": true
+    },
+    {
+      "id": "onboarding.first_claim",
+      "type": "first_worker_claim_binds_exact_source_and_configuration_identity",
+      "required": true
+    },
+    {
+      "id": "onboarding.authority",
+      "type": "guidance_never_grants_roles_or_replaces_canonical_authorization",
+      "required": true
+    }
+  ],
+  "next_refs": [
+    "boreal.workflow.claim.v1",
+    "boreal.workflow.route.v1"
+  ],
+  "state_transition_owner": "boreal.application.v2",
+  "required_server_actions": [
+    "claim",
+    "start_attempt"
+  ]
+}

@@ -15,6 +15,8 @@ Use this thin adapter to make session and work boundaries durable through the Bo
 - Use `handoff compose --work ID` for a current handoff; browse retained summaries with `summary list/show`. Composition is a read and does not finish work or end a session.
 - Include current progress, evidence, blockers, lease/fence state, uncommitted changes, and a bounded next action; preserve historical attempts and failed evidence.
 - Inspect the returned trusted directive/action descriptors and required gates. A handoff is not permission to force-break a lock or close work without eligibility.
+- The harness confirms the worker process has stopped before recovering or releasing its resources. Do not infer a dead process from an elapsed heartbeat or lease alone.
+- Preserve the project, actor, harness, session, transport, attempt/fence, source/proof identity, revisions, receipts, and unresolved operation IDs so a replacement can call `agent resume` and read durable outcomes.
 
 ## Completion
 

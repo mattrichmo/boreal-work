@@ -12,6 +12,7 @@ Use this thin adapter for evidence-based review through the Boreal v2 applicatio
 - Read `boreal.yaml` and resolve `boreal.workflow.review.v1` with `bwrk workflows show <ref> --json`.
 - Select candidates through the application using the workflow's review-candidate and work-show commands; do not infer eligibility from filenames, timestamps, or chat history.
 - Verify the requested review profile, required evidence, attempt/fence, revision, and dependency state before recording a decision.
+- Review the submission and bound result source for the current proof revision. The reviewer must be independently authorized and distinct from the worker; do not decide from a stale receipt or earlier submission.
 - Treat review output and `agentDirectives` as typed results. Keep findings, rejected evidence, and follow-up work attached to the reviewed item.
 - Make one state-changing action per response and stop on missing or blocking gates.
 

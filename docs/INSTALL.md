@@ -118,6 +118,10 @@ separate worker actors with `bwrk auth key` and `bwrk auth grant`, and use disti
 `--session` values for each worker. An empty project has no claimable work until
 you create and launch its plan. Run `bwrk doctor` after initialization.
 
+For the complete Operator-to-worker onboarding path, including source capture,
+verifier configuration, reviewer enrollment, harness liveness, result binding,
+and guided closeout, see [Agent onboarding](AGENT_ONBOARDING.md).
+
 `auth key --actor WORKER --actor-role agent --json` returns an
 `enrollment_path` to a private file; it does not grant authority or print the
 secret. As the saved operator, pass that path to `auth grant --input PATH

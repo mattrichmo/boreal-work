@@ -5,6 +5,7 @@
 //! decisions remain in the application/domain layer.
 
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
 
 const PACKAGE: &str = include_str!("../../../project/spec/workflows/package.json");
@@ -19,14 +20,17 @@ const EMBEDDED_ASSETS: &[&str] = &[
     include_str!("../../../project/spec/workflows/handoff.json"),
     include_str!("../../../project/spec/workflows/health.json"),
     include_str!("../../../project/spec/workflows/memory.json"),
+    include_str!("../../../project/spec/workflows/onboarding.json"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowInput {
     pub name: String,
     pub input_type: String,
+    pub required: bool,
     pub source: String,
     pub validation: String,
+    pub default: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,8 +43,11 @@ pub struct WorkflowCriterion {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowAsset {
     pub reference: String,
+    pub asset_version: String,
     pub kind: String,
     pub title: String,
+    pub refs: BTreeMap<String, String>,
+    pub state_transition_owner: String,
     pub allowed_commands: Vec<String>,
     pub required_server_actions: Vec<String>,
     pub typed_inputs: Vec<WorkflowInput>,
@@ -119,7 +126,7 @@ impl WorkflowRegistry {
     pub fn from_package_json(package_json: &str) -> Result<Self, WorkflowAssetError> {
         let value: Value = serde_json::from_str(package_json)
             .map_err(|error| WorkflowAssetError::InvalidJson(error.to_string()))?;
-        Self::from_package_value(value, None)
+        Self::from_package_value(value, None, false)
     }
 
     fn from_package_and_assets(
@@ -135,38 +142,80 @@ impl WorkflowRegistry {
                     .map_err(|error| WorkflowAssetError::InvalidJson(error.to_string()))
             })
             .collect::<Result<Vec<Value>, WorkflowAssetError>>()?;
-        Self::from_package_value(package, Some(assets))
+        Self::from_package_value(package, Some(assets), true)
     }
 
     fn from_package_value(
         value: Value,
         embedded_assets: Option<Vec<Value>>,
+        strict: bool,
     ) -> Result<Self, WorkflowAssetError> {
         let object = value.as_object().ok_or_else(|| {
             WorkflowAssetError::InvalidField("workflow package must be an object".to_owned())
         })?;
+        require_exact_keys(
+            object,
+            &[
+                "schema_version",
+                "package_id",
+                "package_version",
+                "asset_identity",
+                "state_authority",
+                "execution_model",
+                "assets",
+                "validation",
+            ],
+            "workflow package",
+            strict,
+        )?;
         let schema_version = require_string(object, "schema_version")?;
+        if strict && schema_version != "boreal.workflow_package.v1" {
+            return Err(WorkflowAssetError::InvalidField(
+                "workflow package schema_version is unsupported".to_owned(),
+            ));
+        }
         let package_id = require_string(object, "package_id")?;
         let package_version = require_string(object, "package_version")?;
         let asset_identity = require_string(object, "asset_identity")?;
+        if strict && !is_semver(&package_version) {
+            return Err(WorkflowAssetError::InvalidField(
+                "workflow package package_version must be semantic version text".to_owned(),
+            ));
+        }
         if object.get("state_authority").and_then(Value::as_str) != Some("boreal.application.v2") {
             return Err(WorkflowAssetError::InvalidField(
                 "workflow package state_authority must be boreal.application.v2".to_owned(),
             ));
+        }
+        if strict
+            && object.get("execution_model").and_then(Value::as_str)
+                != Some("one_action_per_guidance_response")
+        {
+            return Err(WorkflowAssetError::InvalidField(
+                "workflow package execution_model is unsupported".to_owned(),
+            ));
+        }
+        if strict {
+            validate_package_policy(object.get("validation"))?;
         }
         let package_assets = object
             .get("assets")
             .and_then(Value::as_array)
             .ok_or(WorkflowAssetError::MissingField("assets"))?
             .to_owned();
+        if strict && package_assets.is_empty() {
+            return Err(WorkflowAssetError::InvalidField(
+                "workflow package has no assets".to_owned(),
+            ));
+        }
         let assets = match embedded_assets {
             Some(values) => values
                 .iter()
-                .map(parse_asset)
+                .map(|value| parse_asset(value, strict))
                 .collect::<Result<Vec<_>, _>>()?,
             None => package_assets
                 .iter()
-                .map(parse_asset)
+                .map(|value| parse_asset(value, strict))
                 .collect::<Result<Vec<_>, _>>()?,
         };
         if assets.len() != package_assets.len() {
@@ -175,6 +224,11 @@ impl WorkflowRegistry {
             ));
         }
         for (metadata, asset) in package_assets.iter().zip(&assets) {
+            let metadata = metadata.as_object().ok_or_else(|| {
+                WorkflowAssetError::InvalidField(
+                    "workflow package asset metadata must be an object".to_owned(),
+                )
+            })?;
             let reference = metadata
                 .get("ref")
                 .and_then(Value::as_str)
@@ -183,6 +237,19 @@ impl WorkflowRegistry {
                 .get("kind")
                 .and_then(Value::as_str)
                 .ok_or(WorkflowAssetError::MissingField("kind"))?;
+            if strict {
+                require_exact_keys(
+                    metadata,
+                    &["ref", "path", "kind"],
+                    "workflow asset metadata",
+                    true,
+                )?;
+                metadata
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or(WorkflowAssetError::MissingField("path"))?;
+            }
             if reference != asset.reference || kind != asset.kind {
                 return Err(WorkflowAssetError::InvalidField(format!(
                     "workflow package identity does not match asset {reference}"
@@ -247,6 +314,15 @@ impl WorkflowRegistry {
             }
         }
         for asset in &self.assets {
+            for reference in asset.refs.values() {
+                if !self
+                    .assets
+                    .iter()
+                    .any(|candidate| candidate.reference == *reference)
+                {
+                    return Err(WorkflowAssetError::UnknownReference(reference.clone()));
+                }
+            }
             for reference in &asset.next_refs {
                 if !self
                     .assets
@@ -261,14 +337,95 @@ impl WorkflowRegistry {
     }
 }
 
-fn parse_asset(value: &Value) -> Result<WorkflowAsset, WorkflowAssetError> {
+fn parse_asset(value: &Value, strict: bool) -> Result<WorkflowAsset, WorkflowAssetError> {
     let object = value.as_object().ok_or_else(|| {
         WorkflowAssetError::InvalidField("workflow asset must be an object".to_owned())
     })?;
+    require_exact_keys(
+        object,
+        &[
+            "schema_version",
+            "asset_version",
+            "ref",
+            "kind",
+            "title",
+            "refs",
+            "allowed_commands",
+            "required_server_actions",
+            "typed_inputs",
+            "finish_criteria",
+            "next_refs",
+            "state_transition_owner",
+        ],
+        "workflow asset",
+        strict,
+    )?;
+    if strict && require_string(object, "schema_version")? != "boreal.workflow_asset.v1" {
+        return Err(WorkflowAssetError::InvalidField(
+            "workflow asset schema_version is unsupported".to_owned(),
+        ));
+    }
+    let asset_version = if strict {
+        require_string(object, "asset_version")?
+    } else {
+        object
+            .get("asset_version")
+            .and_then(Value::as_str)
+            .unwrap_or("0.0.0")
+            .to_owned()
+    };
+    if strict && !is_semver(&asset_version) {
+        return Err(WorkflowAssetError::InvalidField(
+            "workflow asset asset_version must be semantic version text".to_owned(),
+        ));
+    }
     let reference = require_string(object, "ref")?;
     let kind = require_string(object, "kind")?;
     let title = require_string(object, "title")?;
+    let state_transition_owner = object
+        .get("state_transition_owner")
+        .and_then(Value::as_str)
+        .unwrap_or(if strict { "" } else { "untrusted" })
+        .to_owned();
+    if strict && state_transition_owner != "boreal.application.v2" {
+        return Err(WorkflowAssetError::InvalidField(format!(
+            "workflow {reference} state_transition_owner must be boreal.application.v2"
+        )));
+    }
+    let refs_object = object.get("refs").and_then(Value::as_object);
+    if strict && refs_object.map_or(true, |refs| refs.is_empty()) {
+        return Err(WorkflowAssetError::MissingField("refs"));
+    }
+    let mut refs = BTreeMap::new();
+    for (name, value) in refs_object.into_iter().flatten() {
+        let mut characters = name.chars();
+        let valid_name = characters
+            .next()
+            .is_some_and(|character| character.is_ascii_lowercase())
+            && characters.all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+            });
+        if !valid_name {
+            return Err(WorkflowAssetError::InvalidField(format!(
+                "workflow {reference} has malformed named reference {name}"
+            )));
+        }
+        let target = value
+            .as_str()
+            .filter(|target| !target.trim().is_empty())
+            .ok_or_else(|| {
+                WorkflowAssetError::InvalidField(format!(
+                    "workflow {reference} reference {name} must be a non-empty string"
+                ))
+            })?;
+        refs.insert(name.clone(), target.to_owned());
+    }
     let allowed_commands = string_array(object, "allowed_commands")?;
+    if strict && allowed_commands.is_empty() {
+        return Err(WorkflowAssetError::InvalidField(format!(
+            "workflow {reference} has no allowed commands"
+        )));
+    }
     let required_server_actions = string_array(object, "required_server_actions")?;
     if allowed_commands
         .iter()
@@ -289,14 +446,63 @@ fn parse_asset(value: &Value) -> Result<WorkflowAsset, WorkflowAssetError> {
                     "workflow {reference} input must be an object"
                 ))
             })?;
+            reject_unknown_keys(
+                input,
+                &[
+                    "name",
+                    "type",
+                    "required",
+                    "source",
+                    "validation",
+                    "default",
+                ],
+                "workflow input",
+            )?;
             Ok(WorkflowInput {
                 name: require_string(input, "name")?,
                 input_type: require_string(input, "type")?,
+                required: match input.get("required").and_then(Value::as_bool) {
+                    Some(required) => required,
+                    None if !strict => false,
+                    None => {
+                        return Err(WorkflowAssetError::InvalidField(format!(
+                            "workflow {reference} input must declare required"
+                        )))
+                    }
+                },
                 source: require_string(input, "source")?,
                 validation: require_string(input, "validation")?,
+                default: match input.get("default") {
+                    Some(Value::String(value)) if !value.trim().is_empty() => {
+                        Some(value.to_owned())
+                    }
+                    None => None,
+                    _ => {
+                        return Err(WorkflowAssetError::InvalidField(format!(
+                            "workflow {reference} input default must be a non-empty string"
+                        )))
+                    }
+                },
             })
         })
         .collect::<Result<Vec<_>, WorkflowAssetError>>()?;
+    if strict && typed_inputs.is_empty() {
+        return Err(WorkflowAssetError::InvalidField(format!(
+            "workflow {reference} has no typed inputs"
+        )));
+    }
+    for (index, input) in typed_inputs.iter().enumerate() {
+        if typed_inputs
+            .iter()
+            .take(index)
+            .any(|other| other.name == input.name)
+        {
+            return Err(WorkflowAssetError::InvalidField(format!(
+                "workflow {reference} has duplicate typed input {}",
+                input.name
+            )));
+        }
+    }
     let finish_criteria = object
         .get("finish_criteria")
         .and_then(Value::as_array)
@@ -308,6 +514,11 @@ fn parse_asset(value: &Value) -> Result<WorkflowAsset, WorkflowAssetError> {
                     "workflow {reference} criterion must be an object"
                 ))
             })?;
+            reject_unknown_keys(
+                criterion,
+                &["id", "type", "required"],
+                "workflow finish criterion",
+            )?;
             let id = require_string(criterion, "id")?;
             let criterion_type = require_string(criterion, "type")?;
             let required = criterion
@@ -325,17 +536,124 @@ fn parse_asset(value: &Value) -> Result<WorkflowAsset, WorkflowAssetError> {
             })
         })
         .collect::<Result<Vec<_>, WorkflowAssetError>>()?;
-    let next_refs = string_array(object, "next_refs")?;
+    if strict && finish_criteria.is_empty() {
+        return Err(WorkflowAssetError::InvalidField(format!(
+            "workflow {reference} has no finish criteria"
+        )));
+    }
+    for (index, criterion) in finish_criteria.iter().enumerate() {
+        if finish_criteria
+            .iter()
+            .take(index)
+            .any(|other| other.id == criterion.id)
+        {
+            return Err(WorkflowAssetError::InvalidField(format!(
+                "workflow {reference} has duplicate finish criterion {}",
+                criterion.id
+            )));
+        }
+    }
+    if strict && !finish_criteria.iter().any(|criterion| criterion.required) {
+        return Err(WorkflowAssetError::InvalidField(format!(
+            "workflow {reference} has no required finish criteria"
+        )));
+    }
+    let next_refs = if strict || object.contains_key("next_refs") {
+        string_array(object, "next_refs")?
+    } else {
+        Vec::new()
+    };
     Ok(WorkflowAsset {
         reference,
+        asset_version,
         kind,
         title,
+        refs,
+        state_transition_owner,
         allowed_commands,
         required_server_actions,
         typed_inputs,
         finish_criteria,
         next_refs,
     })
+}
+
+fn require_exact_keys(
+    object: &serde_json::Map<String, Value>,
+    expected: &[&str],
+    label: &str,
+    strict: bool,
+) -> Result<(), WorkflowAssetError> {
+    reject_unknown_keys(object, expected, label)?;
+    if strict {
+        if let Some(missing) = expected.iter().find(|key| !object.contains_key(*key)) {
+            return Err(WorkflowAssetError::MissingField(*missing));
+        }
+    }
+    Ok(())
+}
+
+fn reject_unknown_keys(
+    object: &serde_json::Map<String, Value>,
+    expected: &[&str],
+    label: &str,
+) -> Result<(), WorkflowAssetError> {
+    if let Some(unknown) = object.keys().find(|key| !expected.contains(&key.as_str())) {
+        return Err(WorkflowAssetError::InvalidField(format!(
+            "{label} contains unsupported field {unknown}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_package_policy(value: Option<&Value>) -> Result<(), WorkflowAssetError> {
+    let object = value
+        .and_then(Value::as_object)
+        .ok_or(WorkflowAssetError::MissingField("validation"))?;
+    require_exact_keys(
+        object,
+        &[
+            "refs_must_be_unique",
+            "commands_must_be_allowlisted",
+            "inputs_must_be_typed",
+            "finish_criteria_must_be_explicit",
+            "unknown_fields",
+        ],
+        "workflow package validation",
+        true,
+    )?;
+    let valid = object.get("refs_must_be_unique").and_then(Value::as_bool) == Some(true)
+        && object
+            .get("commands_must_be_allowlisted")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && object.get("inputs_must_be_typed").and_then(Value::as_bool) == Some(true)
+        && object
+            .get("finish_criteria_must_be_explicit")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && object.get("unknown_fields").and_then(Value::as_str) == Some("reject");
+    if !valid {
+        return Err(WorkflowAssetError::InvalidField(
+            "workflow package validation policy is incomplete or unsupported".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_semver(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let numeric = |part: Option<&str>| {
+        part.is_some_and(|value| {
+            !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && (value == "0" || !value.starts_with('0'))
+        })
+    };
+    numeric(parts.next())
+        && numeric(parts.next())
+        && numeric(parts.next())
+        && parts.next().is_none()
 }
 
 fn require_string(

@@ -1,6 +1,6 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.2.0",
+  "asset_version": "1.3.0",
   "ref": "boreal.workflow.claim.v1",
   "kind": "claim",
   "title": "Claim, resume, and checkpoint one fenced attempt",
@@ -11,14 +11,16 @@
     "handoff": "boreal.workflow.handoff.v1"
   },
   "allowed_commands": [
-    "bwrk session show --session <session_id> --json",
-    "bwrk agent guide --json",
-    "bwrk agent start <work_id> --source-version <source_version_id> --config-identity <config_identity> --expected-revision <revision> --json",
-    "bwrk work accept <work_id> --attempt <attempt_id> --fence <fence> --json",
-    "bwrk work heartbeat <work_id> --attempt <attempt_id> --fence <fence> --json",
+    "bwrk session show --project <project_id> --session <session_id> --json",
+    "bwrk agent guide --project <project_id> --work <work_id> --json",
+    "bwrk agent resume --project <project_id> --session <session_id> --attempt <attempt_id> --json",
+    "bwrk agent start <work_id> --project <project_id> --source-version <source_version_id> --config-identity <config_identity> --expected-revision <revision> --session <session_id> --json",
+    "bwrk work accept <project_id> <work_id> --attempt <attempt_id> --fence <fence> --json",
+    "bwrk agent heartbeat --project <project_id> --work <work_id> --attempt <attempt_id> --fence <fence> --json",
+    "bwrk agent renew --project <project_id> --work <work_id> --attempt <attempt_id> --fence <fence> --lease-ttl <lease_ttl> --json",
     "bwrk work checkpoint --work <work_id> --input <input_path> --expected-revision <revision> --reason <reason> --yes --json",
-    "bwrk work renew <work_id> --attempt <attempt_id> --fence <fence> --json",
-    "bwrk work release <work_id> --attempt <attempt_id> --fence <fence> --json"
+    "bwrk agent release <work_id> --project <project_id> --attempt <attempt_id> --fence <fence> --json",
+    "bwrk agent next --project <project_id> --work <work_id> --json"
   ],
   "typed_inputs": [
     {
@@ -55,6 +57,34 @@
       "required": true,
       "source": "policy_or_request",
       "validation": "renewable_lease"
+    },
+    {
+      "name": "heartbeat_interval",
+      "type": "duration",
+      "required": true,
+      "source": "current_attempt_or_service_response",
+      "validation": "harness_scheduled_independently_from_lease_renewal_during_long_tool_calls"
+    },
+    {
+      "name": "lease_renewal_interval",
+      "type": "duration",
+      "required": true,
+      "source": "current_attempt_or_service_response",
+      "validation": "harness_scheduled_separately_from_heartbeat_during_long_tool_calls"
+    },
+    {
+      "name": "liveness_scheduler_owner",
+      "type": "harness_id",
+      "required": true,
+      "source": "trusted_harness",
+      "validation": "harness_owns_background_liveness_schedule"
+    },
+    {
+      "name": "process_stop_confirmed",
+      "type": "boolean",
+      "required": false,
+      "source": "harness_process_supervisor",
+      "validation": "must_be_true_before_recovery_releases_live_resources"
     },
     {
       "name": "time_limit",
@@ -122,6 +152,21 @@
     {
       "id": "claim.authority",
       "type": "mutation_authorized_again_inside_canonical_transaction",
+      "required": true
+    },
+    {
+      "id": "claim.liveness",
+      "type": "heartbeat_and_lease_renewal_use_separate_harness_timers_with_service_returned_cadence",
+      "required": true
+    },
+    {
+      "id": "claim.long_tools",
+      "type": "harness_keeps_liveness_timers_running_during_agent_tool_calls",
+      "required": true
+    },
+    {
+      "id": "claim.recovery",
+      "type": "resource_recovery_waits_for_harness_process_stop_confirmation_and_never_breaks_live_locks",
       "required": true
     }
   ],
