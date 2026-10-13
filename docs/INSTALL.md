@@ -66,6 +66,12 @@ on macOS and `${XDG_STATE_HOME:-~/.local/state}/boreal/global.sqlite` on Linux.
 `BOREAL_GLOBAL_ROOT` selects an explicit alternative data directory, useful for
 isolated tests or portable use. Reinstallation preserves this data; do not
 store it beneath the binary prefix or delete it when removing installed files.
+`bwrk global backup` writes validated physical packages beneath the Global
+data directory's `backups/` folder. Boreal does not automatically prune these
+packages; choose and maintain a retention policy that preserves a verified
+recovery copy. Keep the backup directory private because packages contain
+private notes and complete revision history. Removing the binary or its
+installation prefix leaves the Global data directory and backups in place.
 The global dashboard is packaged separately at
 `lib/boreal/global-tui/entrypoint.js` and uses the versioned Rust service API.
 
@@ -182,3 +188,17 @@ Older v2 archives may not contain the updater. Run the official installer once
 to replace one of those archives; subsequent `bwrk update` and
 `bwrk upgrade --machine` calls use the packaged, verified installer. Project
 databases are intentionally left untouched by machine updates.
+
+## Uninstall and artifact trust
+
+Uninstall the binary with the package manager used to install it, or remove the
+files under the selected binary prefix. This does not remove project data or
+the per-user Global root. Global backups are retained until an operator removes
+them; keep an independently stored, verified backup before deleting the last
+recovery copy.
+
+The installer verifies each downloaded archive against `SHA256SUMS` from the
+same GitHub Release over HTTPS. This detects a mismatched or corrupted archive,
+but the checksum file is not an independent signature or signing identity.
+Release candidates retained by GitHub Actions are not published releases and
+are not installable through the release installer.

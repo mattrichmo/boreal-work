@@ -146,6 +146,12 @@ Logical `global export` and `global import` share a 64 MiB compact-JSON transfer
 limit. Export refuses an oversized complete artifact and never drops history to
 fit. Use `bwrk global backup --out PATH` to create a complete physical backup;
 that recovery artifact is separate from logical transfer.
+Physical backup packages are stored under the private Global data root's
+`backups/` directory by default and contain private notes and complete revision
+history. The current implementation does not automatically prune them; backup
+retention and removal are operator-managed. Removing the installed binary must
+leave the Global data root and its recovery packages intact. Keep a verified
+recovery copy before removing the last package.
 
 The following families describe the broader product model; individual tables,
 saved board views, inbox provenance and cached rollups are not all implemented:

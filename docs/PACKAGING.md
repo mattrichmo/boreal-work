@@ -126,6 +126,12 @@ locally from reviewed archives with `scripts/release/render_homebrew_formula.py`
 publishing it to a tap is a separate manual release step. The remaining
 behaviors are part of the P4/P5 compatibility and cutover gates.
 
+The direct installer downloads `SHA256SUMS` from the same GitHub Release as
+the selected archive and verifies the archive digest. This detects transfer or
+artifact mismatches but does not authenticate the release with an independent
+signature. The `.github/workflows/release.yml` workflow creates retained
+qualification artifacts; it does not publish them as GitHub Releases.
+
 The identity simulation is deliberately not a live installer: its target and
 rollback backup are synthetic directories inside a caller-created temp
 directory. `install.sh` is the real archive installer and performs a bounded,
