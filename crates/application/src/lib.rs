@@ -13,6 +13,8 @@ pub use decision_wire::*;
 
 pub mod knowledge_maintenance;
 pub use knowledge_maintenance::*;
+pub mod artifact_context;
+pub use artifact_context::*;
 mod work_split;
 pub use work_split::*;
 mod agent_tools;
