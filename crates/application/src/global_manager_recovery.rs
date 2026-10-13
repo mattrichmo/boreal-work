@@ -4,7 +4,7 @@
 //! revision history. It is deliberately separate from the logical Global
 //! export/import transfer format.
 
-use crate::{sha256_content_digest, GlobalManagerError};
+use crate::{GlobalManagerError, sha256_content_digest};
 use boreal_store::global_manager::{
     GlobalBackupManifest, GlobalMaintenanceGuard, GlobalMaintenanceKind, GlobalManagerStore,
 };
@@ -115,8 +115,8 @@ pub fn restore_global_backup(
 }
 
 /// Creates a validated physical backup under the database's private `backups`
-/// directory. A default destination is stable for the supplied operation ID,
-/// so a retried request can read back the already-published package.
+/// directory. The operation ID is recorded in the package manifest so both
+/// default and explicit destinations can read back an uncertain delivery.
 pub fn create_global_backup(
     database_path: impl AsRef<Path>,
     requested_destination: Option<&Path>,
@@ -129,18 +129,24 @@ pub fn create_global_backup(
     let (destination, is_default) =
         resolve_destination(&backup_root, requested_destination, operation_id)?;
 
-    if is_default && destination.exists() {
-        let existing = GlobalManagerStore::inspect_backup_package(&destination)?;
-        return Ok(metadata_from_manifest(
-            operation_id,
-            existing.package_path,
-            existing.manifest,
-            true,
-        ));
-    }
     if destination.exists() {
+        let existing = GlobalManagerStore::inspect_backup_package(&destination)?;
+        let operation_matches = match existing.manifest.operation_id.as_deref() {
+            Some(existing_operation_id) => existing_operation_id == operation_id,
+            // Before operation IDs were embedded in manifests, the default
+            // path was itself derived from the operation ID.
+            None => is_default,
+        };
+        if operation_matches {
+            return Ok(metadata_from_manifest(
+                operation_id,
+                existing.package_path,
+                existing.manifest,
+                true,
+            ));
+        }
         return Err(GlobalManagerError::Conflict(format!(
-            "Global backup package destination already exists: {}",
+            "Global backup package destination already belongs to another operation: {}",
             destination.display()
         )));
     }
@@ -161,7 +167,7 @@ pub fn create_global_backup(
     }
 
     let store = GlobalManagerStore::open(database_path)?;
-    let report = store.backup_package_to(&destination)?;
+    let report = store.backup_package_to_with_operation_id(&destination, Some(operation_id))?;
     Ok(metadata_from_manifest(
         operation_id,
         report.package_path,
@@ -548,12 +554,14 @@ mod tests {
         let outside = root.with_extension("outside.global-backup");
         assert!(create_global_backup(&database, None, "invalid-operation").is_err());
         assert!(create_global_backup(&database, Some(&outside), "op_backup_path_1").is_err());
-        assert!(create_global_backup(
-            &database,
-            Some(Path::new("../escape.global-backup")),
-            "op_backup_path_2"
-        )
-        .is_err());
+        assert!(
+            create_global_backup(
+                &database,
+                Some(Path::new("../escape.global-backup")),
+                "op_backup_path_2"
+            )
+            .is_err()
+        );
         assert!(!outside.exists());
         let _ = std::fs::remove_dir_all(root);
     }

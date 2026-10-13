@@ -4,9 +4,9 @@
 //! from that copied snapshot. The Global database is reopened read-only for
 //! validation; this path never runs schema initialization or migrations.
 
-use super::{GlobalManagerStore, GLOBAL_SCHEMA_ID, GLOBAL_SCHEMA_VERSION};
-use crate::{SqliteBackupReport, SqliteStore, StoreError, SQLITE_ROW};
-use serde_json::{json, Value};
+use super::{GLOBAL_SCHEMA_ID, GLOBAL_SCHEMA_VERSION, GlobalManagerStore};
+use crate::{SQLITE_ROW, SqliteBackupReport, SqliteStore, StoreError};
+use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -35,6 +35,10 @@ pub struct GlobalBackupSqliteRuntime {
 pub struct GlobalBackupManifest {
     pub kind: String,
     pub format_version: u64,
+    /// The caller's durable operation identity when the package was created
+    /// through the application backup route. Older and lower-level packages
+    /// may omit it.
+    pub operation_id: Option<String>,
     pub source_schema_id: String,
     pub source_schema_version: u64,
     pub database_id: String,
@@ -51,6 +55,7 @@ impl GlobalBackupManifest {
         json!({
             "kind": self.kind,
             "format_version": self.format_version,
+            "operation_id": self.operation_id,
             "source_schema_id": self.source_schema_id,
             "source_schema_version": self.source_schema_version,
             "database_id": self.database_id,
@@ -118,6 +123,25 @@ pub fn validate_global_backup_manifest(
             "unsupported Global backup format version {format_version}"
         )));
     }
+    let operation_id = match document.get("operation_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value))
+            if value.strip_prefix("op_").is_some_and(|tail| {
+                !tail.is_empty()
+                    && value.len() <= 512
+                    && tail.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+            }) =>
+        {
+            Some(value.clone())
+        }
+        _ => {
+            return Err(StoreError::Corrupt(
+                "Global backup manifest operation_id is malformed".into(),
+            ));
+        }
+    };
     let source_schema_id = required_text("source_schema_id")?;
     let source_schema_version = document
         .get("source_schema_version")
@@ -205,6 +229,7 @@ pub fn validate_global_backup_manifest(
     Ok(GlobalBackupManifest {
         kind: PACKAGE_KIND.to_owned(),
         format_version,
+        operation_id,
         source_schema_id,
         source_schema_version,
         database_id,
@@ -233,6 +258,31 @@ impl GlobalManagerStore {
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<GlobalBackupPackageReport, StoreError> {
+        self.backup_package_to_with_operation_id(destination, None)
+    }
+
+    /// Creates and atomically publishes a package associated with a durable
+    /// application operation ID, so an explicit destination can be safely
+    /// read back after an uncertain delivery.
+    pub fn backup_package_to_with_operation_id(
+        &self,
+        destination: impl AsRef<Path>,
+        operation_id: Option<&str>,
+    ) -> Result<GlobalBackupPackageReport, StoreError> {
+        if let Some(operation_id) = operation_id {
+            let valid_tail = operation_id.strip_prefix("op_").is_some_and(|tail| {
+                !tail.is_empty()
+                    && operation_id.len() <= 512
+                    && tail.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+            });
+            if !valid_tail {
+                return Err(StoreError::Invalid(
+                    "Global backup operation ID is malformed".into(),
+                ));
+            }
+        }
         let destination = destination.as_ref();
         ensure_package_destination(destination)?;
         let parent = nonempty_parent(destination);
@@ -253,7 +303,7 @@ impl GlobalManagerStore {
         let result = (|| {
             let database_path = staging.join(DATABASE_FILE);
             let backup = self.inner.backup_to(&database_path)?;
-            let manifest = build_manifest(&database_path)?;
+            let manifest = build_manifest(&database_path, operation_id)?;
             let manifest_document = manifest.as_json();
             // Validate what will be written, not just the in-memory builder.
             validate_global_backup_manifest(&manifest_document)?;
@@ -360,7 +410,10 @@ struct SnapshotIdentity {
     revision: u64,
 }
 
-fn build_manifest(database_path: &Path) -> Result<GlobalBackupManifest, StoreError> {
+fn build_manifest(
+    database_path: &Path,
+    operation_id: Option<&str>,
+) -> Result<GlobalBackupManifest, StoreError> {
     let database = open_global_snapshot_read_only(database_path)?;
     let identity = validate_global_snapshot(&database)?;
     drop(database);
@@ -369,6 +422,7 @@ fn build_manifest(database_path: &Path) -> Result<GlobalBackupManifest, StoreErr
     Ok(GlobalBackupManifest {
         kind: PACKAGE_KIND.to_owned(),
         format_version: PACKAGE_FORMAT_VERSION,
+        operation_id: operation_id.map(str::to_owned),
         source_schema_id: identity.schema_id,
         source_schema_version: identity.schema_version,
         database_id: identity.database_id,
@@ -829,7 +883,7 @@ fn validate_revision_history(
     let minimum_history_count = revision.max(1);
     if expected_revision < minimum_history_count
         || expected_revision > revision.saturating_add(1)
-        || (revision == 0 && !current_revision_present)
+        || !current_revision_present
     {
         return Err(StoreError::Corrupt(
             "Global revision history does not cover the committed revision range".into(),
@@ -994,7 +1048,7 @@ fn is_sha256_digest(value: &str) -> bool {
 
 #[cfg(test)]
 mod streaming_checksum_tests {
-    use super::{format_sha256, Sha256};
+    use super::{Sha256, format_sha256};
 
     #[test]
     fn incremental_sha256_matches_standard_vectors() {
