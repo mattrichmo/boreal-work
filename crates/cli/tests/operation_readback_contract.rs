@@ -118,7 +118,11 @@ fn operation_show_reads_completed_create_operation() {
         "work.create"
     );
     assert_eq!(
-        shown_envelope["data"]["operation"]["result"]["work_id"],
+        shown_envelope["data"]["operation"]["result"]["subject_type"],
+        "work_node"
+    );
+    assert_eq!(
+        shown_envelope["data"]["operation"]["result"]["subject_id"],
         "task-readback"
     );
     assert!(shown_envelope["data"]["execution"].is_null());
