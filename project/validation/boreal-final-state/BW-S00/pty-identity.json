@@ -1,0 +1,27 @@
+{
+  "binary": {
+    "file_name": "bwrk",
+    "sha256": "463e133fa5587fc6fc5bb57024ec238e61c067e1d85267f46264e79e4b8942e2",
+    "size_bytes": 99038040
+  },
+  "global_tui": {
+    "bundle": {
+      "file_count": 11,
+      "sha256": "f398bc691c68a7adf3c824479860e0f75b2065cdfc632ccb1b33c7ea22d9e04c"
+    },
+    "entrypoint": "entrypoint.js",
+    "entrypoint_sha256": "6d44a634944bb97714bea8a04b33b112958121a6f92900bd4811fa44516de492"
+  },
+  "runtime": {
+    "node": {
+      "version": "v26.8.2"
+    }
+  },
+  "schema": "boreal.global-tui-validation-identity/1",
+  "source": {
+    "commit": "caeafb5c7a212e2b72103a33a93af62f012c7cef",
+    "dirty": false,
+    "dirty_sha256": "33c2da2f369cc6a117055a71d327f41de48fe448131a6a62c936189bf2d3e4c3",
+    "sha256": "c872de499fde8b3223dcbe90ef86253628595a9d92acc1c7f7b13475bc4bd972"
+  }
+}
