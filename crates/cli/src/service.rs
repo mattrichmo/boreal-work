@@ -168,7 +168,13 @@ mod unix {
         ExternalEffectReadback, ExternalEffectResolution,
     };
     use boreal_domain::{ActorContext, ActorRole, ReasonCode};
-    use boreal_protocol::{schema, Envelope, ProtocolError as WireError, TransportOutcome};
+    use boreal_protocol::{
+        models::{
+            IntakeDeliveryReadbackRequestDto, IntakeDeliveryReceiveDto,
+            INTAKE_DELIVERY_READBACK_SCHEMA_VERSION, INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION,
+        },
+        schema, Envelope, ProtocolError as WireError, TransportOutcome,
+    };
     use boreal_service::{
         ApplicationCommandHandler, ApplicationRequest, ApplicationResponse, BusyOutcome,
         ConcurrentApplicationCommandHandler, ElectionError, JsonRequest, OperationPhase,
@@ -2774,6 +2780,8 @@ mod unix {
                     )?;
                     Ok((result.outcome, result.revision, result.data))
                 }
+                "intake_delivery_receive_v1" => self.intake_delivery_receive(request, data),
+                "intake_delivery_readback_v1" => self.intake_delivery_readback(data),
                 "memory_command" => {
                     let result = super::super::memory_commands::apply(
                         &self.store,
@@ -2926,6 +2934,136 @@ mod unix {
                 ApplicationOutcome::Unchanged,
                 None,
                 Some(super::super::workflow_package_json(&registry)),
+            ))
+        }
+
+        fn intake_delivery_receive(
+            &self,
+            request: &ApplicationRequest,
+            data: &Value,
+        ) -> ServiceResult {
+            let delivery: IntakeDeliveryReceiveDto = serde_json::from_value(
+                data.get("delivery")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("delivery payload is required"))?,
+            )
+            .map_err(|error| CliError::invalid(format!("invalid delivery payload: {error}")))?;
+            if delivery.schema_version != INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    format!(
+                        "Intake delivery schema mismatch: expected {INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION}, found {}",
+                        delivery.schema_version
+                    ),
+                ));
+            }
+
+            let project_id = string(data, "project_id")?;
+            let actor_id = string(data, "actor_id")?;
+            let session_id = string(data, "session_id")?;
+            let payload = delivery.payload;
+            let payload = boreal_application::IntakeDeliveryPayload {
+                bucket_id: IntakeBucketId::parse(payload.bucket_id)
+                    .map_err(|error| CliError::invalid(error.to_string()))?,
+                kind: parse_intake_kind(&payload.kind)?,
+                content: payload.content,
+                revisit_at: payload.revisit_at_utc_ms.map(TimestampMs::from_millis),
+            };
+            let scope = PlanningScope::new(ProjectId::new(project_id.clone()), actor_id)
+                .with_session(session_id)
+                .at_revision(delivery.expected_revision);
+            let result = WorkApplication::new(&self.store)
+                .receive_intake_delivery(&boreal_application::IntakeDeliveryRequest {
+                    scope,
+                    operation_id: request.operation_id.clone(),
+                    delivery_key: delivery.delivery_key,
+                    origin: boreal_application::IntakeDeliveryOrigin {
+                        kind: delivery.origin.kind,
+                        item_id: delivery.origin.item_id,
+                        digest: delivery.origin.digest,
+                    },
+                    intake_id: IntakeItemId::parse(delivery.intake_id)
+                        .map_err(|error| CliError::invalid(error.to_string()))?,
+                    payload,
+                    payload_digest: delivery.payload_digest,
+                    captured_at: now(),
+                })
+                .map_err(map_application_error)?;
+            let readback = boreal_store::IntakeDeliveryReadback {
+                project_revision: result.project_revision,
+                receipt: Some(result.receipt),
+                intake: Some(result.intake),
+            };
+            let mut body = serde_json::to_value(
+                super::super::knowledge_parity::intake_delivery_readback_dto(
+                    &project_id,
+                    &readback,
+                ),
+            )
+            .map_err(|error| {
+                CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    format!("cannot encode Intake delivery response: {error}"),
+                )
+            })?;
+            body["command"] = json!("intake_delivery_receive_v1");
+            Ok((
+                if result.operation.is_some() {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.project_revision),
+                Some(body),
+            ))
+        }
+
+        fn intake_delivery_readback(&self, data: &Value) -> ServiceResult {
+            let lookup: IntakeDeliveryReadbackRequestDto = serde_json::from_value(
+                data.get("lookup")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("delivery lookup is required"))?,
+            )
+            .map_err(|error| CliError::invalid(format!("invalid delivery lookup: {error}")))?;
+            if lookup.schema_version != INTAKE_DELIVERY_READBACK_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    format!(
+                        "Intake delivery readback schema mismatch: expected {INTAKE_DELIVERY_READBACK_SCHEMA_VERSION}, found {}",
+                        lookup.schema_version
+                    ),
+                ));
+            }
+
+            let project_id = string(data, "project_id")?;
+            let scope = PlanningScope::new(
+                ProjectId::new(project_id.clone()),
+                string(data, "actor_id")?,
+            )
+            .with_session(string(data, "session_id")?);
+            let readback = WorkApplication::new(&self.store)
+                .intake_delivery_readback(&scope, &lookup.delivery_key)
+                .map_err(map_application_error)?;
+            let body = serde_json::to_value(
+                super::super::knowledge_parity::intake_delivery_readback_dto(
+                    &project_id,
+                    &readback,
+                ),
+            )
+            .map_err(|error| {
+                CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    format!("cannot encode Intake delivery readback: {error}"),
+                )
+            })?;
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(readback.project_revision),
+                Some(body),
             ))
         }
 
@@ -6551,6 +6689,164 @@ mod tests {
             })
             .expect("application handler returns an envelope");
         serde_json::from_str(&response.data).expect("application envelope is valid JSON")
+    }
+
+    #[test]
+    fn intake_delivery_routes_receive_readback_and_show_receipt() {
+        let root = temp_path("intake-delivery-routes");
+        let store = seed_project_store(&root);
+        let app = WorkApplication::new(&store);
+        app.ensure_work_model_v3()
+            .expect("work model v3 enables for the project");
+        let bucket_id = IntakeBucketId::new("bucket-delivery");
+        let bucket_scope = PlanningScope::new(ProjectId::new("service-project"), DEFAULT_ACTOR)
+            .with_session("service-test-session")
+            .at_revision(store.project_revision("service-project").unwrap().0);
+        app.create_intake_bucket_v3(
+            &bucket_scope,
+            "op_intake_delivery_bucket",
+            &IntakeBucket {
+                id: bucket_id.clone(),
+                project_id: ProjectId::new("service-project"),
+                name: "Delivery Inbox".to_owned(),
+                archived: false,
+            },
+            &now(),
+        )
+        .expect("destination bucket creates");
+        let expected_revision = store.project_revision("service-project").unwrap().0;
+        let payload = boreal_application::IntakeDeliveryPayload {
+            bucket_id,
+            kind: IntakeKind::Note,
+            content: "A frozen delivery from Global.".to_owned(),
+            revisit_at: None,
+        };
+        let payload_digest = boreal_application::intake_delivery_payload_digest(&payload);
+        let delivery = boreal_protocol::models::IntakeDeliveryReceiveDto {
+            schema_version: boreal_protocol::models::INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION
+                .to_owned(),
+            expected_revision,
+            delivery_key: "delivery-project-origin".to_owned(),
+            origin: boreal_protocol::models::IntakeDeliveryOriginDto {
+                kind: "capture".to_owned(),
+                item_id: "capture-1".to_owned(),
+                digest: "sha256:origin-capture-1".to_owned(),
+            },
+            intake_id: "intake-delivered-1".to_owned(),
+            payload: boreal_protocol::models::IntakeDeliveryPayloadDto {
+                bucket_id: payload.bucket_id.as_str().to_owned(),
+                kind: "note".to_owned(),
+                content: payload.content.clone(),
+                revisit_at_utc_ms: None,
+            },
+            payload_digest,
+        };
+        let receive_data = json!({
+            "command": "intake_delivery_receive_v1",
+            "project_id": "service-project",
+            "actor_id": DEFAULT_ACTOR,
+            "session_id": "service-test-session",
+            "credential_ref": SERVICE_TEST_CREDENTIAL,
+            "delivery": delivery,
+        });
+        let mut handler = make_handler(store);
+        let first = application_envelope(
+            &mut handler,
+            "op_intake_delivery_first",
+            receive_data.clone(),
+        );
+        assert_eq!(first.outcome, ApplicationOutcome::Changed);
+        let first_data = first.data.as_ref().expect("receive includes readback data");
+        assert_eq!(first_data["state"], "received");
+        assert_eq!(first_data["intake"]["intake_id"], "intake-delivered-1");
+        assert_eq!(
+            first_data["receipt"]["delivery_key"],
+            "delivery-project-origin"
+        );
+        let first_revision = first.revision.expect("receive returns committed revision");
+        assert!(first_data["_scope"]["database_instance_id"].is_string());
+
+        // A fresh service operation resolves the stable semantic delivery even
+        // though its original expected revision is now stale.
+        let duplicate =
+            application_envelope(&mut handler, "op_intake_delivery_duplicate", receive_data);
+        assert_eq!(duplicate.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(duplicate.revision, Some(first_revision));
+        assert_eq!(
+            duplicate
+                .data
+                .as_ref()
+                .expect("duplicate includes readback data")["intake"]["intake_id"],
+            "intake-delivered-1"
+        );
+
+        let readback = application_envelope(
+            &mut handler,
+            "op_intake_delivery_readback",
+            json!({
+                "command": "intake_delivery_readback_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "lookup": {
+                    "schema_version": boreal_protocol::models::INTAKE_DELIVERY_READBACK_SCHEMA_VERSION,
+                    "delivery_key": "delivery-project-origin",
+                },
+            }),
+        );
+        assert_eq!(readback.outcome, ApplicationOutcome::Unchanged);
+        let readback_data = readback
+            .data
+            .as_ref()
+            .expect("lookup returns readback data");
+        assert_eq!(readback_data["state"], "received");
+        assert_eq!(readback_data["receipt"]["intake_id"], "intake-delivered-1");
+        assert!(readback_data["_scope"]["restore_epoch"].is_number());
+
+        let absent = application_envelope(
+            &mut handler,
+            "op_intake_delivery_absent",
+            json!({
+                "command": "intake_delivery_readback_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "lookup": {
+                    "schema_version": boreal_protocol::models::INTAKE_DELIVERY_READBACK_SCHEMA_VERSION,
+                    "delivery_key": "delivery-not-yet-received",
+                },
+            }),
+        );
+        assert_eq!(absent.outcome, ApplicationOutcome::Unchanged);
+        let absent_data = absent.data.as_ref().expect("absence is authoritative data");
+        assert_eq!(absent_data["state"], "absent");
+        assert!(absent_data["receipt"].is_null());
+        assert!(absent_data["_scope"]["database_instance_id"].is_string());
+
+        let show = ParsedCommand {
+            path: vec!["intake".to_owned(), "show".to_owned()],
+            options: CliOptions {
+                project: Some("service-project".to_owned()),
+                actor: DEFAULT_ACTOR.to_owned(),
+                session: "service-test-session".to_owned(),
+                positionals: vec!["intake-delivered-1".to_owned()],
+                ..CliOptions::default()
+            },
+        };
+        let mut show_data = request_data(&show, "op_intake_delivery_show")
+            .expect("intake show creates a versioned feature request");
+        show_data["credential_ref"] = json!(SERVICE_TEST_CREDENTIAL);
+        let show = application_envelope(&mut handler, "op_intake_delivery_show", show_data);
+        assert_eq!(show.outcome, ApplicationOutcome::Unchanged);
+        let show_data = show.data.as_ref().expect("Intake show returns item data");
+        assert_eq!(show_data["command"], "intake_show");
+        assert_eq!(
+            show_data["delivery_receipt"]["delivery_key"],
+            "delivery-project-origin"
+        );
+        assert_eq!(show_data["item"]["intake_id"], "intake-delivered-1");
     }
 
     #[test]

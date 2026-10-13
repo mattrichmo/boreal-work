@@ -699,6 +699,104 @@ pub struct ProjectReadbackScope {
     pub workspace_binding_digest: String,
 }
 
+/// Versioned payload schemas for the project-owned Intake delivery service
+/// routes. The outer application envelope supplies project, actor, session,
+/// credential, and operation identity; these DTOs contain only the frozen
+/// delivery intent and its stable logical lookup identity.
+pub const INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION: &str = "boreal.intake_delivery.receive.v1";
+pub const INTAKE_DELIVERY_READBACK_SCHEMA_VERSION: &str = "boreal.intake_delivery.readback.v1";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeDeliveryOriginDto {
+    pub kind: String,
+    pub item_id: String,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeDeliveryPayloadDto {
+    pub bucket_id: String,
+    pub kind: String,
+    pub content: String,
+    #[serde(default)]
+    pub revisit_at_utc_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeDeliveryReceiveDto {
+    pub schema_version: String,
+    pub expected_revision: u64,
+    pub delivery_key: String,
+    pub origin: IntakeDeliveryOriginDto,
+    pub intake_id: String,
+    pub payload: IntakeDeliveryPayloadDto,
+    pub payload_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeDeliveryReadbackRequestDto {
+    pub schema_version: String,
+    pub delivery_key: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntakeDeliveryReadbackStateDto {
+    Received,
+    Absent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeDeliveryReceiptDto {
+    pub project_id: String,
+    pub delivery_key: String,
+    pub intake_id: String,
+    pub origin_kind: String,
+    pub origin_item_id: String,
+    pub origin_digest: String,
+    pub payload_digest: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeDeliveryItemDto {
+    pub project_id: String,
+    pub intake_id: String,
+    pub bucket_id: String,
+    pub kind: String,
+    pub lifecycle: String,
+    pub content: String,
+    pub content_revision: u64,
+    pub content_digest: String,
+    pub captured_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub revisit_at_utc_ms: Option<i64>,
+}
+
+/// Authoritative lookup response. A successful `Absent` response is distinct
+/// from authorization, transport, and unknown-outcome failures in the outer
+/// service envelope. Canonical service responses also include `_scope`, the
+/// server-read ProjectReadbackScope for the physical activation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeDeliveryReadbackDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub project_revision: u64,
+    pub state: IntakeDeliveryReadbackStateDto,
+    #[serde(default)]
+    pub receipt: Option<IntakeDeliveryReceiptDto>,
+    #[serde(default)]
+    pub intake: Option<IntakeDeliveryItemDto>,
+}
+
 /// Local wall-clock input is resolved by the application against its actual
 /// TZif bytes. Clients cannot supply an invented UTC offset or tzdb identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
