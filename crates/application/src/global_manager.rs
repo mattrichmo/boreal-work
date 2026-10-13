@@ -374,6 +374,16 @@ impl GlobalManagerApplication {
                     "detail page expected_revision must be a non-negative integer".into(),
                 ));
             }
+            if payload.get("offset").and_then(Value::as_u64).unwrap_or(0) > 0
+                && payload
+                    .get("expected_revision")
+                    .and_then(Value::as_u64)
+                    .is_none()
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "detail page continuation requires expected_revision; resnapshot before continuing".into(),
+                ));
+            }
         }
         if command == "attention page" {
             if payload.get("limit").is_some_and(|v| {
@@ -395,6 +405,16 @@ impl GlobalManagerApplication {
             {
                 return Err(GlobalManagerError::Invalid(
                     "attention page expected_revision must be a non-negative integer".into(),
+                ));
+            }
+            if payload.get("offset").and_then(Value::as_u64).unwrap_or(0) > 0
+                && payload
+                    .get("expected_revision")
+                    .and_then(Value::as_u64)
+                    .is_none()
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "attention page continuation requires expected_revision; resnapshot before continuing".into(),
                 ));
             }
         }
@@ -419,11 +439,12 @@ impl GlobalManagerApplication {
             "snapshot" => {
                 state["schema_version"] = serde_json::json!(2);
                 state["revision"] = serde_json::json!(revision);
-                let attention_sample_ids = arr(&state, "projects")
+                let mut attention_sample_ids = arr(&state, "projects")
                     .iter()
-                    .take(GLOBAL_ATTENTION_PROJECTS_LIMIT)
                     .filter_map(|project| project["id"].as_str().map(str::to_owned))
                     .collect::<Vec<_>>();
+                attention_sample_ids.sort_unstable();
+                attention_sample_ids.truncate(GLOBAL_ATTENTION_PROJECTS_LIMIT);
                 let context = civil_time.as_ref().expect("snapshot resolves civil time");
                 let attention = attention_summary(&state, &attention_sample_ids, context)?;
                 let mut totals = serde_json::Map::new();
@@ -3295,6 +3316,8 @@ mod global_attention_page_tests {
                 statuses.push(status);
             }
         }
+        projects.reverse();
+        items.reverse();
         bundle["projects"] = json!(projects);
         bundle["items"] = json!(items);
         bundle["statuses"] = json!(statuses);
@@ -3327,6 +3350,16 @@ mod global_attention_page_tests {
         );
         assert_eq!(snapshot["attention"]["projects_truncated"], true);
         assert_eq!(snapshot["attention"]["projects_has_more"], true);
+        let sampled_project_ids = snapshot["attention"]["projects"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let expected_sample_ids = (0..100)
+            .map(|index| format!("attention-project-{index:03}"))
+            .collect::<Vec<_>>();
+        assert_eq!(sampled_project_ids, expected_sample_ids);
         assert_eq!(snapshot["attention"]["portfolio"]["open"], PROJECTS);
         assert_eq!(snapshot["attention"]["portfolio"]["overdue"], PROJECTS);
         assert!(serde_json::to_vec(&snapshot).unwrap().len() < INTERACTIVE_RESPONSE_MAX_BYTES);
@@ -3419,6 +3452,33 @@ mod global_attention_page_tests {
             assert_eq!(stale["has_more"], false);
             assert!(stale["next_offset"].is_null());
         }
+
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn page_continuations_require_the_revision_of_the_first_page() {
+        let path = database_path();
+        let app = GlobalManagerApplication::open(&path).unwrap();
+
+        let attention_error = app
+            .execute(
+                "attention page",
+                &json!({"limit":10,"offset":10}),
+                "attention-without-revision",
+            )
+            .unwrap_err();
+        assert!(attention_error.to_string().contains("expected_revision"));
+
+        let detail_error = app
+            .execute(
+                "detail page",
+                &json!({"collection":"projects","limit":10,"offset":10}),
+                "detail-without-revision",
+            )
+            .unwrap_err();
+        assert!(detail_error.to_string().contains("expected_revision"));
 
         drop(app);
         let _ = std::fs::remove_file(path);
