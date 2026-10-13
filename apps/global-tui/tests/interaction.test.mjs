@@ -317,6 +317,22 @@ test('line parser removes quotes, handles escaped quotes and backslashes, and pr
   assert.equal(h.calls[0].payload.title,'Call, then Café 家 and say "hi" \\ home');
 });
 
+test('line interface preserves complete add, search, and note arguments', async () => {
+  const h=harness();const output=[];
+  async function* lines(){
+    yield 'add Buy milk';
+    yield 'search groceries';
+    yield 'note add Call, then Café 家';
+    yield 'quit';
+  }
+  await runLineInterface(h.controller,lines(),value=>output.push(value));
+  assert.equal(h.calls[0].command,'todo add');
+  assert.equal(h.calls[0].payload.title,'Buy milk');
+  assert.equal(h.controller.searchQuery,'groceries');
+  assert.equal(h.calls[1].command,'note add');
+  assert.equal(h.calls[1].payload.title,'Call, then Café 家');
+});
+
 test('line parser reports unmatched quotes and continues to the next command', async () => {
   const h=harness();const output=[];
   async function* lines(){yield 'add "unfinished';yield 'add valid title';yield 'quit';}
