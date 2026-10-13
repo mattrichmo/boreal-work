@@ -118,3 +118,23 @@ The final disposable probe created 101 global associations, placed `candidate-wo
 Machine-readable result: [global-next-candidate-probe.json](global-next-candidate-probe.json). The exact command is the Python probe above. Its final rerun recorded source commit `eabc70e4d202f6bc924a73d2ef88d2364e4b7597`, binary SHA-256 `4f34f4f1279a934ff49a0c9226efdc273e184cd9193f1646eb64d4719381c8ad`, `result=PASS`, `candidate_selected=true`, and `invalid_sessions_are_partial=true`. The script and JSON are disposable evidence only; the harness removes its temporary Global root and workspace.
 
 The direct command `cargo test --workspace --locked --quiet` was also attempted on the preceding combined source and failed at `crates/domain/tests/production_properties.rs::oracle_identity_and_minimal_counterexample_replay_are_explicit` because `BOREAL_PRODUCTION_ORACLE_MANIFEST` was not set. This invocation is not a valid workspace gate: `scripts/validation/run_full_suite.py` generates the source-bound manifest before running the workspace suite. The coordinator will run that harness on the final combined tree; no full-suite pass is claimed here.
+
+## Final combined exact-head qualification
+
+The final combined smoke and focused probes were rerun at source commit `ae93ae578ee381e2a8034aedb84275a8b3b938d9` with source-tree SHA-256 `c6d2593cc52e86169440cd3a6a8a578747f87faec9a736132d3a4f0c8b9b94d8`. The required current binary SHA-256 was `5307ab65dcc87d69893895e475b6a1d10499b21c2a7688ab12a30c4f503f163f`.
+
+```text
+TMPDIR=/tmp python3 scripts/validation/run_full_suite.py --profile smoke --online --require-current-binary --output /tmp/BW-S04/final-combined-smoke-ae93.json
+exit 0; 9 checks passed, 0 failed, 0 skipped, including cargo test --workspace --locked
+
+python3 project/validation/boreal-final-state/BW-S04/global-next-candidate-probe.py
+exit 0; PASS; association 100 selected with complete 101/101 coverage; missing, wrong-actor, and ended sessions reported partial coverage
+
+python3 scripts/validation/global/linked_saturation.py --binary target/debug/bwrk --associations 80
+exit 0; PASS; 80 associations, 10 queue rejections, last-good total 1 retained, maximum Global todo/note latency below 62 ms
+
+python3 /tmp/BW-S04/large_state_validation_ae93.py
+exit 0; PASS; 1,632,017-byte logical note round-tripped with matching SHA-256; 67,112,960-byte note refused logical transfer without replacing the destination and remained physically backupable
+```
+
+The smoke report records the exact source identity and binary SHA-256 above. Its artifact is `/tmp/BW-S04/final-combined-smoke-ae93.json`; probe output is recorded in `global-next-candidate-probe.json` and `/tmp/BW-S04/large-state-evidence-ae93.json`. This closes the remaining S04 exact-head validation gap for this source tree. The existing earlier failure/reproduction records above remain historical evidence.

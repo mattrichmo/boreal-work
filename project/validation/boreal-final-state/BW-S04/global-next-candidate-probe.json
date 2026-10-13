@@ -1,10 +1,10 @@
 {
   "probe": "BW-S04 Global Next candidate/session coverage at association index 100",
-  "source_commit": "eabc70e4d202f6bc924a73d2ef88d2364e4b7597",
-  "binary_sha256": "4f34f4f1279a934ff49a0c9226efdc273e184cd9193f1646eb64d4719381c8ad",
+  "source_commit": "ae93ae578ee381e2a8034aedb84275a8b3b938d9",
+  "binary_sha256": "5307ab65dcc87d69893895e475b6a1d10499b21c2a7688ab12a30c4f503f163f",
   "disposable_only": true,
   "workspace_id": "candidate-workspace",
-  "management_project_id": "project-86960-1791919272237-1",
+  "management_project_id": "project-90158-1791935434857-1",
   "work_id": "candidate-beyond-cap",
   "claimable_actor_id": "agent-a",
   "claimable_session_id": "candidate-session",
@@ -47,10 +47,10 @@
     "passed": true,
     "candidate_count": 1,
     "selected": {
-      "as_of": "unix-ms:1791919272345",
+      "as_of": "unix-ms:1791935435012",
       "authority": "advisory_snapshot_only",
       "management_priority": 0,
-      "management_project_id": "project-86960-1791919272237-1",
+      "management_project_id": "project-90158-1791935434857-1",
       "priority": 0,
       "project_revision": 7,
       "safe_argv": [
@@ -62,15 +62,15 @@
       ],
       "title": "Candidate beyond summary cap",
       "work_id": "candidate-beyond-cap",
-      "working_directory": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+      "working_directory": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-f99jaz80/candidate-workspace",
       "workspace_id": "candidate-workspace"
     },
     "candidates": [
       {
-        "as_of": "unix-ms:1791919272345",
+        "as_of": "unix-ms:1791935435012",
         "authority": "advisory_snapshot_only",
         "management_priority": 0,
-        "management_project_id": "project-86960-1791919272237-1",
+        "management_project_id": "project-90158-1791935434857-1",
         "priority": 0,
         "project_revision": 7,
         "safe_argv": [
@@ -82,15 +82,15 @@
         ],
         "title": "Candidate beyond summary cap",
         "work_id": "candidate-beyond-cap",
-        "working_directory": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "working_directory": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-f99jaz80/candidate-workspace",
         "workspace_id": "candidate-workspace"
       }
     ],
     "workspace_checks": [
       {
-        "management_project_id": "project-86960-1791919272237-1",
+        "management_project_id": "project-90158-1791935434857-1",
         "participates": true,
-        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-f99jaz80/candidate-workspace",
         "state": "valid",
         "workspace_id": "candidate-workspace"
       }
@@ -120,14 +120,14 @@
     "candidates": [],
     "workspace_checks": [
       {
-        "management_project_id": "project-86960-1791919272237-1",
+        "management_project_id": "project-90158-1791935434857-1",
         "participates": true,
-        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-f99jaz80/candidate-workspace",
         "state": "valid",
         "workspace_id": "candidate-workspace"
       },
       {
-        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-f99jaz80/candidate-workspace",
         "reason": "workspace operator session does not exist",
         "state": "read_failed",
         "workspace_id": "candidate-workspace"
@@ -158,14 +158,14 @@
     "candidates": [],
     "workspace_checks": [
       {
-        "management_project_id": "project-86960-1791919272237-1",
+        "management_project_id": "project-90158-1791935434857-1",
         "participates": true,
-        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-f99jaz80/candidate-workspace",
         "state": "valid",
         "workspace_id": "candidate-workspace"
       },
       {
-        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-f99jaz80/candidate-workspace",
         "reason": "workspace operator session is bound to a different actor",
         "state": "read_failed",
         "workspace_id": "candidate-workspace"
@@ -196,14 +196,14 @@
     "candidates": [],
     "workspace_checks": [
       {
-        "management_project_id": "project-86960-1791919272237-1",
+        "management_project_id": "project-90158-1791935434857-1",
         "participates": true,
-        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-f99jaz80/candidate-workspace",
         "state": "valid",
         "workspace_id": "candidate-workspace"
       },
       {
-        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-9xk0f406/candidate-workspace",
+        "path": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bw-s04-next-candidate-f99jaz80/candidate-workspace",
         "reason": "workspace operator session is not active",
         "state": "read_failed",
         "workspace_id": "candidate-workspace"
