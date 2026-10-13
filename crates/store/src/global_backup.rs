@@ -7,8 +7,8 @@
 use super::{GlobalManagerStore, GLOBAL_SCHEMA_ID, GLOBAL_SCHEMA_VERSION};
 use crate::{SqliteBackupReport, SqliteStore, StoreError, SQLITE_ROW};
 use serde_json::{json, Value};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const PACKAGE_KIND: &str = "boreal.global.backup";
@@ -320,24 +320,13 @@ pub fn inspect_global_backup_package(
 
     let manifest_document = read_manifest(&manifest_path)?;
     let manifest = validate_global_backup_manifest(&manifest_document)?;
-    let metadata = fs::metadata(&database_path).map_err(|error| {
-        StoreError::Unavailable(format!(
-            "cannot inspect Global backup database {}: {error}",
-            database_path.display()
-        ))
-    })?;
-    if !metadata.is_file() || metadata.len() != manifest.database_bytes {
+    let digest = checksum_file(&database_path)?;
+    if digest.bytes != manifest.database_bytes {
         return Err(StoreError::Corrupt(
             "Global backup database byte count does not match its manifest".into(),
         ));
     }
-    let contents = fs::read(&database_path).map_err(|error| {
-        StoreError::Unavailable(format!(
-            "cannot read Global backup database {}: {error}",
-            database_path.display()
-        ))
-    })?;
-    if crate::checksum(&contents) != manifest.database_checksum {
+    if digest.checksum != manifest.database_checksum {
         return Err(StoreError::Corrupt(
             "Global backup database checksum does not match its manifest".into(),
         ));
@@ -375,18 +364,7 @@ fn build_manifest(database_path: &Path) -> Result<GlobalBackupManifest, StoreErr
     let database = open_global_snapshot_read_only(database_path)?;
     let identity = validate_global_snapshot(&database)?;
     drop(database);
-    let metadata = fs::metadata(database_path).map_err(|error| {
-        StoreError::Unavailable(format!(
-            "cannot inspect Global backup database {}: {error}",
-            database_path.display()
-        ))
-    })?;
-    let contents = fs::read(database_path).map_err(|error| {
-        StoreError::Unavailable(format!(
-            "cannot read Global backup database {}: {error}",
-            database_path.display()
-        ))
-    })?;
+    let digest = checksum_file(database_path)?;
     let runtime = crate::sqlite_runtime_identity();
     Ok(GlobalBackupManifest {
         kind: PACKAGE_KIND.to_owned(),
@@ -395,8 +373,8 @@ fn build_manifest(database_path: &Path) -> Result<GlobalBackupManifest, StoreErr
         source_schema_version: identity.schema_version,
         database_id: identity.database_id,
         revision: identity.revision,
-        database_bytes: metadata.len(),
-        database_checksum: crate::checksum(&contents),
+        database_bytes: digest.bytes,
+        database_checksum: digest.checksum,
         created_at: super::now(),
         producer: GlobalBackupProducer {
             name: env!("CARGO_PKG_NAME").to_owned(),
@@ -408,6 +386,199 @@ fn build_manifest(database_path: &Path) -> Result<GlobalBackupManifest, StoreErr
             compile_options: runtime.compile_options,
         },
     })
+}
+
+struct FileDigest {
+    bytes: u64,
+    checksum: String,
+}
+
+/// Hashes a database in fixed-size chunks. Backup packages may exceed the
+/// available memory of the host, so file size must not determine allocation.
+fn checksum_file(path: &Path) -> Result<FileDigest, StoreError> {
+    let mut file = File::open(path).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot open Global backup database {} for hashing: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot inspect Global backup database {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(StoreError::Invalid(
+            "Global backup database must be a regular file".into(),
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes = 0_u64;
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot read Global backup database {} for hashing: {error}",
+                path.display()
+            ))
+        })?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes.checked_add(count as u64).ok_or_else(|| {
+            StoreError::Corrupt("Global backup database byte count overflow".into())
+        })?;
+        hasher.update(&buffer[..count]);
+    }
+    Ok(FileDigest {
+        bytes,
+        checksum: format_sha256(hasher.finish()),
+    })
+}
+
+fn format_sha256(digest: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(71);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+/// Minimal incremental SHA-256 state. The only input-sized storage is the
+/// fixed 64 KiB read buffer in `checksum_file`.
+struct Sha256 {
+    state: [u32; 8],
+    buffer: [u8; 64],
+    buffered: usize,
+    bit_len: u64,
+}
+
+impl Sha256 {
+    fn new() -> Self {
+        Self {
+            state: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            buffer: [0; 64],
+            buffered: 0,
+            bit_len: 0,
+        }
+    }
+
+    fn update(&mut self, mut input: &[u8]) {
+        self.bit_len = self
+            .bit_len
+            .wrapping_add((input.len() as u64).wrapping_mul(8));
+
+        if self.buffered > 0 {
+            let take = (64 - self.buffered).min(input.len());
+            self.buffer[self.buffered..self.buffered + take].copy_from_slice(&input[..take]);
+            self.buffered += take;
+            input = &input[take..];
+            if self.buffered == 64 {
+                Self::compress(&mut self.state, &self.buffer);
+                self.buffered = 0;
+            } else {
+                return;
+            }
+        }
+
+        let complete_len = input.len() / 64 * 64;
+        for chunk in input[..complete_len].chunks_exact(64) {
+            let block: &[u8; 64] = chunk.try_into().expect("chunks_exact returns 64 bytes");
+            Self::compress(&mut self.state, block);
+        }
+        let remainder = &input[complete_len..];
+        self.buffer[..remainder.len()].copy_from_slice(remainder);
+        self.buffered = remainder.len();
+    }
+
+    fn finish(mut self) -> [u8; 32] {
+        self.buffer[self.buffered] = 0x80;
+        self.buffered += 1;
+        if self.buffered > 56 {
+            self.buffer[self.buffered..].fill(0);
+            Self::compress(&mut self.state, &self.buffer);
+            self.buffer = [0; 64];
+        } else {
+            self.buffer[self.buffered..56].fill(0);
+        }
+        self.buffer[56..].copy_from_slice(&self.bit_len.to_be_bytes());
+        Self::compress(&mut self.state, &self.buffer);
+
+        let mut digest = [0_u8; 32];
+        for (index, word) in self.state.iter().enumerate() {
+            digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        digest
+    }
+
+    fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
+        const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
+        ];
+        let mut words = [0_u32; 64];
+        for (index, bytes) in block.chunks_exact(4).enumerate() {
+            words[index] = u32::from_be_bytes(bytes.try_into().expect("word has four bytes"));
+        }
+        for index in 16..64 {
+            let s0 = words[index - 15].rotate_right(7)
+                ^ words[index - 15].rotate_right(18)
+                ^ (words[index - 15] >> 3);
+            let s1 = words[index - 2].rotate_right(17)
+                ^ words[index - 2].rotate_right(19)
+                ^ (words[index - 2] >> 10);
+            words[index] = words[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(words[index - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut working = *state;
+        for index in 0..64 {
+            let s1 = working[4].rotate_right(6)
+                ^ working[4].rotate_right(11)
+                ^ working[4].rotate_right(25);
+            let ch = (working[4] & working[5]) ^ ((!working[4]) & working[6]);
+            let temp1 = working[7]
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[index])
+                .wrapping_add(words[index]);
+            let s0 = working[0].rotate_right(2)
+                ^ working[0].rotate_right(13)
+                ^ working[0].rotate_right(22);
+            let maj =
+                (working[0] & working[1]) ^ (working[0] & working[2]) ^ (working[1] & working[2]);
+            let temp2 = s0.wrapping_add(maj);
+            working[7] = working[6];
+            working[6] = working[5];
+            working[5] = working[4];
+            working[4] = working[3].wrapping_add(temp1);
+            working[3] = working[2];
+            working[2] = working[1];
+            working[1] = working[0];
+            working[0] = temp1.wrapping_add(temp2);
+        }
+        for index in 0..8 {
+            state[index] = state[index].wrapping_add(working[index]);
+        }
+    }
 }
 
 fn open_global_snapshot_read_only(path: &Path) -> Result<SqliteStore, StoreError> {
@@ -819,4 +990,37 @@ fn is_sha256_digest(value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     })
+}
+
+#[cfg(test)]
+mod streaming_checksum_tests {
+    use super::{format_sha256, Sha256};
+
+    #[test]
+    fn incremental_sha256_matches_standard_vectors() {
+        let empty = Sha256::new();
+        assert_eq!(
+            format_sha256(empty.finish()),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        let mut abc = Sha256::new();
+        abc.update(b"a");
+        abc.update(b"bc");
+        assert_eq!(
+            format_sha256(abc.finish()),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn incremental_sha256_handles_block_and_chunk_boundaries() {
+        let bytes: Vec<u8> = (0..150_123).map(|index| (index % 251) as u8).collect();
+        let expected = crate::checksum(&bytes);
+        let mut hasher = Sha256::new();
+        for chunk in bytes.chunks(137) {
+            hasher.update(chunk);
+        }
+        assert_eq!(format_sha256(hasher.finish()), expected);
+    }
 }
