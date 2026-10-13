@@ -522,6 +522,20 @@ pub fn recovery_obligation_id(operation_id: &str, kind: AttemptCommandKind) -> O
     ))
 }
 
+fn attempt_operation_command(kind: AttemptCommandKind) -> &'static str {
+    match kind {
+        AttemptCommandKind::Accept => "attempt.accept",
+        AttemptCommandKind::Start => "attempt.start",
+        AttemptCommandKind::Heartbeat => "attempt.heartbeat",
+        AttemptCommandKind::RenewLease { .. } => "attempt.renew_lease",
+        AttemptCommandKind::Submit => "attempt.submit",
+        AttemptCommandKind::Release => "attempt.release",
+        AttemptCommandKind::Fail => "attempt.fail",
+        AttemptCommandKind::Expire { .. } => "attempt.expire",
+        AttemptCommandKind::Cancel { .. } => "attempt.cancel",
+    }
+}
+
 fn recovery_resolution(record: RecoveryObligationRecord) -> AttemptRecoveryResolution {
     match record.state.as_str() {
         "resolved" => AttemptRecoveryResolution::Reconciled(record),
@@ -1070,32 +1084,34 @@ impl WorkApplication<'_> {
             at: format!("unix-ms:{}", request.at.as_millis()),
         })?;
 
-        if !stored.replayed {
-            let attempt_identity = request.descriptor.attempt.as_ref().ok_or_else(|| {
-                ApplicationError::Invalid(
-                    "recover descriptor is incomplete: the current attempt and fence are absent"
-                        .to_owned(),
-                )
-            })?;
-            let attempt = AttemptRequest::new(
-                request.project_id.clone(),
-                request.work_id.clone(),
-                AttemptId::new(attempt_identity.attempt_id.clone()),
-                request.actor_id.clone(),
-                None,
-                Some(request.session_id.clone()),
-                Fence::new(attempt_identity.fence),
-                request.operation_id.clone(),
-                request_digest,
-                request.at,
-            );
-            self.request_terminal_resource_readback(
-                &attempt,
-                AttemptCommandKind::Expire {
-                    confirmation: request.disposition,
-                },
-            )?;
-        }
+        let attempt_identity = request.descriptor.attempt.as_ref().ok_or_else(|| {
+            ApplicationError::Invalid(
+                "recover descriptor is incomplete: the current attempt and fence are absent"
+                    .to_owned(),
+            )
+        })?;
+        let attempt = AttemptRequest::new(
+            request.project_id.clone(),
+            request.work_id.clone(),
+            AttemptId::new(attempt_identity.attempt_id.clone()),
+            request.actor_id.clone(),
+            None,
+            Some(request.session_id.clone()),
+            Fence::new(attempt_identity.fence),
+            request.operation_id.clone(),
+            request_digest,
+            request.at,
+        );
+        // The operation receipt and its recovery sidecar are separate durable
+        // facts. A replay can follow an interruption after the expiry commit
+        // but before the caller observed its resource/recovery readback, so
+        // every replay must re-check that sidecar before reporting success.
+        self.request_terminal_resource_readback(
+            &attempt,
+            AttemptCommandKind::Expire {
+                confirmation: request.disposition,
+            },
+        )?;
 
         let mutation = attempt_mutation_from_store(stored)?;
         Ok(operation_result(mutation))
@@ -1218,8 +1234,9 @@ impl WorkApplication<'_> {
         let policy = AttemptPolicy::default();
         let replay = adapter.read_attempt_operation(&request.project_id, &request.operation_id)?;
         if let Some(result) = replay {
-            if result.request_digest != request.request_digest {
-                return Err(AttemptPolicyError::OperationReplayConflict.into());
+            self.validate_attempt_operation_result(&request, kind, &result)?;
+            if recovery_obligation_id(request.operation_id.as_str(), kind).is_some() {
+                self.request_terminal_resource_readback(&request, kind)?;
             }
             return Ok(operation_result(result));
         }
@@ -1246,6 +1263,7 @@ impl WorkApplication<'_> {
         };
         match adapter.transact_attempt(command) {
             Ok(result) => {
+                self.validate_attempt_operation_result(&request, kind, &result)?;
                 if recovery_obligation_id(request.operation_id.as_str(), kind).is_some() {
                     self.request_terminal_resource_readback(&request, kind)?;
                 }
@@ -1254,15 +1272,79 @@ impl WorkApplication<'_> {
             Err(AttemptAdapterError::UnknownOutcome(message)) => {
                 let operation_id = request.operation_id.clone();
                 match adapter.read_attempt_operation(&request.project_id, &operation_id)? {
-                    Some(result) if result.request_digest == request.request_digest => {
+                    Some(result) => {
+                        self.validate_attempt_operation_result(&request, kind, &result)?;
+                        if recovery_obligation_id(request.operation_id.as_str(), kind).is_some() {
+                            self.request_terminal_resource_readback(&request, kind)?;
+                        }
                         Ok(operation_result(result))
                     }
-                    Some(_) => Err(AttemptPolicyError::OperationReplayConflict.into()),
                     None => Err(AttemptAdapterError::UnknownOutcome(message).into()),
                 }
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    fn validate_attempt_operation_result(
+        &self,
+        request: &AttemptRequest,
+        kind: AttemptCommandKind,
+        result: &AttemptMutation,
+    ) -> Result<(), ApplicationError> {
+        if result.operation_id != request.operation_id
+            || result.request_digest != request.request_digest
+            || result.attempt_id != request.attempt_id
+            || result.fence != request.fence
+        {
+            return Err(AttemptPolicyError::OperationReplayConflict.into());
+        }
+
+        if let Some(operation) = self
+            .store
+            .operation(request.operation_id.as_str())
+            .map_err(|error| {
+                AttemptAdapterError::UnknownOutcome(format!(
+                    "attempt operation identity readback is unavailable: {error}"
+                ))
+            })?
+        {
+            let expected_session = request
+                .session_id
+                .as_ref()
+                .map(|session_id| session_id.as_str().to_owned());
+            if operation.operation_id != request.operation_id.as_str()
+                || operation.project_id != request.project_id.as_str()
+                || operation.command != attempt_operation_command(kind)
+                || operation.actor_id != request.actor_id.as_str()
+                || operation.session_id != expected_session
+                || operation.attempt_id.as_deref() != Some(request.attempt_id.as_str())
+                || operation.fence != Some(request.fence.get())
+                || operation.request_digest != request.request_digest
+            {
+                return Err(AttemptPolicyError::OperationReplayConflict.into());
+            }
+        } else if recovery_obligation_id(request.operation_id.as_str(), kind).is_some()
+            && self
+                .store
+                .recovery_obligation(
+                    request.project_id.as_str(),
+                    &recovery_obligation_id(request.operation_id.as_str(), kind)
+                        .expect("terminal command has a recovery obligation"),
+                )
+                .map_err(|error| {
+                    AttemptAdapterError::UnknownOutcome(format!(
+                        "terminal recovery sidecar readback is unavailable: {error}"
+                    ))
+                })?
+                .is_some()
+        {
+            return Err(AttemptAdapterError::UnknownOutcome(
+                "terminal recovery obligation has no matching operation receipt".to_owned(),
+            )
+            .into());
+        }
+        Ok(())
     }
 
     fn request_terminal_resource_readback(
@@ -1274,20 +1356,47 @@ impl WorkApplication<'_> {
         else {
             return Ok(());
         };
-        if self
+        let obligation = self
             .store
-            .recovery_obligation(request.project_id.as_str(), &obligation_id)?
-            .is_none()
-        {
+            .recovery_obligation(request.project_id.as_str(), &obligation_id)
+            .map_err(|error| {
+                AttemptAdapterError::UnknownOutcome(format!(
+                    "terminal recovery sidecar readback is unavailable: {error}"
+                ))
+            })?;
+        if obligation.is_none() {
             // Non-store test adapters may implement the lifecycle contract
             // without a durable recovery sidecar. Do not synthesize one here;
             // the canonical adapter/store integration remains the authority.
+            // A committed operation in the canonical journal is different:
+            // its terminal transaction must have written the obligation
+            // atomically, so a missing sidecar leaves the outcome uncertain.
+            if self
+                .store
+                .operation(request.operation_id.as_str())
+                .map_err(|error| {
+                    AttemptAdapterError::UnknownOutcome(format!(
+                        "attempt operation identity readback is unavailable: {error}"
+                    ))
+                })?
+                .is_some()
+            {
+                return Err(AttemptAdapterError::UnknownOutcome(
+                    "terminal operation has no durable recovery obligation readback".to_owned(),
+                )
+                .into());
+            }
             return Ok(());
         }
 
         let resources = self
             .store
-            .list_live_resources(request.project_id.as_str(), None, 500)?;
+            .list_live_resources(request.project_id.as_str(), None, 500)
+            .map_err(|error| {
+                AttemptAdapterError::UnknownOutcome(format!(
+                    "terminal resource sidecar readback is unavailable: {error}"
+                ))
+            })?;
         let identity = match IdentityStore::new(self.store).context(request.project_id.as_str()) {
             Ok(identity) => Some(identity),
             // Schema-v2 compatibility fixtures may expose a resource table
@@ -1307,9 +1416,16 @@ impl WorkApplication<'_> {
         };
         let recovery = AttemptRecoveryAdapter::new_with_identity(self.store, identity)
             .readback(request.project_id.as_str(), &obligation_id)
-            .map_err(ApplicationError::from)?;
+            .map_err(|error| {
+                ApplicationError::AttemptAdapter(AttemptAdapterError::UnknownOutcome(format!(
+                    "terminal recovery sidecar readback is unavailable: {error}"
+                )))
+            })?;
         let recovery_record = recovery.record();
-        if recovery_record.attempt_id.as_deref() != Some(request.attempt_id.as_str())
+        if recovery_record.project_id != request.project_id.as_str()
+            || recovery_record.work_id != request.work_id.as_str()
+            || recovery_record.owner_actor_id.as_deref() != Some(request.actor_id.as_str())
+            || recovery_record.attempt_id.as_deref() != Some(request.attempt_id.as_str())
             || recovery_record.fence != Some(request.fence.get())
         {
             return Err(ApplicationError::AttemptAdapter(
@@ -2114,6 +2230,53 @@ mod tests {
         }
     }
 
+    struct CommitThenUnknownAdapter<'a> {
+        inner: SqliteAttemptAdapter<'a>,
+        store: &'a SqliteStore,
+        lose_next_response: RefCell<bool>,
+        remove_terminal_obligation: RefCell<bool>,
+    }
+
+    impl AttemptLifecycleAdapter for CommitThenUnknownAdapter<'_> {
+        fn current_attempt(
+            &self,
+            project_id: &ProjectId,
+            attempt_id: &AttemptId,
+        ) -> Result<AttemptSnapshot, AttemptAdapterError> {
+            self.inner.current_attempt(project_id, attempt_id)
+        }
+
+        fn transact_attempt(
+            &self,
+            command: AttemptCommand,
+        ) -> Result<AttemptMutation, AttemptAdapterError> {
+            let committed = self.inner.transact_attempt(command)?;
+            if self.lose_next_response.replace(false) {
+                if self.remove_terminal_obligation.replace(false) {
+                    self.store
+                        .execute_batch(
+                            "DELETE FROM boreal_recovery_obligation
+                             WHERE obligation_id = 'op-terminal-fail:recovery:failed';",
+                        )
+                        .map_err(AttemptAdapterError::from)?;
+                }
+                Err(AttemptAdapterError::UnknownOutcome(
+                    "simulated disconnect after durable commit".to_owned(),
+                ))
+            } else {
+                Ok(committed)
+            }
+        }
+
+        fn read_attempt_operation(
+            &self,
+            project_id: &ProjectId,
+            operation_id: &OperationId,
+        ) -> Result<Option<AttemptMutation>, AttemptAdapterError> {
+            self.inner.read_attempt_operation(project_id, operation_id)
+        }
+    }
+
     #[test]
     fn application_dispatches_typed_command_and_preserves_operation_replay() {
         let store = boreal_store::SqliteStore::open_in_memory(include_str!(
@@ -2141,5 +2304,180 @@ mod tests {
         assert!(!result.changed);
         assert_eq!(result.value.operation_id, OperationId::new("op-accept"));
         assert_eq!(adapter.commands.borrow().len(), 1);
+    }
+
+    #[test]
+    fn terminal_unknown_outcome_and_replay_repeat_identity_bound_resource_readback() {
+        let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema");
+        let project = ProjectId::new("runtime-terminal-readback-project");
+        store
+            .create_project(project.as_str(), "unix-ms:1")
+            .expect("project creates");
+        test_identity(&store, project.as_str());
+        bootstrap_operator(&store, project.as_str(), "terminal-operator");
+        grant_agent(
+            &store,
+            project.as_str(),
+            "terminal-operator",
+            "terminal-agent",
+        );
+        let app = WorkApplication::new(&store);
+        app.register_session_as(
+            &project,
+            "terminal-operator",
+            "runtime-harness",
+            "terminal-operator-session",
+            "unix-ms:3",
+            "op-terminal-operator-session",
+        )
+        .expect("operator session registers");
+        app.register_session_as(
+            &project,
+            "terminal-agent",
+            "runtime-harness",
+            "terminal-agent-session",
+            "unix-ms:3",
+            "op-terminal-agent-session",
+        )
+        .expect("agent session registers");
+        app.create_work_as_session_checked(
+            &WorkItem {
+                id: WorkId::new("runtime-terminal-readback-work"),
+                project_id: project.clone(),
+                kind: WorkKind::Task,
+                parent_id: None,
+                title: "terminal readback work".to_owned(),
+                description: String::new(),
+                lifecycle: PersistedLifecycle::Open,
+                priority: 0,
+                dispatch_policy: DispatchPolicy::Automatic,
+                hard_holds: Vec::new(),
+                acceptance_profile: AcceptanceProfile::focused(),
+            },
+            "terminal-operator",
+            "terminal-operator-session",
+            Some(store.project_revision(project.as_str()).unwrap().0),
+            "unix-ms:4",
+            "op-runtime-terminal-readback-work",
+        )
+        .expect("work creates");
+        store
+            .execute_batch(
+                "INSERT INTO source_version
+                 (source_version_id,project_id,origin,access_scope,content_digest,media_type,
+                  byte_count,captured_at,parser_identity,availability,citation_json)
+                 VALUES ('runtime-terminal-source','runtime-terminal-readback-project',
+                         'fixture.md','project',
+                         'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                         'text/markdown',1,'unix-ms:5','fixture-parser/1','available','[]');",
+            )
+            .expect("registered source version is available for this attempt");
+        app.claim_with_context(
+            &project,
+            "runtime-terminal-readback-work",
+            "terminal-agent",
+            "runtime-harness",
+            Some("terminal-agent-session"),
+            "runtime-terminal-readback-attempt",
+            "op-runtime-terminal-readback-claim",
+            "sha256:op-runtime-terminal-readback-claim",
+            None,
+            "unix-ms:1000",
+            "unix-ms:1100",
+            "unix-ms:1200",
+            Some("runtime-terminal-source"),
+            "config-terminal-readback",
+        )
+        .expect("attempt claims and owns a live resource");
+        let adapter = SqliteAttemptAdapter::new(&store);
+        let fence = Fence::new(1);
+        let attempt_request = |operation: &str, at| {
+            AttemptRequest::new(
+                project.clone(),
+                WorkId::new("runtime-terminal-readback-work"),
+                AttemptId::new("runtime-terminal-readback-attempt"),
+                ActorId::new("terminal-agent"),
+                Some(HarnessId::new("runtime-harness")),
+                Some(SessionId::new("terminal-agent-session")),
+                fence,
+                OperationId::new(operation),
+                format!("sha256:{operation}"),
+                TimestampMs(at),
+            )
+        };
+        app.accept(&adapter, attempt_request("op-terminal-accept", 1_001))
+            .expect("enrolled agent accepts its claimed attempt");
+        app.start(&adapter, attempt_request("op-terminal-start", 1_002))
+            .expect("same scoped session starts the attempt");
+        let fail = EndAttemptRequest {
+            attempt: attempt_request("op-terminal-fail", 1_050),
+            reason: Some("worker stopped after a failed tool run".to_owned()),
+        };
+        let lost_response = CommitThenUnknownAdapter {
+            inner: SqliteAttemptAdapter::new(&store),
+            store: &store,
+            lose_next_response: RefCell::new(true),
+            remove_terminal_obligation: RefCell::new(true),
+        };
+
+        for result in [
+            app.fail(&lost_response, fail.clone()),
+            app.fail(&adapter, fail.clone()),
+        ] {
+            let error = result.expect_err(
+                "unknown outcome and operation replay must preserve unresolved resource state",
+            );
+            assert!(matches!(
+                error,
+                ApplicationError::AttemptAdapter(AttemptAdapterError::UnknownOutcome(message))
+                    if message.contains("terminal operation has no durable recovery obligation readback")
+            ));
+        }
+
+        let mut forged_identity = fail.clone();
+        forged_identity.attempt.actor_id = ActorId::new("terminal-operator");
+        forged_identity.attempt.session_id = Some(SessionId::new("terminal-operator-session"));
+        assert!(matches!(
+            app.fail(&adapter, forged_identity),
+            Err(ApplicationError::AttemptPolicy(
+                AttemptPolicyError::OperationReplayConflict
+            ))
+        ));
+
+        let operation = store
+            .operation("op-terminal-fail")
+            .expect("operation readback succeeds")
+            .expect("failed operation committed despite the lost response");
+        assert_eq!(operation.actor_id, "terminal-agent");
+        assert_eq!(operation.project_id, project.as_str());
+        assert_eq!(operation.command, "attempt.fail");
+        assert_eq!(
+            operation.session_id.as_deref(),
+            Some("terminal-agent-session")
+        );
+        assert_eq!(operation.request_digest, "sha256:op-terminal-fail");
+        assert_eq!(
+            operation.attempt_id.as_deref(),
+            Some("runtime-terminal-readback-attempt")
+        );
+        assert_eq!(operation.fence, Some(fence.get()));
+        assert!(
+            store
+                .recovery_obligation(project.as_str(), "op-terminal-fail:recovery:failed")
+                .expect("recovery sidecar readback succeeds")
+                .is_none(),
+            "the test simulates an unavailable sidecar"
+        );
+        assert_eq!(
+            store
+                .resource_reservation(
+                    project.as_str(),
+                    "resource:runtime-terminal-readback-attempt"
+                )
+                .expect("resource readback succeeds")
+                .expect("claim resource remains reserved")
+                .state,
+            "release_pending"
+        );
     }
 }
