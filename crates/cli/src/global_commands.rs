@@ -1348,6 +1348,7 @@ fn normalize_folder_path(input: &str) -> Result<String, CliError> {
 const LINKED_POOL_WORKERS: usize = 8;
 const LINKED_POOL_QUEUE: usize = 64;
 const LINKED_REFRESH_BUDGET: std::time::Duration = std::time::Duration::from_millis(75);
+const LINKED_JOB_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 const LINKED_DETAIL_RETENTION: std::time::Duration = std::time::Duration::from_secs(300);
 const LINKED_DETAIL_RESULT_CAPACITY: usize = 128;
 static LINKED_JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1355,6 +1356,8 @@ static LINKED_JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
 struct LinkedRefreshJob {
     key: (String, String),
     path: String,
+    queued_at: Instant,
+    deadline: Instant,
     kind: LinkedRefreshKind,
 }
 
@@ -1373,6 +1376,11 @@ enum LinkedRefreshKind {
         release: std::sync::mpsc::Receiver<()>,
         fail: bool,
     },
+    #[cfg(test)]
+    BlockRollup {
+        started: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
 }
 
 type LinkedDetailKey = (String, String, String, u64, u64);
@@ -1381,6 +1389,8 @@ struct LinkedDetailRecord {
     key: LinkedDetailKey,
     page: Option<Value>,
     error: Option<String>,
+    pool_wait_ms: Option<u64>,
+    refresh_duration_ms: Option<u64>,
     changed_at: Instant,
 }
 
@@ -1403,6 +1413,7 @@ fn preserve_linked_sample_on_error(
     previous: Option<Value>,
     failure: Value,
     now_ms: u64,
+    pool_wait_ms: u64,
     refresh_duration_ms: u64,
 ) -> Value {
     if failure["availability"] != "unavailable" {
@@ -1416,6 +1427,7 @@ fn preserve_linked_sample_on_error(
     let sampled_at = previous["_sampled_at_ms"].as_u64().unwrap_or(now_ms);
     previous["availability"] = json!("stale");
     previous["sample_age_ms"] = json!(now_ms.saturating_sub(sampled_at));
+    previous["pool_wait_ms"] = json!(pool_wait_ms);
     previous["refresh_duration_ms"] = json!(refresh_duration_ms);
     previous["error"] = failure["error"].clone();
     previous
@@ -1448,21 +1460,22 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                 Ok(job) => job,
                 Err(_) => break,
             };
+            let queued_at = job.queued_at;
+            let deadline = job.deadline;
             match job.kind {
                 LinkedRefreshKind::Rollup => {
                     let started = Instant::now();
-                    let result = linked_workspace_rollup(
-                        &job.key.1,
-                        &job.path,
-                        Instant::now() + Duration::from_secs(3),
-                    );
+                    let pool_wait_ms =
+                        started.saturating_duration_since(queued_at).as_millis() as u64;
+                    let result = linked_workspace_rollup(&job.key.1, &job.path, deadline);
                     let now = now_ms_u64();
+                    let refresh_duration_ms = started.elapsed().as_millis() as u64;
                     let row = match result {
                         Ok(value) => {
-                            json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"refresh_duration_ms":started.elapsed().as_millis() as u64,"counts":value["counts"],"error":null})
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":value["counts"],"error":null})
                         }
                         Err(error) => {
-                            json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"refresh_duration_ms":started.elapsed().as_millis() as u64,"counts":null,"error":error})
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":null,"error":error})
                         }
                     };
                     let mut state = state.lock().expect("linked cache poisoned");
@@ -1471,7 +1484,47 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                         state.rows.get(&job.key).cloned(),
                         row,
                         now,
-                        started.elapsed().as_millis() as u64,
+                        pool_wait_ms,
+                        refresh_duration_ms,
+                    );
+                    state.rows.insert(job.key, row);
+                    changed.notify_all();
+                }
+                #[cfg(test)]
+                LinkedRefreshKind::BlockRollup {
+                    started: signal,
+                    release,
+                } => {
+                    let started = Instant::now();
+                    let pool_wait_ms =
+                        started.saturating_duration_since(queued_at).as_millis() as u64;
+                    let _ = signal.send(());
+                    let _ = release.recv();
+                    let result = if Instant::now() >= deadline {
+                        Err("linked workspace read deadline expired".to_owned())
+                    } else {
+                        Ok(
+                            json!({"revision":9,"as_of":"test","as_of_ms":now_ms_u64(),"counts":{"total":9}}),
+                        )
+                    };
+                    let now = now_ms_u64();
+                    let refresh_duration_ms = started.elapsed().as_millis() as u64;
+                    let row = match result {
+                        Ok(value) => {
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":value["counts"],"error":null})
+                        }
+                        Err(error) => {
+                            json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":null,"error":error})
+                        }
+                    };
+                    let mut state = state.lock().expect("linked cache poisoned");
+                    state.pending.remove(&job.key);
+                    let row = preserve_linked_sample_on_error(
+                        state.rows.get(&job.key).cloned(),
+                        row,
+                        now,
+                        pool_wait_ms,
+                        refresh_duration_ms,
                     );
                     state.rows.insert(job.key, row);
                     changed.notify_all();
@@ -1482,13 +1535,16 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                     offset,
                     job_id,
                 } => {
+                    let started = Instant::now();
+                    let pool_wait_ms =
+                        started.saturating_duration_since(queued_at).as_millis() as u64;
                     let result = linked_workspace_detail(
                         &management_project_id,
                         &job.key.1,
                         &job.path,
                         limit,
                         offset,
-                        Instant::now() + Duration::from_secs(3),
+                        deadline,
                     )
                     .map(|mut page| {
                         let items = page
@@ -1507,8 +1563,11 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                             Value::Null
                         };
                         page["job_id"] = Value::Null;
+                        page["pool_wait_ms"] = json!(pool_wait_ms);
+                        page["refresh_duration_ms"] = json!(started.elapsed().as_millis() as u64);
                         page
                     });
+                    let refresh_duration_ms = started.elapsed().as_millis() as u64;
                     let mut state = state.lock().expect("linked cache poisoned");
                     if let Some(record) = state.details.get_mut(&job_id) {
                         match result {
@@ -1521,6 +1580,8 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                                 record.page = None;
                             }
                         }
+                        record.pool_wait_ms = Some(pool_wait_ms);
+                        record.refresh_duration_ms = Some(refresh_duration_ms);
                         record.changed_at = Instant::now();
                     }
                     changed.notify_all();
@@ -1543,6 +1604,12 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
                                 json!({"availability":"available","items":[],"items_total":0,"total":0,"revision":7,"as_of":"test","job_id":null}),
                             );
                         }
+                        record.pool_wait_ms = Some(
+                            Instant::now()
+                                .saturating_duration_since(queued_at)
+                                .as_millis() as u64,
+                        );
+                        record.refresh_duration_ms = Some(0);
                         record.changed_at = Instant::now();
                     }
                     changed.notify_all();
@@ -1598,18 +1665,23 @@ fn schedule_linked_detail(
         LINKED_JOB_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     let (project_id, identity, _, limit, offset) = key.clone();
+    let queued_at = Instant::now();
     state.details.insert(
         job_id.clone(),
         LinkedDetailRecord {
             key: key.clone(),
             page: None,
             error: None,
-            changed_at: Instant::now(),
+            pool_wait_ms: None,
+            refresh_duration_ms: None,
+            changed_at: queued_at,
         },
     );
     let job = LinkedRefreshJob {
         key: (project_id, identity),
         path,
+        queued_at,
+        deadline: queued_at + LINKED_JOB_BUDGET,
         kind: LinkedRefreshKind::Detail {
             management_project_id,
             limit,
@@ -1693,12 +1765,18 @@ fn linked_detail_job_from_pool(pool: &LinkedRefreshPool, job_id: &str) -> Result
         )
     })?;
     if let Some(error) = &record.error {
-        return Ok(json!({"job_id":job_id,"state":"failed","page":null,"error":error}));
+        return Ok(
+            json!({"job_id":job_id,"state":"failed","page":null,"error":error,"pool_wait_ms":record.pool_wait_ms,"refresh_duration_ms":record.refresh_duration_ms}),
+        );
     }
     if let Some(page) = &record.page {
-        return Ok(json!({"job_id":job_id,"state":"complete","page":page,"error":null}));
+        return Ok(
+            json!({"job_id":job_id,"state":"complete","page":page,"error":null,"pool_wait_ms":record.pool_wait_ms,"refresh_duration_ms":record.refresh_duration_ms}),
+        );
     }
-    Ok(json!({"job_id":job_id,"state":"refreshing","page":null,"error":null}))
+    Ok(
+        json!({"job_id":job_id,"state":"refreshing","page":null,"error":null,"pool_wait_ms":null,"refresh_duration_ms":null}),
+    )
 }
 
 fn enrich_snapshot(snapshot: &mut Value) {
@@ -1746,14 +1824,34 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
         state.pending.retain(|key| keys.contains(key));
         for (key, _, _, path) in &requests {
             if state.pending.insert(key.clone()) {
+                let queued_at = Instant::now();
                 match pool.sender.try_send(LinkedRefreshJob {
                     key: key.clone(),
                     path: path.clone(),
+                    queued_at,
+                    deadline: queued_at + LINKED_JOB_BUDGET,
                     kind: LinkedRefreshKind::Rollup,
                 }) {
                     Ok(()) => {}
-                    Err(_) => {
+                    Err(error) => {
                         state.pending.remove(key);
+                        let message = match error {
+                            std::sync::mpsc::TrySendError::Full(_) => {
+                                "linked refresh worker queue is full"
+                            }
+                            std::sync::mpsc::TrySendError::Disconnected(_) => {
+                                "linked refresh workers are unavailable"
+                            }
+                        };
+                        let failure = json!({"project_id":key.1,"path":path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":0,"refresh_duration_ms":0,"counts":null,"error":message});
+                        let stale = preserve_linked_sample_on_error(
+                            state.rows.get(key).cloned(),
+                            failure,
+                            now_ms_u64(),
+                            0,
+                            0,
+                        );
+                        state.rows.insert(key.clone(), stale);
                     }
                 }
             }
@@ -1773,7 +1871,7 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
     let state = pool.state.lock().expect("linked cache poisoned");
     let linked = requests.into_iter().map(|(key,management_project_id,identity,path)| {
         let pending = state.pending.contains(&key);
-        let mut row = state.rows.get(&key).cloned().unwrap_or_else(|| json!({"project_id":identity,"path":path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"counts":null,"error":"linked workspace has not produced a sample"}));
+        let mut row = state.rows.get(&key).cloned().unwrap_or_else(|| json!({"project_id":identity,"path":path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":null,"refresh_duration_ms":null,"counts":null,"error":"linked workspace has not produced a sample"}));
         if let Some(sampled_at) = row.get("_sampled_at_ms").and_then(Value::as_u64) {
             row["sample_age_ms"] = json!(now_ms_u64().saturating_sub(sampled_at));
             if let Some(object) = row.as_object_mut() {
@@ -1782,7 +1880,7 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
         }
         row["management_project_id"] = json!(management_project_id);
         if pending {
-            row["availability"] = json!(if state.rows.get(&key).is_some_and(|v| v["availability"] == "available") { "stale" } else { "refreshing" });
+            row["availability"] = json!(if state.rows.get(&key).is_some_and(|v| matches!(v["availability"].as_str(), Some("available" | "stale"))) { "stale" } else { "refreshing" });
             row["error"] = json!("refresh is still running");
         }
         row
@@ -2011,11 +2109,12 @@ mod tests {
     fn linked_failure_keeps_last_good_counts_and_updates_sample_age() {
         let previous = json!({"availability":"available","counts":{"open":4},"revision":8,"as_of":"2026-09-30T00:00:00Z","_sampled_at_ms":1000,"sample_age_ms":0,"error":null});
         let failure = json!({"availability":"unavailable","error":"workspace database is busy"});
-        let stale = preserve_linked_sample_on_error(Some(previous), failure, 7250, 31);
+        let stale = preserve_linked_sample_on_error(Some(previous), failure, 7250, 12, 31);
         assert_eq!(stale["availability"], "stale");
         assert_eq!(stale["counts"]["open"], 4);
         assert_eq!(stale["revision"], 8);
         assert_eq!(stale["sample_age_ms"], 6250);
+        assert_eq!(stale["pool_wait_ms"], 12);
         assert_eq!(stale["refresh_duration_ms"], 31);
         assert_eq!(stale["error"], "workspace database is busy");
     }
@@ -2039,13 +2138,18 @@ mod tests {
                 key: key.clone(),
                 page: None,
                 error: None,
+                pool_wait_ms: None,
+                refresh_duration_ms: None,
                 changed_at: Instant::now(),
             },
         );
+        let queued_at = Instant::now();
         pool.sender
             .try_send(LinkedRefreshJob {
                 key: (key.0.clone(), key.1.clone()),
                 path: "synthetic".into(),
+                queued_at,
+                deadline: queued_at + LINKED_JOB_BUDGET,
                 kind: LinkedRefreshKind::Block {
                     job_id: job_id.to_owned(),
                     started,
@@ -2090,6 +2194,8 @@ mod tests {
             let status = linked_detail_job_from_pool(&pool, "job-complete").unwrap();
             if status["state"] == "complete" {
                 assert_eq!(status["page"]["revision"], 7);
+                assert!(status["pool_wait_ms"].is_number());
+                assert!(status["refresh_duration_ms"].is_number());
                 break;
             }
             assert!(Instant::now() < deadline, "detail job did not complete");
@@ -2175,11 +2281,191 @@ mod tests {
                     ),
                     page: Some(json!({"items":[]})),
                     error: None,
+                    pool_wait_ms: Some(0),
+                    refresh_duration_ms: Some(0),
                     changed_at: Instant::now(),
                 },
             );
         }
         prune_linked_detail_results(&mut state, Instant::now());
         assert_eq!(state.details.len(), LINKED_DETAIL_RESULT_CAPACITY);
+    }
+
+    #[test]
+    fn linked_rollup_discards_a_late_success_and_keeps_the_last_good_sample_stale() {
+        let pool = new_linked_refresh_pool();
+        let key = ("management-late".to_owned(), "workspace-late".to_owned());
+        let sampled_at = now_ms_u64().saturating_sub(100);
+        {
+            let mut state = pool.state.lock().unwrap();
+            state.pending.insert(key.clone());
+            state.rows.insert(
+                key.clone(),
+                json!({"project_id":"workspace-late","path":"synthetic","availability":"available","revision":5,"as_of":"sampled","sample_age_ms":100,"_sampled_at_ms":sampled_at,"counts":{"total":9},"error":null}),
+            );
+        }
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let queued_at = Instant::now();
+        pool.sender
+            .try_send(LinkedRefreshJob {
+                key: key.clone(),
+                path: "synthetic".into(),
+                queued_at,
+                deadline: queued_at + Duration::from_millis(30),
+                kind: LinkedRefreshKind::BlockRollup {
+                    started,
+                    release: release_rx,
+                },
+            })
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let mut snapshot = json!({"associations":[{"project_id":"management-late","kind":"workspace","identity":"workspace-late","path":"synthetic"}]});
+        enrich_snapshot_with_pool(&mut snapshot, &pool);
+        let presented = &snapshot["linked_projects"][0];
+        assert_eq!(presented["availability"], "stale");
+        assert_eq!(presented["counts"]["total"], 9);
+
+        std::thread::sleep(Duration::from_millis(40));
+        release.send(()).unwrap();
+        let completion_deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let state = pool.state.lock().unwrap();
+            if !state.pending.contains(&key) {
+                let row = state.rows.get(&key).unwrap();
+                assert_eq!(row["availability"], "stale");
+                assert_eq!(row["counts"]["total"], 9);
+                assert_eq!(row["revision"], 5);
+                assert_eq!(row["error"], "linked workspace read deadline expired");
+                assert!(row["refresh_duration_ms"].as_u64().unwrap() >= 40);
+                break;
+            }
+            drop(state);
+            assert!(
+                Instant::now() < completion_deadline,
+                "late worker did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn linked_worker_and_queue_saturation_leave_global_mutations_available_and_measure_wait() {
+        let pool = new_linked_refresh_pool();
+        let mut blocker_releases = Vec::new();
+        for index in 0..LINKED_POOL_WORKERS {
+            let key = (format!("blocker-{index}"), format!("workspace-{index}"));
+            let (started, started_rx) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            let queued_at = Instant::now();
+            pool.state.lock().unwrap().pending.insert(key.clone());
+            pool.sender
+                .try_send(LinkedRefreshJob {
+                    key,
+                    path: "synthetic".into(),
+                    queued_at,
+                    deadline: queued_at + Duration::from_secs(10),
+                    kind: LinkedRefreshKind::BlockRollup {
+                        started,
+                        release: release_rx,
+                    },
+                })
+                .unwrap();
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            blocker_releases.push(release);
+        }
+
+        let associations = (0..LINKED_POOL_WORKERS + LINKED_POOL_QUEUE + 8)
+            .map(|index| {
+                json!({"project_id":format!("management-{index:03}"),"kind":"workspace","identity":format!("linked-{index:03}"),"path":"/missing/synthetic/workspace"})
+            })
+            .collect::<Vec<_>>();
+        let first_key = ("management-000".to_owned(), "linked-000".to_owned());
+        pool.state.lock().unwrap().rows.insert(
+            first_key,
+            json!({"project_id":"linked-000","path":"/missing/synthetic/workspace","availability":"available","revision":3,"as_of":"last-good","sample_age_ms":0,"_sampled_at_ms":now_ms_u64(),"counts":{"total":1},"error":null}),
+        );
+        let mut snapshot = json!({"associations":associations});
+        let refresh_started = Instant::now();
+        enrich_snapshot_with_pool(&mut snapshot, &pool);
+        let snapshot_elapsed_ms = refresh_started.elapsed().as_millis() as u64;
+        let rows = snapshot["linked_projects"].as_array().unwrap();
+        assert_eq!(rows.len(), LINKED_POOL_WORKERS + LINKED_POOL_QUEUE + 8);
+        assert!(
+            snapshot_elapsed_ms < 500,
+            "snapshot took {snapshot_elapsed_ms} ms"
+        );
+        assert_eq!(rows[0]["availability"], "stale");
+        assert_eq!(rows[0]["counts"]["total"], 1);
+        assert!(rows
+            .iter()
+            .any(|row| row["error"] == "linked refresh worker queue is full"));
+
+        let root = std::env::temp_dir().join(format!(
+            "boreal-global-linked-saturation-{}-{}",
+            std::process::id(),
+            now_ms_u64()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let app = GlobalManagerApplication::open(root.join("global.sqlite")).unwrap();
+        let mutation_started = Instant::now();
+        app.execute(
+            "todo add",
+            &json!({"title":"Global todo under linked saturation"}),
+            "linked-saturation-todo",
+        )
+        .unwrap();
+        app.execute(
+            "note add",
+            &json!({"title":"Global note under linked saturation","body":"The linked queue is busy."}),
+            "linked-saturation-note",
+        )
+        .unwrap();
+        let mutation_elapsed_ms = mutation_started.elapsed().as_millis() as u64;
+        assert!(
+            mutation_elapsed_ms < 1_000,
+            "Global mutations took {mutation_elapsed_ms} ms"
+        );
+        let _ = fs::remove_dir_all(root);
+
+        for release in blocker_releases {
+            release.send(()).unwrap();
+        }
+        let keys = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["management_project_id"].as_str().unwrap().to_owned(),
+                    row["project_id"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let drain_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let state = pool.state.lock().unwrap();
+            if !state.pending.iter().any(|key| keys.contains(key)) {
+                let measured_wait = state
+                    .rows
+                    .iter()
+                    .filter(|(key, _)| keys.contains(*key))
+                    .filter_map(|(_, row)| row["pool_wait_ms"].as_u64())
+                    .max()
+                    .unwrap_or(0);
+                assert!(measured_wait > 0, "pool wait was not measured");
+                assert!(state
+                    .rows
+                    .iter()
+                    .filter(|(key, _)| keys.contains(*key))
+                    .any(|(_, row)| row["refresh_duration_ms"].as_u64().is_some()));
+                break;
+            }
+            drop(state);
+            assert!(
+                Instant::now() < drain_deadline,
+                "saturated linked queue did not drain"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
