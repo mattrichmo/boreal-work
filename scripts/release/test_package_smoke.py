@@ -269,6 +269,21 @@ def test_release_fixture(archive: Path, installer: Path = INSTALLER) -> None:
             "SHA256SUMS basename mismatch",
         )
 
+        wrong_path = scratch / "wrong-path-assets"
+        wrong_path.mkdir()
+        shutil.copyfile(valid_assets / archive_name, wrong_path / archive_name)
+        write_checksums(wrong_path, archive_name, digest, name=f"releases/{archive_name}")
+        result = run_installer(
+            installer=installer,
+            version=version,
+            assets=wrong_path,
+            scratch=scratch,
+            label="wrong-path",
+        )
+        expect_rejected(result, "SHA256SUMS path mismatch")
+        if f"SHA256SUMS does not contain {archive_name}" not in result.stderr:
+            fail("release checksum path was not rejected by exact basename lookup")
+
         wrong_hash = scratch / "wrong-hash-assets"
         wrong_hash.mkdir()
         shutil.copyfile(valid_assets / archive_name, wrong_hash / archive_name)
