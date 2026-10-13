@@ -131,7 +131,7 @@ pub(crate) fn request(parsed: &ParsedCommand, operation: &str) -> Result<CliResu
     let (command, payload) = global_commands::build_command(parsed)?;
     if command == "export" && !parsed.options.extra.contains_key("--out") {
         return Err(CliError::invalid(
-            "global export through the service requires --out PATH so the backup can bypass interactive frame limits",
+            "global export through the service requires --out PATH so the logical transfer can bypass interactive frame limits",
         ));
     }
     if command == "export" && parsed.options.extra.contains_key("--out") {
