@@ -1349,14 +1349,29 @@ if [ -z "$LOCAL_ARCHIVE" ]; then
   curl -fsSL "$RELEASE_URL/$ARCHIVE_NAME" -o "$ARCHIVE_PATH"
   curl -fsSL "$RELEASE_URL/SHA256SUMS" -o "$TEMP_ROOT/SHA256SUMS"
   if command -v shasum >/dev/null 2>&1; then
-    ACTUAL_SHA=$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')
+    ACTUAL_SHA=$(LC_ALL=C shasum -a 256 "$ARCHIVE_PATH" | LC_ALL=C awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL_SHA=$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')
+    ACTUAL_SHA=$(LC_ALL=C sha256sum "$ARCHIVE_PATH" | LC_ALL=C awk '{print $1}')
   else
     die "shasum or sha256sum is required to verify the release"
   fi
-  EXPECTED_SHA=$(awk -v name="$ARCHIVE_NAME" '$2 == name {print $1; exit}' "$TEMP_ROOT/SHA256SUMS")
-  [ -n "$EXPECTED_SHA" ] || die "SHA256SUMS does not contain $ARCHIVE_NAME"
+  EXPECTED_SHA=$(LC_ALL=C awk -v name="$ARCHIVE_NAME" '
+    $2 == name {
+      if (NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-fA-F]/) {
+        invalid = 1
+        next
+      }
+      count++
+      digest = tolower($1)
+    }
+    END {
+      if (count == 1 && !invalid) print digest
+    }
+  ' "$TEMP_ROOT/SHA256SUMS")
+  [ -n "$EXPECTED_SHA" ] || die "SHA256SUMS does not contain $ARCHIVE_NAME exactly once as a valid SHA-256 entry"
+  ACTUAL_SHA=$(printf '%s' "$ACTUAL_SHA" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  # SHA256SUMS is downloaded from the same release as the archive. This detects
+  # transfer or asset mismatches; it is not an independent publisher signature.
   [ "$ACTUAL_SHA" = "$EXPECTED_SHA" ] || die "checksum verification failed for $ARCHIVE_NAME"
 fi
 
