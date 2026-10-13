@@ -10,6 +10,17 @@ pub const ATTENTION_PAGE_COMMAND: &str = "attention page";
 pub const LINKED_PAGE_COMMAND: &str = "linked page";
 pub const LINKED_JOB_SHOW_COMMAND: &str = "linked job show";
 
+/// Application-resolved system time context shared by Global clients. This is
+/// refreshed with each snapshot/read and is never persisted as policy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalCivilTimeContext {
+    pub observed_at_unix_ms: u64,
+    pub timezone: String,
+    pub system_civil_date: String,
+    pub tzdb_identity: String,
+}
+
 /// Deterministic page request for full-state global collections. Search is
 /// evaluated before pagination against the complete collection at one revision.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -85,6 +85,70 @@ pub enum ManagementItemKind {
     Milestone,
 }
 
+/// Relationship vocabulary for management items. Hierarchy is deliberately
+/// independent: only the two dependency kinds produce prerequisite edges.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagementRelationshipKind {
+    DependsOn,
+    Blocks,
+    Related,
+}
+
+impl TryFrom<&str> for ManagementRelationshipKind {
+    type Error = GlobalManagerDomainError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "depends_on" => Ok(Self::DependsOn),
+            "blocks" => Ok(Self::Blocks),
+            "related" => Ok(Self::Related),
+            _ => Err(GlobalManagerDomainError::InvalidRelationshipKind(
+                value.to_owned(),
+            )),
+        }
+    }
+}
+
+/// Canonicalize the user-facing relationship into prerequisite → dependent.
+/// “A blocks B” and “B depends on A” describe the same edge. `related` never
+/// participates in readiness.
+pub fn prerequisite_to_dependent(
+    source: &str,
+    target: &str,
+    kind: ManagementRelationshipKind,
+) -> Option<(String, String)> {
+    match kind {
+        ManagementRelationshipKind::Blocks => Some((source.to_owned(), target.to_owned())),
+        ManagementRelationshipKind::DependsOn => Some((target.to_owned(), source.to_owned())),
+        ManagementRelationshipKind::Related => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagementPrerequisiteState {
+    Satisfied,
+    Incomplete,
+    ArchivedIncomplete,
+    Cancelled,
+    Missing,
+}
+
+/// Only completed work satisfies a management prerequisite. Archiving does
+/// not erase a completed result and cannot make incomplete or cancelled work
+/// appear complete.
+pub fn management_prerequisite_state(
+    category: Option<StatusCategory>,
+    archived: bool,
+) -> ManagementPrerequisiteState {
+    match category {
+        Some(StatusCategory::Completed) => ManagementPrerequisiteState::Satisfied,
+        Some(StatusCategory::Cancelled) => ManagementPrerequisiteState::Cancelled,
+        Some(_) if archived => ManagementPrerequisiteState::ArchivedIncomplete,
+        Some(_) => ManagementPrerequisiteState::Incomplete,
+        None => ManagementPrerequisiteState::Missing,
+    }
+}
+
 impl ManagementItemKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -269,6 +333,7 @@ pub enum GlobalManagerDomainError {
     InvalidIdentifier(String),
     InvalidCategory(String),
     InvalidItemKind(String),
+    InvalidRelationshipKind(String),
     EmptyTitle,
     EmptyLabel,
     SubtaskNeedsParent,
@@ -283,6 +348,9 @@ impl fmt::Display for GlobalManagerDomainError {
             Self::InvalidIdentifier(v) => write!(f, "invalid global identifier: {v:?}"),
             Self::InvalidCategory(v) => write!(f, "unknown workflow category: {v}"),
             Self::InvalidItemKind(v) => write!(f, "unknown management item kind: {v}"),
+            Self::InvalidRelationshipKind(v) => {
+                write!(f, "unknown management relationship kind: {v}")
+            }
             Self::EmptyTitle => f.write_str("item title is required"),
             Self::EmptyLabel => f.write_str("workflow status label is required"),
             Self::SubtaskNeedsParent => f.write_str("a subtask requires a parent item"),

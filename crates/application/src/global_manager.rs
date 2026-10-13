@@ -1,5 +1,6 @@
 //! Application boundary for the installation-wide global manager.
 
+use crate::GlobalCivilTimeContext;
 use boreal_domain::global_manager::{ManagementItemKind, StatusCategory};
 use boreal_store::global_manager::GlobalManagerStore;
 use boreal_store::StoreError;
@@ -406,6 +407,14 @@ impl GlobalManagerApplication {
             } else {
                 (self.store.state()?, self.store.revision()?)
             };
+        let civil_time = if matches!(command, "snapshot" | "detail page" | "attention page") {
+            let context = GlobalCivilTimeContext::system()
+                .map_err(|error| GlobalManagerError::Invalid(error.to_string()))?;
+            crate::global_daily_review::annotate_items(&mut state, &context);
+            Some(context)
+        } else {
+            None
+        };
         match command {
             "snapshot" => {
                 state["schema_version"] = serde_json::json!(2);
@@ -415,7 +424,8 @@ impl GlobalManagerApplication {
                     .take(GLOBAL_ATTENTION_PROJECTS_LIMIT)
                     .filter_map(|project| project["id"].as_str().map(str::to_owned))
                     .collect::<Vec<_>>();
-                let attention = attention_summary(&state, &attention_sample_ids);
+                let context = civil_time.as_ref().expect("snapshot resolves civil time");
+                let attention = attention_summary(&state, &attention_sample_ids, context)?;
                 let mut totals = serde_json::Map::new();
                 let archived_projects = state
                     .get("projects")
@@ -468,6 +478,7 @@ impl GlobalManagerApplication {
                 state["totals"] = Value::Object(totals);
                 state["snapshot_limit"] = json!(100);
                 state["attention"] = attention;
+                state["civil_time"] = json!(context);
                 state["activity"] = self.read("history", &json!({"limit":50,"offset":0}))?;
                 let mut payload_truncated = false;
                 while serde_json::to_vec(&state)
@@ -698,7 +709,7 @@ impl GlobalManagerApplication {
                 let next = offset.saturating_add(page.len() as u64);
                 let has_more = !resnapshot_required && next < total;
                 Ok(
-                    json!({"collection":collection,"rows":page,"total":total,"limit":limit,"offset":offset,"has_more":has_more,"next_offset":if has_more {json!(next)} else {Value::Null},"revision":revision,"resnapshot_required":resnapshot_required,"requested_revision":expected_revision}),
+                    json!({"collection":collection,"rows":page,"total":total,"limit":limit,"offset":offset,"has_more":has_more,"next_offset":if has_more {json!(next)} else {Value::Null},"revision":revision,"resnapshot_required":resnapshot_required,"requested_revision":expected_revision,"civil_time":civil_time}),
                 )
             }
             "attention page" => {
@@ -724,8 +735,17 @@ impl GlobalManagerApplication {
                     .take(limit)
                     .cloned()
                     .collect::<Vec<_>>();
-                let attention = (!resnapshot_required)
-                    .then(|| attention_summary(&state, &selected_project_ids));
+                let attention = if resnapshot_required {
+                    None
+                } else {
+                    Some(attention_summary(
+                        &state,
+                        &selected_project_ids,
+                        civil_time
+                            .as_ref()
+                            .expect("attention page resolves civil time"),
+                    )?)
+                };
                 let attention_projects = attention
                     .as_ref()
                     .and_then(|value| value.get("projects"))
@@ -747,7 +767,8 @@ impl GlobalManagerApplication {
                     "offset": offset,
                     "revision": revision,
                     "resnapshot_required": resnapshot_required,
-                    "requested_revision": expected_revision
+                    "requested_revision": expected_revision,
+                    "civil_time": civil_time
                 });
                 while serde_json::to_vec(&response)
                     .map(|bytes| bytes.len() > INTERACTIVE_RESPONSE_MAX_BYTES)
@@ -777,7 +798,8 @@ impl GlobalManagerApplication {
                     "next_offset": if has_more { json!(next) } else { Value::Null },
                     "revision": revision,
                     "resnapshot_required": resnapshot_required,
-                    "requested_revision": expected_revision
+                    "requested_revision": expected_revision,
+                    "civil_time": civil_time
                 }))
             }
             "project list" => Ok(filter_project_list(&state["projects"], payload)),
@@ -2386,222 +2408,13 @@ fn status_for_category(
         })
 }
 
-fn attention_summary(state: &Value, selected_project_ids: &[String]) -> Value {
-    let today = utc_today();
-    let archived = arr(state, "projects")
-        .iter()
-        .filter(|p| p["archived"] == true)
-        .filter_map(|p| p["id"].as_str().map(str::to_owned))
-        .collect::<std::collections::BTreeSet<_>>();
-    let categories = arr(state, "statuses");
-    let mut portfolio = [0_u64; 5];
-    let project_ids = arr(state, "projects")
-        .iter()
-        .filter_map(|project| project["id"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    let projects_total = project_ids.len() as u64;
-    let included_project_ids = selected_project_ids
-        .iter()
-        .filter(|id| project_ids.contains(id))
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut projects = included_project_ids
-        .iter()
-        .map(|id| (id.clone(), empty_project_attention()))
-        .collect::<serde_json::Map<_, _>>();
-    let mut personal = empty_project_attention();
-    for item in arr(state, "items") {
-        if item["archived"] == true
-            || item["project_id"]
-                .as_str()
-                .is_some_and(|id| archived.contains(id))
-        {
-            continue;
-        }
-        let category = categories
-            .iter()
-            .find(|s| {
-                s["project_id"].as_str() == item["project_id"].as_str()
-                    && s["status_id"] == item["status_id"]
-            })
-            .and_then(|s| s["category"].as_str())
-            .unwrap_or("open");
-        if matches!(category, "completed" | "cancelled") {
-            continue;
-        }
-        let due = item["due_at"].as_str().and_then(utc_date_from_iso);
-        let counts = item["project_id"]
-            .as_str()
-            .and_then(|owner| projects.get_mut(owner))
-            .or_else(|| item["project_id"].is_null().then_some(&mut personal));
-        portfolio[0] += 1;
-        if let Some(counts) = counts {
-            counts["open"] = json!(counts["open"].as_u64().unwrap_or(0) + 1);
-        }
-        if category == "waiting" {
-            portfolio[1] += 1;
-            if let Some(counts) = item["project_id"]
-                .as_str()
-                .and_then(|owner| projects.get_mut(owner))
-                .or_else(|| item["project_id"].is_null().then_some(&mut personal))
-            {
-                counts["waiting"] = json!(counts["waiting"].as_u64().unwrap_or(0) + 1);
-            }
-        }
-        match due.as_deref() {
-            Some(d) if d < today.as_str() => {
-                portfolio[2] += 1;
-                if let Some(counts) = item["project_id"]
-                    .as_str()
-                    .and_then(|owner| projects.get_mut(owner))
-                    .or_else(|| item["project_id"].is_null().then_some(&mut personal))
-                {
-                    counts["overdue"] = json!(counts["overdue"].as_u64().unwrap_or(0) + 1);
-                }
-            }
-            None => {
-                portfolio[3] += 1;
-                if let Some(counts) = item["project_id"]
-                    .as_str()
-                    .and_then(|owner| projects.get_mut(owner))
-                    .or_else(|| item["project_id"].is_null().then_some(&mut personal))
-                {
-                    counts["unscheduled"] = json!(counts["unscheduled"].as_u64().unwrap_or(0) + 1);
-                }
-            }
-            Some(d) if d == today => {
-                portfolio[4] += 1;
-                if let Some(counts) = item["project_id"]
-                    .as_str()
-                    .and_then(|owner| projects.get_mut(owner))
-                    .or_else(|| item["project_id"].is_null().then_some(&mut personal))
-                {
-                    counts["due_today"] = json!(counts["due_today"].as_u64().unwrap_or(0) + 1);
-                }
-            }
-            _ => {}
-        }
-    }
-    for (project_id, summary) in projects.iter_mut() {
-        if archived.contains(project_id.as_str()) {
-            continue;
-        }
-        populate_attention_details(state, Some(project_id), summary);
-    }
-    if personal["open"].as_u64().unwrap_or(0) > 0 {
-        populate_attention_details(state, None, &mut personal);
-        // Keep the established snapshot key for existing clients while also
-        // exposing personal attention explicitly outside the project totals.
-        projects
-            .entry("personal".to_owned())
-            .or_insert_with(|| personal.clone());
-    }
-    let projects_sampled = included_project_ids.len() as u64;
-    let projects_truncated = projects_sampled < projects_total;
-    json!({
-        "portfolio":{"open":portfolio[0],"waiting":portfolio[1],"overdue":portfolio[2],"unscheduled":portfolio[3],"due_today":portfolio[4]},
-        "projects":projects,
-        "projects_total":projects_total,
-        "projects_limit":projects_sampled,
-        "projects_has_more":projects_truncated,
-        "projects_truncated":projects_truncated,
-        "personal":personal
-    })
-}
-
-fn empty_project_attention() -> Value {
-    json!({"open":0,"waiting":0,"overdue":0,"unscheduled":0,"due_today":0,"next_action":null,"next_milestone":null})
-}
-
-fn populate_attention_details(state: &Value, project_id: Option<&str>, summary: &mut Value) {
-    let owns = |item: &Value| match project_id {
-        Some(project_id) => item["project_id"].as_str() == Some(project_id),
-        None => item["project_id"].is_null(),
-    };
-    let mut active_items = arr(state, "items")
-        .iter()
-        .filter(|item| {
-            owns(item)
-                && item["archived"] != true
-                && !matches!(item_category(state, item), "completed" | "cancelled")
-        })
-        .collect::<Vec<_>>();
-    let mut actions = active_items
-        .iter()
-        .copied()
-        .filter(|item| {
-            matches!(item["kind"].as_str(), Some("task" | "subtask"))
-                && matches!(item_category(state, item), "open" | "active")
-        })
-        .collect::<Vec<_>>();
-    actions.sort_by(|left, right| {
-        let due_key = |item: &Value| {
-            item["due_at"]
-                .as_str()
-                .and_then(utc_date_from_iso)
-                .unwrap_or_else(|| "9999-99-99".into())
-        };
-        due_key(left)
-            .cmp(&due_key(right))
-            .then_with(|| {
-                right["priority"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .cmp(&left["priority"].as_u64().unwrap_or(0))
-            })
-            .then_with(|| {
-                left["position"]
-                    .as_i64()
-                    .unwrap_or(0)
-                    .cmp(&right["position"].as_i64().unwrap_or(0))
-            })
-            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
-    });
-    if let Some(item) = actions.first() {
-        let status_id = item["status_id"].as_str().unwrap_or_default();
-        let label = arr(state, "statuses")
-            .iter()
-            .find(|status| {
-                status["project_id"].as_str() == project_id && status["status_id"] == status_id
-            })
-            .and_then(|status| status["label"].as_str())
-            .unwrap_or(status_id);
-        summary["next_action"] = json!({"item_id":item["id"],"title":bound_text(item["title"].as_str().unwrap_or_default(),160),"due_at":item["due_at"],"priority":item["priority"],"status_id":status_id,"status_label":bound_text(label,160),"kind":item["kind"]});
-    }
-    let mut milestones = active_items
-        .drain(..)
-        .filter(|item| item["kind"] == "milestone")
-        .collect::<Vec<_>>();
-    milestones.sort_by(|left, right| {
-        let due_key = |item: &Value| {
-            item["due_at"]
-                .as_str()
-                .and_then(utc_date_from_iso)
-                .unwrap_or_else(|| "9999-99-99".into())
-        };
-        due_key(left)
-            .cmp(&due_key(right))
-            .then_with(|| {
-                left["position"]
-                    .as_i64()
-                    .unwrap_or(0)
-                    .cmp(&right["position"].as_i64().unwrap_or(0))
-            })
-            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
-    });
-    if let Some(milestone) = milestones.first() {
-        let children = arr(state, "items")
-            .iter()
-            .filter(|child| {
-                child["parent_id"] == milestone["id"] && owns(child) && child["archived"] != true
-            })
-            .collect::<Vec<_>>();
-        let completed = children
-            .iter()
-            .filter(|child| item_category(state, child) == "completed")
-            .count();
-        summary["next_milestone"] = json!({"item_id":milestone["id"],"title":bound_text(milestone["title"].as_str().unwrap_or_default(),160),"due_at":milestone["due_at"],"completed_children":completed,"total_children":children.len()});
-    }
+fn attention_summary(
+    state: &Value,
+    selected_project_ids: &[String],
+    time: &GlobalCivilTimeContext,
+) -> Result<Value, GlobalManagerError> {
+    crate::global_manager_attention::attention_summary(state, selected_project_ids, time)
+        .map_err(GlobalManagerError::Invalid)
 }
 
 fn detail_row_order_key(collection: &str, row: &Value) -> String {
@@ -2642,16 +2455,6 @@ fn detail_row_order_key(collection: &str, row: &Value) -> String {
         .chain(std::iter::once(stable_row))
         .collect::<Vec<_>>()
         .join("\u{0}")
-}
-
-fn item_category<'a>(state: &'a Value, item: &Value) -> &'a str {
-    arr(state, "statuses")
-        .iter()
-        .find(|status| {
-            status["project_id"] == item["project_id"] && status["status_id"] == item["status_id"]
-        })
-        .and_then(|status| status["category"].as_str())
-        .unwrap_or("open")
 }
 
 fn detail_row_matches_query(state: &Value, collection: &str, row: &Value, query: &str) -> bool {
@@ -2812,15 +2615,6 @@ fn bound_text(value: &str, maximum_bytes: usize) -> String {
         end -= 1;
     }
     format!("{}…", &value[..end])
-}
-
-fn utc_today() -> String {
-    let days = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-        / 86_400;
-    civil_from_days(days)
 }
 
 fn utc_date_from_iso(value: &str) -> Option<String> {
