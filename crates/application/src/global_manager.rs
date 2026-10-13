@@ -1,10 +1,10 @@
 //! Application boundary for the installation-wide global manager.
 
-use crate::GlobalCivilTimeContext;
+use crate::{canonical_request_digest, GlobalCivilTimeContext};
 use boreal_domain::global_manager::{ManagementItemKind, StatusCategory};
 use boreal_store::global_manager::GlobalManagerStore;
 use boreal_store::StoreError;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -147,6 +147,30 @@ pub struct GlobalManagerApplication {
 pub struct ResolvedWorkspaceIdentity {
     pub project_id: String,
     pub path: String,
+    pub database_instance_id: String,
+    pub restore_epoch: u64,
+    pub workspace_binding_digest: String,
+}
+
+impl ResolvedWorkspaceIdentity {
+    /// Derives an opaque physical identity for a validated workspace link.
+    /// The logical project ID remains a separate association field and is
+    /// never recovered from this key.
+    pub fn physical_binding_key(&self) -> String {
+        let digest = canonical_request_digest(
+            "global.workspace-binding/v1",
+            json!({
+                "project_id": self.project_id,
+                "database_instance_id": self.database_instance_id,
+                "restore_epoch": self.restore_epoch,
+                "workspace_binding_digest": self.workspace_binding_digest,
+            }),
+        );
+        format!(
+            "workspace-{}",
+            digest.strip_prefix("sha256:").unwrap_or(&digest)
+        )
+    }
 }
 
 impl GlobalManagerApplication {
@@ -196,6 +220,8 @@ impl GlobalManagerApplication {
         let mut trusted = payload.clone();
         trusted["identity"] = json!(resolved.project_id);
         trusted["path"] = json!(resolved.path);
+        trusted["workspace_project_id"] = json!(resolved.project_id);
+        trusted["workspace_binding_key"] = json!(resolved.physical_binding_key());
         self.execute_resolved(command, &trusted, operation)
     }
 
@@ -1191,8 +1217,19 @@ impl GlobalManagerApplication {
             }
         }
         if command == "project link" {
-            boreal_domain::global_manager::validate_identifier(string(p, "identity")?)
+            let identity = string(p, "identity")?;
+            let workspace_project_id = string(p, "workspace_project_id")?;
+            boreal_domain::global_manager::validate_identifier(identity)
                 .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
+            boreal_domain::global_manager::validate_identifier(workspace_project_id)
+                .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
+            if identity != workspace_project_id
+                || !string(p, "workspace_binding_key")?.starts_with("workspace-")
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "project link lacks a validated physical workspace identity".into(),
+                ));
+            }
             if string(p, "path")?.trim().is_empty() {
                 return Err(GlobalManagerError::Invalid(
                     "workspace path is required".into(),
@@ -1589,7 +1626,11 @@ fn apply_mutation(
                     p.get("path").and_then(Value::as_str),
                 )
             };
-            let record = json!({"project_id":pid,"kind":kind,"identity":identity,"path":path,"updated_at":timestamp});
+            let mut record = json!({"project_id":pid,"kind":kind,"identity":identity,"path":path,"updated_at":timestamp});
+            if command == "project link" {
+                record["workspace_project_id"] = p["workspace_project_id"].clone();
+                record["workspace_binding_key"] = p["workspace_binding_key"].clone();
+            }
             let rows = arr_mut(s, "associations");
             if let Some(row) = rows
                 .iter_mut()
@@ -3618,5 +3659,45 @@ mod global_transfer_tests {
 
         drop(app);
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod workspace_binding_key_tests {
+    use super::ResolvedWorkspaceIdentity;
+
+    fn identity() -> ResolvedWorkspaceIdentity {
+        ResolvedWorkspaceIdentity {
+            project_id: "logical-project".to_owned(),
+            path: "/workspace/project".to_owned(),
+            database_instance_id: "database-instance-a".to_owned(),
+            restore_epoch: 1,
+            workspace_binding_digest: format!("sha256:{}", "a".repeat(64)),
+        }
+    }
+
+    #[test]
+    fn physical_binding_key_is_opaque_deterministic_and_tracks_database_lineage() {
+        let original = identity();
+        let key = original.physical_binding_key();
+        assert!(key.starts_with("workspace-"));
+        assert!(!key.contains("logical-project"));
+        assert_eq!(key, original.clone().physical_binding_key());
+
+        let mut replacement = original.clone();
+        replacement.project_id = "another-logical-project".to_owned();
+        assert_ne!(key, replacement.physical_binding_key());
+
+        replacement = original.clone();
+        replacement.database_instance_id = "database-instance-b".to_owned();
+        assert_ne!(key, replacement.physical_binding_key());
+
+        replacement = original.clone();
+        replacement.restore_epoch += 1;
+        assert_ne!(key, replacement.physical_binding_key());
+
+        replacement = original.clone();
+        replacement.workspace_binding_digest = format!("sha256:{}", "b".repeat(64));
+        assert_ne!(key, replacement.physical_binding_key());
     }
 }

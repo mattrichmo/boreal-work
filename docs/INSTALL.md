@@ -61,6 +61,13 @@ and business tasks, configurable workflow statuses, milestones and notes in
 the separate global store. `bwrk dashboard` inside an initialized code project
 continues to open that project's dashboard.
 
+A workspace link is bound to the validated database instance and restore
+lineage as well as its logical project ID. Replacing or restoring a workspace
+database can make its existing Global link unavailable, even when the project
+ID and folder path stay the same. Run
+`bwrk global project link PROJECT --workspace PATH` again to validate and bind
+the current workspace database.
+
 The default global database is `~/Library/Application Support/Boreal/global.sqlite`
 on macOS and `${XDG_STATE_HOME:-~/.local/state}/boreal/global.sqlite` on Linux.
 `BOREAL_GLOBAL_ROOT` selects an explicit alternative data directory, useful for

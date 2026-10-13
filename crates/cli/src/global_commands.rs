@@ -990,14 +990,28 @@ pub(crate) fn execute_request(
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| CliError::invalid("linked workspace association has no path"))?;
+        let workspace_project_id = association
+            .get("workspace_project_id")
+            .and_then(Value::as_str)
+            .unwrap_or(identity);
+        let binding_key = association
+            .get("workspace_binding_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let limit = payload
             .get("limit")
             .and_then(Value::as_u64)
             .unwrap_or(50)
             .clamp(1, 50);
         let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0);
-        let mut detail =
-            linked_detail_page(management_project_id, identity, stored_path, limit, offset)?;
+        let mut detail = linked_detail_page(
+            management_project_id,
+            workspace_project_id,
+            binding_key,
+            stored_path,
+            limit,
+            offset,
+        )?;
         if let Some(total) = detail.get("items_total").and_then(Value::as_u64) {
             detail["total"] = json!(total);
         }
@@ -1005,8 +1019,7 @@ pub(crate) fn execute_request(
     }
     let mut result = app
         .execute_with_workspace_resolver(command, payload, operation, |path| {
-            let (project_id, path) = validate_workspace(path).map_err(|error| error.message)?;
-            Ok(ResolvedWorkspaceIdentity { project_id, path })
+            validate_workspace_binding(path).map_err(|error| error.message)
         })
         .map_err(global_error)?;
     if command == "snapshot" {
@@ -1262,6 +1275,8 @@ struct WorkspaceMetadata {
     database: PathBuf,
     #[serde(default)]
     operator_actor: Option<String>,
+    #[serde(default)]
+    operator_session: Option<String>,
 }
 
 pub(crate) fn validate_workspace(input: &str) -> Result<(String, String), CliError> {
@@ -1276,7 +1291,139 @@ struct ValidatedWorkspace {
     project_id: String,
     root: PathBuf,
     operator_actor: Option<String>,
+    operator_session: Option<String>,
+    database_instance_id: String,
+    restore_epoch: u64,
+    workspace_binding_digest: String,
     store: SqliteStore,
+}
+
+impl ValidatedWorkspace {
+    fn resolved_identity(&self) -> ResolvedWorkspaceIdentity {
+        ResolvedWorkspaceIdentity {
+            project_id: self.project_id.clone(),
+            path: self.root.to_string_lossy().into_owned(),
+            database_instance_id: self.database_instance_id.clone(),
+            restore_epoch: self.restore_epoch,
+            workspace_binding_digest: self.workspace_binding_digest.clone(),
+        }
+    }
+
+    fn physical_binding_key(&self) -> String {
+        self.resolved_identity().physical_binding_key()
+    }
+}
+
+pub(crate) fn validate_workspace_binding(
+    input: &str,
+) -> Result<ResolvedWorkspaceIdentity, CliError> {
+    Ok(validate_workspace_details(input)?.resolved_identity())
+}
+
+/// Reads one fresh advisory candidate from the same validated store whose
+/// physical binding is compared with the persisted link identity.
+pub(crate) fn fresh_linked_candidate(
+    root: &str,
+    expected_project: &str,
+    expected_binding_key: &str,
+) -> Result<Value, CliError> {
+    let workspace = validate_workspace_details(root)?;
+    if expected_binding_key.is_empty()
+        || workspace.project_id != expected_project
+        || workspace.physical_binding_key() != expected_binding_key
+    {
+        return Err(CliError::invalid(
+            "linked workspace physical identity changed",
+        ));
+    }
+    let actor = workspace
+        .operator_actor
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("workspace has no registered local operator"))?;
+    let session = workspace
+        .operator_session
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("workspace has no registered local operator session"))?;
+    validate_linked_operator_session(&workspace.store, expected_project, actor, session)?;
+    let role = workspace
+        .store
+        .principal_authority(expected_project, actor)
+        .map_err(map_store_error)?
+        .0;
+    let snapshot = boreal_application::discover_work(
+        &workspace.store,
+        &ProjectId::new(expected_project),
+        &boreal_domain::ActorContext {
+            actor_id: ActorId::new(actor),
+            role,
+        },
+        Some(session),
+        TimestampMs::from_millis(now_ms_u64()),
+    )
+    .map_err(CliError::invalid)?;
+    validate_linked_operator_session(&workspace.store, expected_project, actor, session)?;
+    let current_revision = workspace
+        .store
+        .project_revision(expected_project)
+        .map_err(map_store_error)?
+        .0;
+    if current_revision != snapshot.revision.0 {
+        return Err(CliError::invalid(
+            "workspace changed during advisory discovery",
+        ));
+    }
+    let Some(item) = snapshot
+        .items
+        .iter()
+        .find(|item| item.claimable_for_actor())
+    else {
+        return Ok(json!({
+            "workspace_id": expected_project,
+            "project_revision": snapshot.revision.0,
+            "state": "idle_or_blocked"
+        }));
+    };
+    Ok(json!({
+        "workspace_id": expected_project,
+        "working_directory": workspace.root,
+        "project_revision": snapshot.revision.0,
+        "as_of": stamp(now_ms_u64()),
+        "work_id": item.work.id.as_str(),
+        "title": item.work.title,
+        "priority": item.work.priority,
+        "safe_argv": ["bwrk", "prime", "--project", expected_project, "--json"],
+        "authority": "advisory_snapshot_only"
+    }))
+}
+
+fn validate_linked_operator_session(
+    store: &SqliteStore,
+    project: &str,
+    actor: &str,
+    session_id: &str,
+) -> Result<(), CliError> {
+    let session = store
+        .session(project, session_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CliError::invalid("workspace operator session does not exist"))?;
+    if session.registration_operation_id.is_none() || session.project_id != project {
+        return Err(CliError::invalid(
+            "workspace operator session is not bound to this project",
+        ));
+    }
+    if session.actor_id != actor {
+        return Err(CliError::invalid(
+            "workspace operator session is bound to a different actor",
+        ));
+    }
+    if session.state != boreal_store::SessionState::Active {
+        return Err(CliError::invalid(
+            "workspace operator session is not active",
+        ));
+    }
+    store
+        .validate_project_session(project, actor, session_id)
+        .map_err(map_store_error)
 }
 
 fn validate_workspace_details(input: &str) -> Result<ValidatedWorkspace, CliError> {
@@ -1335,7 +1482,13 @@ fn validate_workspace_details(input: &str) -> Result<ValidatedWorkspace, CliErro
     let identity = identities
         .context(&metadata.project_id)
         .map_err(app_error)?;
-    if identity.database_instance_id != database_identity.database_instance_id {
+    let binding = identities
+        .workspace_binding(&metadata.project_id)
+        .map_err(app_error)?;
+    if identity.database_instance_id != database_identity.database_instance_id
+        || identity.restore_epoch != database_identity.restore_epoch
+        || identity.workspace_binding_digest != binding.binding_digest()
+    {
         return Err(CliError::with(
             ErrorCode::OperationConflict,
             ApplicationOutcome::Rejected,
@@ -1348,6 +1501,12 @@ fn validate_workspace_details(input: &str) -> Result<ValidatedWorkspace, CliErro
         operator_actor: metadata
             .operator_actor
             .filter(|actor| !actor.trim().is_empty()),
+        operator_session: metadata
+            .operator_session
+            .filter(|session| !session.trim().is_empty()),
+        database_instance_id: database_identity.database_instance_id.to_string(),
+        restore_epoch: database_identity.restore_epoch.get(),
+        workspace_binding_digest: binding.binding_digest().to_owned(),
         store,
     })
 }
@@ -1385,7 +1544,9 @@ const LINKED_DETAIL_RESULT_CAPACITY: usize = 128;
 static LINKED_JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct LinkedRefreshJob {
-    key: (String, String),
+    key: LinkedRollupKey,
+    workspace_project_id: String,
+    binding_key: String,
     path: String,
     queued_at: Instant,
     deadline: Instant,
@@ -1414,7 +1575,22 @@ enum LinkedRefreshKind {
     },
 }
 
-type LinkedDetailKey = (String, String, String, u64, u64);
+type LinkedRollupKey = (String, String, String);
+type LinkedDetailKey = (String, String, String, String, u64, u64);
+
+#[derive(Debug)]
+pub(crate) enum LinkedWorkspaceReadError {
+    IdentityMismatch(String),
+    Unavailable(String),
+}
+
+impl LinkedWorkspaceReadError {
+    fn message(&self) -> &str {
+        match self {
+            Self::IdentityMismatch(message) | Self::Unavailable(message) => message,
+        }
+    }
+}
 
 struct LinkedDetailRecord {
     key: LinkedDetailKey,
@@ -1427,8 +1603,8 @@ struct LinkedDetailRecord {
 
 #[derive(Default)]
 struct LinkedRefreshState {
-    pending: std::collections::HashSet<(String, String)>,
-    rows: std::collections::HashMap<(String, String), Value>,
+    pending: std::collections::HashSet<LinkedRollupKey>,
+    rows: std::collections::HashMap<LinkedRollupKey, Value>,
     details: std::collections::HashMap<String, LinkedDetailRecord>,
 }
 
@@ -1482,168 +1658,184 @@ fn new_linked_refresh_pool() -> LinkedRefreshPool {
         let receiver = receiver.clone();
         let state = state.clone();
         let changed = changed.clone();
-        std::thread::spawn(move || loop {
-            let job = match receiver
-                .lock()
-                .expect("linked job receiver poisoned")
-                .recv()
-            {
-                Ok(job) => job,
-                Err(_) => break,
-            };
-            let queued_at = job.queued_at;
-            let deadline = job.deadline;
-            match job.kind {
-                LinkedRefreshKind::Rollup => {
-                    let started = Instant::now();
-                    let pool_wait_ms =
-                        started.saturating_duration_since(queued_at).as_millis() as u64;
-                    let result = linked_workspace_rollup(&job.key.1, &job.path, deadline);
-                    let now = now_ms_u64();
-                    let refresh_duration_ms = started.elapsed().as_millis() as u64;
-                    let row = match result {
-                        Ok(value) => {
-                            json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":value["counts"],"error":null})
-                        }
-                        Err(error) => {
-                            json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":null,"error":error})
-                        }
-                    };
-                    let mut state = state.lock().expect("linked cache poisoned");
-                    state.pending.remove(&job.key);
-                    let row = preserve_linked_sample_on_error(
-                        state.rows.get(&job.key).cloned(),
-                        row,
-                        now,
-                        pool_wait_ms,
-                        refresh_duration_ms,
-                    );
-                    state.rows.insert(job.key, row);
-                    changed.notify_all();
-                }
-                #[cfg(test)]
-                LinkedRefreshKind::BlockRollup {
-                    started: signal,
-                    release,
-                } => {
-                    let started = Instant::now();
-                    let pool_wait_ms =
-                        started.saturating_duration_since(queued_at).as_millis() as u64;
-                    let _ = signal.send(());
-                    let _ = release.recv();
-                    let result = if Instant::now() >= deadline {
-                        Err("linked workspace read deadline expired".to_owned())
-                    } else {
-                        Ok(
-                            json!({"revision":9,"as_of":"test","as_of_ms":now_ms_u64(),"counts":{"total":9}}),
-                        )
-                    };
-                    let now = now_ms_u64();
-                    let refresh_duration_ms = started.elapsed().as_millis() as u64;
-                    let row = match result {
-                        Ok(value) => {
-                            json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":value["counts"],"error":null})
-                        }
-                        Err(error) => {
-                            json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":null,"error":error})
-                        }
-                    };
-                    let mut state = state.lock().expect("linked cache poisoned");
-                    state.pending.remove(&job.key);
-                    let row = preserve_linked_sample_on_error(
-                        state.rows.get(&job.key).cloned(),
-                        row,
-                        now,
-                        pool_wait_ms,
-                        refresh_duration_ms,
-                    );
-                    state.rows.insert(job.key, row);
-                    changed.notify_all();
-                }
-                LinkedRefreshKind::Detail {
-                    management_project_id,
-                    limit,
-                    offset,
-                    job_id,
-                } => {
-                    let started = Instant::now();
-                    let pool_wait_ms =
-                        started.saturating_duration_since(queued_at).as_millis() as u64;
-                    let result = linked_workspace_detail(
-                        &management_project_id,
-                        &job.key.1,
-                        &job.path,
-                        limit,
-                        offset,
-                        deadline,
-                    )
-                    .map(|mut page| {
-                        let items = page
-                            .get("items")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default();
-                        let total = page.get("items_total").and_then(Value::as_u64).unwrap_or(0);
-                        let next = offset.saturating_add(items.len() as u64);
-                        page["limit"] = json!(limit);
-                        page["offset"] = json!(offset);
-                        page["has_more"] = json!(next < total);
-                        page["next_offset"] = if next < total {
-                            json!(next)
-                        } else {
-                            Value::Null
-                        };
-                        page["job_id"] = Value::Null;
-                        page["pool_wait_ms"] = json!(pool_wait_ms);
-                        page["refresh_duration_ms"] = json!(started.elapsed().as_millis() as u64);
-                        page
-                    });
-                    let refresh_duration_ms = started.elapsed().as_millis() as u64;
-                    let mut state = state.lock().expect("linked cache poisoned");
-                    if let Some(record) = state.details.get_mut(&job_id) {
-                        match result {
-                            Ok(page) => {
-                                record.page = Some(page);
-                                record.error = None;
+        std::thread::spawn(move || {
+            loop {
+                let job = match receiver
+                    .lock()
+                    .expect("linked job receiver poisoned")
+                    .recv()
+                {
+                    Ok(job) => job,
+                    Err(_) => break,
+                };
+                let queued_at = job.queued_at;
+                let deadline = job.deadline;
+                match job.kind {
+                    LinkedRefreshKind::Rollup => {
+                        let started = Instant::now();
+                        let pool_wait_ms =
+                            started.saturating_duration_since(queued_at).as_millis() as u64;
+                        let result = linked_workspace_rollup(
+                            &job.workspace_project_id,
+                            &job.binding_key,
+                            &job.path,
+                            deadline,
+                        );
+                        let now = now_ms_u64();
+                        let refresh_duration_ms = started.elapsed().as_millis() as u64;
+                        let identity_mismatch =
+                            matches!(&result, Err(LinkedWorkspaceReadError::IdentityMismatch(_)));
+                        let row = match result {
+                            Ok(value) => {
+                                json!({"project_id":job.workspace_project_id,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":value["counts"],"error":null})
                             }
                             Err(error) => {
-                                record.error = Some(error);
-                                record.page = None;
+                                json!({"project_id":job.workspace_project_id,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":null,"error":error.message()})
                             }
-                        }
-                        record.pool_wait_ms = Some(pool_wait_ms);
-                        record.refresh_duration_ms = Some(refresh_duration_ms);
-                        record.changed_at = Instant::now();
-                    }
-                    changed.notify_all();
-                }
-                #[cfg(test)]
-                LinkedRefreshKind::Block {
-                    job_id,
-                    started,
-                    release,
-                    fail,
-                } => {
-                    let _ = started.send(());
-                    let _ = release.recv();
-                    let mut state = state.lock().expect("linked cache poisoned");
-                    if let Some(record) = state.details.get_mut(&job_id) {
-                        if fail {
-                            record.error = Some("synthetic detail failure".into());
+                        };
+                        let mut state = state.lock().expect("linked cache poisoned");
+                        state.pending.remove(&job.key);
+                        let row = if identity_mismatch {
+                            row
                         } else {
-                            record.page = Some(
-                                json!({"availability":"available","items":[],"items_total":0,"total":0,"revision":7,"as_of":"test","job_id":null}),
-                            );
-                        }
-                        record.pool_wait_ms = Some(
-                            Instant::now()
-                                .saturating_duration_since(queued_at)
-                                .as_millis() as u64,
-                        );
-                        record.refresh_duration_ms = Some(0);
-                        record.changed_at = Instant::now();
+                            preserve_linked_sample_on_error(
+                                state.rows.get(&job.key).cloned(),
+                                row,
+                                now,
+                                pool_wait_ms,
+                                refresh_duration_ms,
+                            )
+                        };
+                        state.rows.insert(job.key, row);
+                        changed.notify_all();
                     }
-                    changed.notify_all();
+                    #[cfg(test)]
+                    LinkedRefreshKind::BlockRollup {
+                        started: signal,
+                        release,
+                    } => {
+                        let started = Instant::now();
+                        let pool_wait_ms =
+                            started.saturating_duration_since(queued_at).as_millis() as u64;
+                        let _ = signal.send(());
+                        let _ = release.recv();
+                        let result = if Instant::now() >= deadline {
+                            Err("linked workspace read deadline expired".to_owned())
+                        } else {
+                            Ok(
+                                json!({"revision":9,"as_of":"test","as_of_ms":now_ms_u64(),"counts":{"total":9}}),
+                            )
+                        };
+                        let now = now_ms_u64();
+                        let refresh_duration_ms = started.elapsed().as_millis() as u64;
+                        let row = match result {
+                            Ok(value) => {
+                                json!({"project_id":job.key.1,"path":job.path,"availability":"available","revision":value["revision"],"as_of":value["as_of"],"sample_age_ms":now.saturating_sub(value["as_of_ms"].as_u64().unwrap_or(now)),"_sampled_at_ms":value["as_of_ms"],"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":value["counts"],"error":null})
+                            }
+                            Err(error) => {
+                                json!({"project_id":job.key.1,"path":job.path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":pool_wait_ms,"refresh_duration_ms":refresh_duration_ms,"counts":null,"error":error})
+                            }
+                        };
+                        let mut state = state.lock().expect("linked cache poisoned");
+                        state.pending.remove(&job.key);
+                        let row = preserve_linked_sample_on_error(
+                            state.rows.get(&job.key).cloned(),
+                            row,
+                            now,
+                            pool_wait_ms,
+                            refresh_duration_ms,
+                        );
+                        state.rows.insert(job.key, row);
+                        changed.notify_all();
+                    }
+                    LinkedRefreshKind::Detail {
+                        management_project_id,
+                        limit,
+                        offset,
+                        job_id,
+                    } => {
+                        let started = Instant::now();
+                        let pool_wait_ms =
+                            started.saturating_duration_since(queued_at).as_millis() as u64;
+                        let result = linked_workspace_detail(
+                            &management_project_id,
+                            &job.workspace_project_id,
+                            &job.binding_key,
+                            &job.path,
+                            limit,
+                            offset,
+                            deadline,
+                        )
+                        .map(|mut page| {
+                            let items = page
+                                .get("items")
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default();
+                            let total =
+                                page.get("items_total").and_then(Value::as_u64).unwrap_or(0);
+                            let next = offset.saturating_add(items.len() as u64);
+                            page["limit"] = json!(limit);
+                            page["offset"] = json!(offset);
+                            page["has_more"] = json!(next < total);
+                            page["next_offset"] = if next < total {
+                                json!(next)
+                            } else {
+                                Value::Null
+                            };
+                            page["job_id"] = Value::Null;
+                            page["pool_wait_ms"] = json!(pool_wait_ms);
+                            page["refresh_duration_ms"] =
+                                json!(started.elapsed().as_millis() as u64);
+                            page
+                        });
+                        let refresh_duration_ms = started.elapsed().as_millis() as u64;
+                        let mut state = state.lock().expect("linked cache poisoned");
+                        if let Some(record) = state.details.get_mut(&job_id) {
+                            match result {
+                                Ok(page) => {
+                                    record.page = Some(page);
+                                    record.error = None;
+                                }
+                                Err(error) => {
+                                    record.error = Some(error.message().to_owned());
+                                    record.page = None;
+                                }
+                            }
+                            record.pool_wait_ms = Some(pool_wait_ms);
+                            record.refresh_duration_ms = Some(refresh_duration_ms);
+                            record.changed_at = Instant::now();
+                        }
+                        changed.notify_all();
+                    }
+                    #[cfg(test)]
+                    LinkedRefreshKind::Block {
+                        job_id,
+                        started,
+                        release,
+                        fail,
+                    } => {
+                        let _ = started.send(());
+                        let _ = release.recv();
+                        let mut state = state.lock().expect("linked cache poisoned");
+                        if let Some(record) = state.details.get_mut(&job_id) {
+                            if fail {
+                                record.error = Some("synthetic detail failure".into());
+                            } else {
+                                record.page = Some(
+                                    json!({"availability":"available","items":[],"items_total":0,"total":0,"revision":7,"as_of":"test","job_id":null}),
+                                );
+                            }
+                            record.pool_wait_ms = Some(
+                                Instant::now()
+                                    .saturating_duration_since(queued_at)
+                                    .as_millis() as u64,
+                            );
+                            record.refresh_duration_ms = Some(0);
+                            record.changed_at = Instant::now();
+                        }
+                        changed.notify_all();
+                    }
                 }
             }
         });
@@ -1695,7 +1887,7 @@ fn schedule_linked_detail(
         std::process::id(),
         LINKED_JOB_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let (project_id, identity, _, limit, offset) = key.clone();
+    let (project_id, identity, binding_key, _, limit, offset) = key.clone();
     let queued_at = Instant::now();
     state.details.insert(
         job_id.clone(),
@@ -1709,7 +1901,9 @@ fn schedule_linked_detail(
         },
     );
     let job = LinkedRefreshJob {
-        key: (project_id, identity),
+        key: (project_id, identity.clone(), binding_key.clone()),
+        workspace_project_id: identity,
+        binding_key,
         path,
         queued_at,
         deadline: queued_at + LINKED_JOB_BUDGET,
@@ -1734,6 +1928,7 @@ fn schedule_linked_detail(
 fn linked_detail_page(
     management_project_id: &str,
     identity: &str,
+    binding_key: &str,
     path: &str,
     limit: u64,
     offset: u64,
@@ -1742,6 +1937,7 @@ fn linked_detail_page(
     let key = (
         management_project_id.to_owned(),
         identity.to_owned(),
+        binding_key.to_owned(),
         path.to_owned(),
         limit,
         offset,
@@ -1834,7 +2030,13 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
             .unwrap_or("")
             .to_owned();
         let identity = association
-            .get("identity")
+            .get("workspace_project_id")
+            .and_then(Value::as_str)
+            .or_else(|| association.get("identity").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_owned();
+        let binding_key = association
+            .get("workspace_binding_key")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
@@ -1843,9 +2045,13 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        let key = (management_project_id.clone(), identity.clone());
+        let key = (
+            management_project_id.clone(),
+            identity.clone(),
+            binding_key.clone(),
+        );
         keys.insert(key.clone());
-        requests.push((key, management_project_id, identity, path));
+        requests.push((key, management_project_id, identity, binding_key, path));
     }
     let now = Instant::now();
     let deadline = now + LINKED_REFRESH_BUDGET;
@@ -1853,11 +2059,13 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
         let mut state = pool.state.lock().expect("linked cache poisoned");
         state.rows.retain(|key, _| keys.contains(key));
         state.pending.retain(|key| keys.contains(key));
-        for (key, _, _, path) in &requests {
+        for (key, _, workspace_project_id, binding_key, path) in &requests {
             if state.pending.insert(key.clone()) {
                 let queued_at = Instant::now();
                 match pool.sender.try_send(LinkedRefreshJob {
                     key: key.clone(),
+                    workspace_project_id: workspace_project_id.clone(),
+                    binding_key: binding_key.clone(),
                     path: path.clone(),
                     queued_at,
                     deadline: queued_at + LINKED_JOB_BUDGET,
@@ -1874,7 +2082,7 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
                                 "linked refresh workers are unavailable"
                             }
                         };
-                        let failure = json!({"project_id":key.1,"path":path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":0,"refresh_duration_ms":0,"counts":null,"error":message});
+                        let failure = json!({"project_id":workspace_project_id,"path":path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":0,"refresh_duration_ms":0,"counts":null,"error":message});
                         let stale = preserve_linked_sample_on_error(
                             state.rows.get(key).cloned(),
                             failure,
@@ -1900,7 +2108,7 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
         }
     }
     let state = pool.state.lock().expect("linked cache poisoned");
-    let linked = requests.into_iter().map(|(key,management_project_id,identity,path)| {
+    let linked = requests.into_iter().map(|(key,management_project_id,identity,_binding_key,path)| {
         let pending = state.pending.contains(&key);
         let mut row = state.rows.get(&key).cloned().unwrap_or_else(|| json!({"project_id":identity,"path":path,"availability":"unavailable","revision":null,"as_of":null,"sample_age_ms":null,"pool_wait_ms":null,"refresh_duration_ms":null,"counts":null,"error":"linked workspace has not produced a sample"}));
         if let Some(sampled_at) = row.get("_sampled_at_ms").and_then(Value::as_u64) {
@@ -1919,24 +2127,41 @@ fn enrich_snapshot_with_pool(snapshot: &mut Value, pool: &LinkedRefreshPool) {
     snapshot["linked_projects"] = json!(linked);
 }
 
-fn linked_workspace_rollup(identity: &str, path: &str, deadline: Instant) -> Result<Value, String> {
-    let result = (|| -> Result<Value, String> {
+fn linked_workspace_rollup(
+    workspace_project_id: &str,
+    binding_key: &str,
+    path: &str,
+    deadline: Instant,
+) -> Result<Value, LinkedWorkspaceReadError> {
+    let result = (|| -> Result<Value, LinkedWorkspaceReadError> {
         if Instant::now() >= deadline {
-            return Err("linked workspace read deadline expired".into());
+            return Err(LinkedWorkspaceReadError::Unavailable(
+                "linked workspace read deadline expired".into(),
+            ));
         }
-        let workspace = validate_workspace_details(path).map_err(|error| error.message)?;
-        if workspace.project_id != identity {
-            return Err("linked project identity does not match workspace metadata".into());
+        let workspace = validate_workspace_details(path)
+            .map_err(|error| LinkedWorkspaceReadError::Unavailable(error.message))?;
+        if binding_key.is_empty()
+            || workspace.project_id != workspace_project_id
+            || workspace.physical_binding_key() != binding_key
+        {
+            return Err(LinkedWorkspaceReadError::IdentityMismatch(
+                "linked workspace physical identity changed".into(),
+            ));
         }
         let operator_actor = workspace.operator_actor.as_deref().ok_or_else(|| {
-            "workspace metadata does not record a local operator actor".to_owned()
+            LinkedWorkspaceReadError::Unavailable(
+                "workspace metadata does not record a local operator actor".to_owned(),
+            )
         })?;
         if Instant::now() >= deadline {
-            return Err("linked workspace read deadline expired".into());
+            return Err(LinkedWorkspaceReadError::Unavailable(
+                "linked workspace read deadline expired".into(),
+            ));
         }
         let snapshot = boreal_application::project_status_from_store_for_session(
             &workspace.store,
-            &ProjectId::new(identity),
+            &ProjectId::new(workspace_project_id),
             &boreal_domain::ActorContext {
                 actor_id: ActorId::new(operator_actor),
                 role: boreal_domain::ActorRole::Operator,
@@ -1946,9 +2171,11 @@ fn linked_workspace_rollup(identity: &str, path: &str, deadline: Instant) -> Res
             1,
             0,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| LinkedWorkspaceReadError::Unavailable(error.to_string()))?;
         if Instant::now() >= deadline {
-            return Err("linked workspace read deadline expired".into());
+            return Err(LinkedWorkspaceReadError::Unavailable(
+                "linked workspace read deadline expired".into(),
+            ));
         }
         let counts = &snapshot.counts;
         Ok(
@@ -1960,30 +2187,43 @@ fn linked_workspace_rollup(identity: &str, path: &str, deadline: Instant) -> Res
 
 fn linked_workspace_detail(
     management_project_id: &str,
-    identity: &str,
+    workspace_project_id: &str,
+    binding_key: &str,
     path: &str,
     limit: u64,
     offset: u64,
     deadline: Instant,
-) -> Result<Value, String> {
+) -> Result<Value, LinkedWorkspaceReadError> {
     let result = {
-        let result = (|| -> Result<Value, String> {
+        let result = (|| -> Result<Value, LinkedWorkspaceReadError> {
             if Instant::now() >= deadline {
-                return Err("linked workspace read deadline expired".into());
+                return Err(LinkedWorkspaceReadError::Unavailable(
+                    "linked workspace read deadline expired".into(),
+                ));
             }
-            let workspace = validate_workspace_details(path).map_err(|error| error.message)?;
-            if workspace.project_id != identity {
-                return Err("linked project identity does not match workspace metadata".into());
+            let workspace = validate_workspace_details(path)
+                .map_err(|error| LinkedWorkspaceReadError::Unavailable(error.message))?;
+            if binding_key.is_empty()
+                || workspace.project_id != workspace_project_id
+                || workspace.physical_binding_key() != binding_key
+            {
+                return Err(LinkedWorkspaceReadError::IdentityMismatch(
+                    "linked workspace physical identity changed".into(),
+                ));
             }
             let operator_actor = workspace.operator_actor.as_deref().ok_or_else(|| {
-                "workspace metadata does not record a local operator actor".to_owned()
+                LinkedWorkspaceReadError::Unavailable(
+                    "workspace metadata does not record a local operator actor".to_owned(),
+                )
             })?;
             if Instant::now() >= deadline {
-                return Err("linked workspace read deadline expired".into());
+                return Err(LinkedWorkspaceReadError::Unavailable(
+                    "linked workspace read deadline expired".into(),
+                ));
             }
             let snapshot = boreal_application::project_status_from_store_for_session(
                 &workspace.store,
-                &ProjectId::new(identity),
+                &ProjectId::new(workspace_project_id),
                 &boreal_domain::ActorContext {
                     actor_id: ActorId::new(operator_actor),
                     role: boreal_domain::ActorRole::Operator,
@@ -1993,9 +2233,11 @@ fn linked_workspace_detail(
                 limit,
                 offset,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| LinkedWorkspaceReadError::Unavailable(error.to_string()))?;
             if Instant::now() >= deadline {
-                return Err("linked workspace read deadline expired".into());
+                return Err(LinkedWorkspaceReadError::Unavailable(
+                    "linked workspace read deadline expired".into(),
+                ));
             }
             let counts = &snapshot.counts;
             let items = snapshot.items.iter().map(|row| {
@@ -2016,7 +2258,7 @@ fn linked_workspace_detail(
             let items_count = items.len() as u64;
             Ok(json!({
                 "management_project_id": management_project_id,
-                "project_id": identity,
+                "project_id": workspace_project_id,
                 "path": workspace.root,
                 "availability": "available",
                 "revision": snapshot.project_revision.0,
@@ -2038,7 +2280,12 @@ fn linked_workspace_detail(
         })();
         result
     };
-    let _ = (management_project_id, identity, path);
+    let _ = (
+        management_project_id,
+        workspace_project_id,
+        binding_key,
+        path,
+    );
     result
 }
 
@@ -2078,10 +2325,12 @@ mod tests {
             path: vec!["global".to_owned(), "restore".to_owned()],
             options: CliOptions::default(),
         };
-        assert!(build_command(&parsed)
-            .unwrap_err()
-            .message
-            .contains("requires --yes"));
+        assert!(
+            build_command(&parsed)
+                .unwrap_err()
+                .message
+                .contains("requires --yes")
+        );
 
         let mut options = CliOptions::default();
         options.setup.yes = true;
@@ -2089,10 +2338,12 @@ mod tests {
             path: vec!["global".to_owned(), "restore".to_owned()],
             options: options.clone(),
         };
-        assert!(build_command(&missing_package)
-            .unwrap_err()
-            .message
-            .contains("package path"));
+        assert!(
+            build_command(&missing_package)
+                .unwrap_err()
+                .message
+                .contains("package path")
+        );
 
         options.positionals.push("backup.global-backup".to_owned());
         let parsed = ParsedCommand {
@@ -2132,6 +2383,9 @@ mod tests {
                     Ok(ResolvedWorkspaceIdentity {
                         project_id: format!("workspace-{index:03}"),
                         path: path.to_owned(),
+                        database_instance_id: format!("database-{index:03}"),
+                        restore_epoch: 1,
+                        workspace_binding_digest: format!("sha256:{index:064x}"),
                     })
                 },
             )
@@ -2184,6 +2438,295 @@ mod tests {
     }
 
     #[test]
+    fn replacement_database_at_same_path_invalidates_linked_reads_and_global_next() {
+        fn argv(values: &[&str]) -> Vec<String> {
+            values.iter().map(|value| (*value).to_owned()).collect()
+        }
+        fn invoke(root: &Path, operation: &str, values: &[&str]) -> CliResult {
+            crate::run_with_operation_at(&argv(values), operation, Some(root))
+                .unwrap_or_else(|error| panic!("{values:?} failed: {}", error.message))
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "boreal-global-link-binding-{}-{}",
+            std::process::id(),
+            now_ms_u64()
+        ));
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+        let global_root = root.join("global");
+        fs::create_dir_all(&global_root).unwrap();
+        let workspace_id = "same-logical-project";
+        let setup_root = workspace_root.to_string_lossy().into_owned();
+        invoke(
+            &workspace_root,
+            "binding-init",
+            &[
+                "init",
+                "--project",
+                workspace_id,
+                "--project-root",
+                &setup_root,
+                "--yes",
+                "--agents",
+                "codex",
+                "--json",
+            ],
+        );
+        let metadata_path = workspace_root.join(".boreal/project.json");
+        let mut metadata: Value =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        let operator = metadata["operator_actor"].as_str().unwrap().to_owned();
+        let operator_session = metadata["operator_session"].as_str().unwrap().to_owned();
+        let workspace_db = workspace_root.join(".boreal/boreal.sqlite");
+        let db = workspace_db.to_string_lossy().into_owned();
+
+        let operator_session_start = invoke(
+            &workspace_root,
+            "binding-operator-session",
+            &[
+                "session",
+                "start",
+                "--project",
+                workspace_id,
+                "--session",
+                &operator_session,
+                "--harness",
+                "link-identity-test",
+                "--actor",
+                &operator,
+                "--db",
+                &db,
+                "--json",
+            ],
+        );
+        let enrollment = invoke(
+            &workspace_root,
+            "binding-agent-key",
+            &[
+                "auth",
+                "key",
+                "--actor",
+                "candidate-agent",
+                "--db",
+                &db,
+                "--json",
+            ],
+        );
+        let enrollment_path = enrollment.data.as_ref().unwrap()["enrollment_path"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let operator_revision = operator_session_start.revision.unwrap().to_string();
+        let _grant = invoke(
+            &workspace_root,
+            "binding-agent-grant",
+            &[
+                "auth",
+                "grant",
+                "--input",
+                &enrollment_path,
+                "--expected-revision",
+                &operator_revision,
+                "--reason",
+                "Disposable link identity regression",
+                "--yes",
+                "--actor",
+                &operator,
+                "--session",
+                &operator_session,
+                "--db",
+                &db,
+                "--json",
+            ],
+        );
+        let agent_session = "candidate-session";
+        let agent_session_start = invoke(
+            &workspace_root,
+            "binding-agent-session",
+            &[
+                "session",
+                "start",
+                "--project",
+                workspace_id,
+                "--session",
+                agent_session,
+                "--harness",
+                "link-identity-test",
+                "--actor",
+                "candidate-agent",
+                "--db",
+                &db,
+                "--json",
+            ],
+        );
+        let agent_revision = agent_session_start.revision.unwrap().to_string();
+        invoke(
+            &workspace_root,
+            "binding-work-create",
+            &[
+                "work",
+                "create",
+                workspace_id,
+                "replacement-candidate",
+                "Replacement candidate",
+                "--kind",
+                "task",
+                "--dispatch",
+                "automatic",
+                "--actor",
+                "candidate-agent",
+                "--session",
+                agent_session,
+                "--expected-revision",
+                &agent_revision,
+                "--db",
+                &db,
+                "--json",
+            ],
+        );
+
+        metadata["operator_actor"] = json!("candidate-agent");
+        metadata["operator_session"] = json!(agent_session);
+        fs::write(
+            &metadata_path,
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let app = GlobalManagerApplication::open(global_root.join("global.sqlite")).unwrap();
+        app.execute(
+            "project add",
+            &json!({"project_id":"management-project","name":"Management project"}),
+            "binding-management-project",
+        )
+        .unwrap();
+        let workspace_path = workspace_root.to_string_lossy().into_owned();
+        app.execute_with_workspace_resolver(
+            "project link",
+            &json!({"project_id":"management-project","path":workspace_path}),
+            "binding-link-project",
+            |path| validate_workspace_binding(path).map_err(|error| error.message),
+        )
+        .unwrap();
+        let association = app
+            .execute(
+                "association show",
+                &json!({"project_id":"management-project","kind":"workspace","identity":workspace_id}),
+                "binding-link-show",
+            )
+            .unwrap();
+        let binding_key = association["workspace_binding_key"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let next_command = ParsedCommand {
+            path: vec!["global".to_owned(), "next".to_owned()],
+            options: CliOptions::default(),
+        };
+        let before =
+            crate::global_discovery::run_with_app(&next_command, "binding-next-before", &app)
+                .unwrap()
+                .data
+                .unwrap();
+        assert_eq!(before["selected"]["work_id"], "replacement-candidate");
+
+        let mut snapshot = json!({"associations":[association.clone()]});
+        let pool = new_linked_refresh_pool();
+        enrich_snapshot_with_pool(&mut snapshot, &pool);
+        assert_eq!(snapshot["linked_projects"][0]["availability"], "available");
+        assert_eq!(snapshot["linked_projects"][0]["counts"]["total"], 1);
+        let detail = linked_workspace_detail(
+            "management-project",
+            workspace_id,
+            &binding_key,
+            &workspace_path,
+            10,
+            0,
+            Instant::now() + LINKED_JOB_BUDGET,
+        )
+        .unwrap();
+        assert_eq!(detail["availability"], "available");
+        assert_eq!(detail["items"][0]["work_id"], "replacement-candidate");
+
+        let original_store = SqliteStore::open_read_only_for_diagnostics(&workspace_db).unwrap();
+        let original_identity = IdentityStore::new(&original_store)
+            .database_identity()
+            .unwrap();
+        let replacement_db = root.join("replacement.sqlite");
+        original_store.backup_to(&replacement_db).unwrap();
+        drop(original_store);
+
+        let replacement_store = SqliteStore::open(&replacement_db, PRODUCTION_SCHEMA).unwrap();
+        IdentityStore::new(&replacement_store)
+            .restore(
+                format!("replacement-{}", original_identity.database_instance_id),
+                original_identity.restore_epoch.get() + 1,
+                &now_timestamp(),
+            )
+            .unwrap();
+        replacement_store
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        drop(replacement_store);
+        for path in [
+            workspace_db.with_extension("sqlite-wal"),
+            workspace_db.with_extension("sqlite-shm"),
+        ] {
+            let _ = fs::remove_file(path);
+        }
+        let displaced_db = root.join("original.sqlite");
+        fs::rename(&workspace_db, &displaced_db).unwrap();
+        fs::rename(&replacement_db, &workspace_db).unwrap();
+
+        assert!(matches!(
+            linked_workspace_rollup(
+                workspace_id,
+                &binding_key,
+                &workspace_path,
+                Instant::now() + LINKED_JOB_BUDGET,
+            ),
+            Err(LinkedWorkspaceReadError::IdentityMismatch(_))
+        ));
+        assert!(matches!(
+            linked_workspace_detail(
+                "management-project",
+                workspace_id,
+                &binding_key,
+                &workspace_path,
+                10,
+                0,
+                Instant::now() + LINKED_JOB_BUDGET,
+            ),
+            Err(LinkedWorkspaceReadError::IdentityMismatch(_))
+        ));
+
+        let mut replaced_snapshot = json!({"associations":[association]});
+        enrich_snapshot_with_pool(&mut replaced_snapshot, &pool);
+        assert_eq!(
+            replaced_snapshot["linked_projects"][0]["availability"],
+            "unavailable"
+        );
+        assert!(replaced_snapshot["linked_projects"][0]["counts"].is_null());
+
+        let after =
+            crate::global_discovery::run_with_app(&next_command, "binding-next-after", &app)
+                .unwrap()
+                .data
+                .unwrap();
+        assert_eq!(after["selected"], Value::Null);
+        assert_eq!(after["coverage"]["state"], "partial");
+        assert_eq!(after["passed"], false);
+        assert!(after["checks"].as_array().unwrap().iter().any(|check| {
+            check["workspace_id"] == workspace_id && check["state"] == "unavailable"
+        }));
+
+        drop(app);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn global_path_uses_explicit_root_independent_of_cwd() {
         assert!(global_db_path().is_ok());
     }
@@ -2210,7 +2753,9 @@ mod tests {
         let queued_at = Instant::now();
         pool.sender
             .try_send(LinkedRefreshJob {
-                key: (key.0.clone(), key.1.clone()),
+                key: (key.0.clone(), key.1.clone(), key.2.clone()),
+                workspace_project_id: key.1.clone(),
+                binding_key: key.2.clone(),
                 path: "synthetic".into(),
                 queued_at,
                 deadline: queued_at + LINKED_JOB_BUDGET,
@@ -2232,6 +2777,7 @@ mod tests {
         let key = (
             "management-a".into(),
             "workspace-a".into(),
+            "binding-a".into(),
             "synthetic".into(),
             20,
             0,
@@ -2272,9 +2818,10 @@ mod tests {
         let changed_path_key = (
             key.0.clone(),
             key.1.clone(),
+            key.2.clone(),
             "updated-path".into(),
-            key.3,
             key.4,
+            key.5,
         );
         let changed_path = schedule_linked_detail(
             &pool,
@@ -2288,6 +2835,7 @@ mod tests {
         let fail_key = (
             "management-b".into(),
             "workspace-b".into(),
+            "binding-b".into(),
             "synthetic".into(),
             20,
             20,
@@ -2324,7 +2872,14 @@ mod tests {
         };
         let error = schedule_linked_detail(
             &pool,
-            ("p".into(), "i".into(), "path".into(), 10, 0),
+            (
+                "p".into(),
+                "i".into(),
+                "binding".into(),
+                "path".into(),
+                10,
+                0,
+            ),
             "p".into(),
             "path".into(),
         )
@@ -2339,6 +2894,7 @@ mod tests {
                     key: (
                         format!("p-{index}"),
                         format!("i-{index}"),
+                        format!("binding-{index}"),
                         format!("path-{index}"),
                         10,
                         0,
@@ -2358,7 +2914,11 @@ mod tests {
     #[test]
     fn linked_rollup_discards_a_late_success_and_keeps_the_last_good_sample_stale() {
         let pool = new_linked_refresh_pool();
-        let key = ("management-late".to_owned(), "workspace-late".to_owned());
+        let key = (
+            "management-late".to_owned(),
+            "workspace-late".to_owned(),
+            "binding-late".to_owned(),
+        );
         let sampled_at = now_ms_u64().saturating_sub(100);
         {
             let mut state = pool.state.lock().unwrap();
@@ -2374,6 +2934,8 @@ mod tests {
         pool.sender
             .try_send(LinkedRefreshJob {
                 key: key.clone(),
+                workspace_project_id: key.1.clone(),
+                binding_key: key.2.clone(),
                 path: "synthetic".into(),
                 queued_at,
                 deadline: queued_at + Duration::from_millis(30),
@@ -2385,7 +2947,7 @@ mod tests {
             .unwrap();
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
-        let mut snapshot = json!({"associations":[{"project_id":"management-late","kind":"workspace","identity":"workspace-late","path":"synthetic"}]});
+        let mut snapshot = json!({"associations":[{"project_id":"management-late","kind":"workspace","identity":"workspace-late","workspace_project_id":"workspace-late","workspace_binding_key":"binding-late","path":"synthetic"}]});
         enrich_snapshot_with_pool(&mut snapshot, &pool);
         let presented = &snapshot["linked_projects"][0];
         assert_eq!(presented["availability"], "stale");
@@ -2419,7 +2981,11 @@ mod tests {
         let pool = new_linked_refresh_pool();
         let mut blocker_releases = Vec::new();
         for index in 0..LINKED_POOL_WORKERS {
-            let key = (format!("blocker-{index}"), format!("workspace-{index}"));
+            let key = (
+                format!("blocker-{index}"),
+                format!("workspace-{index}"),
+                format!("binding-{index}"),
+            );
             let (started, started_rx) = mpsc::channel();
             let (release, release_rx) = mpsc::channel();
             let queued_at = Instant::now();
@@ -2427,6 +2993,8 @@ mod tests {
             pool.sender
                 .try_send(LinkedRefreshJob {
                     key,
+                    workspace_project_id: format!("workspace-{index}"),
+                    binding_key: format!("binding-{index}"),
                     path: "synthetic".into(),
                     queued_at,
                     deadline: queued_at + Duration::from_secs(10),
@@ -2445,7 +3013,11 @@ mod tests {
                 json!({"project_id":format!("management-{index:03}"),"kind":"workspace","identity":format!("linked-{index:03}"),"path":"/missing/synthetic/workspace"})
             })
             .collect::<Vec<_>>();
-        let first_key = ("management-000".to_owned(), "linked-000".to_owned());
+        let first_key = (
+            "management-000".to_owned(),
+            "linked-000".to_owned(),
+            String::new(),
+        );
         pool.state.lock().unwrap().rows.insert(
             first_key,
             json!({"project_id":"linked-000","path":"/missing/synthetic/workspace","availability":"available","revision":3,"as_of":"last-good","sample_age_ms":0,"_sampled_at_ms":now_ms_u64(),"counts":{"total":1},"error":null}),
@@ -2462,9 +3034,10 @@ mod tests {
         );
         assert_eq!(rows[0]["availability"], "stale");
         assert_eq!(rows[0]["counts"]["total"], 1);
-        assert!(rows
-            .iter()
-            .any(|row| row["error"] == "linked refresh worker queue is full"));
+        assert!(
+            rows.iter()
+                .any(|row| row["error"] == "linked refresh worker queue is full")
+        );
 
         let root = std::env::temp_dir().join(format!(
             "boreal-global-linked-saturation-{}-{}",
@@ -2502,6 +3075,7 @@ mod tests {
                 (
                     row["management_project_id"].as_str().unwrap().to_owned(),
                     row["project_id"].as_str().unwrap().to_owned(),
+                    String::new(),
                 )
             })
             .collect::<std::collections::HashSet<_>>();
@@ -2517,11 +3091,13 @@ mod tests {
                     .max()
                     .unwrap_or(0);
                 assert!(measured_wait > 0, "pool wait was not measured");
-                assert!(state
-                    .rows
-                    .iter()
-                    .filter(|(key, _)| keys.contains(*key))
-                    .any(|(_, row)| row["refresh_duration_ms"].as_u64().is_some()));
+                assert!(
+                    state
+                        .rows
+                        .iter()
+                        .filter(|(key, _)| keys.contains(*key))
+                        .any(|(_, row)| row["refresh_duration_ms"].as_u64().is_some())
+                );
                 break;
             }
             drop(state);
