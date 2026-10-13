@@ -825,15 +825,7 @@ impl SqliteStore {
         }
         let mut profile_definitions = BTreeMap::new();
         for work in &request.works {
-            let expected_profile = match work.acceptance_profile.id.as_str() {
-                "focused" => boreal_domain::AcceptanceProfile::focused(),
-                "reviewed" => boreal_domain::AcceptanceProfile::reviewed(),
-                other => {
-                    return Err(StoreError::Invalid(format!(
-                        "template acceptance profile '{other}' is unsupported"
-                    )));
-                }
-            };
+            let expected_profile = canonical_template_acceptance_profile(&work.acceptance_profile)?;
             if work.acceptance_profile != expected_profile {
                 return Err(StoreError::Invalid(format!(
                     "template acceptance profile '{}' does not match its canonical definition",
@@ -876,6 +868,39 @@ impl SqliteStore {
     }
 }
 
+fn canonical_template_acceptance_profile(
+    profile: &boreal_domain::AcceptanceProfile,
+) -> Result<boreal_domain::AcceptanceProfile, StoreError> {
+    match profile.id.as_str() {
+        "focused" => Ok(boreal_domain::AcceptanceProfile::focused()),
+        "reviewed" => Ok(boreal_domain::AcceptanceProfile::reviewed()),
+        profile_id => {
+            let version = super::profile_version(&profile.version)?;
+            let registered = super::profiles::registered_acceptance_profile(profile_id, version)?
+                .ok_or_else(|| {
+                StoreError::Invalid(format!(
+                    "template acceptance profile '{profile_id}/{version}' is unsupported"
+                ))
+            })?;
+            let mut gates = vec![boreal_domain::GateRequirement::required(
+                boreal_domain::GateId::new(registered.summary_gate_id),
+                boreal_domain::GateKind::Summary,
+            )];
+            if let Some(review_gate_id) = registered.review_gate_id {
+                gates.push(boreal_domain::GateRequirement::required(
+                    boreal_domain::GateId::new(review_gate_id),
+                    boreal_domain::GateKind::Review,
+                ));
+            }
+            Ok(boreal_domain::AcceptanceProfile {
+                id: boreal_domain::ProfileId::new(registered.profile_id),
+                version: registered.version.to_string(),
+                gates,
+            })
+        }
+    }
+}
+
 fn valid_template_prefix(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 48
@@ -890,4 +915,282 @@ fn valid_template_key(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SessionRegistrationRequest;
+    use boreal_domain::{
+        AcceptanceProfile, GateId, GateKind, GateRequirement, ProfileId, ProjectId, WorkId,
+        WorkKind,
+    };
+
+    const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+
+    fn gate(id: &str, kind: GateKind) -> GateRequirement {
+        GateRequirement::required(GateId::new(id), kind)
+    }
+
+    fn profile(id: &str, version: &str, gates: Vec<GateRequirement>) -> AcceptanceProfile {
+        AcceptanceProfile {
+            id: ProfileId::new(id),
+            version: version.to_owned(),
+            gates,
+        }
+    }
+
+    fn batch_request(
+        project_id: &str,
+        profile: AcceptanceProfile,
+        operation_id: &str,
+        expected_project_revision: u64,
+    ) -> WorkBatchCreateRequest {
+        let work_id = "profile-item";
+        let mut work = boreal_domain::WorkItem::new(
+            ProjectId::new(project_id),
+            WorkId::new(format!("batch-{work_id}")),
+            WorkKind::Task,
+            None,
+            "Profile fixture",
+        );
+        work.acceptance_profile = profile;
+        WorkBatchCreateRequest {
+            project_id: project_id.to_owned(),
+            actor_id: "planner".to_owned(),
+            session_id: "planner-session".to_owned(),
+            expected_project_revision,
+            operation_id: operation_id.to_owned(),
+            request_digest: format!("digest-{operation_id}"),
+            template_id: "profile-fixture".to_owned(),
+            template_version: 1,
+            id_prefix: "batch".to_owned(),
+            works: vec![work],
+            planning_contracts: vec![WorkPlanningContractWrite {
+                work_id: format!("batch-{work_id}"),
+                requirements_json: "[]".to_owned(),
+                inputs_json: "[]".to_owned(),
+            }],
+            dependencies: Vec::new(),
+            labels: BTreeMap::new(),
+            created_at: "unix-ms:1".to_owned(),
+        }
+    }
+
+    fn store_with_project(project_id: &str) -> SqliteStore {
+        let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+        store
+            .install_feature_schema("agent_tools", 1, super::super::AGENT_TOOLS_SCHEMA)
+            .unwrap();
+        store
+            .initialize_project(
+                project_id,
+                "planner",
+                "operator",
+                "planner-credential",
+                "Planner",
+                "operation-init",
+                "digest-init",
+                "unix-ms:1",
+            )
+            .unwrap();
+        let revision = store.project_revision(project_id).unwrap().0;
+        store
+            .register_session(SessionRegistrationRequest {
+                project_id: project_id.to_owned(),
+                session_id: "planner-session".to_owned(),
+                actor_id: "planner".to_owned(),
+                harness_id: "test-harness".to_owned(),
+                operation_id: "operation-session".to_owned(),
+                request_digest: "digest-session".to_owned(),
+                expected_project_revision: Some(revision),
+                started_at: "unix-ms:2".to_owned(),
+            })
+            .unwrap();
+        store
+    }
+
+    fn stored_gates(
+        store: &SqliteStore,
+        work_id: &str,
+    ) -> Vec<(String, String, u64, String, bool)> {
+        let mut statement = store
+            .prepare(
+                "SELECT gate_id,profile_id,profile_version,kind,required
+                 FROM gate WHERE work_id=?1 ORDER BY gate_id",
+            )
+            .unwrap();
+        statement.bind_text(1, work_id).unwrap();
+        let mut gates = Vec::new();
+        while statement.step().unwrap() == SQLITE_ROW {
+            let gate_id = statement.column_text(0).unwrap();
+            gates.push((
+                gate_id.rsplit(':').next().unwrap().to_owned(),
+                statement.column_text(1).unwrap(),
+                statement.column_u64(2).unwrap(),
+                statement.column_text(3).unwrap(),
+                statement.column_u64(4).unwrap() == 1,
+            ));
+        }
+        gates
+    }
+
+    #[test]
+    fn template_admission_uses_registered_profile_versions_and_exact_gates() {
+        let profiles = [
+            (
+                "focused",
+                AcceptanceProfile::focused(),
+                vec![
+                    ("checkpoint", "focused", 1, "checkpoint", true),
+                    ("summary", "focused", 1, "summary", true),
+                    ("verification", "focused", 1, "verification", true),
+                ],
+            ),
+            (
+                "reviewed",
+                AcceptanceProfile::reviewed(),
+                vec![
+                    ("checkpoint", "reviewed", 1, "checkpoint", true),
+                    ("review", "reviewed", 1, "review", true),
+                    ("summary", "reviewed", 1, "summary", true),
+                    ("verification", "reviewed", 1, "verification", true),
+                ],
+            ),
+            (
+                "general-attestation",
+                profile(
+                    "general-attestation",
+                    "1",
+                    vec![gate("summary", GateKind::Summary)],
+                ),
+                vec![("summary", "general-attestation", 1, "summary", true)],
+            ),
+            (
+                "validated-deliverables",
+                profile(
+                    "validated-deliverables",
+                    "1",
+                    vec![gate("summary", GateKind::Summary)],
+                ),
+                vec![("summary", "validated-deliverables", 1, "summary", true)],
+            ),
+            (
+                "reviewed-artifacts",
+                profile(
+                    "reviewed-artifacts",
+                    "1",
+                    vec![
+                        gate("summary", GateKind::Summary),
+                        gate("artifact_review", GateKind::Review),
+                    ],
+                ),
+                vec![
+                    ("artifact_review", "reviewed-artifacts", 1, "review", true),
+                    ("summary", "reviewed-artifacts", 1, "summary", true),
+                ],
+            ),
+        ];
+
+        for (index, (name, acceptance_profile, expected_gates)) in profiles.into_iter().enumerate()
+        {
+            let project_id = format!("template-profile-{index}");
+            let store = store_with_project(&project_id);
+            let expected_revision = store.project_revision(&project_id).unwrap().0;
+            let request = batch_request(
+                &project_id,
+                acceptance_profile,
+                &format!("operation-{name}"),
+                expected_revision,
+            );
+            let created = store.create_work_batch(&request).unwrap();
+            assert_eq!(created.works.len(), 1, "profile {name}");
+            assert_eq!(
+                stored_gates(&store, "batch-profile-item"),
+                expected_gates
+                    .into_iter()
+                    .map(|(id, profile, version, kind, required)| {
+                        (
+                            id.to_owned(),
+                            profile.to_owned(),
+                            version,
+                            kind.to_owned(),
+                            required,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                "profile {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_admission_rejects_unknown_wrong_version_and_noncanonical_gates() {
+        let cases = [
+            (
+                "unknown",
+                profile(
+                    "unregistered",
+                    "1",
+                    vec![gate("summary", GateKind::Summary)],
+                ),
+            ),
+            (
+                "wrong-version",
+                profile(
+                    "general-attestation",
+                    "2",
+                    vec![gate("summary", GateKind::Summary)],
+                ),
+            ),
+            (
+                "wrong-gates",
+                profile(
+                    "general-attestation",
+                    "1",
+                    vec![
+                        gate("checkpoint", GateKind::Checkpoint),
+                        gate("summary", GateKind::Summary),
+                    ],
+                ),
+            ),
+            (
+                "legacy-wrong-version",
+                profile(
+                    "focused",
+                    "2",
+                    vec![
+                        gate("checkpoint", GateKind::Checkpoint),
+                        gate("verification", GateKind::Verification),
+                        gate("summary", GateKind::Summary),
+                    ],
+                ),
+            ),
+        ];
+
+        for (index, (case, acceptance_profile)) in cases.into_iter().enumerate() {
+            let project_id = format!("template-invalid-profile-{index}");
+            let store = store_with_project(&project_id);
+            let expected_revision = store.project_revision(&project_id).unwrap().0;
+            let request = batch_request(
+                &project_id,
+                acceptance_profile,
+                &format!("operation-{case}"),
+                expected_revision,
+            );
+            assert!(store.create_work_batch(&request).is_err(), "case {case}");
+            assert!(
+                store
+                    .work(&project_id, "batch-profile-item")
+                    .unwrap()
+                    .is_none(),
+                "case {case} wrote a work item"
+            );
+            assert_eq!(
+                store.project_revision(&project_id).unwrap().0,
+                expected_revision,
+                "case {case}"
+            );
+        }
+    }
 }

@@ -48,7 +48,7 @@ pub struct TemplateWorkItem {
     pub dependencies: Vec<String>,
     #[serde(default)]
     pub labels: Vec<String>,
-    /// `focused` (default) or `reviewed` acceptance requirements.
+    /// `focused` (default), `reviewed`, or a registered `profile/version`.
     #[serde(default = "default_acceptance_profile")]
     pub acceptance_profile: String,
     /// Optional output declarations. Missing values in schema-1 templates
@@ -156,6 +156,60 @@ pub struct RenderedTemplateItem {
 
 fn default_acceptance_profile() -> String {
     "focused".to_owned()
+}
+
+fn resolve_template_acceptance_profile(
+    value: &str,
+) -> Result<boreal_domain::AcceptanceProfile, TemplateError> {
+    match value {
+        "focused" => return Ok(boreal_domain::AcceptanceProfile::focused()),
+        "reviewed" => return Ok(boreal_domain::AcceptanceProfile::reviewed()),
+        _ => {}
+    }
+
+    let (profile_id, version_text) = value.split_once('/').ok_or_else(|| {
+        TemplateError::Invalid(format!("unsupported acceptance profile '{value}'"))
+    })?;
+    if profile_id.is_empty() || version_text.is_empty() || version_text.contains('/') {
+        return Err(TemplateError::Invalid(format!(
+            "invalid versioned acceptance profile '{value}'"
+        )));
+    }
+    let version = version_text.parse::<u64>().map_err(|_| {
+        TemplateError::Invalid(format!("invalid acceptance profile version in '{value}'"))
+    })?;
+    if version.to_string() != version_text {
+        return Err(TemplateError::Invalid(format!(
+            "acceptance profile version in '{value}' is not canonical"
+        )));
+    }
+    let registered = boreal_store::profiles::registered_acceptance_profile(profile_id, version)
+        .map_err(|error| TemplateError::Invalid(error.to_string()))?;
+    let Some(registered) = registered else {
+        return match profile_id {
+            "focused" => Ok(boreal_domain::AcceptanceProfile::focused()),
+            "reviewed" => Ok(boreal_domain::AcceptanceProfile::reviewed()),
+            _ => Err(TemplateError::Invalid(format!(
+                "acceptance profile '{profile_id}/{version}' is not a registered general-work profile"
+            ))),
+        };
+    };
+
+    let mut gates = vec![boreal_domain::GateRequirement::required(
+        boreal_domain::GateId::new(registered.summary_gate_id),
+        boreal_domain::GateKind::Summary,
+    )];
+    if let Some(review_gate_id) = registered.review_gate_id {
+        gates.push(boreal_domain::GateRequirement::required(
+            boreal_domain::GateId::new(review_gate_id),
+            boreal_domain::GateKind::Review,
+        ));
+    }
+    Ok(boreal_domain::AcceptanceProfile {
+        id: boreal_domain::ProfileId::new(registered.profile_id),
+        version: registered.version.to_string(),
+        gates,
+    })
 }
 
 impl TemplateDeliverableRequirement {
@@ -304,12 +358,12 @@ impl WorkTemplate {
                     item.key
                 )));
             }
-            if !matches!(item.acceptance_profile.as_str(), "focused" | "reviewed") {
-                return Err(TemplateError::Invalid(format!(
-                    "unsupported acceptance profile '{}' for '{}'",
-                    item.acceptance_profile, item.key
-                )));
-            }
+            resolve_template_acceptance_profile(&item.acceptance_profile).map_err(|error| {
+                TemplateError::Invalid(format!(
+                    "invalid acceptance profile for '{}': {error}",
+                    item.key
+                ))
+            })?;
             if self.schema_version == 1
                 && (!item.deliverables.is_empty() || !item.inputs.is_empty())
             {
@@ -512,15 +566,7 @@ pub fn instantiate_template(
         work.description = item.description;
         work.priority = item.priority;
         work.dispatch_policy = item.dispatch;
-        work.acceptance_profile = match item.acceptance_profile.as_str() {
-            "focused" => boreal_domain::AcceptanceProfile::focused(),
-            "reviewed" => boreal_domain::AcceptanceProfile::reviewed(),
-            other => {
-                return Err(TemplateError::Invalid(format!(
-                    "unsupported acceptance profile '{other}'"
-                )));
-            }
-        };
+        work.acceptance_profile = resolve_template_acceptance_profile(&item.acceptance_profile)?;
         ids.insert(item.key, id);
         works.push(work);
     }
@@ -544,7 +590,7 @@ pub fn instantiate_template(
             "project_id": project_id.as_str(), "actor_id": actor_id, "session_id": session_id,
             "expected_revision": expected_revision, "template_id": plan.template_id,
             "template_version": plan.template_version, "id_prefix": id_prefix,
-            "works": works.iter().map(|work| json!({"work_id": work.id.as_str(), "kind": format!("{:?}", work.kind), "parent": work.parent_id.as_ref().map(|id| id.as_str()), "title": work.title, "description": work.description, "priority": work.priority, "dispatch": format!("{:?}", work.dispatch_policy),"acceptance_profile":work.acceptance_profile.id.as_str()})).collect::<Vec<_>>(),
+            "works": works.iter().map(|work| json!({"work_id": work.id.as_str(), "kind": format!("{:?}", work.kind), "parent": work.parent_id.as_ref().map(|id| id.as_str()), "title": work.title, "description": work.description, "priority": work.priority, "dispatch": format!("{:?}", work.dispatch_policy),"acceptance_profile":work.acceptance_profile.id.as_str(),"acceptance_profile_version":work.acceptance_profile.version})).collect::<Vec<_>>(),
             "dependencies":dependencies,"labels":labels,
             "planning_contracts": plan.rendered.iter().map(|item|json!({"key":item.key,"deliverables":item.deliverables.iter().map(deliverable_json).collect::<Vec<_>>(),"inputs":item.inputs.iter().map(input_reference_json).collect::<Vec<_>>()})).collect::<Vec<_>>()
         }),
@@ -654,15 +700,7 @@ pub fn amend_template_prefix(
         work.description = item.description;
         work.priority = item.priority;
         work.dispatch_policy = item.dispatch;
-        work.acceptance_profile = match item.acceptance_profile.as_str() {
-            "focused" => boreal_domain::AcceptanceProfile::focused(),
-            "reviewed" => boreal_domain::AcceptanceProfile::reviewed(),
-            other => {
-                return Err(TemplateError::Invalid(format!(
-                    "unsupported acceptance profile '{other}'"
-                )));
-            }
-        };
+        work.acceptance_profile = resolve_template_acceptance_profile(&item.acceptance_profile)?;
         ids.insert(item.key, id);
         works.push(work);
     }
@@ -722,6 +760,7 @@ pub fn amend_template_prefix(
                 "priority": work.priority,
                 "dispatch": format!("{:?}", work.dispatch_policy),
                 "acceptance_profile": work.acceptance_profile.id.as_str(),
+                "acceptance_profile_version": work.acceptance_profile.version,
             })).collect::<Vec<_>>(),
             "dependencies": dependencies,
             "labels": labels,
@@ -776,13 +815,18 @@ fn validate_rendered_plan(
             || item.description.trim().is_empty()
             || item.description.contains('\0')
             || item.priority > 9
-            || !matches!(item.acceptance_profile.as_str(), "focused" | "reviewed")
         {
             return Err(TemplateError::Invalid(format!(
                 "rendered item '{}' has invalid identity or planning fields",
                 item.key
             )));
         }
+        resolve_template_acceptance_profile(&item.acceptance_profile).map_err(|error| {
+            TemplateError::Invalid(format!(
+                "rendered item '{}' has an invalid acceptance profile: {error}",
+                item.key
+            ))
+        })?;
         validate_deliverable_requirements(&item.deliverables).map_err(|error| {
             TemplateError::Invalid(format!("invalid deliverables for '{}': {error}", item.key))
         })?;
@@ -1326,6 +1370,138 @@ mod tests {
                 .template_version,
             2
         );
+    }
+
+    #[test]
+    fn registered_profiles_validate_render_and_apply_with_canonical_gates() {
+        let store = boreal_store::SqliteStore::open_in_memory(SCHEMA).unwrap();
+        store
+            .install_feature_schema("agent_tools", 1, boreal_store::AGENT_TOOLS_SCHEMA)
+            .unwrap();
+        let app = crate::WorkApplication::new(&store);
+        let project = ProjectId::new("template-profiles");
+        app.init_project(
+            &project,
+            "planner",
+            "operator",
+            "planner-credential",
+            "Planner",
+            "unix-ms:1",
+            "operation-init",
+        )
+        .unwrap();
+        app.register_session_as(
+            &project,
+            "planner",
+            "test-harness",
+            "planner-session",
+            "unix-ms:2",
+            "operation-session",
+        )
+        .unwrap();
+
+        let cases = [
+            ("focused", vec!["checkpoint", "verification", "summary"]),
+            (
+                "reviewed",
+                vec!["checkpoint", "verification", "review", "summary"],
+            ),
+            ("general-attestation/1", vec!["summary"]),
+            ("validated-deliverables/1", vec!["summary"]),
+            ("reviewed-artifacts/1", vec!["summary", "artifact_review"]),
+        ];
+        for (index, (profile_token, expected_gate_ids)) in cases.into_iter().enumerate() {
+            let mut template_item = item("output", "Produce the requested result");
+            template_item.acceptance_profile = profile_token.to_owned();
+            if profile_token == "general-attestation/1" {
+                template_item
+                    .deliverables
+                    .push(TemplateDeliverableRequirement {
+                        key: "optional-document".into(),
+                        purpose: "Optional supporting material".into(),
+                        required: false,
+                        deliverable_type: TemplateDeliverableType::Document,
+                        allowed_media_types: vec!["text/plain".into()],
+                        min_count: 0,
+                        max_count: 1,
+                        criteria: Vec::new(),
+                    });
+            } else if matches!(
+                profile_token,
+                "validated-deliverables/1" | "reviewed-artifacts/1"
+            ) {
+                template_item
+                    .deliverables
+                    .push(TemplateDeliverableRequirement {
+                        key: "required-document".into(),
+                        purpose: "Required result document".into(),
+                        required: true,
+                        deliverable_type: TemplateDeliverableType::Document,
+                        allowed_media_types: vec!["text/plain".into()],
+                        min_count: 1,
+                        max_count: 1,
+                        criteria: Vec::new(),
+                    });
+            }
+            let plan = template(1, vec![template_item])
+                .plan(&BTreeMap::new())
+                .unwrap();
+            assert_eq!(plan.rendered[0].acceptance_profile, profile_token);
+
+            let prefix = format!("profile-{index}");
+            let result = instantiate_template(
+                &app,
+                &project,
+                &plan,
+                "planner",
+                "planner-session",
+                store.project_revision("template-profiles").unwrap().0,
+                &prefix,
+                "unix-ms:3",
+                &format!("operation-profile-{index}"),
+            )
+            .unwrap();
+            assert_eq!(result.works.len(), 1, "profile {profile_token}");
+            let work_id = format!("{prefix}-output");
+            for gate_id in [
+                "checkpoint",
+                "verification",
+                "review",
+                "summary",
+                "artifact_review",
+            ] {
+                let resolved = store.gate_id_for_work("template-profiles", &work_id, gate_id);
+                if expected_gate_ids.contains(&gate_id) {
+                    assert!(resolved.is_ok(), "missing {gate_id} for {profile_token}");
+                } else {
+                    assert!(
+                        resolved.is_err(),
+                        "unexpected {gate_id} for {profile_token}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn template_profiles_reject_unknown_and_unsupported_versions() {
+        for profile_token in [
+            "general-attestation",
+            "general-attestation/2",
+            "unregistered/1",
+            "reviewed-artifacts/01",
+            "reviewed-artifacts/1/extra",
+        ] {
+            let mut template_item = item("work", "Work");
+            template_item.acceptance_profile = profile_token.to_owned();
+            let error = template(1, vec![template_item])
+                .plan(&BTreeMap::new())
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("acceptance profile"),
+                "{profile_token}: {error}"
+            );
+        }
     }
 
     #[test]
