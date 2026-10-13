@@ -115,7 +115,7 @@ fn operation_show_reads_completed_create_operation() {
     );
     assert_eq!(
         shown_envelope["data"]["operation"]["command"],
-        "work.create"
+        "work.create.v3"
     );
     assert_eq!(
         shown_envelope["data"]["operation"]["result"]["subject_type"],
