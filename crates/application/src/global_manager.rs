@@ -52,6 +52,48 @@ fn validate_global_transfer(value: &Value, limit: usize) -> Result<(), String> {
     validate_global_transfer_size(size, limit)
 }
 
+fn validate_global_import_bundle(snapshot: &Value, limit: usize) -> Result<(), StoreError> {
+    for key in [
+        "projects",
+        "items",
+        "notes",
+        "statuses",
+        "relationships",
+        "associations",
+    ] {
+        if !snapshot.get(key).is_some_and(Value::is_array) {
+            return Err(StoreError::Invalid(format!(
+                "import snapshot requires {key} array"
+            )));
+        }
+    }
+    if !snapshot.get("status_history").is_some_and(Value::is_array) {
+        return Err(StoreError::Invalid(
+            "import snapshot requires status_history array".into(),
+        ));
+    }
+    if snapshot
+        .get("revision_history")
+        .is_some_and(|value| !value.is_array())
+        || snapshot
+            .get("imported_history")
+            .is_some_and(|value| !value.is_array())
+    {
+        return Err(StoreError::Invalid(
+            "import revision history must be arrays".into(),
+        ));
+    }
+    if snapshot.get("schema_version").and_then(Value::as_u64) != Some(2) {
+        return Err(StoreError::Invalid(
+            "unsupported global backup schema version".into(),
+        ));
+    }
+    validate_global_transfer(snapshot, limit).map_err(StoreError::Invalid)?;
+    validate_import_snapshot(snapshot)?;
+    let mut history_entries = 0usize;
+    validate_import_history(snapshot, 0, &mut history_entries)
+}
+
 #[derive(Debug)]
 pub enum GlobalManagerError {
     Store(StoreError),
@@ -200,6 +242,9 @@ impl GlobalManagerApplication {
             }
         }
         self.validate(command, &prepared)?;
+        if command == "import" {
+            self.preflight_import_export(&prepared)?;
+        }
         if is_mutation(command) {
             let result =
                 self.store
@@ -812,8 +857,37 @@ impl GlobalManagerApplication {
         state["schema_version"] = json!(2);
         state["revision"] = json!(revision);
         state["revision_history"] = json!(history);
-        validate_global_transfer(&state, size_limit).map_err(GlobalManagerError::Invalid)?;
+        validate_global_import_bundle(&state, size_limit)
+            .map_err(|error| GlobalManagerError::Invalid(error.to_string()))?;
         Ok(state)
+    }
+
+    fn preflight_import_export(&self, payload: &Value) -> Result<(), GlobalManagerError> {
+        let (before, revision, mut history) = self.store.export_bundle()?;
+        let next_revision = revision
+            .checked_add(1)
+            .ok_or_else(|| GlobalManagerError::Invalid("global revision overflow".into()))?;
+        let mut replacement = before.clone();
+        apply_mutation("import", payload, &mut replacement, next_revision)?;
+
+        // The store records the pre-import state at the current revision as
+        // part of the same transaction. Include that exact future history row
+        // when checking that the accepted import remains logically portable.
+        if !history
+            .iter()
+            .any(|entry| entry.get("revision").and_then(Value::as_u64) == Some(revision))
+        {
+            history.push(json!({
+                "revision": revision,
+                "snapshot": before,
+                "created_at": now(),
+            }));
+        }
+        replacement["schema_version"] = json!(2);
+        replacement["revision"] = json!(next_revision);
+        replacement["revision_history"] = json!(history);
+        validate_global_import_bundle(&replacement, GLOBAL_TRANSFER_MAX_BYTES)
+            .map_err(|error| GlobalManagerError::Invalid(error.to_string()))
     }
 
     fn validate(&self, command: &str, p: &Value) -> Result<(), GlobalManagerError> {
@@ -2081,46 +2155,7 @@ fn apply_mutation(
         }
         "import" => {
             let incoming = p.get("snapshot").unwrap_or(p);
-            for key in [
-                "projects",
-                "items",
-                "notes",
-                "statuses",
-                "relationships",
-                "associations",
-            ] {
-                if !incoming.get(key).is_some_and(Value::is_array) {
-                    return Err(StoreError::Invalid(format!(
-                        "import snapshot requires {key} array"
-                    )));
-                }
-            }
-            if !incoming.get("status_history").is_some_and(Value::is_array) {
-                return Err(StoreError::Invalid(
-                    "import snapshot requires status_history array".into(),
-                ));
-            }
-            if incoming
-                .get("revision_history")
-                .is_some_and(|v| !v.is_array())
-                || incoming
-                    .get("imported_history")
-                    .is_some_and(|v| !v.is_array())
-            {
-                return Err(StoreError::Invalid(
-                    "import revision history must be arrays".into(),
-                ));
-            }
-            if incoming.get("schema_version").and_then(Value::as_u64) != Some(2) {
-                return Err(StoreError::Invalid(
-                    "unsupported global backup schema version".into(),
-                ));
-            }
-            validate_global_transfer(incoming, GLOBAL_TRANSFER_MAX_BYTES)
-                .map_err(StoreError::Invalid)?;
-            validate_import_snapshot(incoming)?;
-            let mut history_entries = 0usize;
-            validate_import_history(incoming, 0, &mut history_entries)?;
+            validate_global_import_bundle(incoming, GLOBAL_TRANSFER_MAX_BYTES)?;
             let mut imported_history = incoming
                 .get("imported_history")
                 .and_then(Value::as_array)
@@ -2882,7 +2917,7 @@ fn validate_import_history(
 ) -> Result<(), StoreError> {
     if depth > 8 {
         return Err(StoreError::Invalid(
-            "global backup revision history exceeds the maximum nesting depth of 8".into(),
+            "global backup revision history exceeds the maximum nesting depth of 8; use `bwrk global backup --out PATH` for a complete physical backup".into(),
         ));
     }
     let error = |message: &str| StoreError::Invalid(format!("invalid global backup: {message}"));
@@ -2899,7 +2934,7 @@ fn validate_import_history(
             *entry_count = entry_count.saturating_add(1);
             if *entry_count > 10_000 {
                 return Err(StoreError::Invalid(
-                    "global backup contains more than 10000 revision history entries".into(),
+                    "global backup contains more than 10000 revision history entries; use `bwrk global backup --out PATH` for a complete physical backup".into(),
                 ));
             }
             if key == "revision_history" && !entry.get("revision").and_then(Value::as_u64).is_some()
