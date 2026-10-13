@@ -1084,6 +1084,37 @@ mod global_backup_tests {
     }
 
     #[test]
+    fn backup_is_not_published_when_snapshot_validation_fails() {
+        let root = unique_test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("global.sqlite");
+        let package = root.join("invalid.global-backup");
+        let store = GlobalManagerStore::open(&source).unwrap();
+
+        // Keep SQLite structurally sound while making the copied Global state
+        // invalid, so this exercises package validation rather than I/O error
+        // handling.
+        store
+            .inner
+            .execute_batch("UPDATE global_manager_state SET state_json='{}' WHERE singleton=1")
+            .unwrap();
+
+        assert!(store.backup_package_to(&package).is_err());
+        assert!(
+            !package.exists(),
+            "an invalid snapshot must not be published"
+        );
+        assert!(fs::read_dir(&root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".global-backup.")));
+
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn manifest_validation_rejects_unsupported_and_tampered_packages() {
         let root = unique_test_dir();
         fs::create_dir_all(&root).unwrap();
@@ -1101,7 +1132,48 @@ mod global_backup_tests {
         unsupported["format_version"] = json!(99);
         assert!(validate_global_backup_manifest(&unsupported).is_err());
 
-        let mut missing_runtime = valid;
+        let mut invalid_manifests = Vec::new();
+
+        let mut unsupported_schema_id = valid.clone();
+        unsupported_schema_id["source_schema_id"] = json!("other.global");
+        invalid_manifests.push(("schema ID", unsupported_schema_id));
+
+        let mut unsupported_schema_version = valid.clone();
+        unsupported_schema_version["source_schema_version"] = json!(99);
+        invalid_manifests.push(("schema version", unsupported_schema_version));
+
+        let mut malformed_database_id = valid.clone();
+        malformed_database_id["database_id"] = json!("not-a-database-id");
+        invalid_manifests.push(("database ID", malformed_database_id));
+
+        let mut malformed_revision = valid.clone();
+        malformed_revision["revision"] = json!(-1);
+        invalid_manifests.push(("revision", malformed_revision));
+
+        let mut zero_database_size = valid.clone();
+        zero_database_size["database_bytes"] = json!(0);
+        invalid_manifests.push(("database size", zero_database_size));
+
+        let mut malformed_checksum = valid.clone();
+        malformed_checksum["database_checksum"] = json!("sha256:bad");
+        invalid_manifests.push(("checksum", malformed_checksum));
+
+        let mut empty_producer = valid.clone();
+        empty_producer["producer"]["name"] = json!(" ");
+        invalid_manifests.push(("producer", empty_producer));
+
+        let mut malformed_runtime = valid.clone();
+        malformed_runtime["sqlite_runtime"]["compile_options"] = json!([1]);
+        invalid_manifests.push(("SQLite runtime", malformed_runtime));
+
+        for (field, manifest) in invalid_manifests {
+            assert!(
+                validate_global_backup_manifest(&manifest).is_err(),
+                "invalid {field} should be rejected"
+            );
+        }
+
+        let mut missing_runtime = valid.clone();
         missing_runtime
             .as_object_mut()
             .unwrap()
