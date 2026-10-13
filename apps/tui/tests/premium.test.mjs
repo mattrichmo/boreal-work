@@ -132,7 +132,8 @@ test('search covers title, ID, description, owner and parent on the loaded page'
 test('palette explains disabled actions and never invents unsupported commands', () => {
     const v = fixtureView(), s = initialState(v);
     s.modal = { kind: 'palette', value: 'finish', index: 0 };
-    const command = paletteCommands(v, s)[0];
+    const command = paletteCommands(v, s).find(c => c.id === 'action:finish');
+    assert.ok(command);
     assert.equal(command.id, 'action:finish');
     assert.equal(command.disabled, true);
     assert.ok(command.hint.length);
@@ -209,7 +210,7 @@ test('claim rejects unknown source/config values and cancellation sends no mutat
 test('create-work form accepts shortcut letters as text and submits the real fields', async () => {
     await session(async (c, t) => {
         t.send('n');
-        t.send('task-new\r\rA proper q title\r\r\rA description\r');
+        t.send('task-new\r\r\rA proper q title\r\r\rA description\r');
         await tick();
         assert.equal(c.calls.length, 0);
         t.send('\r');
@@ -217,6 +218,7 @@ test('create-work form accepts shortcut letters as text and submits the real fie
         const input = c.calls.find(x => x[0] === 'create_work')[1];
         assert.equal(input.title, 'A proper q title');
         assert.equal(input.kind, 'task');
+        assert.equal(input.execution_mode, 'direct');
         assert.equal(input.priority, 0);
         assert.equal(input.description, 'A description');
     });

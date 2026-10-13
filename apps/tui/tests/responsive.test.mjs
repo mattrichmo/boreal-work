@@ -53,7 +53,10 @@ for (const [w,h] of SIZES) test(`operable content across dashboard, sheets, and 
             form.index=i; if(!form.fields[i].choices) form.fields[i].value='visible-input';
             s.modal=form; screen=renderDashboard(v,s,w,h); bounded(screen,w,h);
             const box=dialogViewport(w,h,18), body=screen.plain().slice(box.body.y,box.body.y+box.body.height).join('\n');
-            assert.match(body, form.fields[i].choices ? /> task/ : /visible-input/);
+            if (form.fields[i].choices)
+                assert.ok(body.includes(`> ${form.fields[i].value}`), `${form.fields[i].name} choice remains visible`);
+            else
+                assert.match(body, /visible-input/);
             assert.match(screen.plain()[box.footerY],/Enter/);
         }
     }
