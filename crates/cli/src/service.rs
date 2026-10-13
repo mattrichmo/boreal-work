@@ -1977,6 +1977,8 @@ mod unix {
                     .options
                     .expected_revision
                     .map_or(Value::Null, |value| json!(value));
+                data["planning_contract"] =
+                    super::super::planning_contract_file_value(parsed)?.unwrap_or(Value::Null);
             }
             ["work", "edit"] => {
                 let offset = usize::from(parsed.options.project.is_none());
@@ -2588,6 +2590,8 @@ mod unix {
         _session_id: Option<String>,
         #[serde(default, rename = "expected_revision")]
         expected_revision: Option<u64>,
+        #[serde(default)]
+        planning_contract: Option<Value>,
         #[serde(default, rename = "operation_id")]
         _operation_id: Option<String>,
     }
@@ -3697,6 +3701,21 @@ mod unix {
                 format!("{}/{}", request.profile, request.profile_version)
             };
             let acceptance_profile = super::super::acceptance_profile_from_token(&profile_token)?;
+            let planning_contract = request
+                .planning_contract
+                .map(|payload| {
+                    super::super::planning_contract_from_value(
+                        payload,
+                        &ProjectId::new(project_id.clone()),
+                        &work_id,
+                    )
+                })
+                .transpose()?;
+            if kind == WorkKind::Sprint && planning_contract.is_some() {
+                return Err(CliError::invalid(
+                    "structured deliverable and input contracts are supported on Milestones and Tasks, not legacy Sprint containers",
+                ));
+            }
             let parent_id = request
                 .parent_id
                 .map(|parent_id| required_trimmed(parent_id, "parent_id"))
@@ -3752,8 +3771,15 @@ mod unix {
                 let scope = PlanningScope::new(work.project_id.clone(), actor_id.clone())
                     .with_session(session_id)
                     .at_revision(expected_revision);
-                app.create_planning_work_v3(&scope, operation, &work, mode, &at)
-                    .map_err(map_application_error)?
+                app.create_planning_work_v3_with_contract(
+                    &scope,
+                    operation,
+                    &work,
+                    mode,
+                    planning_contract,
+                    &at,
+                )
+                .map_err(map_application_error)?
             };
             let planning = super::super::planning_projection_json(
                 &self.store,
@@ -3762,6 +3788,11 @@ mod unix {
                 &result.value.kind,
                 result.value.parent_id.as_deref(),
             );
+            let planning_contract = super::super::planning_contract_detail_json(
+                &self.store,
+                result.value.project_id.as_str(),
+                &result.value.work_id,
+            )?;
             Ok((
                 if result.changed {
                     ApplicationOutcome::Changed
@@ -3786,6 +3817,7 @@ mod unix {
                     "planning_parent_id": planning["planning_parent_id"],
                     "planning_integrity": planning["planning_integrity"],
                     "planning_diagnostic": planning["planning_diagnostic"],
+                    "planning_contract": planning_contract,
                     "hard_holds": result
                         .value
                         .hard_holds
@@ -3830,6 +3862,12 @@ mod unix {
             let execution_mode = optional_string(data, "execution_mode")?
                 .map(|value| super::super::execution_mode_from_token(&value))
                 .transpose()?;
+            let planning_contract = data
+                .get("planning_contract")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .map(|value| super::super::planning_contract_from_value(value, &project, &work_id))
+                .transpose()?;
             let app = WorkApplication::new(&self.store);
             let current = self
                 .store
@@ -3843,7 +3881,7 @@ mod unix {
                     )
                 })?;
             let at = now();
-            let (revision, changed) = if current.kind == "sprint" {
+            let (revision, changed) = if current.kind == "sprint" && planning_contract.is_none() {
                 if clear_parent || parent_id.is_some() || execution_mode.is_some() {
                     return Err(CliError::invalid(
                         "Sprint parent and execution-mode edits require the atomic planning projection route",
@@ -3879,6 +3917,7 @@ mod unix {
                     priority,
                     dispatch_policy,
                     execution_mode,
+                    planning_contract,
                 };
                 let mut scope = PlanningScope::new(project.clone(), actor_id);
                 if let Some(session_id) = session_id {
@@ -3896,6 +3935,11 @@ mod unix {
                 .map_err(map_store_error)?
                 .ok_or_else(|| CliError::invalid("edited work disappeared during readback"))?;
             let mut response = super::super::work_projection_json(&projected, &self.store);
+            response["planning_contract"] = super::super::planning_contract_detail_json(
+                &self.store,
+                project.as_str(),
+                &work_id,
+            )?;
             response["replayed"] = json!(!changed);
             Ok((
                 if changed {
@@ -4476,10 +4520,16 @@ mod unix {
                 .store
                 .project_revision(project.as_str())
                 .map_err(map_store_error)?;
+            let mut detail = super::super::work_projection_json(&item, &self.store);
+            detail["planning_contract"] = super::super::planning_contract_detail_json(
+                &self.store,
+                project.as_str(),
+                &work_id,
+            )?;
             Ok((
                 ApplicationOutcome::Unchanged,
                 Some(revision.0),
-                Some(super::super::work_projection_json(&item, &self.store)),
+                Some(detail),
             ))
         }
 

@@ -10,16 +10,20 @@ use boreal_application::{
 };
 use boreal_domain::work_model_v3::ExecutionMode;
 use boreal_domain::{
-    AcceptanceProfile, ActorId, AttemptId, AttemptPhase, ConfigIdentity, DispatchPolicy, Fence,
-    GateId, GateKind, HarnessId, OperationId, PersistedLifecycle, ProjectId, ReasonCode, ReceiptId,
+    AcceptanceProfile, AcceptedResultIdentity, ActorId, ArtifactProductionIdentity, AttemptId,
+    AttemptPhase, ConfigIdentity, DeliverableCriterion, DeliverableRequirement, DeliverableType,
+    DispatchPolicy, Fence, GateId, GateKind, HarnessId, InputArtifactRef, InputArtifactRole,
+    InputArtifactScope, OperationId, PersistedLifecycle, ProjectId, ReasonCode, ReceiptId,
     ReceiptResult, SessionId, SourceVersionId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
 use boreal_protocol::{
     models::{
-        AgentGuideDto, AgentNextDto, ContextRefDto, CoverageDto, GuidanceContextDto,
-        GuidanceProvenanceDto, GuidanceStatusDto, NextActionDto, NextReasonDto, NextStatusDto,
-        ReceiptDto, ReceiptSubjectDto, RequirementDto, SubjectDto, WorkflowAssetDto,
-        WorkflowCriterionDto, WorkflowInputDto, WorkflowPackageDto, WorkflowShowDto,
+        AcceptedInputBindingV2Dto, AgentGuideDto, AgentNextDto, ContextRefDto, CoverageDto,
+        DeliverableCriterionV2Dto, DeliverableRequirementV2Dto, DeliverableTypeDto,
+        GuidanceContextDto, GuidanceProvenanceDto, GuidanceStatusDto, InputArtifactRoleV2Dto,
+        InputArtifactScopeV2Dto, NextActionDto, NextReasonDto, NextStatusDto, ReceiptDto,
+        ReceiptSubjectDto, RequirementDto, SubjectDto, WorkflowAssetDto, WorkflowCriterionDto,
+        WorkflowInputDto, WorkflowPackageDto, WorkflowShowDto,
     },
     schema, ApplicationOutcome, DetailReference, Envelope, ErrorCode, ProtocolError,
     TransportOutcome, API_VERSION,
@@ -98,6 +102,13 @@ const DEFAULT_HARNESS: &str = "cli";
 const DEFAULT_SESSION: &str = "session-operator";
 const MAX_GATE_RUNTIME_MS: u64 = 30_000;
 const GATE_COMMANDS_DIR: &str = "gates";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PlanningContractFileV2 {
+    requirements: Vec<DeliverableRequirementV2Dto>,
+    inputs: Vec<AcceptedInputBindingV2Dto>,
+}
 const MAX_SOURCE_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const HELP: &str = r#"bwrk v2
@@ -2747,6 +2758,7 @@ fn work_edit_result(
         .get(offset)
         .cloned()
         .ok_or_else(|| CliError::invalid("work edit requires a work identifier"))?;
+    let planning_contract = planning_contract_for_work(parsed, &project, &work_id)?;
     let clear_parent = parsed.options.extra.contains_key("--clear-parent");
     if clear_parent && parsed.options.parent.is_some() {
         return Err(CliError::invalid(
@@ -2768,7 +2780,7 @@ fn work_edit_result(
         .expected_revision
         .ok_or_else(|| CliError::invalid("work edit requires --expected-revision"))?;
     let at = now();
-    let (revision, changed) = if current.kind == "sprint" {
+    let (revision, changed) = if current.kind == "sprint" && planning_contract.is_none() {
         if clear_parent || parsed.options.parent.is_some() || requested_mode.is_some() {
             return Err(CliError::invalid(
                 "Sprint parent and execution-mode edits require the atomic planning projection route",
@@ -2814,6 +2826,7 @@ fn work_edit_result(
             priority: parsed.options.priority,
             dispatch_policy,
             execution_mode: requested_mode,
+            planning_contract,
         };
         let scope = PlanningScope::new(project.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
@@ -2828,6 +2841,7 @@ fn work_edit_result(
         .map_err(map_store_error)?
         .ok_or_else(|| CliError::invalid("edited work disappeared during readback"))?;
     let mut data = work_projection_json(&projected, store);
+    data["planning_contract"] = planning_contract_detail_json(store, project.as_str(), &work_id)?;
     data["replayed"] = json!(!changed);
     bounded_result(Some(data), Some(revision)).map(|mut view| {
         view.outcome = if changed {
@@ -4763,6 +4777,97 @@ pub(crate) fn work_projection_json(item: &WorkRecord, store: &SqliteStore) -> Va
     })
 }
 
+fn planning_contract_detail_json(
+    store: &SqliteStore,
+    project_id: &str,
+    work_id: &str,
+) -> Result<Value, CliError> {
+    let snapshot = store
+        .work_planning_contract_snapshot(project_id, work_id)
+        .map_err(map_store_error)?;
+    let Some(record) = snapshot.contract else {
+        return Ok(json!({
+            "project_revision": snapshot.project_revision,
+            "contract_revision": 0,
+            "template_id": null,
+            "template_version": null,
+            "requirements": [],
+            "inputs": [],
+        }));
+    };
+    let requirements = serde_json::from_str::<Vec<Value>>(&record.requirements_json)
+        .map_err(|error| CliError::invalid(format!("stored planning requirements are corrupt: {error}")))?
+        .into_iter()
+        .map(|requirement| {
+            let criteria = requirement["criteria"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|criterion| match criterion["kind"].as_str().unwrap_or_default() {
+                    "min_bytes" => json!({"kind":"minimum_bytes","value":criterion["value"]}),
+                    "max_bytes" => json!({"kind":"maximum_bytes","value":criterion["value"]}),
+                    "non_empty" => json!({"kind":"non_empty"}),
+                    "digest_present" => json!({"kind":"digest_present"}),
+                    "json_document" => json!({"kind":"json_document"}),
+                    "text_contains" => json!({"kind":"text_contains","text":criterion["text"]}),
+                    _ => criterion.clone(),
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "schema_version": boreal_protocol::models::DELIVERABLE_REQUIREMENT_V2_SCHEMA_VERSION,
+                "requirement_key": requirement["key"],
+                "purpose": requirement["purpose"],
+                "required": requirement["required"],
+                "deliverable_type": requirement["deliverable_type"],
+                "allowed_media_types": requirement["allowed_media_types"],
+                "min_count": requirement["min_count"],
+                "max_count": requirement["max_count"],
+                "criteria": criteria,
+            })
+        })
+        .collect::<Vec<_>>();
+    let inputs = serde_json::from_str::<Vec<Value>>(&record.inputs_json)
+        .map_err(|error| CliError::invalid(format!("stored planning inputs are corrupt: {error}")))?
+        .into_iter()
+        .map(|input| {
+            let producer = input.get("produced_by").cloned().unwrap_or(Value::Null);
+            let accepted = input.get("accepted_result").cloned().unwrap_or(Value::Null);
+            let accepted_result = accepted.as_object().map(|_| {
+                json!({
+                    "producer": accepted["producer"],
+                    "decision_id": accepted["decision_id"],
+                    "submission_id": accepted["submission_id"],
+                    "artifact_set_digest": accepted["artifact_set_digest"],
+                })
+            });
+            json!({
+                "input_key": input.get("input_key").cloned().unwrap_or(Value::Null),
+                "required": input.get("required").cloned().unwrap_or(json!(false)),
+                "role": input["role"],
+                "access_scope": input["scope"],
+                "artifact": {
+                    "project_id": input["project_id"],
+                    "source_version_id": input["source_version_id"],
+                    "content_digest": input["content_digest"],
+                    "media_type": input.get("media_type").cloned().unwrap_or(Value::Null),
+                    "byte_count": input.get("byte_count").cloned().unwrap_or(Value::Null),
+                    "availability": input.get("availability").cloned().unwrap_or(Value::Null),
+                },
+                "produced_by": producer,
+                "accepted_result": accepted_result,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "project_revision": snapshot.project_revision,
+        "contract_revision": record.contract_revision,
+        "template_id": record.template_id,
+        "template_version": record.template_version,
+        "requirements": requirements,
+        "inputs": inputs,
+    }))
+}
+
 /// Build a typed planning projection without hiding legacy rows or damaged
 /// siblings from the canonical work/status page. Only `valid` v3 rows are
 /// safe for v3 planning actions such as cycle assignment.
@@ -4946,7 +5051,9 @@ fn show_work_result(
         .show_work(&project, &work_id)
         .map_err(map_application_error)?;
     let revision = store_revision(store, &project)?;
-    bounded_result(Some(work_projection_json(&item, store)), Some(revision))
+    let mut data = work_projection_json(&item, store);
+    data["planning_contract"] = planning_contract_detail_json(store, project.as_str(), &work_id)?;
+    bounded_result(Some(data), Some(revision))
 }
 
 fn operation_show_result(
@@ -5590,6 +5697,189 @@ fn default_execution_mode(kind: WorkKind) -> ExecutionMode {
     }
 }
 
+fn planning_contract_file_value(parsed: &ParsedCommand) -> Result<Option<Value>, CliError> {
+    let Some(path) = extra_value(&parsed.options, "--planning-contract") else {
+        return Ok(None);
+    };
+    let relative = Path::new(path);
+    if !relative.starts_with(".boreal/contracts") {
+        return Err(CliError::invalid(
+            "planning contract input must be under .boreal/contracts",
+        ));
+    }
+    let context = project_context::resolve(parsed)?;
+    let path = project_context::confined_path(&context.root, relative, false)?;
+    let bytes = fs::read(&path).map_err(|error| {
+        CliError::invalid(format!("cannot read planning contract input: {error}"))
+    })?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(CliError::invalid(
+            "planning contract input exceeds the 1 MiB bound",
+        ));
+    }
+    let contract = serde_json::from_slice::<PlanningContractFileV2>(&bytes).map_err(|error| {
+        CliError::invalid(format!(
+            "planning contract input is not valid strict v2 JSON: {error}"
+        ))
+    })?;
+    serde_json::to_value(contract)
+        .map(Some)
+        .map_err(|error| CliError::invalid(format!("cannot normalize planning contract: {error}")))
+}
+
+fn planning_contract_from_value(
+    value: Value,
+    project_id: &ProjectId,
+    work_id: &str,
+) -> Result<boreal_store::WorkPlanningContractWrite, CliError> {
+    let payload = serde_json::from_value::<PlanningContractFileV2>(value).map_err(|error| {
+        CliError::invalid(format!("planning contract payload is invalid: {error}"))
+    })?;
+    let requirements = payload
+        .requirements
+        .into_iter()
+        .map(|requirement| {
+            if requirement.schema_version
+                != boreal_protocol::models::DELIVERABLE_REQUIREMENT_V2_SCHEMA_VERSION
+            {
+                return Err(CliError::invalid(format!(
+                    "deliverable requirement '{}' uses an unsupported schema version",
+                    requirement.requirement_key
+                )));
+            }
+            let deliverable_type = match requirement.deliverable_type {
+                DeliverableTypeDto::Code => DeliverableType::Code,
+                DeliverableTypeDto::Document => DeliverableType::Document,
+                DeliverableTypeDto::Image => DeliverableType::Image,
+                DeliverableTypeDto::Dataset => DeliverableType::Dataset,
+                DeliverableTypeDto::Report => DeliverableType::Report,
+                DeliverableTypeDto::Archive => DeliverableType::Archive,
+                DeliverableTypeDto::Other => DeliverableType::Other,
+            };
+            let criteria = requirement
+                .criteria
+                .into_iter()
+                .map(|criterion| match criterion {
+                    DeliverableCriterionV2Dto::NonEmpty => DeliverableCriterion::NonEmpty,
+                    DeliverableCriterionV2Dto::MinimumBytes { value } => {
+                        DeliverableCriterion::MinBytes(value)
+                    }
+                    DeliverableCriterionV2Dto::MaximumBytes { value } => {
+                        DeliverableCriterion::MaxBytes(value)
+                    }
+                    DeliverableCriterionV2Dto::DigestPresent => DeliverableCriterion::DigestPresent,
+                    DeliverableCriterionV2Dto::JsonDocument => DeliverableCriterion::JsonDocument,
+                    DeliverableCriterionV2Dto::TextContains { text } => {
+                        DeliverableCriterion::TextContains(text)
+                    }
+                })
+                .collect();
+            Ok(DeliverableRequirement {
+                key: requirement.requirement_key,
+                purpose: requirement.purpose,
+                required: requirement.required,
+                deliverable_type,
+                allowed_media_types: requirement.allowed_media_types,
+                min_count: requirement.min_count,
+                max_count: requirement.max_count,
+                criteria,
+            })
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    boreal_domain::validate_deliverable_requirements(&requirements)
+        .map_err(|error| CliError::invalid(error.to_string()))?;
+
+    let inputs = payload
+        .inputs
+        .into_iter()
+        .map(|binding| {
+            let artifact = binding.artifact;
+            let input_project = ProjectId::parse(artifact.project_id)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            if input_project != *project_id {
+                return Err(CliError::invalid(
+                    "planning contract inputs must reference the current project",
+                ));
+            }
+            let role = match binding.role {
+                InputArtifactRoleV2Dto::Context => InputArtifactRole::Context,
+                InputArtifactRoleV2Dto::AcceptedInput => InputArtifactRole::AcceptedInput,
+                InputArtifactRoleV2Dto::Reference => InputArtifactRole::Reference,
+            };
+            let scope = match binding.access_scope {
+                InputArtifactScopeV2Dto::Project => InputArtifactScope::Project,
+                InputArtifactScopeV2Dto::Private => InputArtifactScope::Private,
+            };
+            let producer_from_dto =
+                |identity: boreal_protocol::models::ArtifactProductionIdentityDto| {
+                    Ok::<_, CliError>(ArtifactProductionIdentity {
+                        work_id: WorkId::parse(identity.work_id)
+                            .map_err(|error| CliError::invalid(error.to_string()))?,
+                        attempt_id: AttemptId::parse(identity.attempt_id)
+                            .map_err(|error| CliError::invalid(error.to_string()))?,
+                        result_id: identity.result_id,
+                    })
+                };
+            let produced_by = binding.produced_by.map(producer_from_dto).transpose()?;
+            let accepted_result = binding
+                .accepted_result
+                .map(|accepted| {
+                    let producer = producer_from_dto(accepted.producer)?;
+                    if produced_by
+                        .as_ref()
+                        .is_some_and(|current| current != &producer)
+                    {
+                        return Err(CliError::invalid(
+                            "accepted-result producer does not match input produced_by",
+                        ));
+                    }
+                    Ok(AcceptedResultIdentity {
+                        producer,
+                        decision_id: accepted.decision_id,
+                        submission_id: accepted.submission_id,
+                        artifact_set_digest: accepted.artifact_set_digest,
+                    })
+                })
+                .transpose()?;
+            let produced_by = produced_by.or_else(|| {
+                accepted_result
+                    .as_ref()
+                    .map(|accepted| accepted.producer.clone())
+            });
+            let input = InputArtifactRef {
+                input_key: Some(binding.input_key),
+                required: binding.required,
+                project_id: input_project,
+                source_version_id: SourceVersionId::parse(artifact.source_version_id)
+                    .map_err(|error| CliError::invalid(error.to_string()))?,
+                content_digest: artifact.content_digest,
+                media_type: Some(artifact.media_type),
+                byte_count: Some(artifact.byte_count),
+                availability: Some(artifact.availability),
+                role,
+                scope,
+                produced_by,
+                accepted_result,
+            };
+            boreal_domain::validate_input_artifact_ref(&input, project_id)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            Ok(input)
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    boreal_application::encode_planning_contract(work_id.to_owned(), &requirements, &inputs)
+        .map_err(|error| CliError::invalid(error.to_string()))
+}
+
+fn planning_contract_for_work(
+    parsed: &ParsedCommand,
+    project_id: &ProjectId,
+    work_id: &str,
+) -> Result<Option<boreal_store::WorkPlanningContractWrite>, CliError> {
+    planning_contract_file_value(parsed)?
+        .map(|value| planning_contract_from_value(value, project_id, work_id))
+        .transpose()
+}
+
 fn create_work_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
@@ -5619,6 +5909,12 @@ fn create_work_result(
         "task" => WorkKind::Task,
         _ => unreachable!("parser validates work kind"),
     };
+    let planning_contract = planning_contract_for_work(parsed, &project, &work_id)?;
+    if kind == WorkKind::Sprint && planning_contract.is_some() {
+        return Err(CliError::invalid(
+            "structured deliverable and input contracts are supported on Milestones and Tasks, not legacy Sprint containers",
+        ));
+    }
     let work = WorkItem {
         id: WorkId::new(work_id),
         project_id: project,
@@ -5675,8 +5971,15 @@ fn create_work_result(
         let scope = PlanningScope::new(work.project_id.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
             .at_revision(expected_revision);
-        app.create_planning_work_v3(&scope, operation.to_owned(), &work, mode, &at)
-            .map_err(map_application_error)?
+        app.create_planning_work_v3_with_contract(
+            &scope,
+            operation.to_owned(),
+            &work,
+            mode,
+            planning_contract,
+            &at,
+        )
+        .map_err(map_application_error)?
     };
     let planning = planning_projection_json(
         store,
@@ -5685,6 +5988,11 @@ fn create_work_result(
         &result.value.kind,
         result.value.parent_id.as_deref(),
     );
+    let planning_contract = planning_contract_detail_json(
+        store,
+        result.value.project_id.as_str(),
+        &result.value.work_id,
+    )?;
     bounded_result(
         Some(json!({
             "project_id": result.value.project_id,
@@ -5703,6 +6011,7 @@ fn create_work_result(
             "planning_parent_id": planning["planning_parent_id"],
             "planning_integrity": planning["planning_integrity"],
             "planning_diagnostic": planning["planning_diagnostic"],
+            "planning_contract": planning_contract,
             "hard_holds": result
                 .value
                 .hard_holds
@@ -10640,6 +10949,86 @@ mod tests {
         assert_ne!(
             first, changed_revision,
             "revision preconditions are request identity"
+        );
+    }
+
+    #[test]
+    fn planning_contract_v2_round_trips_keyed_inputs_and_all_requirement_types() {
+        let value = json!({
+            "requirements": [{
+                "schema_version": boreal_protocol::models::DELIVERABLE_REQUIREMENT_V2_SCHEMA_VERSION,
+                "requirement_key": "release-report",
+                "purpose": "Publish the release report",
+                "required": false,
+                "deliverable_type": "report",
+                "allowed_media_types": ["application/pdf"],
+                "min_count": 0,
+                "max_count": 2,
+                "criteria": [
+                    {"kind": "non_empty"},
+                    {"kind": "minimum_bytes", "value": 10},
+                    {"kind": "maximum_bytes", "value": 5000},
+                    {"kind": "digest_present"},
+                    {"kind": "json_document"},
+                    {"kind": "text_contains", "text": "release"}
+                ]
+            }],
+            "inputs": [{
+                "input_key": "approved-source",
+                "role": "accepted_input",
+                "required": true,
+                "access_scope": "project",
+                "artifact": {
+                    "project_id": "planning-project",
+                    "source_version_id": "source-version-1",
+                    "content_digest": "sha256:source",
+                    "media_type": "text/plain",
+                    "byte_count": 32,
+                    "availability": "available"
+                },
+                "produced_by": {
+                    "work_id": "source-work",
+                    "attempt_id": "attempt-1",
+                    "result_id": "result-1"
+                },
+                "accepted_result": {
+                    "producer": {
+                        "work_id": "source-work",
+                        "attempt_id": "attempt-1",
+                        "result_id": "result-1"
+                    },
+                    "decision_id": "decision-1",
+                    "submission_id": "submission-1",
+                    "artifact_set_digest": "sha256:accepted"
+                }
+            }]
+        });
+        let contract = planning_contract_from_value(
+            value,
+            &ProjectId::new("planning-project"),
+            "consumer-work",
+        )
+        .expect("strict v2 planning DTO encodes into the durable contract");
+
+        let requirements: Value = serde_json::from_str(&contract.requirements_json).unwrap();
+        assert_eq!(requirements[0]["key"], "release-report");
+        assert_eq!(requirements[0]["required"], false);
+        assert_eq!(requirements[0]["deliverable_type"], "report");
+        assert_eq!(requirements[0]["criteria"].as_array().unwrap().len(), 6);
+
+        let inputs: Value = serde_json::from_str(&contract.inputs_json).unwrap();
+        assert_eq!(inputs[0]["input_key"], "approved-source");
+        assert_eq!(inputs[0]["required"], true);
+        assert_eq!(inputs[0]["source_version_id"], "source-version-1");
+        assert_eq!(inputs[0]["produced_by"]["result_id"], "result-1");
+        assert_eq!(inputs[0]["accepted_result"]["decision_id"], "decision-1");
+        assert_eq!(
+            inputs[0]["accepted_result"]["submission_id"],
+            "submission-1"
+        );
+        assert_eq!(
+            inputs[0]["accepted_result"]["artifact_set_digest"],
+            "sha256:accepted"
         );
     }
 

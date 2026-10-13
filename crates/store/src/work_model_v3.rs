@@ -63,6 +63,7 @@ pub struct WorkNodeV3Input {
 pub struct PlannedWorkV3Input {
     pub work: boreal_domain::WorkItem,
     pub execution_mode: String,
+    pub planning_contract: Option<super::WorkPlanningContractWrite>,
 }
 
 /// Fields accepted by the durable v3 planning edit. `parent_id` is the
@@ -78,6 +79,9 @@ pub struct PlanningWorkEditV3Input {
     pub priority: Option<u8>,
     pub dispatch_policy: Option<String>,
     pub execution_mode: Option<String>,
+    /// A supplied contract replaces the latest immutable planning snapshot.
+    /// Empty arrays are an explicit clear and are still recorded as history.
+    pub planning_contract: Option<super::WorkPlanningContractWrite>,
     pub updated_at: String,
 }
 
@@ -460,6 +464,9 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &PlannedWorkV3Input,
     ) -> Result<MutationResult, StoreError> {
+        if input.planning_contract.is_some() {
+            self.ensure_deliverables_schema()?;
+        }
         let work = &input.work;
         let profile = &work.acceptance_profile;
         let bound = context.with_payload(json!({
@@ -486,6 +493,10 @@ impl SqliteStore {
                 },
             },
             "execution_mode": input.execution_mode,
+            "planning_contract": input.planning_contract.as_ref().map(|contract| json!({
+                "requirements_json": contract.requirements_json,
+                "inputs_json": contract.inputs_json,
+            })),
         }));
         let context = &bound;
         ensure_project(&context.project_id, work.project_id.as_str())?;
@@ -545,7 +556,6 @@ impl SqliteStore {
                         statement.bind_text(4, work.id.as_str())?;
                         statement.run()?;
                     }
-                    Ok(())
                 } else {
                     let mut statement = self.prepare(
                         "INSERT INTO work_node_v3
@@ -559,8 +569,26 @@ impl SqliteStore {
                     statement.bind_text(4, &input.execution_mode)?;
                     statement.bind_optional_text(5, parent_node_id.as_deref())?;
                     statement.bind_text(6, &context.now)?;
-                    statement.run()
+                    statement.run()?;
                 }
+                if let Some(contract) = &input.planning_contract {
+                    let session_id = context.session_id.as_deref().ok_or_else(|| {
+                        StoreError::Invalid(
+                            "planning contract creation requires an enrolled session".into(),
+                        )
+                    })?;
+                    self.insert_planning_contract_in_transaction(
+                        work.project_id.as_str(),
+                        contract,
+                        None,
+                        None,
+                        &context.actor_id,
+                        session_id,
+                        &context.operation_id,
+                        &context.now,
+                    )?;
+                }
+                Ok(())
             },
         )
     }
@@ -574,6 +602,9 @@ impl SqliteStore {
         context: &V3MutationContext,
         input: &PlanningWorkEditV3Input,
     ) -> Result<MutationResult, StoreError> {
+        if input.planning_contract.is_some() {
+            self.ensure_deliverables_schema()?;
+        }
         let bound = context.with_payload(json!({
             "project_id": input.project_id,
             "work_id": input.work_id,
@@ -587,17 +618,22 @@ impl SqliteStore {
             "priority": input.priority,
             "dispatch_policy": input.dispatch_policy,
             "execution_mode": input.execution_mode,
+            "planning_contract": input.planning_contract.as_ref().map(|contract| json!({
+                "requirements_json": contract.requirements_json,
+                "inputs_json": contract.inputs_json,
+            })),
         }));
         let context = &bound;
         ensure_project(&context.project_id, &input.project_id)?;
-        let roles: &[boreal_domain::ActorRole] = if input.dispatch_policy.is_some() {
-            &[boreal_domain::ActorRole::Operator]
-        } else {
-            &[
-                boreal_domain::ActorRole::Agent,
-                boreal_domain::ActorRole::Operator,
-            ]
-        };
+        let roles: &[boreal_domain::ActorRole] =
+            if input.dispatch_policy.is_some() || input.planning_contract.is_some() {
+                &[boreal_domain::ActorRole::Operator]
+            } else {
+                &[
+                    boreal_domain::ActorRole::Agent,
+                    boreal_domain::ActorRole::Operator,
+                ]
+            };
         self.fact_mutation(
             context,
             "work.edit.v3",
@@ -611,6 +647,7 @@ impl SqliteStore {
                     && input.priority.is_none()
                     && input.dispatch_policy.is_none()
                     && input.execution_mode.is_none()
+                    && input.planning_contract.is_none()
                 {
                     return Err(StoreError::Invalid(
                         "work edit requires at least one changed field".into(),
@@ -650,6 +687,14 @@ impl SqliteStore {
                             entity: "work",
                             id: input.work_id.clone(),
                         })?;
+                if input.planning_contract.is_some()
+                    && (current_work.lifecycle != "open"
+                        || self.work_has_attempt_history(&input.project_id, &input.work_id)?)
+                {
+                    return Err(StoreError::Conflict(
+                        "planning requirements and inputs cannot be changed after publication, claim, or prior attempt history; create a new revision through the explicit supersession path".into(),
+                    ));
+                }
                 if current_work.kind == "sprint" {
                     if self
                         .work_node_v3(&input.project_id, &input.work_id)?
@@ -659,7 +704,9 @@ impl SqliteStore {
                             "Sprint unexpectedly has a work-model/3 node".into(),
                         ));
                     }
-                    return self.edit_sprint_work_v3(input, &current_work);
+                    self.edit_sprint_work_v3(input, &current_work)?;
+                    self.append_planning_contract_if_present(context, input)?;
+                    return Ok(());
                 }
                 let mut current_node = self
                     .work_node_v3(&input.project_id, &input.work_id)?
@@ -825,9 +872,54 @@ impl SqliteStore {
                 update.bind_text(3, &input.updated_at)?;
                 update.bind_text(4, &input.project_id)?;
                 update.bind_text(5, &input.work_id)?;
-                update.run()
+                update.run()?;
+                self.append_planning_contract_if_present(context, input)
             },
         )
+    }
+
+    fn work_has_attempt_history(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut row = self.prepare(
+            "SELECT 1 FROM attempt a
+             JOIN work_item w ON w.work_id=a.work_id
+             WHERE w.project_id=?1 AND w.work_id=?2 LIMIT 1",
+        )?;
+        row.bind_text(1, project_id)?;
+        row.bind_text(2, work_id)?;
+        Ok(row.step()? == SQLITE_ROW)
+    }
+
+    fn append_planning_contract_if_present(
+        &self,
+        context: &V3MutationContext,
+        input: &PlanningWorkEditV3Input,
+    ) -> Result<(), StoreError> {
+        let Some(contract) = &input.planning_contract else {
+            return Ok(());
+        };
+        let session_id = context.session_id.as_deref().ok_or_else(|| {
+            StoreError::Invalid("planning contract edits require an enrolled session".into())
+        })?;
+        let prior = self.work_planning_contract(&input.project_id, &input.work_id)?;
+        let template_id = prior
+            .as_ref()
+            .and_then(|record| record.template_id.as_deref());
+        let template_version = prior.as_ref().and_then(|record| record.template_version);
+        self.append_planning_contract_in_transaction(
+            &input.project_id,
+            contract,
+            template_id,
+            template_version,
+            &context.actor_id,
+            session_id,
+            &context.operation_id,
+            &context.now,
+        )?;
+        Ok(())
     }
 
     /// Edit a legacy Sprint through the v3 planning operation. A Sprint has no

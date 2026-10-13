@@ -4,7 +4,7 @@ use boreal_application::{
     instantiate_template, TemplateParameter, TemplateWorkItem, WorkTemplate,
     WORK_TEMPLATE_SCHEMA_VERSION,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn supported(path: &[String]) -> bool {
     path.first()
@@ -60,6 +60,7 @@ pub(crate) fn run(
             })
         }
         "run" => run_template(parsed, operation, store),
+        "amend" => amend_template_prefix(parsed, operation, store),
         "capture" => capture_template(parsed, store),
         _ => Err(CliError::invalid(
             "template supports list, show, validate, run, and capture",
@@ -415,6 +416,338 @@ fn capture_template(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliRe
     })
 }
 
+fn amend_template_prefix(
+    parsed: &ParsedCommand,
+    operation: &str,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let template_path = extra(parsed, "input")
+        .or(parsed.options.input.as_deref())
+        .ok_or_else(|| CliError::invalid("template amend requires --input PATH"))?;
+    if !Path::new(template_path).starts_with(".boreal/templates") {
+        return Err(CliError::invalid(
+            "template amendment input must be under .boreal/templates",
+        ));
+    }
+    let template = load_project_template(parsed)?;
+    let variables = parsed
+        .options
+        .extra
+        .get("var")
+        .or_else(|| parsed.options.extra.get("--var"))
+        .into_iter()
+        .flatten()
+        .map(|pair| {
+            let (key, value) = pair
+                .split_once('=')
+                .ok_or_else(|| CliError::invalid("--var requires NAME=VALUE"))?;
+            if key.trim().is_empty() {
+                return Err(CliError::invalid("--var name cannot be empty"));
+            }
+            Ok((key.to_owned(), value.to_owned()))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let plan = template.plan(&variables).map_err(template_error)?;
+    let project = project_argument(parsed, 0)?;
+    let project_id = ProjectId::new(project.clone());
+    let prefix = extra(parsed, "prefix")
+        .ok_or_else(|| CliError::invalid("template amend requires --prefix ID"))?;
+    let expected_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("template amend requires --expected-revision"))?;
+    let expected_template_version = extra(parsed, "expected-template-version")
+        .ok_or_else(|| CliError::invalid("template amend requires --expected-template-version"))?
+        .parse::<u64>()
+        .map_err(|_| CliError::invalid("--expected-template-version must be a positive integer"))?;
+    if expected_template_version == 0 {
+        return Err(CliError::invalid(
+            "--expected-template-version must be a positive integer",
+        ));
+    }
+    let apply =
+        parsed.options.extra.contains_key("apply") || parsed.options.extra.contains_key("--apply");
+    if apply && parsed.options.setup.dry_run {
+        return Err(CliError::invalid(
+            "--dry-run cannot be combined with --apply",
+        ));
+    }
+    if apply && !parsed.options.setup.yes {
+        return Err(CliError::invalid(
+            "template amend --apply requires --yes after reviewing the explicit patch",
+        ));
+    }
+    let prefix_record = store
+        .work_template_prefix(&project, prefix)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("template prefix '{prefix}' has not been instantiated"),
+            )
+        })?;
+    let revision = store_revision(store, &project_id)?;
+    if revision != expected_revision || prefix_record.template_version != expected_template_version
+    {
+        return Err(CliError::with(
+            ErrorCode::StaleContext,
+            ApplicationOutcome::Rejected,
+            format!(
+                "template prefix is at project revision {} and template version {}; expected revision {} and template version {}",
+                revision,
+                prefix_record.template_version,
+                expected_revision,
+                expected_template_version,
+            ),
+        ));
+    }
+    if u64::from(plan.template_version) <= expected_template_version {
+        return Err(CliError::invalid(
+            "template amend requires an input template with a newer version",
+        ));
+    }
+    let existing = store
+        .work_template_prefix_items(&project, prefix)
+        .map_err(map_store_error)?;
+    let patch = preview_prefix_patch(store, &project, prefix, &plan, &existing)?;
+    if !apply {
+        return Ok(CliResult {
+            outcome: ApplicationOutcome::Unchanged,
+            revision: Some(revision),
+            data: Some(json!({
+                "dry_run": true,
+                "template_id": plan.template_id,
+                "from_template_version": expected_template_version,
+                "to_template_version": plan.template_version,
+                "prefix": prefix,
+                "patch": patch,
+            })),
+            ..CliResult::default()
+        });
+    }
+    let amended = boreal_application::amend_template_prefix(
+        &WorkApplication::new(store),
+        &project_id,
+        &plan,
+        &parsed.options.actor,
+        &parsed.options.session,
+        expected_revision,
+        expected_template_version,
+        prefix,
+        &now_ms_u64().to_string(),
+        operation,
+    )
+    .map_err(template_error)?;
+    Ok(CliResult {
+        outcome: if amended.replayed {
+            ApplicationOutcome::Unchanged
+        } else {
+            ApplicationOutcome::Changed
+        },
+        revision: Some(amended.revision),
+        data: Some(json!({
+            "dry_run": false,
+            "template_id": plan.template_id,
+            "from_template_version": expected_template_version,
+            "to_template_version": plan.template_version,
+            "prefix": prefix,
+            "patch": patch,
+            "amended_work_ids": amended.works.iter().map(|work| &work.work_id).collect::<Vec<_>>(),
+            "replayed": amended.replayed,
+        })),
+        ..CliResult::default()
+    })
+}
+
+fn preview_prefix_patch(
+    store: &SqliteStore,
+    project: &str,
+    prefix: &str,
+    plan: &boreal_application::TemplatePlan,
+    existing: &[boreal_store::TemplatePrefixItemRecord],
+) -> Result<Value, CliError> {
+    if existing.is_empty() {
+        return Err(CliError::with(
+            ErrorCode::StaleContext,
+            ApplicationOutcome::Rejected,
+            "template prefix has no identity ledger items",
+        ));
+    }
+    let existing_by_key = existing
+        .iter()
+        .map(|item| (item.item_key.as_str(), item))
+        .collect::<BTreeMap<_, _>>();
+    let desired_keys = plan
+        .rendered
+        .iter()
+        .map(|item| item.key.as_str())
+        .collect::<BTreeSet<_>>();
+    let removed = existing_by_key
+        .keys()
+        .filter(|key| !desired_keys.contains(**key))
+        .copied()
+        .collect::<Vec<_>>();
+    if !removed.is_empty() {
+        return Err(CliError::invalid(format!(
+            "template amendment cannot remove existing item keys: {}",
+            removed.join(", ")
+        )));
+    }
+    let mut additions = Vec::new();
+    let mut updates = Vec::new();
+    let mut unchanged = Vec::new();
+    for item in &plan.rendered {
+        let work_id = format!("{prefix}-{}", item.key);
+        let Some(current) = existing_by_key.get(item.key.as_str()) else {
+            if store
+                .work(project, &work_id)
+                .map_err(map_store_error)?
+                .is_some()
+            {
+                return Err(CliError::with(
+                    ErrorCode::InvalidArgument,
+                    ApplicationOutcome::Rejected,
+                    format!("new template item '{work_id}' collides with existing work"),
+                ));
+            }
+            additions
+                .push(json!({"key": item.key, "work_id": work_id, "item": rendered_json(item)}));
+            continue;
+        };
+        let state: Value = serde_json::from_str(&current.state_json).map_err(|error| {
+            CliError::invalid(format!("template prefix ledger state is corrupt: {error}"))
+        })?;
+        let current_work = &state["work"];
+        if current_work["lifecycle"].as_str() != Some("open") {
+            return Err(CliError::with(
+                ErrorCode::StaleContext,
+                ApplicationOutcome::Rejected,
+                format!(
+                    "template prefix item '{}' is no longer draft work",
+                    current.work_id
+                ),
+            ));
+        }
+        let desired_parent = item
+            .parent
+            .as_ref()
+            .map(|parent| format!("{prefix}-{parent}"));
+        let desired_profile = item.acceptance_profile.split_once('/');
+        let desired_profile_id = desired_profile.map_or(item.acceptance_profile.as_str(), |v| v.0);
+        let desired_profile_version = desired_profile
+            .map(|v| v.1.parse::<u64>())
+            .transpose()
+            .map_err(|_| CliError::invalid("template acceptance profile version is invalid"))?
+            .unwrap_or(1);
+        let identity_changes = [
+            (
+                "kind",
+                current_work["kind"].as_str().unwrap_or_default() != kind_name(item.kind),
+            ),
+            (
+                "parent",
+                current_work["parent_id"].as_str().map(str::to_owned) != desired_parent,
+            ),
+            (
+                "acceptance_profile",
+                current_work["acceptance_profile_id"].as_str() != Some(desired_profile_id)
+                    || current_work["acceptance_profile_version"].as_u64()
+                        != Some(desired_profile_version),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(field, changed)| changed.then_some(field))
+        .collect::<Vec<_>>();
+        if !identity_changes.is_empty() {
+            return Err(CliError::invalid(format!(
+                "template amendment cannot change stable identity fields for '{}': {}",
+                current.work_id,
+                identity_changes.join(", ")
+            )));
+        }
+        let desired_dependencies = item
+            .dependencies
+            .iter()
+            .map(|key| format!("{prefix}-{key}"))
+            .collect::<BTreeSet<_>>();
+        let current_dependencies = state["dependencies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|dependency| dependency["prerequisite_id"].as_str().map(str::to_owned))
+            .collect::<BTreeSet<_>>();
+        let current_labels = state["labels"].as_array().cloned().unwrap_or_default();
+        let current_deliverables = state["deliverables"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let current_inputs = state["inputs"].as_array().cloned().unwrap_or_default();
+        let desired_deliverables = item
+            .deliverables
+            .iter()
+            .map(deliverable_json)
+            .collect::<Vec<_>>();
+        let desired_inputs = item
+            .inputs
+            .iter()
+            .map(input_reference_json)
+            .collect::<Vec<_>>();
+        let changes = json!({
+            "title": changed(current_work["title"] != item.title, current_work["title"].clone(), json!(item.title)),
+            "description": changed(current_work["description"] != item.description, current_work["description"].clone(), json!(item.description)),
+            "priority": changed(current_work["priority"] != item.priority, current_work["priority"].clone(), json!(item.priority)),
+            "dispatch": changed(current_work["dispatch_policy"] != dispatch_name(item.dispatch), current_work["dispatch_policy"].clone(), json!(dispatch_name(item.dispatch))),
+            "dependencies": changed(current_dependencies != desired_dependencies, json!(current_dependencies), json!(desired_dependencies)),
+            "labels": changed(current_labels != item.labels.iter().cloned().map(Value::String).collect::<Vec<_>>(), json!(current_labels), json!(item.labels)),
+            "deliverables": changed(current_deliverables != desired_deliverables, json!(current_deliverables), json!(desired_deliverables)),
+            "inputs": changed(current_inputs != desired_inputs, json!(current_inputs), json!(desired_inputs)),
+        });
+        let changes = changes
+            .as_object()
+            .into_iter()
+            .flat_map(|object| object.iter())
+            .filter(|(_, value)| !value.is_null())
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        if changes.is_empty() {
+            unchanged.push(json!({"key":item.key,"work_id":current.work_id}));
+        } else {
+            updates.push(json!({"key":item.key,"work_id":current.work_id,"changes":changes}));
+        }
+    }
+    Ok(json!({
+        "add": additions,
+        "update": updates,
+        "unchanged": unchanged,
+        "remove": [],
+    }))
+}
+
+fn changed(is_changed: bool, from: Value, to: Value) -> Value {
+    if is_changed {
+        json!({"from":from,"to":to})
+    } else {
+        Value::Null
+    }
+}
+
+fn kind_name(kind: boreal_domain::WorkKind) -> &'static str {
+    match kind {
+        boreal_domain::WorkKind::Milestone => "milestone",
+        boreal_domain::WorkKind::Sprint => "sprint",
+        boreal_domain::WorkKind::Task => "task",
+    }
+}
+
+fn dispatch_name(policy: boreal_domain::DispatchPolicy) -> &'static str {
+    match policy {
+        boreal_domain::DispatchPolicy::Automatic => "automatic",
+        boreal_domain::DispatchPolicy::OperatorOnly => "operator_only",
+        boreal_domain::DispatchPolicy::Paused => "paused",
+    }
+}
+
 fn load_template(parsed: &ParsedCommand) -> Result<WorkTemplate, CliError> {
     let path = extra(parsed, "input")
         .or(parsed.options.input.as_deref())
@@ -556,11 +889,15 @@ fn deliverable_json(requirement: &boreal_domain::DeliverableRequirement) -> Valu
         .criteria
         .iter()
         .map(|criterion| match criterion {
+            boreal_domain::DeliverableCriterion::NonEmpty => json!({"kind":"non_empty"}),
             boreal_domain::DeliverableCriterion::MinBytes(value) => {
                 json!({"kind":"min_bytes","value":value})
             }
             boreal_domain::DeliverableCriterion::MaxBytes(value) => {
                 json!({"kind":"max_bytes","value":value})
+            }
+            boreal_domain::DeliverableCriterion::DigestPresent => {
+                json!({"kind":"digest_present"})
             }
             boreal_domain::DeliverableCriterion::JsonDocument => json!({"kind":"json_document"}),
             boreal_domain::DeliverableCriterion::TextContains(text) => {
@@ -582,15 +919,30 @@ fn deliverable_json(requirement: &boreal_domain::DeliverableRequirement) -> Valu
 
 fn input_reference_json(input: &boreal_domain::InputArtifactRef) -> Value {
     json!({
+        "input_key":input.input_key,
+        "required":input.required,
         "project_id":input.project_id.as_str(),
         "source_version_id":input.source_version_id.as_str(),
         "content_digest":input.content_digest,
+        "media_type":input.media_type,
+        "byte_count":input.byte_count,
+        "availability":input.availability,
         "role":input.role.as_str(),
         "scope":input.scope.as_str(),
         "produced_by":input.produced_by.as_ref().map(|producer|json!({
             "work_id":producer.work_id.as_str(),
             "attempt_id":producer.attempt_id.as_str(),
             "result_id":producer.result_id,
+        })),
+        "accepted_result":input.accepted_result.as_ref().map(|accepted|json!({
+            "producer": {
+                "work_id":accepted.producer.work_id.as_str(),
+                "attempt_id":accepted.producer.attempt_id.as_str(),
+                "result_id":accepted.producer.result_id,
+            },
+            "decision_id":accepted.decision_id,
+            "submission_id":accepted.submission_id,
+            "artifact_set_digest":accepted.artifact_set_digest,
         })),
     })
 }

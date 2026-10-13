@@ -3,10 +3,9 @@
 //! Templates describe work inputs only. Every created item still passes
 //! through the normal WorkApplication transaction and revision checks.
 use boreal_domain::{
-    validate_deliverable_requirements, validate_input_artifact_ref, ArtifactProductionIdentity,
-    AttemptId, DeliverableCriterion, DeliverableRequirement, DeliverableType, DispatchPolicy,
-    InputArtifactRef, InputArtifactRole, InputArtifactScope, ProjectId, SourceVersionId, WorkId,
-    WorkItem, WorkKind,
+    validate_deliverable_requirements, ArtifactProductionIdentity, AttemptId, DeliverableCriterion,
+    DeliverableRequirement, DeliverableType, DispatchPolicy, InputArtifactRef, InputArtifactRole,
+    InputArtifactScope, ProjectId, SourceVersionId, WorkId, WorkItem, WorkKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -90,8 +89,10 @@ pub enum TemplateDeliverableType {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TemplateDeliverableCriterion {
+    NonEmpty,
     MinBytes { value: u64 },
     MaxBytes { value: u64 },
+    DigestPresent,
     JsonDocument,
     TextContains { text: String },
 }
@@ -99,13 +100,26 @@ pub enum TemplateDeliverableCriterion {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TemplateInputArtifactRef {
+    /// `None` keeps schema-1 templates readable when they predate keyed inputs.
+    #[serde(default)]
+    pub input_key: Option<String>,
+    #[serde(default)]
+    pub required: bool,
     pub project_id: String,
     pub source_version_id: String,
     pub content_digest: String,
+    #[serde(default)]
+    pub media_type: Option<String>,
+    #[serde(default)]
+    pub byte_count: Option<u64>,
+    #[serde(default)]
+    pub availability: Option<String>,
     pub role: TemplateInputArtifactRole,
     pub scope: TemplateInputArtifactScope,
     #[serde(default)]
     pub produced_by: Option<TemplateArtifactProductionIdentity>,
+    #[serde(default)]
+    pub accepted_result: Option<TemplateAcceptedResultIdentity>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -129,6 +143,15 @@ pub struct TemplateArtifactProductionIdentity {
     pub work_id: String,
     pub attempt_id: String,
     pub result_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateAcceptedResultIdentity {
+    pub producer: TemplateArtifactProductionIdentity,
+    pub decision_id: String,
+    pub submission_id: String,
+    pub artifact_set_digest: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,12 +250,14 @@ impl TemplateDeliverableRequirement {
             .criteria
             .iter()
             .map(|criterion| match criterion {
+                TemplateDeliverableCriterion::NonEmpty => DeliverableCriterion::NonEmpty,
                 TemplateDeliverableCriterion::MinBytes { value } => {
                     DeliverableCriterion::MinBytes(*value)
                 }
                 TemplateDeliverableCriterion::MaxBytes { value } => {
                     DeliverableCriterion::MaxBytes(*value)
                 }
+                TemplateDeliverableCriterion::DigestPresent => DeliverableCriterion::DigestPresent,
                 TemplateDeliverableCriterion::JsonDocument => DeliverableCriterion::JsonDocument,
                 TemplateDeliverableCriterion::TextContains { text } => {
                     DeliverableCriterion::TextContains(text.clone())
@@ -267,28 +292,66 @@ impl TemplateInputArtifactRef {
             TemplateInputArtifactScope::Project => InputArtifactScope::Project,
             TemplateInputArtifactScope::Private => InputArtifactScope::Private,
         };
-        let produced_by = self
-            .produced_by
+        let parse_producer = |identity: &TemplateArtifactProductionIdentity| {
+            Ok::<_, TemplateError>(ArtifactProductionIdentity {
+                work_id: WorkId::parse(identity.work_id.clone())
+                    .map_err(|error| TemplateError::Invalid(error.to_string()))?,
+                attempt_id: AttemptId::parse(identity.attempt_id.clone())
+                    .map_err(|error| TemplateError::Invalid(error.to_string()))?,
+                result_id: identity.result_id.clone(),
+            })
+        };
+        let produced_by = self.produced_by.as_ref().map(parse_producer).transpose()?;
+        let accepted_result = self
+            .accepted_result
             .as_ref()
             .map(|identity| {
-                Ok(ArtifactProductionIdentity {
-                    work_id: WorkId::parse(identity.work_id.clone())
-                        .map_err(|error| TemplateError::Invalid(error.to_string()))?,
-                    attempt_id: AttemptId::parse(identity.attempt_id.clone())
-                        .map_err(|error| TemplateError::Invalid(error.to_string()))?,
-                    result_id: identity.result_id.clone(),
+                Ok::<_, TemplateError>(boreal_domain::AcceptedResultIdentity {
+                    producer: parse_producer(&identity.producer)?,
+                    decision_id: identity.decision_id.clone(),
+                    submission_id: identity.submission_id.clone(),
+                    artifact_set_digest: identity.artifact_set_digest.clone(),
                 })
             })
             .transpose()?;
         Ok(InputArtifactRef {
+            input_key: self.input_key.clone(),
+            required: self.required,
             project_id,
             source_version_id,
             content_digest: self.content_digest.clone(),
+            media_type: self.media_type.clone(),
+            byte_count: self.byte_count,
+            availability: self.availability.clone(),
             role,
             scope,
             produced_by,
+            accepted_result,
         })
     }
+}
+
+/// Encode a validated domain planning contract using the single durable
+/// representation shared by direct work create/edit and template plans.
+pub fn encode_planning_contract(
+    work_id: impl Into<String>,
+    requirements: &[DeliverableRequirement],
+    inputs: &[InputArtifactRef],
+) -> Result<boreal_store::WorkPlanningContractWrite, TemplateError> {
+    Ok(boreal_store::WorkPlanningContractWrite {
+        work_id: work_id.into(),
+        requirements_json: serde_json::to_string(
+            &requirements
+                .iter()
+                .map(deliverable_json)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| TemplateError::Invalid(error.to_string()))?,
+        inputs_json: serde_json::to_string(
+            &inputs.iter().map(input_reference_json).collect::<Vec<_>>(),
+        )
+        .map_err(|error| TemplateError::Invalid(error.to_string()))?,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -385,9 +448,16 @@ impl WorkTemplate {
                 .iter()
                 .map(TemplateInputArtifactRef::to_domain)
                 .collect::<Result<Vec<_>, _>>()?;
-            for input in &input_refs {
-                validate_input_artifact_ref(input, &input.project_id).map_err(|error| {
-                    TemplateError::Invalid(format!("invalid input for '{}': {error}", item.key))
+            if let Some(first_input) = input_refs.first() {
+                boreal_domain::deliverables::validate_input_artifact_refs(
+                    &input_refs,
+                    &first_input.project_id,
+                )
+                .map_err(|error| {
+                    TemplateError::Invalid(format!(
+                        "invalid input references for '{}': {error}",
+                        item.key
+                    ))
                 })?;
             }
             let mut labels = BTreeSet::new();
@@ -830,11 +900,13 @@ fn validate_rendered_plan(
         validate_deliverable_requirements(&item.deliverables).map_err(|error| {
             TemplateError::Invalid(format!("invalid deliverables for '{}': {error}", item.key))
         })?;
-        for input in &item.inputs {
-            validate_input_artifact_ref(input, project_id).map_err(|error| {
-                TemplateError::Invalid(format!("invalid input for '{}': {error}", item.key))
+        boreal_domain::deliverables::validate_input_artifact_refs(&item.inputs, project_id)
+            .map_err(|error| {
+                TemplateError::Invalid(format!(
+                    "invalid input references for '{}': {error}",
+                    item.key
+                ))
             })?;
-        }
         if item.labels.len() > 64 {
             return Err(TemplateError::Invalid(format!(
                 "labels for '{}' exceed the 64-label bound",
@@ -926,8 +998,10 @@ fn deliverable_json(requirement: &DeliverableRequirement) -> Value {
         .criteria
         .iter()
         .map(|criterion| match criterion {
+            DeliverableCriterion::NonEmpty => json!({"kind":"non_empty"}),
             DeliverableCriterion::MinBytes(value) => json!({"kind":"min_bytes","value":value}),
             DeliverableCriterion::MaxBytes(value) => json!({"kind":"max_bytes","value":value}),
+            DeliverableCriterion::DigestPresent => json!({"kind":"digest_present"}),
             DeliverableCriterion::JsonDocument => json!({"kind":"json_document"}),
             DeliverableCriterion::TextContains(text) => {
                 json!({"kind":"text_contains","text":text})
@@ -948,15 +1022,30 @@ fn deliverable_json(requirement: &DeliverableRequirement) -> Value {
 
 fn input_reference_json(input: &InputArtifactRef) -> Value {
     json!({
+        "input_key": input.input_key,
+        "required": input.required,
         "project_id": input.project_id.as_str(),
         "source_version_id": input.source_version_id.as_str(),
         "content_digest": input.content_digest,
+        "media_type": input.media_type,
+        "byte_count": input.byte_count,
+        "availability": input.availability,
         "role": input.role.as_str(),
         "scope": input.scope.as_str(),
         "produced_by": input.produced_by.as_ref().map(|producer|json!({
             "work_id":producer.work_id.as_str(),
             "attempt_id":producer.attempt_id.as_str(),
             "result_id":producer.result_id,
+        })),
+        "accepted_result": input.accepted_result.as_ref().map(|accepted|json!({
+            "producer": {
+                "work_id":accepted.producer.work_id.as_str(),
+                "attempt_id":accepted.producer.attempt_id.as_str(),
+                "result_id":accepted.producer.result_id,
+            },
+            "decision_id":accepted.decision_id,
+            "submission_id":accepted.submission_id,
+            "artifact_set_digest":accepted.artifact_set_digest,
         })),
     })
 }
@@ -1527,5 +1616,29 @@ mod tests {
         let plan = template.plan(&BTreeMap::new()).unwrap();
         assert!(plan.rendered[0].deliverables.is_empty());
         assert!(plan.rendered[0].inputs.is_empty());
+    }
+
+    #[test]
+    fn template_planning_rejects_duplicate_input_keys_before_apply() {
+        let input = TemplateInputArtifactRef {
+            input_key: Some("source-spec".into()),
+            required: true,
+            project_id: "planning-test".into(),
+            source_version_id: "source-one".into(),
+            content_digest: "sha256:source".into(),
+            media_type: Some("text/plain".into()),
+            byte_count: Some(1),
+            availability: Some("available".into()),
+            role: TemplateInputArtifactRole::Context,
+            scope: TemplateInputArtifactScope::Project,
+            produced_by: None,
+            accepted_result: None,
+        };
+        let mut item = item("prepare", "Prepare");
+        item.inputs = vec![input.clone(), input];
+        let error = template(2, vec![item])
+            .plan(&BTreeMap::new())
+            .expect_err("duplicate input keys must fail planning before transaction");
+        assert!(error.to_string().contains("duplicate input key"));
     }
 }

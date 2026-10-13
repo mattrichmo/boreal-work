@@ -402,6 +402,7 @@ fn production_schema_work_creation_reuses_triggered_projection() {
                     )
                     .open(),
                     execution_mode: execution_mode.to_owned(),
+                    planning_contract: None,
                 },
             )
             .expect("work and its production projection commit together");

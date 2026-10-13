@@ -423,6 +423,23 @@ impl SqliteStore {
                     input.source_version_id
                 )));
             }
+            if input
+                .media_type
+                .as_deref()
+                .is_some_and(|value| value != source.media_type)
+                || input
+                    .byte_count
+                    .is_some_and(|value| value != source.byte_count)
+                || input
+                    .availability
+                    .as_deref()
+                    .is_some_and(|value| value != source.availability)
+            {
+                return Err(StoreError::Conflict(format!(
+                    "input source {} metadata no longer matches its pinned identity",
+                    input.source_version_id
+                )));
+            }
             if let Some((producer_work, producer_attempt, _producer_result)) = input.produced_by {
                 let mut attempt = self.prepare(
                     "SELECT a.work_id FROM attempt a
@@ -726,6 +743,9 @@ struct ValidatedPlanningInput {
     source_version_id: String,
     content_digest: String,
     scope: String,
+    media_type: Option<String>,
+    byte_count: Option<u64>,
+    availability: Option<String>,
     produced_by: Option<(String, String, String)>,
 }
 
@@ -764,10 +784,10 @@ fn validate_planning_contract_json(
             "a work item may have at most 100 input references".into(),
         ));
     }
-    let mut input_identities = BTreeSet::new();
+    let mut input_identities = BTreeSet::<(String, String, String)>::new();
     let mut validated_inputs = Vec::with_capacity(inputs.len());
     for input in inputs {
-        if !has_exact_keys(
+        let legacy_shape = has_exact_keys(
             input,
             &[
                 "project_id",
@@ -777,9 +797,27 @@ fn validate_planning_contract_json(
                 "scope",
                 "produced_by",
             ],
-        ) {
+        );
+        let current_shape = has_exact_keys(
+            input,
+            &[
+                "input_key",
+                "required",
+                "project_id",
+                "source_version_id",
+                "content_digest",
+                "media_type",
+                "byte_count",
+                "availability",
+                "role",
+                "scope",
+                "produced_by",
+                "accepted_result",
+            ],
+        );
+        if !legacy_shape && !current_shape {
             return Err(StoreError::Invalid(
-                "input references must contain only stable identity, role, scope, and producer fields".into(),
+                "input references must use a recognized legacy or keyed v2 identity shape".into(),
             ));
         }
         let source_project = input
@@ -804,13 +842,62 @@ fn validate_planning_contract_json(
             .get("role")
             .and_then(Value::as_str)
             .ok_or_else(|| StoreError::Invalid("input reference has no role".into()))?;
+        let (input_key, _required, media_type, byte_count, availability) = if current_shape {
+            let input_key = match input.get("input_key") {
+                Some(Value::Null) => None,
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| {
+                            StoreError::Invalid("input key must be a string or null".into())
+                        })?
+                        .to_owned(),
+                ),
+                None => unreachable!("current input shape has input_key"),
+            };
+            let required = input
+                .get("required")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    StoreError::Invalid("input required state must be boolean".into())
+                })?;
+            if input_key
+                .as_deref()
+                .is_some_and(|key| !valid_planning_key(key))
+                || (input_key.is_none() && required)
+            {
+                return Err(StoreError::Invalid(
+                    "required input references need a valid stable key".into(),
+                ));
+            }
+            let media_type = optional_string_field(input, "media_type")?;
+            let byte_count = match input.get("byte_count") {
+                Some(Value::Null) => None,
+                Some(value) => Some(value.as_u64().ok_or_else(|| {
+                    StoreError::Invalid(
+                        "input byte_count must be a non-negative integer or null".into(),
+                    )
+                })?),
+                None => unreachable!("current input shape has byte_count"),
+            };
+            let availability = optional_string_field(input, "availability")?;
+            if media_type.is_some() != byte_count.is_some()
+                || media_type.is_some() != availability.is_some()
+            {
+                return Err(StoreError::Invalid(
+                    "input artifact metadata must be complete or omitted together".into(),
+                ));
+            }
+            (input_key, required, media_type, byte_count, availability)
+        } else {
+            (None, false, None, None, None)
+        };
         if source_project != project_id
             || source_version.is_empty()
             || content_digest.trim().is_empty()
             || content_digest.len() > 255
             || !matches!(scope, "project" | "private")
             || !matches!(role, "context" | "accepted_input" | "reference")
-            || !input_identities.insert((source_version, role))
         {
             return Err(StoreError::Invalid(
                 "input references must be unique, typed, digest-pinned, and project-scoped".into(),
@@ -848,14 +935,108 @@ fn validate_planning_contract_json(
         } else {
             None
         };
+        let identity = input_key
+            .as_ref()
+            .map(|key| ("key".to_owned(), key.clone(), String::new()))
+            .unwrap_or((
+                "legacy".to_owned(),
+                source_version.to_owned(),
+                role.to_owned(),
+            ));
+        if !input_identities.insert(identity) {
+            return Err(StoreError::Invalid("input keys must be unique".into()));
+        }
+        if current_shape {
+            validate_accepted_result_identity(input, role, produced_by.as_ref())?;
+        }
         validated_inputs.push(ValidatedPlanningInput {
             source_version_id: source_version.to_owned(),
             content_digest: content_digest.to_owned(),
             scope: scope.to_owned(),
+            media_type,
+            byte_count,
+            availability,
             produced_by,
         });
     }
     Ok(validated_inputs)
+}
+
+fn optional_string_field(value: &Value, key: &str) -> Result<Option<String>, StoreError> {
+    match value.get(key) {
+        Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(str::to_owned)
+            .map(Some)
+            .ok_or_else(|| StoreError::Invalid(format!("input {key} must be a string or null"))),
+        None => Ok(None),
+    }
+}
+
+fn validate_accepted_result_identity(
+    input: &Value,
+    role: &str,
+    produced_by: Option<&(String, String, String)>,
+) -> Result<(), StoreError> {
+    let Some(accepted) = input
+        .get("accepted_result")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    if role != "accepted_input"
+        || !has_exact_keys(
+            accepted,
+            &[
+                "producer",
+                "decision_id",
+                "submission_id",
+                "artifact_set_digest",
+            ],
+        )
+        || !has_exact_keys(
+            accepted.get("producer").unwrap_or(&Value::Null),
+            &["work_id", "attempt_id", "result_id"],
+        )
+    {
+        return Err(StoreError::Invalid(
+            "accepted-result input provenance has an invalid shape or role".into(),
+        ));
+    }
+    let producer = accepted.get("producer").expect("validated producer");
+    let identity = (
+        producer["work_id"].as_str().unwrap_or_default(),
+        producer["attempt_id"].as_str().unwrap_or_default(),
+        producer["result_id"].as_str().unwrap_or_default(),
+    );
+    if identity.0.is_empty()
+        || identity.1.is_empty()
+        || identity.2.is_empty()
+        || produced_by.is_some_and(|expected| {
+            (
+                expected.0.as_str(),
+                expected.1.as_str(),
+                expected.2.as_str(),
+            ) != identity
+        })
+        || produced_by.is_none()
+    {
+        return Err(StoreError::Invalid(
+            "accepted-result producer must exactly match the input producer".into(),
+        ));
+    }
+    for key in ["decision_id", "submission_id", "artifact_set_digest"] {
+        if accepted[key]
+            .as_str()
+            .is_none_or(|value| value.trim().is_empty() || value.len() > 255)
+        {
+            return Err(StoreError::Invalid(format!(
+                "accepted-result {key} is outside its bound"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_deliverable_requirement_json(requirement: &Value) -> Result<(), StoreError> {
@@ -960,6 +1141,14 @@ fn validate_deliverable_requirement_json(requirement: &Value) -> Result<(), Stor
                     minimum_bytes = Some(value);
                 } else {
                     maximum_bytes = Some(value);
+                }
+                kind.to_owned()
+            }
+            "non_empty" | "digest_present" => {
+                if !has_exact_keys(criterion, &["kind"]) {
+                    return Err(StoreError::Invalid(
+                        "presence criterion has an invalid shape".into(),
+                    ));
                 }
                 kind.to_owned()
             }
@@ -1206,5 +1395,72 @@ mod tests {
             "path": "/private/source"
         }]);
         assert!(validate_planning_contract_json("p", "[]", &path_reference.to_string()).is_err());
+    }
+
+    #[test]
+    fn persisted_keyed_input_keeps_required_state_and_exact_artifact_metadata() {
+        let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+        store
+            .install_feature_schema("agent_tools", 1, crate::AGENT_TOOLS_SCHEMA)
+            .unwrap();
+        store.create_project("planning-test", "unix-ms:1").unwrap();
+        store.ensure_deliverables_schema().unwrap();
+        add_source(&store, "source-keyed", "sha256:keyed");
+        store
+            .create_work(
+                &WorkItem::new(
+                    ProjectId::new("planning-test"),
+                    WorkId::new("work-keyed"),
+                    WorkKind::Task,
+                    None,
+                    "Keyed planning work",
+                ),
+                "unix-ms:2",
+            )
+            .unwrap();
+        let inputs = json!([{
+            "input_key": "source-spec",
+            "required": true,
+            "project_id": "planning-test",
+            "source_version_id": "source-keyed",
+            "content_digest": "sha256:keyed",
+            "media_type": "text/plain",
+            "byte_count": 0,
+            "availability": "available",
+            "role": "context",
+            "scope": "project",
+            "produced_by": null,
+            "accepted_result": null
+        }]);
+        store.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let result = store.insert_planning_contract_in_transaction(
+            "planning-test",
+            &WorkPlanningContractWrite {
+                work_id: "work-keyed".into(),
+                requirements_json: "[]".into(),
+                inputs_json: inputs.to_string(),
+            },
+            None,
+            None,
+            "planner",
+            "planner-session",
+            "contract-keyed",
+            "unix-ms:3",
+        );
+        finish_transaction(&store, result).unwrap();
+
+        let persisted = store
+            .work_planning_contract("planning-test", "work-keyed")
+            .unwrap()
+            .unwrap();
+        let persisted_inputs: Value = serde_json::from_str(&persisted.inputs_json).unwrap();
+        assert_eq!(persisted_inputs[0]["input_key"], "source-spec");
+        assert_eq!(persisted_inputs[0]["required"], true);
+        assert_eq!(persisted_inputs[0]["source_version_id"], "source-keyed");
+        assert_eq!(persisted_inputs[0]["scope"], "project");
+        assert_eq!(persisted_inputs[0]["role"], "context");
+        assert_eq!(persisted_inputs[0]["media_type"], "text/plain");
+        assert_eq!(persisted_inputs[0]["byte_count"], 0);
+        assert_eq!(persisted_inputs[0]["availability"], "available");
     }
 }

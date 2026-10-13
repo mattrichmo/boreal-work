@@ -26,10 +26,11 @@ pub use decision_api::{
 pub use decision_inputs::{DecisionDiagnostic, DecisionInputs};
 pub use deliverables::{
     validate_deliverable_requirement, validate_deliverable_requirements,
-    validate_input_artifact_ref, ArtifactProductionIdentity, DeliverableCriterion,
-    DeliverableRequirement, DeliverableType, DeliverableValidationError, InputArtifactRef,
-    InputArtifactRole, InputArtifactScope, MAX_CRITERION_BYTES, MAX_DELIVERABLE_REQUIREMENTS,
-    MAX_REQUIREMENT_CARDINALITY, MAX_REQUIREMENT_CRITERIA, MAX_REQUIREMENT_MEDIA_TYPES,
+    validate_input_artifact_ref, AcceptedResultIdentity, ArtifactProductionIdentity,
+    DeliverableCriterion, DeliverableRequirement, DeliverableType, DeliverableValidationError,
+    InputArtifactRef, InputArtifactRole, InputArtifactScope, MAX_CRITERION_BYTES,
+    MAX_DELIVERABLE_REQUIREMENTS, MAX_REQUIREMENT_CARDINALITY, MAX_REQUIREMENT_CRITERIA,
+    MAX_REQUIREMENT_MEDIA_TYPES,
 };
 
 /// Version-3 work-model value objects and pure validators.  This module is

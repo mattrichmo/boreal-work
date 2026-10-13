@@ -10,6 +10,7 @@ pub const MAX_DELIVERABLE_REQUIREMENTS: usize = 64;
 pub const MAX_REQUIREMENT_MEDIA_TYPES: usize = 32;
 pub const MAX_REQUIREMENT_CRITERIA: usize = 32;
 pub const MAX_REQUIREMENT_CARDINALITY: u32 = 100;
+pub const MAX_INPUT_ARTIFACT_REFS: usize = 100;
 pub const MAX_CRITERION_BYTES: u64 = 1_073_741_824;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -52,8 +53,10 @@ pub struct DeliverableRequirement {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum DeliverableCriterion {
+    NonEmpty,
     MinBytes(u64),
     MaxBytes(u64),
+    DigestPresent,
     JsonDocument,
     TextContains(String),
 }
@@ -97,16 +100,31 @@ pub struct ArtifactProductionIdentity {
     pub result_id: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedResultIdentity {
+    pub producer: ArtifactProductionIdentity,
+    pub decision_id: String,
+    pub submission_id: String,
+    pub artifact_set_digest: String,
+}
+
 /// A planning relationship to one immutable, project-scoped source version.
 /// The source/artifact layer remains responsible for bytes and availability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputArtifactRef {
+    /// `None` is retained only for pre-v2 templates that predate keyed inputs.
+    pub input_key: Option<String>,
+    pub required: bool,
     pub project_id: ProjectId,
     pub source_version_id: SourceVersionId,
     pub content_digest: String,
+    pub media_type: Option<String>,
+    pub byte_count: Option<u64>,
+    pub availability: Option<String>,
     pub role: InputArtifactRole,
     pub scope: InputArtifactScope,
     pub produced_by: Option<ArtifactProductionIdentity>,
+    pub accepted_result: Option<AcceptedResultIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -175,6 +193,7 @@ pub fn validate_deliverable_requirement(
     let mut criteria = BTreeSet::new();
     for criterion in &requirement.criteria {
         match criterion {
+            DeliverableCriterion::NonEmpty | DeliverableCriterion::DigestPresent => {}
             DeliverableCriterion::MinBytes(value) if *value <= MAX_CRITERION_BYTES => {
                 min_bytes = Some(*value);
             }
@@ -198,9 +217,11 @@ pub fn validate_deliverable_requirement(
         // `TextContains` values can be arbitrarily useful but are not useful
         // duplicated. The other variants have a single canonical instance.
         let duplicate = match criterion {
+            DeliverableCriterion::NonEmpty => !criteria.insert("non-empty".into()),
             DeliverableCriterion::TextContains(text) => !criteria.insert(format!("text:{text}")),
             DeliverableCriterion::MinBytes(_) => !criteria.insert("min-bytes".into()),
             DeliverableCriterion::MaxBytes(_) => !criteria.insert("max-bytes".into()),
+            DeliverableCriterion::DigestPresent => !criteria.insert("digest-present".into()),
             DeliverableCriterion::JsonDocument => !criteria.insert("json-document".into()),
         };
         if duplicate {
@@ -247,6 +268,16 @@ pub fn validate_input_artifact_ref(
     input: &InputArtifactRef,
     expected_project: &ProjectId,
 ) -> Result<(), DeliverableValidationError> {
+    if input
+        .input_key
+        .as_deref()
+        .is_some_and(|key| !valid_key(key))
+        || (input.input_key.is_none() && input.required)
+    {
+        return Err(DeliverableValidationError(
+            "input references require a stable key when marked required".into(),
+        ));
+    }
     if &input.project_id != expected_project {
         return Err(DeliverableValidationError(format!(
             "input source {} belongs to project {}, not {}",
@@ -270,6 +301,64 @@ pub fn validate_input_artifact_ref(
         return Err(DeliverableValidationError(
             "input producer provenance requires both work and attempt identities".into(),
         ));
+    }
+    if let Some(accepted) = &input.accepted_result {
+        if input.role != InputArtifactRole::AcceptedInput
+            || input.produced_by.as_ref() != Some(&accepted.producer)
+            || accepted.decision_id.trim().is_empty()
+            || accepted.decision_id.len() > 255
+            || accepted.submission_id.trim().is_empty()
+            || accepted.submission_id.len() > 255
+            || accepted.artifact_set_digest.trim().is_empty()
+            || accepted.artifact_set_digest.len() > 255
+        {
+            return Err(DeliverableValidationError(
+                "accepted input provenance must match its producer and include decision, submission, and artifact-set identities".into(),
+            ));
+        }
+    }
+    if input
+        .media_type
+        .as_deref()
+        .is_some_and(|value| !valid_media_type(value))
+        || input.availability.as_deref().is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 64 || value.contains('\0')
+        })
+        || input.media_type.is_some() != input.byte_count.is_some()
+        || input.media_type.is_some() != input.availability.is_some()
+    {
+        return Err(DeliverableValidationError(
+            "input artifact metadata is outside its bound".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_input_artifact_refs(
+    inputs: &[InputArtifactRef],
+    expected_project: &ProjectId,
+) -> Result<(), DeliverableValidationError> {
+    if inputs.len() > MAX_INPUT_ARTIFACT_REFS {
+        return Err(DeliverableValidationError(format!(
+            "a work item may have at most {MAX_INPUT_ARTIFACT_REFS} input references"
+        )));
+    }
+    let mut keys = BTreeSet::new();
+    let mut legacy_identities = BTreeSet::new();
+    for input in inputs {
+        validate_input_artifact_ref(input, expected_project)?;
+        if let Some(key) = input.input_key.as_deref() {
+            if !keys.insert(key) {
+                return Err(DeliverableValidationError(format!(
+                    "duplicate input key '{key}'"
+                )));
+            }
+        } else if !legacy_identities.insert((input.source_version_id.as_str(), input.role.as_str()))
+        {
+            return Err(DeliverableValidationError(
+                "legacy input references must not duplicate a source and role".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -345,9 +434,14 @@ mod tests {
     fn exact_input_identity_is_project_scoped_and_requires_digest() {
         let project = ProjectId::new("p1");
         let input = InputArtifactRef {
+            input_key: Some("approved-source".into()),
+            required: true,
             project_id: project.clone(),
             source_version_id: SourceVersionId::new("source-v7"),
             content_digest: "sha256:abc".into(),
+            media_type: Some("text/plain".into()),
+            byte_count: Some(10),
+            availability: Some("available".into()),
             role: InputArtifactRole::AcceptedInput,
             scope: InputArtifactScope::Project,
             produced_by: Some(ArtifactProductionIdentity {
@@ -355,8 +449,23 @@ mod tests {
                 attempt_id: AttemptId::new("attempt-1"),
                 result_id: "result-1".into(),
             }),
+            accepted_result: Some(AcceptedResultIdentity {
+                producer: ArtifactProductionIdentity {
+                    work_id: WorkId::new("producer"),
+                    attempt_id: AttemptId::new("attempt-1"),
+                    result_id: "result-1".into(),
+                },
+                decision_id: "decision-1".into(),
+                submission_id: "submission-1".into(),
+                artifact_set_digest: "sha256:result".into(),
+            }),
         };
         assert!(validate_input_artifact_ref(&input, &project).is_ok());
         assert!(validate_input_artifact_ref(&input, &ProjectId::new("other")).is_err());
+        let mut incomplete_metadata = input.clone();
+        incomplete_metadata.byte_count = None;
+        assert!(validate_input_artifact_ref(&incomplete_metadata, &project).is_err());
+        let duplicate = input.clone();
+        assert!(validate_input_artifact_refs(&[input, duplicate], &project).is_err());
     }
 }

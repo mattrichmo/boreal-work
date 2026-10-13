@@ -893,6 +893,15 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "dry-run or atomically instantiate a versioned work template",
     },
     CommandSpec {
+        path: "template amend",
+        syntax: "bwrk template amend --project PROJECT --input .boreal/templates/NAME.json --prefix ID --expected-revision N --expected-template-version N [--var KEY=VALUE] [--dry-run | --apply --yes] [--json]",
+        action: "mutate",
+        output: "template",
+        direct: true,
+        service: true,
+        summary: "review and revision-fence an explicit amendment to an existing draft template prefix",
+    },
+    CommandSpec {
         path: "template capture",
         syntax: "bwrk template capture --project PROJECT --work ID --out PATH [--json]",
         action: "read",
@@ -2361,7 +2370,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "work create",
-        syntax: "bwrk work create --project PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID] [--execution-mode direct|container] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--acceptance focused|reviewed|PROFILE/VERSION] [--hold CODE] [--session SESSION_ID] --expected-revision N [--json]",
+        syntax: "bwrk work create --project PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID] [--execution-mode direct|container] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--acceptance focused|reviewed|PROFILE/VERSION] [--hold CODE] [--planning-contract .boreal/contracts/NAME.json] [--session SESSION_ID] --expected-revision N [--json]",
         action: "mutate",
         output: "work",
         direct: true,
@@ -2370,7 +2379,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "work edit",
-        syntax: "bwrk work edit PROJECT WORK_ID [--title TEXT] [--description TEXT] [--parent WORK_ID|--clear-parent] [--execution-mode direct|container] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N",
+        syntax: "bwrk work edit PROJECT WORK_ID [--title TEXT] [--description TEXT] [--parent WORK_ID|--clear-parent] [--execution-mode direct|container] [--priority N] [--dispatch automatic|operator_only|paused] [--planning-contract .boreal/contracts/NAME.json] --expected-revision N",
         action: "mutate",
         output: "work",
         direct: true,
@@ -3224,7 +3233,7 @@ fn input_schema(path: &str) -> Value {
                 "description": "Copy the current server-issued Recover descriptor exactly. Pass its expected_project_revision again as --expected-revision; --yes confirms the descriptor confirmation. Disposition records the typed recovery choice; it does not replace recovery.resolve."
             })
         }
-        "template validate" | "template run" => {
+        "template validate" | "template run" | "template amend" => {
             json!({
                 "type": "object",
                 "required": ["schema_version", "id", "version", "title", "description", "parameters", "items"],
@@ -3434,6 +3443,7 @@ const LEGACY_COMMANDS: &[&str] = &[
     "template show",
     "template validate",
     "template run",
+    "template amend",
     "template capture",
     "install",
     "install codex",

@@ -110,6 +110,7 @@ pub struct WorkPlanningEditV3Input {
     pub priority: Option<u8>,
     pub dispatch_policy: Option<DispatchPolicy>,
     pub execution_mode: Option<ExecutionMode>,
+    pub planning_contract: Option<boreal_store::WorkPlanningContractWrite>,
 }
 
 impl WorkApplication<'_> {
@@ -932,6 +933,27 @@ impl WorkApplication<'_> {
         execution_mode: ExecutionMode,
         now: &str,
     ) -> Result<OperationResult<boreal_store::WorkRecord>, ApplicationError> {
+        self.create_planning_work_v3_with_contract(
+            scope,
+            operation_id,
+            work,
+            execution_mode,
+            None,
+            now,
+        )
+    }
+
+    /// Create a v3 work item and optional immutable output/input contract in
+    /// the same revision-fenced store transaction.
+    pub fn create_planning_work_v3_with_contract(
+        &self,
+        scope: &PlanningScope,
+        operation_id: impl Into<String>,
+        work: &WorkItem,
+        execution_mode: ExecutionMode,
+        planning_contract: Option<boreal_store::WorkPlanningContractWrite>,
+        now: &str,
+    ) -> Result<OperationResult<boreal_store::WorkRecord>, ApplicationError> {
         ensure_mutation_scope(self.store_ref(), scope)?;
         if work.project_id != scope.project_id {
             return Err(ApplicationError::Planning(PlanningError::ScopeConflict {
@@ -960,6 +982,7 @@ impl WorkApplication<'_> {
             &PlannedWorkV3Input {
                 work: work.clone(),
                 execution_mode,
+                planning_contract,
             },
         )?;
         let value = self
@@ -1015,6 +1038,7 @@ impl WorkApplication<'_> {
                     .execution_mode
                     .map(execution_mode_name)
                     .map(str::to_owned),
+                planning_contract: input.planning_contract.clone(),
                 updated_at: now.to_owned(),
             },
         )?;
