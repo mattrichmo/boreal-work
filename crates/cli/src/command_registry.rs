@@ -1469,13 +1469,22 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "read a consistent management snapshot",
     },
     CommandSpec {
+        path: "global backup",
+        syntax: "bwrk global backup [--out PATH] [--operation-id ID] [--json]",
+        action: "read",
+        output: "global_backup",
+        direct: true,
+        service: true,
+        summary: "write a validated physical package under the private Global backup root, including private notes and complete revision history; an operation ID reads back a retry",
+    },
+    CommandSpec {
         path: "global export",
         syntax: "bwrk global export [--out PATH] [--json]",
         action: "read",
         output: "global_export",
         direct: true,
         service: true,
-        summary: "export global management data",
+        summary: "export logical Global management data for transfer, without a physical SQLite backup",
     },
     CommandSpec {
         path: "global import",

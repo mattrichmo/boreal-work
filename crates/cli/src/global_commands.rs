@@ -4,7 +4,10 @@
 //! open a project database from the current working directory.
 
 use super::*;
-use boreal_application::{GlobalManagerApplication, GlobalManagerError, ResolvedWorkspaceIdentity};
+use boreal_application::{
+    create_global_backup, GlobalManagerApplication, GlobalManagerError, ResolvedWorkspaceIdentity,
+    GLOBAL_BACKUP_CONTENTS,
+};
 
 pub(crate) fn supported(path: &[String]) -> bool {
     path.first().is_some_and(|value| value == "global")
@@ -619,6 +622,12 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
             )?);
             "operation show".to_owned()
         }
+        ["backup"] => {
+            if let Some(destination) = value("out") {
+                payload["path"] = json!(destination);
+            }
+            "backup".to_owned()
+        }
         ["export"] => {
             if let Some(out) = value("out") {
                 payload["path"] = json!(out);
@@ -649,11 +658,11 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
             CliError::with(
                 ErrorCode::NotFound,
                 ApplicationOutcome::Rejected,
-                format!("cannot read global backup {}: {error}", source),
+                format!("cannot read Global import document {}: {error}", source),
             )
         })?;
         let snapshot: Value = serde_json::from_slice(&bytes).map_err(|error| {
-            CliError::invalid(format!("global backup is invalid JSON: {error}"))
+            CliError::invalid(format!("Global export document is invalid JSON: {error}"))
         })?;
         let app = GlobalManagerApplication::open(ensure_global_root()?).map_err(global_error)?;
         let current = app
@@ -873,6 +882,28 @@ pub(crate) fn execute_request(
     operation: &str,
 ) -> Result<Value, CliError> {
     let path = ensure_global_root()?;
+    if command == "backup" {
+        let destination = match payload.get("path") {
+            None => None,
+            Some(Value::String(path)) => Some(Path::new(path)),
+            Some(_) => return Err(CliError::invalid("Global backup path must be a string")),
+        };
+        let metadata = create_global_backup(&path, destination, operation).map_err(global_error)?;
+        return Ok(json!({
+            "operation_id": metadata.operation_id,
+            "path": metadata.package_path.to_string_lossy(),
+            "schema_id": metadata.schema_id,
+            "schema_version": metadata.schema_version,
+            "database_id": metadata.database_id,
+            "revision": metadata.revision,
+            "database_bytes": metadata.database_bytes,
+            "database_checksum": metadata.database_checksum,
+            "created_at": metadata.created_at,
+            "validated": metadata.validated,
+            "idempotent_readback": metadata.idempotent_readback,
+            "contents": GLOBAL_BACKUP_CONTENTS,
+        }));
+    }
     let app = GlobalManagerApplication::open(path).map_err(global_error)?;
     if command == "export" {
         let data = app
@@ -1064,6 +1095,13 @@ pub(crate) fn mutation(command: &str) -> bool {
     is_mutation(command)
 }
 
+/// A backup does not mutate canonical Global state, but it publishes a local
+/// artifact and therefore needs unknown-delivery handling if the service
+/// response is lost.
+pub(crate) fn may_have_delivery_effect(command: &str) -> bool {
+    is_mutation(command) || command == "backup"
+}
+
 fn is_mutation(command: &str) -> bool {
     !matches!(
         command,
@@ -1086,6 +1124,7 @@ fn is_mutation(command: &str) -> bool {
             | "linked show"
             | "linked page"
             | "linked job show"
+            | "backup"
             | "export"
     )
 }
@@ -1878,6 +1917,31 @@ fn linked_workspace_detail(
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn physical_backup_has_its_own_command_and_output_path() {
+        let mut options = CliOptions::default();
+        options
+            .extra
+            .insert("--out".to_owned(), vec!["private-copy".to_owned()]);
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "backup".to_owned()],
+            options,
+        };
+        let (command, payload) = build_command(&parsed).unwrap();
+        assert_eq!(command, "backup");
+        assert_eq!(payload, json!({"path":"private-copy"}));
+        assert!(!mutation(&command));
+        assert!(may_have_delivery_effect(&command));
+
+        let export = ParsedCommand {
+            path: vec!["global".to_owned(), "export".to_owned()],
+            options: parsed.options,
+        };
+        let (command, payload) = build_command(&export).unwrap();
+        assert_eq!(command, "export");
+        assert_eq!(payload, json!({"path":"private-copy"}));
+    }
 
     #[test]
     fn global_detail_reads_pass_summary_cap_and_mark_the_configured_limit_partial() {
