@@ -10,6 +10,64 @@
     {"path": "review approve", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
     {"behavior": "general-work deliverable artifact submission", "public_route": "unavailable", "contract_status": "unavailable"}
   ],
+  "profile_registry": {
+    "contract_revision": "boreal.acceptance_profile_registry.v1",
+    "profiles": [
+      {
+        "id": "focused",
+        "version": "1",
+        "required_gates": [
+          {"id": "checkpoint", "kind": "checkpoint"},
+          {"id": "verification", "kind": "verification"},
+          {"id": "summary", "kind": "summary"}
+        ],
+        "compatibility": "Existing software verification profile; immutable."
+      },
+      {
+        "id": "reviewed",
+        "version": "1",
+        "required_gates": [
+          {"id": "checkpoint", "kind": "checkpoint"},
+          {"id": "verification", "kind": "verification"},
+          {"id": "review", "kind": "review"},
+          {"id": "summary", "kind": "summary"}
+        ],
+        "compatibility": "Existing software verification plus independent review; immutable."
+      },
+      {
+        "id": "general-attestation",
+        "version": "1",
+        "required_gates": [{"id": "summary", "kind": "summary"}],
+        "required_typed_facts": ["completion_attestation/1"],
+        "deliverable_rule": "No required deliverables may be declared; optional outputs may be absent and remain visible.",
+        "review_rule": "No independent reviewer required."
+      },
+      {
+        "id": "validated-deliverables",
+        "version": "1",
+        "required_gates": [{"id": "summary", "kind": "summary"}],
+        "required_typed_facts": ["artifact_inspection/1"],
+        "deliverable_rule": "Every required deliverable must have exact current-attempt submission coverage and pass its declared type, cardinality, availability, and bounded criteria.",
+        "review_rule": "No independent reviewer required."
+      },
+      {
+        "id": "reviewed-artifacts",
+        "version": "1",
+        "required_gates": [
+          {"id": "summary", "kind": "summary"},
+          {"id": "artifact_review", "kind": "review"}
+        ],
+        "required_typed_facts": ["artifact_inspection/1", "independent_artifact_decision/1"],
+        "deliverable_rule": "Every required deliverable must pass exact current-attempt typed inspection before review.",
+        "review_rule": "An independent reviewer decision binds the exact sealed submission and artifact-set digest."
+      }
+    ],
+    "rules": [
+      "Profile ID, version, required gate identities, and typed-fact identities are pinned; unknown values and shapes fail closed.",
+      "Changing result, source/config identity, profile, requirements, or proof applicability preserves prior history but makes prior acceptance stale.",
+      "Artifact observations and human decisions are typed facts, never synthesized executable receipts."
+    ]
+  },
   "source_version": {
     "project_id": "project_demo",
     "source_version_id": "source_version_01",
