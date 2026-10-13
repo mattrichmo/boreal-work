@@ -6,13 +6,42 @@ import { runInteractive, runLineInterface } from '../dist/interaction.js';
 import { StreamingKeyDecoder } from '../dist/terminal/keys.js';
 import { form, editField, validateForm, parseLabels, renderForm } from '../dist/forms.js';
 
-const snapshot = () => ({ schema_version: 2, revision: 1,
+const SYSTEM_CIVIL_DATE = '2026-09-30';
+const CIVIL_TIME = { observed_at_unix_ms: Date.parse(`${SYSTEM_CIVIL_DATE}T12:00:00Z`), timezone: 'UTC', system_civil_date: SYSTEM_CIVIL_DATE, tzdb_identity: `sha256:${'a'.repeat(64)}` };
+function withServerReadModel(source) {
+  const result = structuredClone(source); result.civil_time = structuredClone(CIVIL_TIME);
+  result.items = result.items.map(item => {
+    const category = result.statuses.find(status => status.project_id === item.project_id && status.status_id === item.status_id)?.category ?? 'open';
+    const day = item.due_at == null ? undefined : /^\d{4}-\d{2}-\d{2}$/u.test(item.due_at) ? item.due_at : Number.isFinite(Date.parse(item.due_at)) ? new Date(item.due_at).toISOString().slice(0, 10) : undefined;
+    const deadline = day === undefined ? item.due_at == null ? 'unscheduled' : 'unknown' : day < SYSTEM_CIVIL_DATE ? 'overdue' : day === SYSTEM_CIVIL_DATE ? 'due_today' : 'later';
+    const waiting = category === 'waiting';
+    const group = deadline === 'overdue' ? 'overdue' : deadline === 'due_today' ? 'due_today' : deadline === 'unscheduled' ? waiting ? 'waiting' : 'unscheduled' : deadline === 'later' ? waiting ? 'waiting' : 'later' : waiting ? 'waiting' : 'unknown';
+    return { ...item, daily_classification: { group, deadline, waiting, filters: { today: deadline === 'due_today', overdue: deadline === 'overdue', waiting, unscheduled: deadline === 'unscheduled', all_open: true } } };
+  });
+  {
+    const summary = owner => {
+      const items = result.items.filter(item => item.project_id === owner && !item.archived);
+      const category = item => result.statuses.find(status => status.project_id === item.project_id && status.status_id === item.status_id)?.category;
+      const active = items.filter(item => !['completed', 'cancelled'].includes(category(item)));
+      const counts = { open: active.length, waiting: 0, overdue: 0, due_today: 0, unscheduled: 0, later: 0 };
+      for (const item of active) { const value = item.daily_classification; if (value.waiting) counts.waiting++; if (Object.hasOwn(counts, value.deadline)) counts[value.deadline]++; }
+      const next = items.find(item => ['open', 'active'].includes(category(item)) && ['task', 'subtask'].includes(item.kind));
+      return { ...counts, next_action: next ? { item_id: next.id, title: next.title, due_at: next.due_at, priority: next.priority, status_id: next.status_id, status_label: result.statuses.find(status => status.project_id === next.project_id && status.status_id === next.status_id)?.label ?? next.status_id, kind: next.kind } : null, next_milestone: null, blocked_by: [], next_action_unavailable_reason: next ? null : 'no_open_action' };
+    };
+    const projects = Object.fromEntries(result.projects.map(project => [project.id, summary(project.id)]));
+    const personal = summary(null); const portfolio = { open: personal.open, waiting: personal.waiting, overdue: personal.overdue, due_today: personal.due_today, unscheduled: personal.unscheduled, later: personal.later };
+    for (const value of Object.values(projects)) for (const key of Object.keys(portfolio)) portfolio[key] += value[key];
+    result.attention = { portfolio, projects, projects_total: result.projects.length, projects_limit: result.projects.length, projects_has_more: false, projects_truncated: false, personal };
+  }
+  return result;
+}
+const snapshot = () => withServerReadModel({ schema_version: 2, revision: 1,
   projects: [{ id: 'p1', name: 'Life', description: '', archived: false, created_at: '', updated_at: '' }],
-  items: [{ id: 'i1', project_id: 'p1', parent_id: null, kind: 'task', title: 'A task', description: '', status_id: 'todo', priority: null, due_at: null, labels: [], archived: false, position: 0, created_at: '', updated_at: '' }],
-  notes: [], statuses: [{ project_id: 'p1', status_id: 'todo', label: 'To do', category: 'todo', position: 0 }], relationships: [], associations: [] });
+  items: [{ id: 'i1', project_id: 'p1', parent_id: null, kind: 'task', title: 'A task', description: '', status_id: 'todo', priority: null, due_at: null, follow_up_at: null, labels: [], archived: false, position: 0, created_at: '', updated_at: '' }],
+  notes: [], statuses: [{ project_id: 'p1', status_id: 'todo', label: 'To do', category: 'open', position: 0 }], relationships: [], associations: [] });
 function harness(options = {}) {
   const calls = [], historyCalls = [], linkedPageCalls=[]; let snapshotCalls = 0;
-  const client = { snapshot: async () => { snapshotCalls++; if(options.failSnapshotAfter!==undefined&&snapshotCalls>options.failSnapshotAfter)throw new Error('snapshot unavailable'); if(options.failFirstSnapshot&&snapshotCalls===1)throw new Error('service unavailable'); return options.snapshot ?? snapshot(); }, history: async args => { historyCalls.push(args); return options.history ? options.history(args) : { events: [], total: 0, has_more: false, next_offset: null }; }, noteShow: async id => options.noteShow?.(id)??options.snapshot?.notes?.find(n=>n.id===id), linkedShow: async (projectId,identity) => options.linkedShow?.(projectId,identity), linkedPage: async (projectId,identity,args) => { linkedPageCalls.push({projectId,identity,...args}); return options.linkedPage?.(projectId,identity,args); }, linkedJobShow: async id => options.linkedJobShow?.(id), execute: async (command, payload, mutation) => { if(mutation)calls.push({ command, payload }); if (options.fail&&mutation) throw new Error('write rejected for fixture'); if(options.conflict&&mutation)throw Object.assign(new Error('revision conflict'),{errorCode:'revision_conflict'}); if(!mutation&&/show$/.test(command))return options.showItem?.(payload.item_id,command)??options.snapshot?.items?.find(i=>i.id===payload.item_id)??snapshot().items[0]; return { operation_id: `op${calls.length}`, revision: calls.length+1 }; } };
+  const client = { snapshot: async () => { snapshotCalls++; if(options.failSnapshotAfter!==undefined&&snapshotCalls>options.failSnapshotAfter)throw new Error('snapshot unavailable'); if(options.failFirstSnapshot&&snapshotCalls===1)throw new Error('service unavailable'); return withServerReadModel(options.snapshot ?? snapshot()); }, history: async args => { historyCalls.push(args); return options.history ? options.history(args) : { events: [], total: 0, has_more: false, next_offset: null }; }, noteShow: async id => options.noteShow?.(id)??options.snapshot?.notes?.find(n=>n.id===id), linkedShow: async (projectId,identity) => options.linkedShow?.(projectId,identity), linkedPage: async (projectId,identity,args) => { linkedPageCalls.push({projectId,identity,...args}); return options.linkedPage?.(projectId,identity,args); }, linkedJobShow: async id => options.linkedJobShow?.(id), execute: async (command, payload, mutation) => { if(mutation)calls.push({ command, payload }); if (options.fail&&mutation) throw new Error('write rejected for fixture'); if(options.conflict&&mutation)throw Object.assign(new Error('revision conflict'),{errorCode:'revision_conflict'}); if(!mutation&&/show$/.test(command))return options.showItem?.(payload.item_id,command)??options.snapshot?.items?.find(i=>i.id===payload.item_id)??snapshot().items[0]; return { operation_id: `op${calls.length}`, revision: calls.length+1 }; } };
   const controller = new GlobalController(client); controller.setScope('p1'); controller.setRoute(options.route ?? 'list');
   const terminal = { isTty: true, output: '', raw: false, listener: undefined, write(s) { this.output += s; }, setRawMode(v) { this.raw = v; }, onData(fn) { this.listener = fn; return () => { this.listener = undefined; }; }, dimensions() { return options.dimensions??{ width: 80, height: 18 }; }, openLinkedWorkspace: options.openLinkedWorkspace };
   const run = runInteractive(controller, terminal);
