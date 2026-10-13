@@ -66,7 +66,9 @@ lineage as well as its logical project ID. Replacing or restoring a workspace
 database can make its existing Global link unavailable, even when the project
 ID and folder path stay the same. Run
 `bwrk global project link PROJECT --workspace PATH` again to validate and bind
-the current workspace database.
+the current workspace database. Workspace links created before lineage binding
+was introduced also need this one-time relink after upgrading; their original
+records do not contain enough identity data to validate automatically.
 
 The default global database is `~/Library/Application Support/Boreal/global.sqlite`
 on macOS and `${XDG_STATE_HOME:-~/.local/state}/boreal/global.sqlite` on Linux.
