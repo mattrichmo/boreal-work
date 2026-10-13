@@ -3,11 +3,30 @@ use boreal_application::{WorkflowAssetError, WorkflowRegistry};
 #[test]
 fn embedded_workflow_package_is_bounded_and_resolves_audit() {
     let registry = WorkflowRegistry::embedded().expect("embedded workflow package validates");
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../../../project/spec/workflows/package.json"))
+            .expect("checked-in workflow package manifest parses");
+    let package_assets = manifest["assets"]
+        .as_array()
+        .expect("workflow package manifest lists assets");
 
     assert_eq!(registry.schema_version(), "boreal.workflow_package.v1");
     assert_eq!(registry.package_id(), "boreal.core-workflows");
-    assert_eq!(registry.package_version(), "1.2.0");
-    assert_eq!(registry.assets().len(), 10);
+    assert_eq!(
+        registry.package_version(),
+        manifest["package_version"]
+            .as_str()
+            .expect("workflow package manifest has a version")
+    );
+    assert_eq!(registry.assets().len(), package_assets.len());
+    for metadata in package_assets {
+        let reference = metadata["ref"]
+            .as_str()
+            .expect("workflow package asset has a reference");
+        registry
+            .get(reference)
+            .unwrap_or_else(|_| panic!("workflow package asset {reference} resolves"));
+    }
     let audit = registry
         .get("boreal.workflow.audit.v1")
         .expect("audit workflow is present");
