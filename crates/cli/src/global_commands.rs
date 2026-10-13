@@ -2634,9 +2634,34 @@ mod tests {
 
         let mut snapshot = json!({"associations":[association.clone()]});
         let pool = new_linked_refresh_pool();
+        let linked_key = (
+            "management-project".to_owned(),
+            workspace_id.to_owned(),
+            binding_key.clone(),
+        );
+        let wait_for_rollup = || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut state = pool.state.lock().unwrap();
+            while state.pending.contains(&linked_key) && Instant::now() < deadline {
+                let (next, timeout) = pool
+                    .changed
+                    .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
+                    .unwrap();
+                state = next;
+                if timeout.timed_out() {
+                    break;
+                }
+            }
+            assert!(
+                !state.pending.contains(&linked_key),
+                "linked workspace rollup worker did not finish before the test deadline"
+            );
+            state.rows.get(&linked_key).cloned().unwrap()
+        };
         enrich_snapshot_with_pool(&mut snapshot, &pool);
-        assert_eq!(snapshot["linked_projects"][0]["availability"], "available");
-        assert_eq!(snapshot["linked_projects"][0]["counts"]["total"], 1);
+        let initial_rollup = wait_for_rollup();
+        assert_eq!(initial_rollup["availability"], "available");
+        assert_eq!(initial_rollup["counts"]["total"], 1);
         let detail = linked_workspace_detail(
             "management-project",
             workspace_id,
@@ -2704,11 +2729,12 @@ mod tests {
 
         let mut replaced_snapshot = json!({"associations":[association]});
         enrich_snapshot_with_pool(&mut replaced_snapshot, &pool);
+        let replaced_rollup = wait_for_rollup();
         assert_eq!(
-            replaced_snapshot["linked_projects"][0]["availability"],
+            replaced_rollup["availability"],
             "unavailable"
         );
-        assert!(replaced_snapshot["linked_projects"][0]["counts"].is_null());
+        assert!(replaced_rollup["counts"].is_null());
 
         let after =
             crate::global_discovery::run_with_app(&next_command, "binding-next-after", &app)
