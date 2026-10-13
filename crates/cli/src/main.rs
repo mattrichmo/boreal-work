@@ -88,6 +88,11 @@ const LEGACY_SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
 const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 const MAX_JSON_BYTES: usize = boreal_protocol::bounds::MAX_INLINE_OUTPUT_BYTES;
 const ENVELOPE_METADATA_BUDGET: usize = 4096;
+// `prime` carries a bounded status page plus its guide, workflow index, and
+// project instructions. Give this composite brief its own metadata reserve;
+// `print_envelope` still checks the complete encoded response against
+// MAX_JSON_BYTES.
+const PRIME_ENVELOPE_METADATA_BUDGET: usize = 2048;
 const DEFAULT_ACTOR: &str = "operator";
 const DEFAULT_HARNESS: &str = "cli";
 const DEFAULT_SESSION: &str = "session-operator";
@@ -9318,6 +9323,14 @@ fn typed_result<T: serde::Serialize>(
 }
 
 fn bounded_result(data: Option<Value>, revision: Option<u64>) -> Result<CliResult, CliError> {
+    bounded_result_with_metadata_budget(data, revision, ENVELOPE_METADATA_BUDGET)
+}
+
+fn bounded_result_with_metadata_budget(
+    data: Option<Value>,
+    revision: Option<u64>,
+    metadata_budget: usize,
+) -> Result<CliResult, CliError> {
     if let Some(value) = &data {
         if serde_json::to_vec(value)
             .map_err(|error| {
@@ -9328,7 +9341,7 @@ fn bounded_result(data: Option<Value>, revision: Option<u64>) -> Result<CliResul
                 )
             })?
             .len()
-            > MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET)
+            > MAX_JSON_BYTES.saturating_sub(metadata_budget)
         {
             return Err(CliError::with(
                 ErrorCode::InvalidArgument,

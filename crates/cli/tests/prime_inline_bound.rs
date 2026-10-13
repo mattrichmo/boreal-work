@@ -205,10 +205,25 @@ fn default_prime_is_bounded_and_keeps_pagination_for_large_projects() {
         .output()
         .expect("explicitly paged prime starts");
     let explicit_value = envelope(&explicit, "explicitly paged prime");
+    assert!(
+        explicit.stdout.len() <= INLINE_BOUND,
+        "explicitly paged prime exceeded the inline bound"
+    );
     assert_eq!(explicit_value["data"]["status"]["limit"], 2);
     assert_eq!(explicit_value["data"]["status"]["offset"], 50);
     assert_eq!(explicit_value["data"]["status"]["total"], ITEM_COUNT);
     assert_eq!(explicit_value["data"]["status"]["returned_rows"], 2);
+    let explicit_items = explicit_value["data"]["status"]["items"]
+        .as_array()
+        .expect("explicit prime includes status rows");
+    assert_eq!(explicit_items.len(), 2);
+    assert_eq!(explicit_items[0]["work_id"], "task-050");
+    assert_eq!(explicit_items[1]["work_id"], "task-051");
+    assert!(explicit_items.iter().all(|item| {
+        item["description"].as_str().is_some_and(|description| {
+            description.len() == 5_000 && description.bytes().all(|byte| byte == b'd')
+        })
+    }));
     assert_eq!(explicit_value["data"]["status"]["has_more"], true);
     assert_eq!(explicit_value["data"]["status"]["next_offset"], 52);
 }
