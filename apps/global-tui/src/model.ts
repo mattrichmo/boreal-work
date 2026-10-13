@@ -73,11 +73,19 @@ export class GlobalController {
         this.refreshQueued = false;
         try {
           const prior=this.selectedRow();
+          const priorSearchMatchId=this.searchQuery.trim()&&this.route!=="history"&&prior?keyOf(prior):undefined;
+          const preservePriorSearchMatch=!!priorSearchMatchId&&this.searchMatchedIds.has(priorSearchMatchId);
           const next = await this.client.snapshot(); validateSnapshot(next);
           this.reconcileLinkedSamples(next);
           this.snapshot = next;
           this.pageOffsets.clear();this.pageTotals.clear();this.linkedOffsets.clear();this.archiveCollectionIndex=0;this.overviewCollectionIndex=0;this.searchMatchedIds.clear();this.pageError=undefined;
-          if(prior)await this.retainSelectedRow(prior);
+          if(prior){
+            await this.retainSelectedRow(prior);
+            // A server search can match fields omitted from local row filtering
+            // (for example due dates). Preserve that stable selection across
+            // the refresh after rehydrating the selected row.
+            if(preservePriorSearchMatch&&priorSearchMatchId&&this.snapshotContainsRow(prior))this.searchMatchedIds.add(priorSearchMatchId);
+          }
           await this.loadHistory();if(prior&&"operation_id" in prior&&!this.historyEvents.some(e=>e.operation_id===prior.operation_id))this.historyEvents.push(prior); this.sampledAt = Date.now(); this.lastRefreshError = undefined;
           if(this.searchQuery.trim()&&this.route!=="history")await this.loadMoreRows();
           this.reconcileSelection();
@@ -227,6 +235,18 @@ export class GlobalController {
       else if("label" in row&&"status_id" in row&&!this.snapshot.statuses.some(s=>s.status_id===row.status_id&&s.project_id===row.project_id)){const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;query?:string}):Promise<GlobalPage<T>>};if(client.detailPage){const page=await client.detailPage("statuses",{...(row.project_id?{projectId:row.project_id}:{}),query:row.status_id,limit:100,offset:0});if(page.revision===this.snapshot.revision)this.appendPage("statuses",page.rows as never[]);}}
       else if("identity" in row&&!this.snapshot.associations.some(a=>a.identity===row.identity&&a.project_id===row.project_id&&a.kind===row.kind)){const client=this.client as GlobalServiceClient&{detailPage?<T=unknown>(collection:string,options?:{projectId?:string;limit?:number;offset?:number;query?:string}):Promise<GlobalPage<T>>};if(client.detailPage){const page=await client.detailPage("associations",{projectId:row.project_id,query:row.identity,limit:100,offset:0});if(page.revision===this.snapshot.revision)this.appendPage("associations",page.rows as never[]);}}
     }catch{/* Keep the last selection if it can still be resolved from the retained snapshot. */}
+  }
+
+  private snapshotContainsRow(row:Row):boolean{
+    const snapshot=this.snapshot;if(!snapshot)return false;
+    if("id" in row){
+      if("status_id" in row)return snapshot.items.some(candidate=>candidate.id===row.id);
+      if("name" in row)return snapshot.projects.some(candidate=>candidate.id===row.id);
+      return snapshot.notes.some(candidate=>candidate.id===row.id);
+    }
+    if("status_id" in row)return snapshot.statuses.some(candidate=>candidate.project_id===row.project_id&&candidate.status_id===row.status_id);
+    if("identity" in row)return snapshot.associations.some(candidate=>candidate.project_id===row.project_id&&candidate.kind===row.kind&&candidate.identity===row.identity);
+    return false;
   }
 
   async mutate(command: string, payload: Record<string, unknown>): Promise<void> {
