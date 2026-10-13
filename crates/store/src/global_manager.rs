@@ -58,12 +58,58 @@ CREATE TABLE IF NOT EXISTS global_audit (
 const EMPTY_STATE: &str = r#"{"projects":[],"items":[],"notes":[],"statuses":[{"project_id":null,"status_id":"todo","label":"To do","category":"open","position":0},{"project_id":null,"status_id":"doing","label":"Doing","category":"active","position":1},{"project_id":null,"status_id":"waiting","label":"Waiting","category":"waiting","position":2},{"project_id":null,"status_id":"blocked","label":"Blocked","category":"blocked","position":3},{"project_id":null,"status_id":"done","label":"Done","category":"completed","position":4},{"project_id":null,"status_id":"cancelled","label":"Cancelled","category":"cancelled","position":5}],"relationships":[],"note_links":[],"associations":[],"status_history":[],"imported_history":[]}"#;
 
 static GLOBAL_MIGRATION_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
+const GLOBAL_BOOTSTRAP_MIGRATION_RETRY_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(5);
+const GLOBAL_BOOTSTRAP_UNKNOWN_OWNER_GRACE: std::time::Duration =
+    std::time::Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GlobalSchemaStatus {
     Ready,
     Bootstrap,
     Migration,
+}
+
+/// Returns true only for a confirmed bootstrap handoff: a named live Migration
+/// owner, or the very short unknown-owner window while another first-open is
+/// publishing that owner / releasing its read-only preflight. Existing
+/// incomplete schemas and all restore/backup contention stay fail-fast.
+fn retry_bootstrap_migration_admission(
+    preflight_status: GlobalSchemaStatus,
+    status_after_busy: Option<GlobalSchemaStatus>,
+    error: &StoreError,
+    retry_started: &mut Option<std::time::Instant>,
+) -> bool {
+    let StoreError::Busy(message) = error else {
+        return false;
+    };
+    let current_status = status_after_busy.unwrap_or(preflight_status);
+    if current_status == GlobalSchemaStatus::Migration {
+        return false;
+    }
+    let migration_owner = message.ends_with("(migration) owns maintenance admission");
+    let transient_bootstrap_owner = message.ends_with("active owner identity is unknown")
+        && preflight_status == GlobalSchemaStatus::Bootstrap
+        && current_status == GlobalSchemaStatus::Bootstrap;
+    if (!migration_owner && !transient_bootstrap_owner)
+        || (migration_owner
+            && preflight_status != GlobalSchemaStatus::Bootstrap
+            && retry_started.is_none())
+    {
+        return false;
+    }
+    let started = retry_started.get_or_insert_with(std::time::Instant::now);
+    let retry_window = if migration_owner {
+        GLOBAL_BOOTSTRAP_MIGRATION_RETRY_WINDOW
+    } else {
+        GLOBAL_BOOTSTRAP_UNKNOWN_OWNER_GRACE
+    };
+    let remaining = retry_window.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return false;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(10).min(remaining));
+    true
 }
 
 /// A connection to the separate installation-wide SQLite database.
@@ -85,8 +131,27 @@ pub struct GlobalAuditRecord {
 impl GlobalManagerStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path: std::path::PathBuf = path.as_ref().to_path_buf();
+        let mut bootstrap_retry_started = None;
         loop {
-            let shared = GlobalMaintenanceGuard::acquire_shared(&path, "global-store-open")?;
+            // Keep the read-only status probe ahead of shared admission so a
+            // second first-open can recognize the brief bootstrap migration
+            // window. This does not authorize waiting for ordinary maintenance:
+            // the owner record must identify a live Migration owner below.
+            let preflight_status = global_schema_status(&path)?;
+            let shared = match GlobalMaintenanceGuard::acquire_shared(&path, "global-store-open") {
+                Ok(shared) => shared,
+                Err(error)
+                    if retry_bootstrap_migration_admission(
+                        preflight_status,
+                        None,
+                        &error,
+                        &mut bootstrap_retry_started,
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let schema_status = global_schema_status(&path)?;
             if schema_status == GlobalSchemaStatus::Ready {
                 return Self::open_with_admission(path, shared);
@@ -103,21 +168,61 @@ impl GlobalManagerStore {
                 schema_status == GlobalSchemaStatus::Bootstrap,
             ) {
                 Ok(Some(migration)) => migration,
-                Ok(None) => continue,
-                Err(StoreError::Busy(_))
-                    if global_schema_status(&path)? == GlobalSchemaStatus::Ready =>
-                {
-                    // A concurrent first-open migration can finish between
-                    // preflight and exclusive acquisition, then reopen under
-                    // shared admission before this caller reaches flock.
-                    // Recheck normally once the database is already ready.
+                Ok(None) => {
+                    let status_after_owner = global_schema_status(&path)?;
+                    if schema_status == GlobalSchemaStatus::Bootstrap
+                        && status_after_owner != GlobalSchemaStatus::Migration
+                    {
+                        bootstrap_retry_started.get_or_insert_with(std::time::Instant::now);
+                    }
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    let status_after_busy = global_schema_status(&path)?;
+                    if status_after_busy == GlobalSchemaStatus::Ready
+                        && matches!(error, StoreError::Busy(_))
+                    {
+                        // Another bootstrap/migration may have committed while
+                        // this caller waited for exclusive admission. Recheck
+                        // under ordinary shared admission.
+                        let _ = retry_bootstrap_migration_admission(
+                            schema_status,
+                            Some(status_after_busy),
+                            &error,
+                            &mut bootstrap_retry_started,
+                        );
+                        continue;
+                    }
+                    if retry_bootstrap_migration_admission(
+                        schema_status,
+                        Some(status_after_busy),
+                        &error,
+                        &mut bootstrap_retry_started,
+                    ) {
+                        continue;
+                    }
+                    return Err(error);
+                }
             };
+            if global_schema_status(&path)? == GlobalSchemaStatus::Ready {
+                // A migration waiter may acquire exclusive admission just as
+                // the winning first-open commits bootstrap. Do not reopen a
+                // ready database under a redundant migration owner.
+                drop(migration);
+                if schema_status == GlobalSchemaStatus::Bootstrap {
+                    bootstrap_retry_started.get_or_insert_with(std::time::Instant::now);
+                }
+                continue;
+            }
             let migrated = Self::open_with_admission(path.clone(), migration.clone())?;
             drop(migrated);
             drop(migration);
+            if schema_status == GlobalSchemaStatus::Bootstrap {
+                // This caller performed the first-open path and is now
+                // reopening under shared admission. Give another confirmed
+                // bootstrap waiter the same bounded migration handoff window.
+                bootstrap_retry_started.get_or_insert_with(std::time::Instant::now);
+            }
         }
     }
 
