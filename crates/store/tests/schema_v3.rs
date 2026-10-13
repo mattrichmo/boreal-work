@@ -215,7 +215,7 @@ fn store_v3_mutations_use_revisions_audit_and_typed_replay() {
         work_id: "direct-a".to_owned(),
         decomposition_kind: "task".to_owned(),
         execution_mode: "direct".to_owned(),
-        parent_id: Some("container-1".to_owned()),
+        parent_id: None,
         created_at: "t1".to_owned(),
         updated_at: "t1".to_owned(),
     };
