@@ -718,6 +718,64 @@ mod typed_acceptance_tests {
     }
 
     #[test]
+    fn wildcard_media_type_is_checked_against_the_actual_type_during_close_validation() {
+        use super::super::profiles::RegisteredAcceptanceMode::ValidatedDeliverables;
+
+        let mut requirements = required_contract();
+        requirements[0]["allowed_media_types"] = json!(["image/*"]);
+        let mut matching = inspection(ArtifactInspectionAvailability::Available, true);
+        matching.media_type = "image/png".into();
+        assert!(validate_result_against_contract(
+            ValidatedDeliverables,
+            &requirements,
+            std::slice::from_ref(&matching),
+            None,
+            true,
+        )
+        .is_ok());
+
+        let mut mismatch = matching.clone();
+        mismatch.media_type = "application/pdf".into();
+        mismatch.media_type_allowed = false;
+        let error = validate_result_against_contract(
+            ValidatedDeliverables,
+            &requirements,
+            std::slice::from_ref(&mismatch),
+            None,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("required artifact"));
+
+        // The store independently checks the inspection outcome against the
+        // pinned media contract, even if a caller claims a mismatch passed.
+        mismatch.media_type_allowed = true;
+        let error = validate_result_against_contract(
+            ValidatedDeliverables,
+            &requirements,
+            std::slice::from_ref(&mismatch),
+            None,
+            true,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("media-type inspection does not match"));
+
+        requirements[0]["allowed_media_types"] = json!([]);
+        mismatch.media_type = "application/pdf".into();
+        mismatch.media_type_allowed = true;
+        assert!(validate_result_against_contract(
+            ValidatedDeliverables,
+            &requirements,
+            std::slice::from_ref(&mismatch),
+            None,
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn store_binds_and_reads_back_failed_then_passing_results_without_overwriting_history() {
         let (store, attempt, fence) = active_acceptance_work("validated-deliverables", true);
         let failed_request = bind_request(&store, &attempt, fence, "op-result-failed", false);
@@ -2991,9 +3049,11 @@ fn validate_result_against_contract(
             .and_then(Value::as_array)
             .ok_or_else(|| StoreError::Corrupt("deliverable media types are invalid".into()))?;
         let expected_media_outcome = media_types.is_empty()
-            || media_types
-                .iter()
-                .any(|media| media.as_str() == Some(output.media_type.as_str()));
+            || media_types.iter().any(|media| {
+                media.as_str().is_some_and(|declared| {
+                    declared_media_type_matches(declared, &output.media_type)
+                })
+            });
         if output.media_type_allowed != expected_media_outcome {
             return Err(StoreError::Conflict(format!(
                 "artifact {} media-type inspection does not match the pinned requirement",
@@ -3062,6 +3122,27 @@ fn validate_result_against_contract(
         }
     }
     Ok(())
+}
+
+fn declared_media_type_matches(declared: &str, actual: &str) -> bool {
+    if declared == actual {
+        return true;
+    }
+
+    let Some(declared_type) = declared.strip_suffix("/*") else {
+        return false;
+    };
+    if declared_type.is_empty() || declared_type.contains('/') {
+        return false;
+    }
+
+    let Some((actual_type, actual_subtype)) = actual.split_once('/') else {
+        return false;
+    };
+    actual_type == declared_type
+        && !actual_subtype.is_empty()
+        && actual_subtype != "*"
+        && !actual_subtype.contains('/')
 }
 
 fn validate_output_source(

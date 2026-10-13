@@ -177,15 +177,7 @@ impl WorkApplication<'_> {
                     )
                 }
             };
-            let media_type_allowed =
-                requirement["allowed_media_types"]
-                    .as_array()
-                    .is_some_and(|media_types| {
-                        media_types.is_empty()
-                            || media_types
-                                .iter()
-                                .any(|media| media.as_str() == Some(media_type.as_str()))
-                    });
+            let media_type_allowed = media_type_is_allowed(requirement, &media_type);
             output_facts.push(AcceptanceArtifactInspection {
                 requirement_key: output.requirement_key.clone(),
                 relationship_id: output.relationship_id.clone(),
@@ -585,6 +577,40 @@ fn validate_profile_contract(
     }
 }
 
+fn media_type_is_allowed(requirement: &Value, actual: &str) -> bool {
+    requirement["allowed_media_types"]
+        .as_array()
+        .is_some_and(|media_types| {
+            media_types.is_empty()
+                || media_types.iter().any(|media| {
+                    media
+                        .as_str()
+                        .is_some_and(|declared| declared_media_type_matches(declared, actual))
+                })
+        })
+}
+
+fn declared_media_type_matches(declared: &str, actual: &str) -> bool {
+    if declared == actual {
+        return true;
+    }
+
+    let Some(declared_type) = declared.strip_suffix("/*") else {
+        return false;
+    };
+    if declared_type.is_empty() || declared_type.contains('/') {
+        return false;
+    }
+
+    let Some((actual_type, actual_subtype)) = actual.split_once('/') else {
+        return false;
+    };
+    actual_type == declared_type
+        && !actual_subtype.is_empty()
+        && actual_subtype != "*"
+        && !actual_subtype.contains('/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,6 +675,31 @@ mod tests {
         assert!(error
             .to_string()
             .contains("acceptance_profile_requires_validated_deliverables"));
+    }
+
+    #[test]
+    fn media_type_matching_accepts_exact_and_declared_type_wildcards_only() {
+        let image_requirement = serde_json::json!({"allowed_media_types":["image/*"]});
+        assert!(media_type_is_allowed(&image_requirement, "image/png"));
+        assert!(!media_type_is_allowed(
+            &image_requirement,
+            "application/pdf"
+        ));
+        assert!(!media_type_is_allowed(&image_requirement, "image/"));
+        assert!(!media_type_is_allowed(
+            &image_requirement,
+            "image/png/extra"
+        ));
+
+        let exact_requirement = serde_json::json!({"allowed_media_types":["image/png"]});
+        assert!(media_type_is_allowed(&exact_requirement, "image/png"));
+        assert!(!media_type_is_allowed(&exact_requirement, "image/jpeg"));
+
+        let unrestricted_requirement = serde_json::json!({"allowed_media_types":[]});
+        assert!(media_type_is_allowed(
+            &unrestricted_requirement,
+            "application/pdf"
+        ));
     }
 
     #[test]
@@ -787,7 +838,7 @@ mod tests {
         let catalog = SourceCatalog::default();
         let bytes = b"short report";
         let version = catalog
-            .capture("p1", "report.txt", bytes, "text/plain")
+            .capture("p1", "report.png", bytes, "image/png")
             .unwrap();
         store
             .register_source_version(&SourceVersionRegistrationInput {
@@ -795,7 +846,7 @@ mod tests {
                 project_id: "p1".into(),
                 actor_id: "operator-1".into(),
                 source_version_id: version.source_version_id.clone(),
-                origin: "report.txt".into(),
+                origin: "report.png".into(),
                 access_scope: "project".into(),
                 content_digest: version.content_digest.clone(),
                 media_type: version.media_type.clone(),
@@ -844,7 +895,7 @@ mod tests {
                     requirements_json,inputs_json,actor_id,session_id,operation_id,created_at)
                  VALUES
                    ('p1','pilot-report',1,NULL,NULL,
-                    '[{\"key\":\"report\",\"purpose\":\"Provide the requested report\",\"required\":true,\"deliverable_type\":\"report\",\"allowed_media_types\":[\"text/plain\"],\"min_count\":1,\"max_count\":1,\"criteria\":[{\"kind\":\"min_bytes\",\"value\":100}]}]',
+                    '[{\"key\":\"report\",\"purpose\":\"Provide the requested report\",\"required\":true,\"deliverable_type\":\"report\",\"allowed_media_types\":[\"image/*\"],\"min_count\":1,\"max_count\":1,\"criteria\":[{\"kind\":\"min_bytes\",\"value\":100}]}]',
                     '[]','operator-1','operator-session','op-app-contract','unix-ms:3');
                  COMMIT;",
             )
@@ -934,6 +985,8 @@ mod tests {
         let app = WorkApplication::new(&store);
         let first = app.bind_artifact_result(&catalog, &request).unwrap();
         assert!(first.changed);
+        assert_eq!(first.value.result.outputs[0].media_type, "image/png");
+        assert!(first.value.result.outputs[0].media_type_allowed);
         assert!(!first.value.result.outputs[0].criteria[0].passed);
         assert_eq!(
             first.value.result.outputs[0].criteria[0].observed,
