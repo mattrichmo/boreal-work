@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -20,6 +21,21 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 ORACLE_MANIFEST_ENV = "BOREAL_PRODUCTION_ORACLE_MANIFEST"
 ORACLE_MANIFEST_GENERATOR = ROOT / "crates/domain/tests/generate_production_oracle_manifest.py"
+IDENTITY_HELPER = ROOT / "scripts/validation/global-tui/identity.py"
+
+
+def collect_validation_identity(binary: Path) -> dict[str, Any]:
+    """Load the exact source/binary/UI identity without relying on cwd imports."""
+    spec = importlib.util.spec_from_file_location("boreal_global_tui_identity", IDENTITY_HELPER)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load validation identity helper: {IDENTITY_HELPER}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.collect_identity(
+        ROOT,
+        binary,
+        ROOT / "apps/global-tui/dist/entrypoint.js",
+    )
 
 
 def now_iso() -> str:
@@ -266,10 +282,26 @@ def markdown(report: dict[str, Any]) -> str:
         f"Profile: **{report['profile']}**  ",
         f"Binary: `{report['binary']}`  ",
         f"Pass: **{report['counts']['pass']}**, skip: **{report['counts']['skip']}**, fail: **{report['counts']['fail']}**",
-        "",
-        "| Check | Status | Exit | Duration (ms) | Reason |",
-        "| --- | --- | ---: | ---: | --- |",
     ]
+    identity = report.get("validation_identity")
+    if identity is not None:
+        source = identity["source"]
+        binary_identity = identity["binary"]
+        tui = identity["global_tui"]
+        lines.extend(
+            [
+                f"Source: `{source['commit']}`; dirty: **{str(source['dirty']).lower()}**; source SHA-256: `{source['sha256']}`  ",
+                f"Binary SHA-256: `{binary_identity['sha256']}`  ",
+                f"Global TUI bundle SHA-256: `{tui['bundle']['sha256']}` ({tui['bundle']['file_count']} files)",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "| Check | Status | Exit | Duration (ms) | Reason |",
+            "| --- | --- | ---: | ---: | --- |",
+        ]
+    )
     for check in report["checks"]:
         reason = (check.get("reason") or "").replace("|", "\\|").replace("\n", " ")
         lines.append(
@@ -524,6 +556,13 @@ def main() -> int:
         )
     )
     for label, command in global_tui_check_specs(args.profile, binary):
+        if label == "global-tui-pty":
+            command.extend(
+                [
+                    "--identity-output",
+                    str(log_dir / "global-tui-identity.json"),
+                ]
+            )
         checks.append(
             run_check(
                 label,
@@ -754,6 +793,48 @@ def main() -> int:
             check["label"] for check in checks if check["status"] == "skip"
         )
 
+    identity_error: str | None = None
+    validation_identity: dict[str, Any] | None = None
+    try:
+        validation_identity = collect_validation_identity(binary)
+        identity_path = log_dir / "global-tui-identity.json"
+        pty_check = next((check for check in checks if check["label"] == "global-tui-pty"), None)
+        if args.profile == "full" and pty_check is not None and pty_check["status"] == "pass":
+            pty_identity = json.loads(identity_path.read_text(encoding="utf-8"))
+            if pty_identity != validation_identity:
+                raise ValueError("source, binary, Global TUI bundle, or Node identity changed during PTY validation")
+        checks.append(
+            {
+                "label": "validation-identity",
+                "command": [],
+                "exit_code": 0,
+                "status": "pass",
+                "reason": None,
+                "duration_ms": 0.0,
+                "timeout_seconds": None,
+                "stdout_log": None,
+                "stderr_log": None,
+                "source_sha256": validation_identity["source"]["sha256"],
+                "binary_sha256": validation_identity["binary"]["sha256"],
+                "global_tui_sha256": validation_identity["global_tui"]["bundle"]["sha256"],
+            }
+        )
+    except Exception as error:
+        identity_error = str(error)
+        checks.append(
+            {
+                "label": "validation-identity",
+                "command": [],
+                "exit_code": 2,
+                "status": "fail",
+                "reason": identity_error,
+                "duration_ms": 0.0,
+                "timeout_seconds": None,
+                "stdout_log": None,
+                "stderr_log": None,
+            }
+        )
+
     report = {
         "result_version": "boreal.full-suite/1",
         "started_at": started_at,
@@ -770,6 +851,8 @@ def main() -> int:
             "soak_rounds": args.soak_rounds,
         },
         "binary": str(binary.resolve()),
+        "validation_identity": validation_identity,
+        "validation_identity_error": identity_error,
         "host": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
         "checks": checks,
         "counts": {

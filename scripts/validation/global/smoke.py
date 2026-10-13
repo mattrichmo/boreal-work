@@ -92,6 +92,27 @@ def main():
             cli('global','project','link',business['id'],'--workspace',str(code))
             linked=request('snapshot')['linked_projects']
             assert any(row['project_id']=='smoke-code' and row['availability']=='available' and row['counts']['total']==1 for row in linked), linked
+            # Project execution must not bootstrap or read Global state. Point
+            # its configured root at a regular file so any accidental Global
+            # access fails closed while project-local status and writes work.
+            unavailable_global = root / 'global-unavailable'
+            unavailable_global.write_text('not a directory', encoding='utf-8')
+            project_env = dict(env, BOREAL_GLOBAL_ROOT=str(unavailable_global))
+            status = subprocess.run(
+                [str(binary), 'status', '--json'], cwd=code, env=project_env,
+                text=True, capture_output=True, timeout=15,
+            )
+            assert status.returncode == 0, status.stdout + status.stderr
+            project_status = json.loads(status.stdout)['data']
+            independent_work = subprocess.run(
+                [str(binary), 'work', 'create', 'smoke-code', 'work-without-global',
+                 'Project write while Global is unavailable', '--kind', 'task',
+                 '--actor', 'global-smoke', '--session', 'global-smoke-session',
+                 '--db', database, '--expected-revision', str(project_status['revision']), '--json'],
+                cwd=code, env=project_env, text=True, capture_output=True, timeout=15,
+            )
+            assert independent_work.returncode == 0, independent_work.stdout + independent_work.stderr
+            assert json.loads(independent_work.stdout)['data']['work_id'] == 'work-without-global'
             # Relocation/outage cannot silently turn known work into zero work.
             moved=root/'code-moved'
             code.rename(moved)
@@ -126,7 +147,7 @@ def main():
                 result=subprocess.run([str(binary),'dashboard','global','--json'],env=restored_env,cwd=root,text=True,capture_output=True,timeout=15)
                 restored=json.loads(result.stdout)['data']
                 assert restored['items']==snapshot['items'] and restored['statuses']==snapshot['statuses']
-            print('PASS global CLI cwd independence, configurable workflow, hierarchy, notes, dependency cycle rejection, revision conflict, durable replay, real framed TUI and export/import')
+            print('PASS global CLI cwd independence, configurable workflow, hierarchy, notes, dependency cycle rejection, revision conflict, durable replay, project execution while Global is unavailable, real framed TUI and export/import')
         finally:
             service.terminate()
             try: service.communicate(timeout=5)
