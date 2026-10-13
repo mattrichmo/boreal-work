@@ -243,20 +243,35 @@ test('JSON arrays are rejected as evidence; real receipt objects remain unchange
 test('unknown operations are read back, never automatically replayed', async () => {
     await session(async (c, t) => { c.data.pending_operations = [{ operation_id: 'op-unknown', action: 'claim', work_id: 'tui-104' }]; t.send('u'); await tick(); assert.deepEqual(c.calls, [['readback', 'op-unknown']]); });
 });
-test('later pages pause polling instead of being silently replaced by page zero', async () => {
+test('later pages pause polling instead of being silently replaced by page zero', async (testContext) => {
     const c = new FakeController(), t = new FakeTerminal();
     c.data.monitoring.has_more = true;
+    let poll;
+    const realSetInterval = globalThis.setInterval;
+    testContext.mock.method(globalThis, 'setInterval', (callback, delay, ...args) => {
+        assert.equal(delay, 500);
+        poll = callback;
+        return realSetInterval(callback, 60_000, ...args);
+    });
     const p = runFullScreen(c, t, { auto_refresh_ms: 500 });
-    await tick();
-    t.send(']');
-    await new Promise(r => setTimeout(r, 650));
-    assert.equal(c.refreshes, 0);
-    assert.match(t.text(), /polling paused/);
-    t.send('F');
-    await tick();
-    assert.equal(c.refreshes, 1);
-    t.send('q');
-    await p;
+    try {
+        await tick();
+        t.send(']');
+        await tick();
+        assert.equal(c.refreshes, 0);
+        assert.match(t.text(), /polling paused/);
+        assert.equal(typeof poll, 'function');
+        poll();
+        await tick();
+        assert.equal(c.refreshes, 0);
+        t.send('F');
+        await tick();
+        assert.equal(c.refreshes, 1);
+    }
+    finally {
+        t.send('q');
+        await p;
+    }
 });
 test('resize preserves access to the currently focused inspector', async () => {
     await session(async (c, t) => { t.send('\r'); t.resize(60, 24); assert.match(t.writes.at(-1), /INSPECTOR/); });
