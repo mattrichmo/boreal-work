@@ -529,7 +529,7 @@ fn related_transfer_rejects_atomically_and_status_history_is_portable() {
     call(
         &app,
         "relationship add",
-        json!({"source_id":x["id"],"target_id":y["id"],"kind":"related"}),
+        json!({"source_id":x["id"],"target_id":y["id"],"kind":"depends_on"}),
         "edge",
     )
     .unwrap();
@@ -545,7 +545,7 @@ fn related_transfer_rejects_atomically_and_status_history_is_portable() {
     let removed = call(
         &app,
         "relationship remove",
-        json!({"source_id":x["id"],"target_id":y["id"],"kind":"related"}),
+        json!({"source_id":x["id"],"target_id":y["id"],"kind":"depends_on"}),
         "edge-remove",
     )
     .unwrap();
