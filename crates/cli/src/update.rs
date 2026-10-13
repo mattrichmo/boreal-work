@@ -8,14 +8,461 @@
 
 use super::ParsedCommand;
 use boreal_application::sha256_content_digest;
+use serde::{Deserialize, Serialize};
 use std::{env, path::PathBuf, process::Command};
 
 const MAX_UPDATE_IDENTITY_BYTES: usize = 4 * 1024;
 
+/// Durable stages for the per-installation update journal. `Running` is an
+/// intent/readback boundary only; the caller that atomically wins
+/// `acquire_machine_update` is the sole caller allowed to start the updater.
+/// A later read of this label never grants another callback permission.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MachineUpdateStage {
+    Registered,
+    Running,
+    ReadbackRequired,
+    Reconciled,
+    Rejected,
+}
+
+impl MachineUpdateStage {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Registered => "registered",
+            Self::Running => "running",
+            Self::ReadbackRequired => "readback_required",
+            Self::Reconciled => "reconciled",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    pub(crate) const fn is_terminal(self) -> bool {
+        matches!(self, Self::Reconciled | Self::Rejected)
+    }
+}
+
+/// Machine-scoped identity recorded beside the installation it updates.
+/// Global fields are optional until the paired backup/maintenance integration
+/// supplies read-only source metadata and a committed backup reference.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct MachineUpdateRecord {
+    pub format: String,
+    pub operation_id: String,
+    pub request_digest: String,
+    pub prefix: String,
+    pub source_package_identity: String,
+    /// Immutable release manifest identity selected before package mutation.
+    pub target_package_identity: String,
+    pub target_version: String,
+    pub global_root: Option<String>,
+    pub source_schema: Option<String>,
+    pub source_revision: Option<u64>,
+    pub backup_ref: Option<String>,
+    pub stage: MachineUpdateStage,
+    pub side_effect_ref: Option<String>,
+    pub observed_package_identity: Option<String>,
+    pub version: Option<String>,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MachineUpdateAcquisition {
+    /// This atomic transition grants the only invocation permission.
+    Won(MachineUpdateRecord),
+    /// Existing work is returned for readback only. It never grants replay.
+    Existing(MachineUpdateRecord),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MachineUpdateRun {
+    pub record: MachineUpdateRecord,
+    pub invoked: bool,
+    pub execution_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MachineUpdateTarget {
+    pub artifact_identity: String,
+    pub version: String,
+}
+
+pub(crate) trait MachineUpdateJournalPort {
+    fn register_machine_update(
+        &self,
+        record: &MachineUpdateRecord,
+    ) -> Result<MachineUpdateRecord, String>;
+    fn acquire_machine_update(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+        side_effect_ref: &str,
+        updated_at: &str,
+    ) -> Result<MachineUpdateAcquisition, String>;
+    fn mark_machine_readback_required(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+        updated_at: &str,
+    ) -> Result<MachineUpdateRecord, String>;
+    fn reconcile_machine_update(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+        observed_package_identity: &str,
+        version: &str,
+        updated_at: &str,
+    ) -> Result<MachineUpdateRecord, String>;
+    fn reject_machine_update(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+        reason: &str,
+        updated_at: &str,
+    ) -> Result<MachineUpdateRecord, String>;
+    fn read_machine_update(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+    ) -> Result<MachineUpdateRecord, String>;
+}
+
+/// Persist registration, acquire the unique callback permission, and force
+/// every non-winning retry through durable readback. Storage adapters own the
+/// atomic compare-and-transition and must return `Won` only for that caller.
+pub(crate) fn acquire_machine_update<J: MachineUpdateJournalPort>(
+    journal: &J,
+    record: &MachineUpdateRecord,
+    side_effect_ref: &str,
+    updated_at: &str,
+) -> Result<MachineUpdateAcquisition, String> {
+    validate_machine_update_record(record)?;
+    validate_identity(side_effect_ref, "machine update side-effect reference")?;
+    validate_identity(updated_at, "machine update timestamp")?;
+    let registered = journal.register_machine_update(record)?;
+    validate_machine_record_identity(record, &registered)?;
+    if registered.stage != MachineUpdateStage::Registered {
+        return Ok(MachineUpdateAcquisition::Existing(registered));
+    }
+    journal.acquire_machine_update(
+        &record.operation_id,
+        &record.request_digest,
+        side_effect_ref,
+        updated_at,
+    )
+}
+
+/// Invoke the updater only after the journal adapter atomically grants the
+/// initial winner. All replays return the durable record for readback without
+/// invoking the closure. The readback-required stage is synced before the
+/// external callback begins, so interruption cannot turn a stage label into
+/// permission to replay.
+pub(crate) fn run_machine_update_once<J, F>(
+    journal: &J,
+    record: &MachineUpdateRecord,
+    side_effect_ref: &str,
+    updated_at: &str,
+    execute: F,
+) -> Result<MachineUpdateRun, String>
+where
+    J: MachineUpdateJournalPort,
+    F: FnOnce(&MachineUpdateRecord) -> Result<(), String>,
+{
+    match acquire_machine_update(journal, record, side_effect_ref, updated_at)? {
+        MachineUpdateAcquisition::Won(running) => {
+            journal.mark_machine_readback_required(
+                &running.operation_id,
+                &running.request_digest,
+                updated_at,
+            )?;
+            let execution_error = execute(&running).err();
+            let durable =
+                journal.read_machine_update(&running.operation_id, &running.request_digest)?;
+            validate_machine_record_identity(&running, &durable)?;
+            Ok(MachineUpdateRun {
+                record: durable,
+                invoked: true,
+                execution_error,
+            })
+        }
+        MachineUpdateAcquisition::Existing(existing) => {
+            let durable =
+                journal.read_machine_update(&existing.operation_id, &existing.request_digest)?;
+            validate_machine_record_identity(&existing, &durable)?;
+            Ok(MachineUpdateRun {
+                record: durable,
+                invoked: false,
+                execution_error: None,
+            })
+        }
+    }
+}
+
+pub(crate) fn validate_machine_update_record(record: &MachineUpdateRecord) -> Result<(), String> {
+    for (value, label) in [
+        (&record.format, "machine update journal format"),
+        (&record.operation_id, "machine update operation identity"),
+        (&record.request_digest, "machine update request digest"),
+        (&record.prefix, "machine update prefix"),
+        (
+            &record.source_package_identity,
+            "machine update source package identity",
+        ),
+        (
+            &record.target_package_identity,
+            "machine update target package identity",
+        ),
+        (&record.target_version, "machine update target version"),
+        (&record.created_at, "machine update creation timestamp"),
+        (&record.updated_at, "machine update timestamp"),
+    ] {
+        validate_identity(value, label)?;
+    }
+    for (value, label) in [
+        (record.global_root.as_ref(), "machine update Global root"),
+        (
+            record.source_schema.as_ref(),
+            "machine update source schema",
+        ),
+        (
+            record.backup_ref.as_ref(),
+            "machine update backup reference",
+        ),
+        (
+            record.side_effect_ref.as_ref(),
+            "machine update side-effect reference",
+        ),
+        (
+            record.observed_package_identity.as_ref(),
+            "machine update observed package identity",
+        ),
+        (record.version.as_ref(), "machine update version"),
+        (record.error.as_ref(), "machine update error"),
+    ] {
+        if let Some(value) = value {
+            validate_identity(value, label)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn machine_update_side_effect_ref(record: &MachineUpdateRecord) -> String {
+    let identity = format!(
+        "{}\0{}\0{}\0{}",
+        record.prefix, record.operation_id, record.request_digest, record.source_package_identity
+    );
+    format!("installer:{}", sha256_content_digest(identity.as_bytes()))
+}
+
+/// Invoke the updater shipped inside the selected installation. The caller
+/// must first win the machine journal's atomic acquisition and persist its
+/// side-effect reference. The exit status alone is never treated as proof of
+/// package activation; callers must perform verified package readback.
+pub(crate) fn run_machine_installer(prefix: &std::path::Path, version: &str) -> Result<(), String> {
+    let installer = prefix.join("share/boreal/install.sh");
+    if !installer.is_file() {
+        if prefix.to_string_lossy().contains("/Cellar/") {
+            return Err(
+                "this bwrk installation is managed by Homebrew; run `brew upgrade boreal`"
+                    .to_owned(),
+            );
+        }
+        return Err(format!(
+            "this bwrk installation does not include its updater ({})",
+            installer.display()
+        ));
+    }
+    let status = Command::new("sh")
+        .arg(&installer)
+        .arg("--prefix")
+        .arg(prefix)
+        // Pin the installer to the release manifest whose immutable artifact
+        // identity was written into the journal before this side effect.
+        .env("BOREAL_VERSION", version)
+        .status()
+        .map_err(|error| format!("could not start the Boreal updater: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "the Boreal updater exited with {}; package activation requires readback",
+            status
+                .code()
+                .map_or_else(|| "a signal".to_owned(), |code| code.to_string())
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve and verify the exact target package manifest before the updater is
+/// invoked. The installer still verifies the archive against SHA256SUMS; this
+/// preflight binds the journal and installer to one release version.
+pub(crate) fn latest_machine_update_target(target: &str) -> Result<MachineUpdateTarget, String> {
+    validate_identity(target, "machine update release target")?;
+    let repository = env!("CARGO_PKG_REPOSITORY")
+        .strip_prefix("https://github.com/")
+        .filter(|value| {
+            let mut parts = value.trim_end_matches(".git").split('/');
+            parts.next().is_some_and(|part| !part.is_empty())
+                && parts.next().is_some_and(|part| !part.is_empty())
+                && parts.next().is_none()
+        })
+        .ok_or_else(|| {
+            "the package repository is not a supported GitHub release source".to_owned()
+        })?
+        .trim_end_matches(".git");
+    let latest_url = format!("https://github.com/{repository}/releases/latest");
+    let latest = Command::new("curl")
+        .args(["-fsSL", "-o", "/dev/null", "-w", "%{url_effective}"])
+        .arg(&latest_url)
+        .output()
+        .map_err(|error| format!("could not resolve the latest Boreal release: {error}"))?;
+    if !latest.status.success() {
+        return Err(format!(
+            "could not resolve the latest Boreal release: {}",
+            bounded_process_error(&latest.stderr)
+        ));
+    }
+    let latest_url = String::from_utf8(latest.stdout)
+        .map_err(|_| "latest release URL was not valid UTF-8".to_owned())?;
+    let tag_prefix = format!("https://github.com/{repository}/releases/tag/");
+    let tag = latest_url
+        .trim()
+        .strip_prefix(&tag_prefix)
+        .filter(|tag| !tag.is_empty() && !tag.contains('/'))
+        .ok_or_else(|| "latest release URL did not resolve to a Boreal version tag".to_owned())?;
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    if version.len() > 128
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
+        || !version.bytes().any(|byte| byte.is_ascii_digit())
+    {
+        return Err("latest release tag is not a safe version identity".to_owned());
+    }
+    let manifest_name = format!("bwrk-v{version}-{target}.release.json");
+    let manifest_url =
+        format!("https://github.com/{repository}/releases/download/v{version}/{manifest_name}");
+    let manifest = Command::new("curl")
+        .args(["-fsSL", "--max-filesize", "16777216"])
+        .arg(&manifest_url)
+        .output()
+        .map_err(|error| format!("could not read target release manifest: {error}"))?;
+    if !manifest.status.success() {
+        return Err(format!(
+            "could not read target release manifest: {}",
+            bounded_process_error(&manifest.stderr)
+        ));
+    }
+    if manifest.stdout.len() > 16 * 1024 * 1024 {
+        return Err("target release manifest exceeds the size limit".to_owned());
+    }
+    let (artifact_identity, observed_target, observed_version) =
+        verified_release_manifest_identity(&manifest.stdout)?;
+    if observed_target != target || observed_version != version {
+        return Err(
+            "target release manifest identity does not match the selected release".to_owned(),
+        );
+    }
+    Ok(MachineUpdateTarget {
+        artifact_identity,
+        version: observed_version,
+    })
+}
+
+pub(crate) fn verified_release_manifest_identity(
+    bytes: &[u8],
+) -> Result<(String, String, String), String> {
+    let manifest: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("release manifest is invalid: {error}"))?;
+    if manifest
+        .get("manifest_version")
+        .and_then(serde_json::Value::as_str)
+        != Some("boreal.binary_release.v1")
+    {
+        return Err("release manifest version is unsupported".to_owned());
+    }
+    let artifact_identity = manifest
+        .get("artifact_identity")
+        .and_then(serde_json::Value::as_str)
+        .filter(|identity| is_sha256_identity(identity))
+        .ok_or_else(|| "release manifest identity is missing or invalid".to_owned())?;
+    let mut basis = manifest.clone();
+    basis
+        .as_object_mut()
+        .ok_or_else(|| "release manifest is not an object".to_owned())?
+        .remove("artifact_identity");
+    let mut canonical = serde_json::to_vec(&basis)
+        .map_err(|error| format!("could not canonicalize release manifest: {error}"))?;
+    canonical.push(b'\n');
+    if sha256_content_digest(&canonical) != artifact_identity {
+        return Err("release manifest identity does not verify".to_owned());
+    }
+    let target = manifest
+        .get("target")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "release manifest has no target identity".to_owned())?;
+    let version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "release manifest has no version".to_owned())?;
+    Ok((
+        artifact_identity.to_owned(),
+        target.to_owned(),
+        version.to_owned(),
+    ))
+}
+
+fn is_sha256_identity(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+fn bounded_process_error(bytes: &[u8]) -> String {
+    let message = String::from_utf8_lossy(bytes);
+    let bounded = message
+        .chars()
+        .take(MAX_UPDATE_IDENTITY_BYTES)
+        .collect::<String>();
+    if bounded.trim().is_empty() {
+        "release server returned an unsuccessful status".to_owned()
+    } else {
+        bounded
+    }
+}
+
+fn validate_machine_record_identity(
+    request: &MachineUpdateRecord,
+    current: &MachineUpdateRecord,
+) -> Result<(), String> {
+    if current.format != request.format
+        || current.operation_id != request.operation_id
+        || current.request_digest != request.request_digest
+        || current.prefix != request.prefix
+        || current.source_package_identity != request.source_package_identity
+        || current.target_package_identity != request.target_package_identity
+        || current.target_version != request.target_version
+    {
+        return Err(
+            "machine update journal identity does not match the requested operation".into(),
+        );
+    }
+    Ok(())
+}
+
 /// These public spellings update the running Boreal installation, so they
 /// must be dispatched before project context is discovered or authenticated.
 pub(crate) fn is_machine_route(parsed: &ParsedCommand) -> bool {
-    parsed.path.as_slice() == ["update"]
+    (parsed.path.as_slice() == ["update"]
+        || parsed.path.as_slice() == ["update", "status"]
+        || parsed.path.as_slice() == ["update", "recover"])
         || (parsed.path.as_slice() == ["upgrade"] && parsed.options.machine)
 }
 
@@ -30,7 +477,14 @@ pub(crate) fn explicit_authority_selector(args: &[String]) -> Option<&'static st
         "--install-root",
     ]
     .into_iter()
-    .find(|selector| args.iter().any(|argument| argument.as_str() == *selector))
+    .find(|selector| {
+        args.iter().any(|argument| {
+            argument == selector
+                || argument
+                    .strip_prefix(selector)
+                    .is_some_and(|suffix| suffix.starts_with('='))
+        })
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

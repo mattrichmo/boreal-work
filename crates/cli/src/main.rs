@@ -66,6 +66,7 @@ mod global_service;
 mod history_commands;
 mod knowledge_maintenance;
 mod knowledge_parity;
+mod machine_update;
 mod memory_commands;
 mod operational_commands;
 mod orchestration_commands;
@@ -110,6 +111,8 @@ Usage:
   bwrk setup [PROJECT_DIR] [--project ID] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk install [PROJECT_DIR] [--project ID] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk update [--json]
+  bwrk update status [--json]
+  bwrk update recover --yes [--operation-id ID] [--json]
   bwrk upgrade --machine [--json]  (alias for update)
   bwrk backup --project PROJECT PACKAGE_DIR [--socket PATH] [--json]
   bwrk restore PACKAGE_DIR [--db PATH] [--json]
@@ -757,7 +760,12 @@ fn run_with_operation_at(
                 "machine update does not accept {selector}; omit project, database, and service selectors"
             )));
         }
-        return service::run_update(&parsed, operation);
+        if parsed.path == ["update", "recover"] && !parsed.options.setup.yes {
+            return Err(CliError::invalid(
+                "update recover requires explicit --yes authorization",
+            ));
+        }
+        return machine_update::run(&parsed, operation);
     }
     if parsed.options.socket.is_some()
         && !setup::is_setup_command(&parsed.path)
@@ -2391,6 +2399,10 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["workflows", "list"] => options.positionals.is_empty(),
         ["workflows", "show"] => options.positionals.len() == 1,
         ["update"] => options.positionals.is_empty() && !options.machine,
+        ["update", "status"] => options.positionals.is_empty() && !options.machine,
+        ["update", "recover"] => {
+            options.positionals.is_empty() && !options.machine && options.setup.yes
+        }
         ["upgrade"] => options.positionals.is_empty() && options.machine,
         ["backup"] => positionals == 1,
         ["restore"] => positionals == 1 && options.socket.is_none(),
