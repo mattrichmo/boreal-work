@@ -1762,7 +1762,7 @@ const COMMANDS: &[CommandSpec] = &[
         action: "read",
         output: "intake",
         direct: true,
-        service: false,
+        service: true,
         summary: "project-scoped intake through the canonical application",
     },
     CommandSpec {
