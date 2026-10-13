@@ -2183,8 +2183,13 @@ impl SqliteStore {
         &self,
         request: &CloseIntentRequest,
     ) -> Result<Option<String>, StoreError> {
-        let pin = super::ProfileStore::new(self)
-            .current_pinned_requirements(&request.project_id, &request.work_id)?;
+        let pin = match super::ProfileStore::new(self)
+            .current_pinned_requirements(&request.project_id, &request.work_id)
+        {
+            Ok(pin) => pin,
+            Err(StoreError::Corrupt(_)) => return Ok(Some("requirements_missing".into())),
+            Err(error) => return Err(error),
+        };
         let Some(_) = super::profiles::registered_acceptance_profile(
             &pin.profile.profile_id,
             pin.profile.version,
