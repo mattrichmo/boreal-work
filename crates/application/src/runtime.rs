@@ -1324,25 +1324,29 @@ impl WorkApplication<'_> {
             {
                 return Err(AttemptPolicyError::OperationReplayConflict.into());
             }
-        } else if recovery_obligation_id(request.operation_id.as_str(), kind).is_some()
-            && self
+        } else if let Some(obligation_id) =
+            recovery_obligation_id(request.operation_id.as_str(), kind)
+        {
+            let obligation = self
                 .store
-                .recovery_obligation(
-                    request.project_id.as_str(),
-                    &recovery_obligation_id(request.operation_id.as_str(), kind)
-                        .expect("terminal command has a recovery obligation"),
-                )
+                .recovery_obligation(request.project_id.as_str(), &obligation_id)
                 .map_err(|error| {
                     AttemptAdapterError::UnknownOutcome(format!(
                         "terminal recovery sidecar readback is unavailable: {error}"
                     ))
-                })?
-                .is_some()
-        {
-            return Err(AttemptAdapterError::UnknownOutcome(
-                "terminal recovery obligation has no matching operation receipt".to_owned(),
-            )
-            .into());
+                })?;
+            if obligation.is_some() {
+                // Inspect the durable resource state before classifying an
+                // orphaned recovery sidecar. This preserves the concrete
+                // fail-closed release diagnosis when a resource is still
+                // active, while never accepting an adapter-only terminal
+                // receipt as canonical success.
+                self.request_terminal_resource_readback(request, kind)?;
+                return Err(AttemptAdapterError::UnknownOutcome(
+                    "terminal recovery obligation has no matching operation receipt".to_owned(),
+                )
+                .into());
+            }
         }
         Ok(())
     }
@@ -1401,10 +1405,24 @@ impl WorkApplication<'_> {
             Ok(identity) => Some(identity),
             // Schema-v2 compatibility fixtures may expose a resource table
             // without the production database/project identity boundary. Do
-            // not use the unbound release API in that case: leave the
-            // resource unreconciled until a canonical production opener can
-            // supply identity context.
-            Err(IdentityError::Invalid { field, .. }) if field == "database_identity" => None,
+            // not use the unbound release API in that case. A still-live
+            // resource means terminal release was not durably admitted, so
+            // report an unknown outcome instead of claiming success.
+            Err(IdentityError::Invalid { field, .. }) if field == "database_identity" => {
+                if let Some(resource) = resources.iter().find(|resource| {
+                    resource.attempt_id == request.attempt_id.as_str()
+                        && resource.fence == request.fence.get()
+                        && matches!(resource.state.as_str(), "active" | "unknown")
+                }) {
+                    return Err(ApplicationError::AttemptAdapter(
+                        AttemptAdapterError::UnknownOutcome(format!(
+                            "canonical terminal resource release was not durably admitted for {}: {}",
+                            resource.reservation_id, STANDALONE_RESOURCE_RELEASE_CONFLICT
+                        )),
+                    ));
+                }
+                None
+            }
             Err(error) => {
                 return Err(ApplicationError::Store(StoreError::Conflict(format!(
                     "terminal resource release identity: {error}"
