@@ -41,7 +41,7 @@ const snapshot = () => withServerReadModel({ schema_version: 2, revision: 1,
   notes: [], statuses: [{ project_id: 'p1', status_id: 'todo', label: 'To do', category: 'open', position: 0 }], relationships: [], associations: [] });
 function harness(options = {}) {
   const calls = [], historyCalls = [], linkedPageCalls=[]; let snapshotCalls = 0;
-  const client = { snapshot: async () => { snapshotCalls++; if(options.failSnapshotAfter!==undefined&&snapshotCalls>options.failSnapshotAfter)throw new Error('snapshot unavailable'); if(options.failFirstSnapshot&&snapshotCalls===1)throw new Error('service unavailable'); return withServerReadModel(options.snapshot ?? snapshot()); }, history: async args => { historyCalls.push(args); return options.history ? options.history(args) : { events: [], total: 0, has_more: false, next_offset: null }; }, noteShow: async id => options.noteShow?.(id)??options.snapshot?.notes?.find(n=>n.id===id), linkedShow: async (projectId,identity) => options.linkedShow?.(projectId,identity), linkedPage: async (projectId,identity,args) => { linkedPageCalls.push({projectId,identity,...args}); return options.linkedPage?.(projectId,identity,args); }, linkedJobShow: async id => options.linkedJobShow?.(id), execute: async (command, payload, mutation) => { if(mutation)calls.push({ command, payload }); if (options.fail&&mutation) throw new Error('write rejected for fixture'); if(options.conflict&&mutation)throw Object.assign(new Error('revision conflict'),{errorCode:'revision_conflict'}); if(!mutation&&/show$/.test(command))return options.showItem?.(payload.item_id,command)??options.snapshot?.items?.find(i=>i.id===payload.item_id)??snapshot().items[0]; return { operation_id: `op${calls.length}`, revision: calls.length+1 }; } };
+  const client = { snapshot: async () => { snapshotCalls++; if(options.failSnapshotAfter!==undefined&&snapshotCalls>options.failSnapshotAfter)throw new Error('snapshot unavailable'); if(options.failFirstSnapshot&&snapshotCalls===1)throw new Error('service unavailable'); return withServerReadModel(options.snapshot ?? snapshot()); }, history: async args => { historyCalls.push(args); return options.history ? options.history(args) : { events: [], total: 0, has_more: false, next_offset: null }; }, noteShow: async id => options.noteShow?.(id)??options.snapshot?.notes?.find(n=>n.id===id), linkedShow: async (projectId,identity) => options.linkedShow?.(projectId,identity), linkedPage: async (projectId,identity,args) => { linkedPageCalls.push({projectId,identity,...args}); return options.linkedPage?.(projectId,identity,args); }, linkedJobShow: async id => options.linkedJobShow?.(id), execute: async (command, payload, mutation) => { if(mutation)calls.push({ command, payload }); if (options.fail&&mutation) throw new Error('write rejected for fixture'); if(options.conflict&&mutation)throw Object.assign(new Error('revision conflict'),{errorCode:'revision_conflict'}); if(mutation)await options.onMutation?.(command,payload); if(!mutation&&/show$/.test(command))return options.showItem?.(payload.item_id,command)??options.snapshot?.items?.find(i=>i.id===payload.item_id)??snapshot().items[0]; return { operation_id: `op${calls.length}`, revision: calls.length+1 }; } };
   const controller = new GlobalController(client); controller.setScope('p1'); controller.setRoute(options.route ?? 'list');
   const terminal = { isTty: true, output: '', raw: false, listener: undefined, write(s) { this.output += s; }, setRawMode(v) { this.raw = v; }, onData(fn) { this.listener = fn; return () => { this.listener = undefined; }; }, dimensions() { return options.dimensions??{ width: 80, height: 18 }; }, openLinkedWorkspace: options.openLinkedWorkspace };
   const run = runInteractive(controller, terminal);
@@ -230,6 +230,66 @@ test('bulk triage collects marked rows and sends one atomic changes command', as
     {item_id:'i1',project_id:'p1',parent_id:null,status_id:'todo'},
     {item_id:'i2',project_id:'p1',parent_id:null,status_id:'todo'}
   ]);
+  assert.equal(h.controller.bulkSelectedIds.size,0);
+  await h.key('\x03');await h.run;
+});
+
+test('triage selects the next remaining Inbox item by stable ID after refresh', async () => {
+  const data=snapshot();
+  data.statuses.push({project_id:'p1',status_id:'inbox',label:'Inbox',category:'inbox',position:1});
+  data.items[0].status_id='inbox';
+  data.items.push({...data.items[0],id:'i2',title:'Second task',status_id:'inbox',position:1});
+  const h=harness({snapshot:data,route:'inbox',onMutation:(command,payload)=>{
+    if(command==='todo edit')data.items.find(item=>item.id===payload.item_id).status_id=payload.status_id;
+  }});
+  h.controller.setScope(undefined);h.controller.selectId('i1');
+  await h.key('e');await new Promise(r=>setTimeout(r,10));
+  for(let i=0;i<4;i++)await h.key('\t');
+  await h.key('\r');await h.key('\r');await h.key('\x13');
+  assert.equal(h.calls[0].command,'todo edit');
+  assert.equal(h.controller.selectedRow()?.id,'i2');
+  assert.equal(h.controller.selectedId,'i2');
+  await h.key('\x03');await h.run;
+});
+
+test('committed Inbox triage with failed refresh retains selected identity and truthful notice', async () => {
+  const data=snapshot();
+  data.statuses.push({project_id:'p1',status_id:'inbox',label:'Inbox',category:'inbox',position:1});
+  data.items[0].status_id='inbox';
+  data.items.push({...data.items[0],id:'i2',title:'Second task',status_id:'inbox',position:1});
+  const h=harness({snapshot:data,route:'inbox',failSnapshotAfter:1,onMutation:(command,payload)=>{
+    if(command==='todo edit')data.items.find(item=>item.id===payload.item_id).status_id=payload.status_id;
+  }});
+  await new Promise(r=>setTimeout(r,0));
+  h.controller.setScope(undefined);h.controller.selectId('i1');
+  const selectedBefore=h.controller.selectedId;
+  await h.key('e');await new Promise(r=>setTimeout(r,10));
+  for(let i=0;i<4;i++)await h.key('\t');
+  await h.key('\r');await h.key('\r');await h.key('\x13');
+  assert.equal(h.calls.length,1);
+  assert.equal(h.controller.lastMutationRefreshFailed,true);
+  assert.equal(h.controller.selectedId,selectedBefore);
+  assert.equal(h.controller.selectedRow()?.id,'i1');
+  assert.match(h.terminal.output,/Saved; refresh failed/);
+  await h.key('\x03');await h.run;
+});
+
+test('bulk Inbox triage advances past the last triaged ID only after refreshed readback', async () => {
+  const data=snapshot();
+  data.statuses.push({project_id:'p1',status_id:'inbox',label:'Inbox',category:'inbox',position:1});
+  data.items[0].status_id='inbox';
+  data.items.push({...data.items[0],id:'i2',title:'Second task',status_id:'inbox',position:1},{...data.items[0],id:'i3',title:'Third task',status_id:'inbox',position:2});
+  const h=harness({snapshot:data,route:'inbox',onMutation:(command,payload)=>{
+    if(command==='todo bulk triage')for(const change of payload.changes)data.items.find(item=>item.id===change.item_id).status_id=change.status_id;
+  }});
+  await new Promise(r=>setTimeout(r,0));
+  h.controller.setScope(undefined);h.controller.toggleBulkSelected('i1');h.controller.toggleBulkSelected('i2');
+  await h.key('Y');await h.key('\x1b[B');await h.key('\r');
+  await h.key('\r');await h.key('\r');await h.key('\r');
+  assert.equal(h.calls[0].command,'todo bulk triage');
+  assert.deepEqual(h.calls[0].payload.changes.map(change=>change.item_id),['i1','i2']);
+  assert.equal(h.controller.selectedRow()?.id,'i3');
+  assert.equal(h.controller.selectedId,'i3');
   assert.equal(h.controller.bulkSelectedIds.size,0);
   await h.key('\x03');await h.run;
 });

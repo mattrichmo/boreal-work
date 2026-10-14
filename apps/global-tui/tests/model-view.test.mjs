@@ -120,6 +120,22 @@ test("todo views filter Today, overdue, waiting, and all open independently",asy
  c.todoFilter="all_open";for(const id of ["due-today","due-old","waiting","unscheduled"])assert.ok(c.rows().some(x=>x.id===id));
  snapshot.items.push({...snapshot.items[0],id:"personal0",project_id:null,title:"Personal inbox capture",status_id:"todo",due_at:null});await c.refresh();c.setScope();c.setRoute("inbox");assert.ok(c.rows().some(x=>x.id==="personal0"));
 });
+test("Today/Open renders explicit service-classified groups and keeps the selected item visible when narrow",async()=>{
+ const {snapshot}=fixture();const project="life";
+ snapshot.statuses.push({project_id:project,status_id:"waiting",label:"Waiting",category:"waiting",position:10});
+ const base=snapshot.items[0];snapshot.items=[
+  {...base,id:"daily-overdue",project_id:project,title:"Overdue task",status_id:"s0",due_at:"2026-09-29",position:0},
+  {...base,id:"daily-today",project_id:project,title:"Today task",status_id:"s0",due_at:"2026-09-30",position:1},
+  {...base,id:"daily-waiting",project_id:project,title:"Waiting task",status_id:"waiting",due_at:null,position:2},
+  {...base,id:"daily-unscheduled",project_id:project,title:"Unscheduled task",status_id:"s0",due_at:null,position:3},
+  {...base,id:"daily-later",project_id:project,title:"Later task",status_id:"s0",due_at:"2026-10-01",position:4}
+ ];
+ const c=new GlobalController({snapshot:async()=>serverSnapshot(snapshot),execute:async()=>({})});await c.refresh();c.setScope(project);c.setRoute("todos");c.todoFilter="all_open";
+ const screen=render(c,120,30);let previous=-1;
+ for(const heading of ["Overdue","Due today","Waiting","Unscheduled","Later"]){const position=screen.indexOf(heading);assert.ok(position>previous,`${heading} group appears in the expected order`);previous=position;}
+ c.selectId("daily-later");const narrow=render(c,40,12);
+ assert.match(narrow,/Later task/);assert.ok(narrow.split("\n").length<=12);assert.ok(narrow.split("\n").every(line=>line.length<=40));
+});
 test("archive respects project scope and keeps archived project children reachable",async()=>{
  const {client,snapshot}=fixture();snapshot.projects[1].archived=true;snapshot.items[0].archived=true;snapshot.items.push({...snapshot.items[0],id:"biz-child",project_id:"biz",archived:false,title:"Child of archived project"},{...snapshot.items[0],id:"life-archived",project_id:"life",archived:true});const c=new GlobalController(client);await c.refresh();c.setRoute("archive");assert.ok(c.rows().some(x=>x.id==="biz"));assert.ok(c.rows().some(x=>x.id==="biz-child"));c.setScope("life");assert.ok(c.rows().some(x=>x.id==="life-archived"));assert.ok(!c.rows().some(x=>x.id==="biz"));
 });

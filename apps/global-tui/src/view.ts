@@ -21,6 +21,7 @@ export function render(c:GlobalController,width=100,height=40):string {
   else if(navigationOnly)work=navigation(c,width,bodyHeight);
   else if(c.route==="board")work=board(c,workWidth,bodyHeight);
   else if(c.route==="overview")work=overview(c,workWidth,bodyHeight);
+  else if(c.route==="todos")work=dailyList(c,workWidth,bodyHeight);
   else if(c.route==="planning")work=planning(c,workWidth,bodyHeight);
   else if(c.route==="history")work=history(c,workWidth,bodyHeight);
   else work=list(c,workWidth,bodyHeight);
@@ -47,6 +48,22 @@ function header(c:GlobalController,width:number,compact=false):string[]{
 }
 function navigation(c:GlobalController,w:number,h:number):string[]{const groups:[string,Array<[Route,string]>][]=[["GLOBAL",routes.filter(([r])=>["overview","inbox","todos","projects"].includes(r))],["CURRENT PROJECT",routes.filter(([r])=>["board","list","planning","notes","workflow"].includes(r))],["PROJECT CONTEXT",routes.filter(([r])=>r==="links")],["SECONDARY",routes.filter(([r])=>["archive","history"].includes(r))]];const menu:string[]=[];for(const [heading,entries] of groups){menu.push(heading);for(const [route,name] of entries)menu.push(`${c.route===route?(c.focus==="navigation"?"▸":"›"):" "} ${name}`);}menu.push("","PROJECT SCOPE",...(c.projectId?[`› ${c.activeProject?.name??"Archived project"}`,"  Space · change scope"]:["› All projects",...c.projects.map(p=>`  ${p.name}`)]));const active=menu.findIndex(x=>x.endsWith(` ${label(c.route)}`));const start=Math.max(0,Math.min(menu.length-Math.max(1,h),active-Math.floor(h/2)));const page=menu.slice(start,start+Math.max(1,h));if(start>0&&page.length)page[0]="↑ Views and scope";if(start+page.length<menu.length&&page.length)page[page.length-1]="↓ More views";return page.map(x=>clip(x,w));}
 function list(c:GlobalController,w:number,h:number):string[]{const rows=c.rows();const collection=({projects:"projects",board:"items",list:"items",todos:"items",inbox:"items",notes:"notes",workflow:"statuses",links:"associations",planning:"items"} as Record<string,string>)[c.route];const exact=c.pageTotals.get(`${c.route}:${c.projectId??"*"}:${c.searchQuery}:${collection}`);const storeTotal=!c.projectId&&!c.searchQuery&&collection?c.snapshot?.totals?.[collection]:undefined;const total=exact??storeTotal;const title=`${label(c.route)}  ${rows.length}${total===undefined?" loaded":` shown · ${total} total`}${total!==undefined&&rows.length<total?" · PgDn more":""}${c.pageLoading?" · loading":""}${c.searchQuery?`  ·  “${c.searchQuery}”`:""}`;const lines=[title,"─".repeat(w)];const rendered=rows.flatMap((row,i)=>rowLines(c,row,i===c.selected,w));const sel=c.route==="board"?c.rowKey(c.boardSelected):c.selectedId;let ix=rendered.findIndex(line=>line.startsWith(`@${sel}@`));if(ix<0)ix=0;const avail=Math.max(1,h-lines.length);const start=Math.max(0,Math.min(rendered.length-avail,ix-Math.floor(avail/2)));lines.push(...rendered.slice(start,start+avail));return lines.map(x=>clip(x.replace(/^@[^@]*@/,""),w));}
+function dailyList(c:GlobalController,w:number,h:number):string[]{
+ const rows=c.rows().filter((row):row is Item=>"status_id" in row&&"title" in row);
+ const groups=new Map<string,Item[]>();
+ for(const item of rows){const group=dailyClassification(item)?.group??"unknown";const values=groups.get(group)??[];values.push(item);groups.set(group,values);}
+ const names:Record<string,string>={overdue:"Overdue",due_today:"Due today",waiting:"Waiting",unscheduled:"Unscheduled",later:"Later",unknown:"Classification unavailable"};
+ const order=["overdue","due_today","waiting","unscheduled","later",...([...groups.keys()].filter(group=>!names[group]).sort())];
+ const title=`Today / Open · ${c.todoFilter.replace("_"," ")} · ${rows.length} loaded`;
+ const lines=[title,"─".repeat(w)];
+ const rendered:string[]=[];
+ const selectedKey=c.rowKey(c.selectedRow());
+ for(const group of order){const items=groups.get(group);if(!items?.length)continue;rendered.push(`@daily-${group}@${names[group]??"Other classification"} · ${items.length} loaded`);for(const item of items)rendered.push(...rowLines(c,item,c.rowKey(item)===selectedKey,w));}
+ if(!rendered.length)rendered.push("@empty@No items in this daily view.");
+ let ix=selectedKey?rendered.findIndex(line=>line.startsWith(`@${selectedKey}@`)):-1;if(ix<0)ix=0;
+ const avail=Math.max(1,h-lines.length);const start=Math.max(0,Math.min(rendered.length-avail,ix-Math.floor(avail/2)));
+ lines.push(...rendered.slice(start,start+avail));return lines.map(x=>clip(x.replace(/^@[^@]*@/,""),w));
+}
 function rowLines(c:GlobalController,row:Row,selected:boolean,w:number):string[]{const mark=selected?(c.focus==="work"?"▸":"›"):" ";
  const key=c.rowKey(row)??"";
  if("operation_id" in row){const origin=!c.projectId&&row.project_id?` · ${c.projectName(row.project_id)}`:"";return [`@${key}@${mark} r${row.revision} · ${formatDate(row.created_at)}${origin} · ${row.title??row.command}`,`@${key}@   ${row.summary}`];}
