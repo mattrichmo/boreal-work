@@ -10,6 +10,13 @@ use super::{
     json_object, AuditEventRecord, MutationResult, OperationOutcome, OperationRecord, SqliteStore,
     StatusRecordDiagnostic, StoreError, SQLITE_ROW,
 };
+use boreal_domain::work_model_v3::{
+    BusinessDate, BusinessSchedule, DirectDependency, ExecutionMode, ExternalWait,
+    ExternalWaitAccountable, ExternalWaitCategory, ExternalWaitOutcome, ExternalWaitResolution,
+    ExternalWaitState, FoldPolicy, GapPolicy, LocalDate, LocalDateTime, LocalTime,
+    ProjectCivilTimeSetting, TimeResolution, WorkNode, WorkScheduleRecord,
+};
+use boreal_domain::{ActorRole, ProjectId, TimestampMs, WorkId};
 use serde_json::json;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,6 +102,30 @@ pub struct WorkNodeV3Record {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectCivilTimeV1Input {
+    pub setting: ProjectCivilTimeSetting,
+    pub expected_setting_revision: u64,
+}
+
+pub type ProjectCivilTimeV1Record = ProjectCivilTimeSetting;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkScheduleV3Input {
+    pub record: WorkScheduleRecord,
+    pub expected_schedule_revision: u64,
+}
+
+pub type WorkScheduleV3Record = WorkScheduleRecord;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalWaitV1Input {
+    pub wait: ExternalWait,
+    pub expected_wait_revision: u64,
+}
+
+pub type ExternalWaitV1Record = ExternalWait;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CycleSeriesV3Input {
@@ -1207,6 +1238,554 @@ impl SqliteStore {
         }))
     }
 
+    /// Return the latest coordinator-owned project civil-time setting. Date-only
+    /// business values require this explicit versioned setting; absence is not
+    /// replaced with the host timezone.
+    pub fn project_civil_time_v1(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ProjectCivilTimeV1Record>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT project_id, setting_revision, timezone, tzdb_identity,
+                    changed_by, changed_at_ms
+             FROM project_civil_time_v1
+             WHERE project_id = ?1
+             ORDER BY setting_revision DESC LIMIT 1",
+        )?;
+        statement.bind_text(1, project_id)?;
+        if statement.step()? != SQLITE_ROW {
+            return Ok(None);
+        }
+        let setting = ProjectCivilTimeSetting {
+            project_id: ProjectId::new(statement.column_text(0)?),
+            revision: statement.column_u64(1)?,
+            timezone: statement.column_text(2)?,
+            tzdb_identity: statement.column_text(3)?,
+            changed_by: statement.column_text(4)?,
+            changed_at: TimestampMs::from_millis(statement.column_u64(5)?),
+        };
+        setting
+            .validate()
+            .map_err(|error| StoreError::Corrupt(format!("invalid civil-time setting: {error}")))?;
+        Ok(Some(setting))
+    }
+
+    /// Append the next attributed project timezone setting revision. Only an
+    /// Operator may change the source used to interpret date-only business
+    /// values; the expected setting and project revisions are checked in the
+    /// same transaction as the history row and operation journal.
+    pub fn update_project_civil_time_v1(
+        &self,
+        context: &V3MutationContext,
+        input: &ProjectCivilTimeV1Input,
+    ) -> Result<MutationResult, StoreError> {
+        let setting = &input.setting;
+        let bound = context.with_payload(json!({
+            "project_id": setting.project_id.as_str(),
+            "setting_revision": setting.revision,
+            "expected_setting_revision": input.expected_setting_revision,
+            "timezone": setting.timezone,
+            "tzdb_identity": setting.tzdb_identity,
+            "changed_by": setting.changed_by,
+            "changed_at_ms": setting.changed_at.as_millis(),
+        }));
+        ensure_project(&bound.project_id, setting.project_id.as_str())?;
+        setting
+            .validate()
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        if setting.changed_by != bound.actor_id
+            || input.expected_setting_revision.checked_add(1) != Some(setting.revision)
+        {
+            return Err(StoreError::Invalid(
+                "civil-time setting revision or actor attribution is invalid".into(),
+            ));
+        }
+        self.fact_mutation(
+            &bound,
+            "project.civil-time.update.v1",
+            "project_civil_time",
+            &setting.project_id.to_string(),
+            &[ActorRole::Operator],
+            || {
+                let current = self
+                    .project_civil_time_v1(setting.project_id.as_str())?
+                    .map_or(0, |current| current.revision);
+                if current != input.expected_setting_revision {
+                    return Err(StoreError::Conflict(format!(
+                        "stale civil-time setting revision: expected {}, actual {current}",
+                        input.expected_setting_revision
+                    )));
+                }
+                let mut statement = self.prepare(
+                    "INSERT INTO project_civil_time_v1
+                     (project_id, setting_revision, timezone, tzdb_identity,
+                      changed_by, changed_at_ms, created_project_revision,
+                      operation_id, request_digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )?;
+                statement.bind_text(1, setting.project_id.as_str())?;
+                statement.bind_i64(2, setting.revision)?;
+                statement.bind_text(3, &setting.timezone)?;
+                statement.bind_text(4, &setting.tzdb_identity)?;
+                statement.bind_text(5, &setting.changed_by)?;
+                statement.bind_i64(6, setting.changed_at.as_millis())?;
+                statement.bind_i64(
+                    7,
+                    bound.expected_revision.ok_or_else(|| {
+                        StoreError::Invalid("civil-time update requires project revision".into())
+                    })?,
+                )?;
+                statement.bind_text(8, &bound.operation_id)?;
+                statement.bind_text(9, &bound.request_digest)?;
+                statement.run()
+            },
+        )
+    }
+
+    pub fn work_schedule_v3(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<Option<WorkScheduleV3Record>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT project_id, work_id, schedule_revision, payload_json,
+                    civil_time_setting_revision, updated_at_ms
+             FROM work_schedule_v3
+             WHERE project_id = ?1 AND work_id = ?2
+             ORDER BY schedule_revision DESC LIMIT 1",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, work_id)?;
+        if statement.step()? != SQLITE_ROW {
+            return Ok(None);
+        }
+        decode_work_schedule_record(
+            statement.column_text(0)?,
+            statement.column_text(1)?,
+            statement.column_u64(2)?,
+            &statement.column_text(3)?,
+            statement.column_optional_i64(4)?,
+            statement.column_u64(5)?,
+        )
+        .map(Some)
+    }
+
+    pub fn work_schedules_v3(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<WorkScheduleV3Record>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT schedule.project_id, schedule.work_id,
+                    schedule.schedule_revision, schedule.payload_json,
+                    schedule.civil_time_setting_revision, schedule.updated_at_ms
+             FROM work_schedule_v3 schedule
+             JOIN (
+               SELECT project_id, work_id, MAX(schedule_revision) AS schedule_revision
+               FROM work_schedule_v3 WHERE project_id = ?1 GROUP BY project_id, work_id
+             ) latest USING (project_id, work_id, schedule_revision)
+             ORDER BY schedule.work_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+        let mut records = Vec::new();
+        while statement.step()? == SQLITE_ROW {
+            records.push(decode_work_schedule_record(
+                statement.column_text(0)?,
+                statement.column_text(1)?,
+                statement.column_u64(2)?,
+                &statement.column_text(3)?,
+                statement.column_optional_i64(4)?,
+                statement.column_u64(5)?,
+            )?);
+        }
+        Ok(records)
+    }
+
+    /// Return the untouched legacy `work_item.due_at` text only when no
+    /// revisioned work-model/3 schedule exists for this exact project/work
+    /// pair. A v3 schedule row, including an explicit clear, shadows the
+    /// legacy column. The caller must preserve date-only text as a civil date
+    /// and must not assume any other legacy representation is an instant
+    /// without parsing its explicit zone.
+    pub fn legacy_due_at_v3_if_no_schedule(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let mut schedule = self.prepare(
+            "SELECT 1 FROM work_schedule_v3
+             WHERE project_id = ?1 AND work_id = ?2 LIMIT 1",
+        )?;
+        schedule.bind_text(1, project_id)?;
+        schedule.bind_text(2, work_id)?;
+        if schedule.step()? == SQLITE_ROW {
+            return Ok(None);
+        }
+
+        let mut legacy =
+            self.prepare("SELECT due_at FROM work_item WHERE project_id = ?1 AND work_id = ?2")?;
+        legacy.bind_text(1, project_id)?;
+        legacy.bind_text(2, work_id)?;
+        if legacy.step()? != SQLITE_ROW {
+            return Ok(None);
+        }
+        legacy.column_optional_text(0)
+    }
+
+    /// Append one full schedule revision. Clear operations use an empty typed
+    /// schedule and still advance revision, preserving the prior row.
+    pub fn append_work_schedule_v3(
+        &self,
+        context: &V3MutationContext,
+        input: &WorkScheduleV3Input,
+    ) -> Result<MutationResult, StoreError> {
+        let record = &input.record;
+        let payload_json = encode_schedule_payload(record)?;
+        let bound = context.with_payload(json!({
+            "project_id": record.project_id.as_str(),
+            "work_id": record.work_id.as_str(),
+            "schedule_revision": record.revision,
+            "expected_schedule_revision": input.expected_schedule_revision,
+            "civil_time_setting_revision": record.civil_time_setting_revision,
+            "payload": serde_json::from_str::<serde_json::Value>(&payload_json)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?,
+        }));
+        ensure_project(&bound.project_id, record.project_id.as_str())?;
+        record
+            .validate()
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        if input.expected_schedule_revision.checked_add(1) != Some(record.revision) {
+            return Err(StoreError::Invalid(
+                "schedule revision is not the next revision".into(),
+            ));
+        }
+        self.fact_mutation(
+            &bound,
+            "work.schedule.update.v3",
+            "work_schedule",
+            record.work_id.as_str(),
+            &[ActorRole::Operator],
+            || {
+                let node = self
+                    .work_node_v3(record.project_id.as_str(), record.work_id.as_str())?
+                    .ok_or_else(|| StoreError::NotFound {
+                        entity: "work_node_v3",
+                        id: record.work_id.to_string(),
+                    })?;
+                if !matches!(node.decomposition_kind.as_str(), "task" | "milestone")
+                    || !matches!(node.execution_mode.as_str(), "direct" | "container")
+                {
+                    return Err(StoreError::Corrupt("unknown schedulable work node kind".into()));
+                }
+                let actual_revision = self
+                    .work_schedule_v3(record.project_id.as_str(), record.work_id.as_str())?
+                    .map_or(0, |current| current.revision);
+                if actual_revision != input.expected_schedule_revision {
+                    return Err(StoreError::Conflict(format!(
+                        "stale schedule revision: expected {}, actual {actual_revision}",
+                        input.expected_schedule_revision
+                    )));
+                }
+                if let Some(setting_revision) = record.civil_time_setting_revision {
+                    let current_setting = self.project_civil_time_v1(record.project_id.as_str())?;
+                    if current_setting.map(|setting| setting.revision) != Some(setting_revision) {
+                        return Err(StoreError::Conflict(
+                            "date-only schedule was planned against a stale project civil-time setting".into(),
+                        ));
+                    }
+                }
+                let mut statement = self.prepare(
+                    "INSERT INTO work_schedule_v3
+                     (project_id, work_id, schedule_revision, payload_json,
+                      civil_time_setting_revision, updated_at_ms,
+                      created_project_revision, operation_id, request_digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )?;
+                statement.bind_text(1, record.project_id.as_str())?;
+                statement.bind_text(2, record.work_id.as_str())?;
+                statement.bind_i64(3, record.revision)?;
+                statement.bind_text(4, &payload_json)?;
+                statement.bind_optional_i64(5, record.civil_time_setting_revision)?;
+                statement.bind_i64(6, record.updated_at.as_millis())?;
+                statement.bind_i64(
+                    7,
+                    bound.expected_revision.ok_or_else(|| {
+                        StoreError::Invalid("schedule update requires project revision".into())
+                    })?,
+                )?;
+                statement.bind_text(8, &bound.operation_id)?;
+                statement.bind_text(9, &bound.request_digest)?;
+                statement.run()
+            },
+        )
+    }
+
+    pub fn external_waits_v1(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ExternalWaitV1Record>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT wait.project_id, wait.wait_id, wait.wait_revision,
+                    wait.payload_json
+             FROM external_wait_v1 wait
+             JOIN (
+               SELECT project_id, wait_id, MAX(wait_revision) AS wait_revision
+               FROM external_wait_v1 WHERE project_id = ?1 GROUP BY project_id, wait_id
+             ) latest USING (project_id, wait_id, wait_revision)
+             ORDER BY wait.wait_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+        let mut waits = Vec::new();
+        while statement.step()? == SQLITE_ROW {
+            let project_id = statement.column_text(0)?;
+            let wait_id = statement.column_text(1)?;
+            let revision = statement.column_u64(2)?;
+            let payload = statement.column_text(3)?;
+            let wait = decode_external_wait(&project_id, &wait_id, revision, &payload)?;
+            let persisted_scope = self.external_wait_scope_v1(&project_id, &wait_id, revision)?;
+            if wait.affected_work_ids != persisted_scope {
+                return Err(StoreError::Corrupt(format!(
+                    "external wait {wait_id} payload and immutable scope edges disagree"
+                )));
+            }
+            wait.validate(
+                &self.work_nodes_domain_v3(&project_id)?,
+                &self.work_dependencies_domain_v3(&project_id)?,
+            )
+            .map_err(|error| {
+                StoreError::Corrupt(format!("invalid external wait {wait_id}: {error}"))
+            })?;
+            waits.push(wait);
+        }
+        Ok(waits)
+    }
+
+    /// Append a typed external-wait revision and its immutable scope edges.
+    /// The wait's state is re-read under the same transaction before a close;
+    /// time passage alone never writes a state transition.
+    pub fn append_external_wait_v1(
+        &self,
+        context: &V3MutationContext,
+        input: &ExternalWaitV1Input,
+    ) -> Result<MutationResult, StoreError> {
+        let wait = &input.wait;
+        let payload_json = encode_external_wait(wait)?;
+        let bound = context.with_payload(json!({
+            "project_id": wait.project_id.as_str(),
+            "wait_id": wait.id.as_str(),
+            "wait_revision": wait.revision,
+            "expected_wait_revision": input.expected_wait_revision,
+            "payload": serde_json::from_str::<serde_json::Value>(&payload_json)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?,
+            "affected_work_ids": wait.affected_work_ids.iter().map(WorkId::as_str).collect::<Vec<_>>(),
+        }));
+        ensure_project(&bound.project_id, wait.project_id.as_str())?;
+        if wait.created_by != bound.actor_id && input.expected_wait_revision == 0 {
+            return Err(StoreError::Invalid(
+                "external-wait creator must be the current actor".into(),
+            ));
+        }
+        if input.expected_wait_revision.checked_add(1) != Some(wait.revision) {
+            return Err(StoreError::Invalid(
+                "external-wait revision is not the next revision".into(),
+            ));
+        }
+        self.fact_mutation(
+            &bound,
+            if input.expected_wait_revision == 0 {
+                "external-wait.create.v1"
+            } else {
+                "external-wait.resolve.v1"
+            },
+            "external_wait",
+            wait.id.as_str(),
+            &[ActorRole::Operator],
+            || {
+                let nodes = self.work_nodes_domain_v3(wait.project_id.as_str())?;
+                let dependencies = self.work_dependencies_domain_v3(wait.project_id.as_str())?;
+                wait.validate(&nodes, &dependencies)
+                    .map_err(|error| StoreError::Invalid(error.to_string()))?;
+                let current =
+                    self.external_wait_v1_by_id(wait.project_id.as_str(), wait.id.as_str())?;
+                let actual_revision = current.as_ref().map_or(0, |current| current.revision);
+                if actual_revision != input.expected_wait_revision {
+                    return Err(StoreError::Conflict(format!(
+                        "stale external-wait revision: expected {}, actual {actual_revision}",
+                        input.expected_wait_revision
+                    )));
+                }
+                if let Some(current) = current {
+                    current.validate(&nodes, &dependencies).map_err(|error| {
+                        StoreError::Corrupt(format!("invalid current wait: {error}"))
+                    })?;
+                    if current.state != ExternalWaitState::Open
+                        || !same_external_wait_scope(&current, wait)
+                    {
+                        return Err(StoreError::Conflict(
+                            "external wait is no longer open or its immutable scope changed".into(),
+                        ));
+                    }
+                    let resolution = wait.resolution.as_ref().ok_or_else(|| {
+                        StoreError::Invalid("closed wait requires attributed resolution".into())
+                    })?;
+                    if resolution.recorded_by != bound.actor_id
+                        || resolution.recorded_as != ActorRole::Operator
+                    {
+                        return Err(StoreError::Invalid(
+                            "wait resolution must be attributed to the current Operator".into(),
+                        ));
+                    }
+                } else if input.expected_wait_revision != 0
+                    || wait.state != ExternalWaitState::Open
+                    || wait.resolution.is_some()
+                {
+                    return Err(StoreError::Conflict("external wait does not exist".into()));
+                }
+                if let Some(setting_revision) = wait.civil_time_setting_revision {
+                    let current_setting = self.project_civil_time_v1(wait.project_id.as_str())?;
+                    if current_setting.map(|setting| setting.revision) != Some(setting_revision) {
+                        return Err(StoreError::Conflict(
+                            "date-only wait was planned against a stale project civil-time setting"
+                                .into(),
+                        ));
+                    }
+                }
+                let mut insert = self.prepare(
+                    "INSERT INTO external_wait_v1
+                     (project_id, wait_id, wait_revision, payload_json,
+                      created_project_revision, operation_id, request_digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )?;
+                insert.bind_text(1, wait.project_id.as_str())?;
+                insert.bind_text(2, wait.id.as_str())?;
+                insert.bind_i64(3, wait.revision)?;
+                insert.bind_text(4, &payload_json)?;
+                insert.bind_i64(
+                    5,
+                    bound.expected_revision.ok_or_else(|| {
+                        StoreError::Invalid("wait update requires project revision".into())
+                    })?,
+                )?;
+                insert.bind_text(6, &bound.operation_id)?;
+                insert.bind_text(7, &bound.request_digest)?;
+                insert.run()?;
+                for affected_work_id in &wait.affected_work_ids {
+                    let mut edge = self.prepare(
+                        "INSERT INTO external_wait_scope_v1
+                         (project_id, wait_id, wait_revision, affected_work_id)
+                         VALUES (?1, ?2, ?3, ?4)",
+                    )?;
+                    edge.bind_text(1, wait.project_id.as_str())?;
+                    edge.bind_text(2, wait.id.as_str())?;
+                    edge.bind_i64(3, wait.revision)?;
+                    edge.bind_text(4, affected_work_id.as_str())?;
+                    edge.run()?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    fn external_wait_v1_by_id(
+        &self,
+        project_id: &str,
+        wait_id: &str,
+    ) -> Result<Option<ExternalWaitV1Record>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT project_id, wait_id, wait_revision, payload_json
+             FROM external_wait_v1
+             WHERE project_id = ?1 AND wait_id = ?2
+             ORDER BY wait_revision DESC LIMIT 1",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, wait_id)?;
+        if statement.step()? != SQLITE_ROW {
+            return Ok(None);
+        }
+        let project_id = statement.column_text(0)?;
+        let wait_id = statement.column_text(1)?;
+        let revision = statement.column_u64(2)?;
+        let payload = statement.column_text(3)?;
+        let wait = decode_external_wait(&project_id, &wait_id, revision, &payload)?;
+        let persisted_scope = self.external_wait_scope_v1(&project_id, &wait_id, revision)?;
+        if wait.affected_work_ids != persisted_scope {
+            return Err(StoreError::Corrupt(format!(
+                "external wait {wait_id} payload and immutable scope edges disagree"
+            )));
+        }
+        Ok(Some(wait))
+    }
+
+    fn external_wait_scope_v1(
+        &self,
+        project_id: &str,
+        wait_id: &str,
+        revision: u64,
+    ) -> Result<Vec<WorkId>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT affected_work_id FROM external_wait_scope_v1
+             WHERE project_id = ?1 AND wait_id = ?2 AND wait_revision = ?3
+             ORDER BY affected_work_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, wait_id)?;
+        statement.bind_i64(3, revision)?;
+        let mut affected = Vec::new();
+        while statement.step()? == SQLITE_ROW {
+            affected.push(WorkId::new(statement.column_text(0)?));
+        }
+        Ok(affected)
+    }
+
+    fn work_nodes_domain_v3(&self, project_id: &str) -> Result<Vec<WorkNode>, StoreError> {
+        self.work_nodes_v3(project_id)?
+            .into_iter()
+            .map(|record| {
+                let project = ProjectId::new(record.project_id);
+                let work_id = WorkId::new(record.work_id);
+                let parent_id = record.parent_id.map(WorkId::new);
+                let node = match record.decomposition_kind.as_str() {
+                    "milestone" if record.execution_mode == "container" => {
+                        WorkNode::milestone(project, work_id, "")
+                    }
+                    "task" => {
+                        let mode = match record.execution_mode.as_str() {
+                            "direct" => ExecutionMode::Direct,
+                            "container" => ExecutionMode::Container,
+                            _ => {
+                                return Err(StoreError::Corrupt(
+                                    "unknown work execution mode".into(),
+                                ))
+                            }
+                        };
+                        WorkNode::task(project, work_id, mode, parent_id, "")
+                    }
+                    _ => return Err(StoreError::Corrupt("unknown v3 decomposition kind".into())),
+                };
+                Ok(node)
+            })
+            .collect()
+    }
+
+    fn work_dependencies_domain_v3(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<DirectDependency>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT prerequisite_work_id, dependent_work_id
+             FROM work_dependency_v3 WHERE project_id = ?1
+             ORDER BY prerequisite_work_id, dependent_work_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+        let mut dependencies = Vec::new();
+        while statement.step()? == SQLITE_ROW {
+            dependencies.push(DirectDependency {
+                blocker_id: WorkId::new(statement.column_text(0)?),
+                blocked_id: WorkId::new(statement.column_text(1)?),
+            });
+        }
+        Ok(dependencies)
+    }
+
     pub fn create_cycle_series_v3(
         &self,
         context: &V3MutationContext,
@@ -2147,6 +2726,441 @@ impl SqliteStore {
     }
 }
 
+fn encode_schedule_payload(record: &WorkScheduleRecord) -> Result<String, StoreError> {
+    let payload = json!({
+        "version": 1,
+        "not_before": encode_business_date(record.schedule.not_before.as_ref()),
+        "due": encode_business_date(record.schedule.due.as_ref()),
+        "planned_start": encode_business_date(record.schedule.planned_start.as_ref()),
+        "planned_end": encode_business_date(record.schedule.planned_end.as_ref()),
+    });
+    serde_json::to_string(&payload)
+        .map_err(|error| StoreError::Invalid(format!("cannot encode schedule: {error}")))
+}
+
+fn encode_external_wait(wait: &ExternalWait) -> Result<String, StoreError> {
+    let payload = json!({
+        "version": 1,
+        "revision": wait.revision,
+        "source_work_id": wait.source_work_id.as_str(),
+        "affected_work_ids": wait.affected_work_ids.iter().map(WorkId::as_str).collect::<Vec<_>>(),
+        "category": external_wait_category_name(wait.category),
+        "reason": wait.reason,
+        "accountable": encode_accountable(&wait.accountable),
+        "expected_decision": wait.expected_decision,
+        "expected_output": wait.expected_output,
+        "follow_up": encode_business_date(wait.follow_up.as_ref()),
+        "civil_time_setting_revision": wait.civil_time_setting_revision,
+        "state": external_wait_state_name(wait.state),
+        "created_by": wait.created_by,
+        "created_at_ms": wait.created_at.as_millis(),
+        "resolution": wait.resolution.as_ref().map(encode_resolution),
+    });
+    serde_json::to_string(&payload)
+        .map_err(|error| StoreError::Invalid(format!("cannot encode external wait: {error}")))
+}
+
+fn encode_business_date(value: Option<&BusinessDate>) -> serde_json::Value {
+    match value {
+        None => serde_json::Value::Null,
+        Some(BusinessDate::Instant(at)) => json!({"kind":"instant", "at_ms":at.as_millis()}),
+        Some(BusinessDate::LocalDate(date)) => json!({
+            "kind":"local_date", "year":date.year, "month":date.month, "day":date.day
+        }),
+        Some(BusinessDate::ResolvedLocal(value)) => json!({
+            "kind":"resolved_local",
+            "nominal_local": {
+                "year": value.nominal_local.date.year,
+                "month": value.nominal_local.date.month,
+                "day": value.nominal_local.date.day,
+                "hour": value.nominal_local.time.hour,
+                "minute": value.nominal_local.time.minute,
+                "second": value.nominal_local.time.second,
+            },
+            "utc_instant_ms": value.utc_instant.as_millis(),
+            "utc_offset_minutes": value.utc_offset_minutes,
+            "timezone": value.timezone,
+            "tzdb_identity": value.tzdb_identity,
+            "gap_policy": format!("{:?}", value.gap_policy).to_ascii_lowercase(),
+            "fold_policy": format!("{:?}", value.fold_policy).to_ascii_lowercase(),
+        }),
+    }
+}
+
+fn encode_accountable(value: &ExternalWaitAccountable) -> serde_json::Value {
+    match value {
+        ExternalWaitAccountable::Person {
+            reference,
+            display_name,
+        } => json!({"kind":"person", "reference":reference, "display_name":display_name}),
+        ExternalWaitAccountable::Role(role) => {
+            json!({"kind":"role", "role":actor_role_name(*role)})
+        }
+        ExternalWaitAccountable::Service {
+            reference,
+            display_name,
+        } => json!({"kind":"service", "reference":reference, "display_name":display_name}),
+    }
+}
+
+fn encode_resolution(value: &ExternalWaitResolution) -> serde_json::Value {
+    json!({
+        "outcome": external_wait_outcome_name(value.outcome),
+        "detail": value.detail,
+        "output_ref": value.output_ref,
+        "supplied_by": encode_accountable(&value.supplied_by),
+        "recorded_by": value.recorded_by,
+        "recorded_as": actor_role_name(value.recorded_as),
+        "recorded_at_ms": value.recorded_at.as_millis(),
+    })
+}
+
+fn decode_work_schedule_record(
+    project_id: String,
+    work_id: String,
+    revision: u64,
+    payload_json: &str,
+    civil_time_setting_revision: Option<u64>,
+    updated_at_ms: u64,
+) -> Result<WorkScheduleV3Record, StoreError> {
+    let payload = parse_payload(payload_json, "work schedule")?;
+    if required_u64(&payload, "version")? != 1 {
+        return Err(StoreError::Corrupt(
+            "unsupported schedule payload version".into(),
+        ));
+    }
+    let schedule = BusinessSchedule {
+        not_before: decode_business_date(required(&payload, "not_before")?)?,
+        due: decode_business_date(required(&payload, "due")?)?,
+        planned_start: decode_business_date(required(&payload, "planned_start")?)?,
+        planned_end: decode_business_date(required(&payload, "planned_end")?)?,
+    };
+    let record = WorkScheduleRecord {
+        project_id: ProjectId::new(project_id),
+        work_id: WorkId::new(work_id),
+        revision,
+        schedule,
+        civil_time_setting_revision,
+        updated_at: TimestampMs::from_millis(updated_at_ms),
+    };
+    record
+        .validate()
+        .map_err(|error| StoreError::Corrupt(format!("invalid persisted schedule: {error}")))?;
+    Ok(record)
+}
+
+fn decode_external_wait(
+    project_id: &str,
+    wait_id: &str,
+    revision: u64,
+    payload_json: &str,
+) -> Result<ExternalWaitV1Record, StoreError> {
+    let payload = parse_payload(payload_json, "external wait")?;
+    if required_u64(&payload, "version")? != 1 || required_u64(&payload, "revision")? != revision {
+        return Err(StoreError::Corrupt(
+            "unsupported or mismatched external-wait payload revision".into(),
+        ));
+    }
+    let affected = required(&payload, "affected_work_ids")?
+        .as_array()
+        .ok_or_else(|| StoreError::Corrupt("external-wait scope is not an array".into()))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(|value| WorkId::new(value.to_owned()))
+                .ok_or_else(|| StoreError::Corrupt("external-wait scope ID is not text".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let state = parse_external_wait_state(required_string(&payload, "state")?)?;
+    let resolution = match required(&payload, "resolution")? {
+        serde_json::Value::Null => None,
+        value => Some(decode_resolution(value)?),
+    };
+    let wait = ExternalWait {
+        id: boreal_domain::work_model_v3::ExternalWaitId::new(wait_id),
+        project_id: ProjectId::new(project_id),
+        source_work_id: WorkId::new(required_string(&payload, "source_work_id")?),
+        affected_work_ids: affected,
+        category: parse_external_wait_category(required_string(&payload, "category")?)?,
+        reason: required_string(&payload, "reason")?.to_owned(),
+        accountable: decode_accountable(required(&payload, "accountable")?)?,
+        expected_decision: optional_string(&payload, "expected_decision")?,
+        expected_output: optional_string(&payload, "expected_output")?,
+        follow_up: decode_business_date(required(&payload, "follow_up")?)?,
+        civil_time_setting_revision: optional_u64(&payload, "civil_time_setting_revision")?,
+        revision,
+        state,
+        created_by: required_string(&payload, "created_by")?.to_owned(),
+        created_at: TimestampMs::from_millis(required_u64(&payload, "created_at_ms")?),
+        resolution,
+    };
+    Ok(wait)
+}
+
+fn decode_business_date(value: &serde_json::Value) -> Result<Option<BusinessDate>, StoreError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let kind = required_string(value, "kind")?;
+    let date = match kind {
+        "instant" => BusinessDate::Instant(TimestampMs::from_millis(required_u64(value, "at_ms")?)),
+        "local_date" => BusinessDate::LocalDate(LocalDate::new(
+            required_i32(value, "year")?,
+            required_u8(value, "month")?,
+            required_u8(value, "day")?,
+        )),
+        "resolved_local" => {
+            let local = required(value, "nominal_local")?;
+            BusinessDate::ResolvedLocal(TimeResolution {
+                nominal_local: LocalDateTime::new(
+                    LocalDate::new(
+                        required_i32(local, "year")?,
+                        required_u8(local, "month")?,
+                        required_u8(local, "day")?,
+                    ),
+                    LocalTime::new(
+                        required_u8(local, "hour")?,
+                        required_u8(local, "minute")?,
+                        required_u8(local, "second")?,
+                    ),
+                ),
+                utc_instant: TimestampMs::from_millis(required_u64(value, "utc_instant_ms")?),
+                utc_offset_minutes: required_i32(value, "utc_offset_minutes")?,
+                timezone: required_string(value, "timezone")?.to_owned(),
+                tzdb_identity: required_string(value, "tzdb_identity")?.to_owned(),
+                gap_policy: match required_string(value, "gap_policy")? {
+                    "nextvalid" => GapPolicy::NextValid,
+                    _ => return Err(StoreError::Corrupt("unknown local-time gap policy".into())),
+                },
+                fold_policy: match required_string(value, "fold_policy")? {
+                    "earlieroffset" => FoldPolicy::EarlierOffset,
+                    "lateroffset" => FoldPolicy::LaterOffset,
+                    _ => return Err(StoreError::Corrupt("unknown local-time fold policy".into())),
+                },
+            })
+        }
+        _ => {
+            return Err(StoreError::Corrupt(format!(
+                "unknown business-date kind {kind:?}"
+            )))
+        }
+    };
+    date.validate()
+        .map_err(|error| StoreError::Corrupt(format!("invalid business date: {error}")))?;
+    Ok(Some(date))
+}
+
+fn decode_accountable(value: &serde_json::Value) -> Result<ExternalWaitAccountable, StoreError> {
+    match required_string(value, "kind")? {
+        "person" => Ok(ExternalWaitAccountable::Person {
+            reference: required_string(value, "reference")?.to_owned(),
+            display_name: required_string(value, "display_name")?.to_owned(),
+        }),
+        "service" => Ok(ExternalWaitAccountable::Service {
+            reference: required_string(value, "reference")?.to_owned(),
+            display_name: required_string(value, "display_name")?.to_owned(),
+        }),
+        "role" => Ok(ExternalWaitAccountable::Role(parse_actor_role(
+            required_string(value, "role")?,
+        )?)),
+        kind => Err(StoreError::Corrupt(format!(
+            "unknown accountable kind {kind:?}"
+        ))),
+    }
+}
+
+fn decode_resolution(value: &serde_json::Value) -> Result<ExternalWaitResolution, StoreError> {
+    Ok(ExternalWaitResolution {
+        outcome: parse_external_wait_outcome(required_string(value, "outcome")?)?,
+        detail: required_string(value, "detail")?.to_owned(),
+        output_ref: optional_string(value, "output_ref")?,
+        supplied_by: decode_accountable(required(value, "supplied_by")?)?,
+        recorded_by: required_string(value, "recorded_by")?.to_owned(),
+        recorded_as: parse_actor_role(required_string(value, "recorded_as")?)?,
+        recorded_at: TimestampMs::from_millis(required_u64(value, "recorded_at_ms")?),
+    })
+}
+
+fn parse_payload(payload_json: &str, label: &str) -> Result<serde_json::Value, StoreError> {
+    let value = serde_json::from_str::<serde_json::Value>(payload_json).map_err(|error| {
+        StoreError::Corrupt(format!("{label} payload is invalid JSON: {error}"))
+    })?;
+    if !value.is_object() {
+        return Err(StoreError::Corrupt(format!(
+            "{label} payload is not an object"
+        )));
+    }
+    Ok(value)
+}
+
+fn required<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a serde_json::Value, StoreError> {
+    value
+        .as_object()
+        .and_then(|object| object.get(key))
+        .ok_or_else(|| StoreError::Corrupt(format!("payload is missing {key}")))
+}
+
+fn required_string<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a str, StoreError> {
+    required(value, key)?
+        .as_str()
+        .ok_or_else(|| StoreError::Corrupt(format!("payload field {key} is not text")))
+}
+
+fn optional_string(value: &serde_json::Value, key: &str) -> Result<Option<String>, StoreError> {
+    match required(value, key)? {
+        serde_json::Value::Null => Ok(None),
+        value => value
+            .as_str()
+            .map(|value| Some(value.to_owned()))
+            .ok_or_else(|| StoreError::Corrupt(format!("payload field {key} is not text or null"))),
+    }
+}
+
+fn required_u64(value: &serde_json::Value, key: &str) -> Result<u64, StoreError> {
+    required(value, key)?.as_u64().ok_or_else(|| {
+        StoreError::Corrupt(format!("payload field {key} is not an unsigned integer"))
+    })
+}
+
+fn optional_u64(value: &serde_json::Value, key: &str) -> Result<Option<u64>, StoreError> {
+    match required(value, key)? {
+        serde_json::Value::Null => Ok(None),
+        value => value.as_u64().map(Some).ok_or_else(|| {
+            StoreError::Corrupt(format!(
+                "payload field {key} is not an unsigned integer or null"
+            ))
+        }),
+    }
+}
+
+fn required_i32(value: &serde_json::Value, key: &str) -> Result<i32, StoreError> {
+    required(value, key)?
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| StoreError::Corrupt(format!("payload field {key} is not a 32-bit integer")))
+}
+
+fn required_u8(value: &serde_json::Value, key: &str) -> Result<u8, StoreError> {
+    required(value, key)?
+        .as_u64()
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| {
+            StoreError::Corrupt(format!(
+                "payload field {key} is not an 8-bit unsigned integer"
+            ))
+        })
+}
+
+fn external_wait_category_name(value: ExternalWaitCategory) -> &'static str {
+    match value {
+        ExternalWaitCategory::Decision => "decision",
+        ExternalWaitCategory::Approval => "approval",
+        ExternalWaitCategory::Information => "information",
+        ExternalWaitCategory::Access => "access",
+        ExternalWaitCategory::Service => "service",
+        ExternalWaitCategory::Other => "other",
+    }
+}
+
+fn parse_external_wait_category(value: &str) -> Result<ExternalWaitCategory, StoreError> {
+    match value {
+        "decision" => Ok(ExternalWaitCategory::Decision),
+        "approval" => Ok(ExternalWaitCategory::Approval),
+        "information" => Ok(ExternalWaitCategory::Information),
+        "access" => Ok(ExternalWaitCategory::Access),
+        "service" => Ok(ExternalWaitCategory::Service),
+        "other" => Ok(ExternalWaitCategory::Other),
+        _ => Err(StoreError::Corrupt(format!(
+            "unknown external-wait category {value:?}"
+        ))),
+    }
+}
+
+fn external_wait_state_name(value: ExternalWaitState) -> &'static str {
+    match value {
+        ExternalWaitState::Open => "open",
+        ExternalWaitState::Resolved => "resolved",
+        ExternalWaitState::Cancelled => "cancelled",
+    }
+}
+
+fn parse_external_wait_state(value: &str) -> Result<ExternalWaitState, StoreError> {
+    match value {
+        "open" => Ok(ExternalWaitState::Open),
+        "resolved" => Ok(ExternalWaitState::Resolved),
+        "cancelled" => Ok(ExternalWaitState::Cancelled),
+        _ => Err(StoreError::Corrupt(format!(
+            "unknown external-wait state {value:?}"
+        ))),
+    }
+}
+
+fn external_wait_outcome_name(value: ExternalWaitOutcome) -> &'static str {
+    match value {
+        ExternalWaitOutcome::Approved => "approved",
+        ExternalWaitOutcome::Rejected => "rejected",
+        ExternalWaitOutcome::DecisionProvided => "decisionprovided",
+        ExternalWaitOutcome::OutputProvided => "outputprovided",
+        ExternalWaitOutcome::Declined => "declined",
+        ExternalWaitOutcome::Unavailable => "unavailable",
+        ExternalWaitOutcome::Cancelled => "cancelled",
+    }
+}
+
+fn parse_external_wait_outcome(value: &str) -> Result<ExternalWaitOutcome, StoreError> {
+    match value {
+        "approved" => Ok(ExternalWaitOutcome::Approved),
+        "rejected" => Ok(ExternalWaitOutcome::Rejected),
+        "decisionprovided" => Ok(ExternalWaitOutcome::DecisionProvided),
+        "outputprovided" => Ok(ExternalWaitOutcome::OutputProvided),
+        "declined" => Ok(ExternalWaitOutcome::Declined),
+        "unavailable" => Ok(ExternalWaitOutcome::Unavailable),
+        "cancelled" => Ok(ExternalWaitOutcome::Cancelled),
+        _ => Err(StoreError::Corrupt(format!(
+            "unknown external-wait outcome {value:?}"
+        ))),
+    }
+}
+
+fn actor_role_name(value: ActorRole) -> &'static str {
+    match value {
+        ActorRole::Agent => "agent",
+        ActorRole::Reviewer => "reviewer",
+        ActorRole::Operator => "operator",
+        ActorRole::Publisher => "publisher",
+    }
+}
+
+fn parse_actor_role(value: &str) -> Result<ActorRole, StoreError> {
+    match value {
+        "agent" => Ok(ActorRole::Agent),
+        "reviewer" => Ok(ActorRole::Reviewer),
+        "operator" => Ok(ActorRole::Operator),
+        "publisher" => Ok(ActorRole::Publisher),
+        _ => Err(StoreError::Corrupt(format!("unknown actor role {value:?}"))),
+    }
+}
+
+fn same_external_wait_scope(left: &ExternalWait, right: &ExternalWait) -> bool {
+    left.id == right.id
+        && left.project_id == right.project_id
+        && left.source_work_id == right.source_work_id
+        && left.affected_work_ids == right.affected_work_ids
+        && left.category == right.category
+        && left.reason == right.reason
+        && left.accountable == right.accountable
+        && left.expected_decision == right.expected_decision
+        && left.expected_output == right.expected_output
+        && left.follow_up == right.follow_up
+        && left.civil_time_setting_revision == right.civil_time_setting_revision
+        && left.created_by == right.created_by
+        && left.created_at == right.created_at
+}
+
 fn work_kind_name(kind: boreal_domain::WorkKind) -> &'static str {
     match kind {
         boreal_domain::WorkKind::Milestone => "milestone",
@@ -2247,5 +3261,234 @@ fn bind_optional_signed_i64(
     match value {
         Some(value) => statement.bind_signed_i64(index, value),
         None => statement.bind_null(index),
+    }
+}
+
+#[cfg(test)]
+mod scheduling_codec_tests {
+    use super::*;
+
+    fn store_with_schedule_table() -> SqliteStore {
+        let store = SqliteStore::open_in_memory(crate::PRODUCTION_SCHEMA_SQL).unwrap();
+        store
+            .execute_batch(
+                "CREATE TABLE work_schedule_v3 (
+                   project_id TEXT NOT NULL,
+                   work_id TEXT NOT NULL,
+                   schedule_revision INTEGER NOT NULL,
+                   payload_json TEXT NOT NULL,
+                   civil_time_setting_revision INTEGER,
+                   updated_at_ms INTEGER NOT NULL,
+                   created_project_revision INTEGER NOT NULL,
+                   operation_id TEXT NOT NULL,
+                   request_digest TEXT NOT NULL,
+                   PRIMARY KEY (project_id, work_id, schedule_revision)
+                 );",
+            )
+            .unwrap();
+        store
+    }
+
+    fn local_date(year: i32, month: u8, day: u8) -> BusinessDate {
+        BusinessDate::LocalDate(LocalDate::new(year, month, day))
+    }
+
+    fn external_wait() -> ExternalWait {
+        ExternalWait {
+            id: boreal_domain::work_model_v3::ExternalWaitId::new("wait-1"),
+            project_id: ProjectId::new("project-1"),
+            source_work_id: WorkId::new("source-1"),
+            affected_work_ids: vec![WorkId::new("dependent-1")],
+            category: ExternalWaitCategory::Decision,
+            reason: "Provider decision required".to_owned(),
+            accountable: ExternalWaitAccountable::Service {
+                reference: "provider:acme".to_owned(),
+                display_name: "Acme provider".to_owned(),
+            },
+            expected_decision: Some("Approve access".to_owned()),
+            expected_output: None,
+            follow_up: Some(local_date(2026, 11, 1)),
+            civil_time_setting_revision: Some(3),
+            revision: 1,
+            state: ExternalWaitState::Open,
+            created_by: "operator-1".to_owned(),
+            created_at: TimestampMs::from_millis(1_800_000_000_000),
+            resolution: None,
+        }
+    }
+
+    #[test]
+    fn schedule_codec_round_trips_civil_dates_and_instants() {
+        let record = WorkScheduleRecord {
+            project_id: ProjectId::new("project-1"),
+            work_id: WorkId::new("work-1"),
+            revision: 2,
+            schedule: BusinessSchedule {
+                not_before: Some(local_date(2026, 3, 8)),
+                due: Some(BusinessDate::Instant(TimestampMs::from_millis(
+                    1_800_000_000_000,
+                ))),
+                planned_start: Some(local_date(2026, 3, 8)),
+                planned_end: Some(local_date(2026, 3, 9)),
+            },
+            civil_time_setting_revision: Some(4),
+            updated_at: TimestampMs::from_millis(1_800_000_000_100),
+        };
+
+        let encoded = encode_schedule_payload(&record).unwrap();
+        let decoded = decode_work_schedule_record(
+            "project-1".to_owned(),
+            "work-1".to_owned(),
+            2,
+            &encoded,
+            Some(4),
+            1_800_000_000_100,
+        )
+        .unwrap();
+
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn external_wait_codec_round_trips_attributed_resolution() {
+        let mut wait = external_wait();
+        wait.revision = 2;
+        wait.state = ExternalWaitState::Resolved;
+        wait.resolution = Some(ExternalWaitResolution {
+            outcome: ExternalWaitOutcome::DecisionProvided,
+            detail: "Access approved by the provider".to_owned(),
+            output_ref: Some("decision:provider-42".to_owned()),
+            supplied_by: ExternalWaitAccountable::Person {
+                reference: "provider-user:7".to_owned(),
+                display_name: "Provider reviewer".to_owned(),
+            },
+            recorded_by: "operator-2".to_owned(),
+            recorded_as: ActorRole::Operator,
+            recorded_at: TimestampMs::from_millis(1_800_000_000_200),
+        });
+
+        let encoded = encode_external_wait(&wait).unwrap();
+        let decoded = decode_external_wait("project-1", "wait-1", 2, &encoded).unwrap();
+
+        assert_eq!(decoded, wait);
+    }
+
+    #[test]
+    fn external_wait_codec_rejects_unknown_state_and_outcome() {
+        let wait = external_wait();
+        let encoded = encode_external_wait(&wait).unwrap();
+        let mut unknown_state: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        unknown_state["state"] = json!("waiting_for_something_new");
+        let unknown_state = serde_json::to_string(&unknown_state).unwrap();
+        assert!(matches!(
+            decode_external_wait("project-1", "wait-1", 1, &unknown_state),
+            Err(StoreError::Corrupt(_))
+        ));
+
+        let mut resolved = wait;
+        resolved.revision = 2;
+        resolved.state = ExternalWaitState::Resolved;
+        resolved.resolution = Some(ExternalWaitResolution {
+            outcome: ExternalWaitOutcome::Approved,
+            detail: "Decision recorded".to_owned(),
+            output_ref: None,
+            supplied_by: ExternalWaitAccountable::Role(ActorRole::Reviewer),
+            recorded_by: "operator-1".to_owned(),
+            recorded_as: ActorRole::Operator,
+            recorded_at: TimestampMs::from_millis(1_800_000_000_300),
+        });
+        let encoded = encode_external_wait(&resolved).unwrap();
+        let mut unknown_outcome: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        unknown_outcome["resolution"]["outcome"] = json!("accepted_by_magic");
+        let unknown_outcome = serde_json::to_string(&unknown_outcome).unwrap();
+        assert!(matches!(
+            decode_external_wait("project-1", "wait-1", 2, &unknown_outcome),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_due_at_reader_preserves_raw_date_text_and_project_scope() {
+        let store = store_with_schedule_table();
+        store.create_project("project-1", "unix-ms:1").unwrap();
+        let work = boreal_domain::WorkItem::new(
+            ProjectId::new("project-1"),
+            WorkId::new("task-1"),
+            boreal_domain::WorkKind::Task,
+            None,
+            "Legacy due date",
+        )
+        .open();
+        store.create_work(&work, "unix-ms:2").unwrap();
+        let no_due = boreal_domain::WorkItem::new(
+            ProjectId::new("project-1"),
+            WorkId::new("task-2"),
+            boreal_domain::WorkKind::Task,
+            None,
+            "No legacy due date",
+        )
+        .open();
+        store.create_work(&no_due, "unix-ms:2").unwrap();
+        store
+            .execute_batch(
+                "UPDATE work_item SET due_at = '2026-11-01'
+                 WHERE project_id = 'project-1' AND work_id = 'task-1';",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .legacy_due_at_v3_if_no_schedule("project-1", "task-1")
+                .unwrap()
+                .as_deref(),
+            Some("2026-11-01")
+        );
+        assert_eq!(
+            store
+                .legacy_due_at_v3_if_no_schedule("another-project", "task-1")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .legacy_due_at_v3_if_no_schedule("project-1", "task-2")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_schedule_revision_shadows_legacy_due_at_even_when_cleared() {
+        let store = store_with_schedule_table();
+        store.create_project("project-1", "unix-ms:1").unwrap();
+        let work = boreal_domain::WorkItem::new(
+            ProjectId::new("project-1"),
+            WorkId::new("task-1"),
+            boreal_domain::WorkKind::Task,
+            None,
+            "Explicitly cleared legacy due date",
+        )
+        .open();
+        store.create_work(&work, "unix-ms:2").unwrap();
+        store
+            .execute_batch(
+                "UPDATE work_item SET due_at = '2026-11-01'
+                 WHERE project_id = 'project-1' AND work_id = 'task-1';
+                 INSERT INTO work_schedule_v3
+                   (project_id, work_id, schedule_revision, payload_json,
+                    civil_time_setting_revision, updated_at_ms,
+                    created_project_revision, operation_id, request_digest)
+                 VALUES ('project-1', 'task-1', 1,
+                         '{\"version\":1,\"due\":null}', NULL, 3, 0,
+                         'schedule-clear', 'digest');",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .legacy_due_at_v3_if_no_schedule("project-1", "task-1")
+                .unwrap(),
+            None
+        );
     }
 }
