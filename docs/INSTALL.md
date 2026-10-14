@@ -195,8 +195,14 @@ complete CLI + TUI install.
 
 Older v2 archives may not contain the updater. Run the official installer once
 to replace one of those archives; subsequent `bwrk update` and
-`bwrk upgrade --machine` calls use the packaged, verified installer. Project
-databases are intentionally left untouched by machine updates.
+`bwrk upgrade --machine` calls use the packaged, verified installer. The
+installer stages package files and can restore the prior package after a
+failure. It runs Global bootstrap after publishing the package, but package
+rollback is not yet paired with a physical Global database backup and restore.
+Keep a verified Global backup for an update that may require a Global schema
+migration; restoring the prior package does not itself restore a matching
+Global database. Project databases are intentionally left untouched by machine
+updates.
 
 ## Uninstall and artifact trust
 

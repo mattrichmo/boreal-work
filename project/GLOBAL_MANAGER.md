@@ -127,11 +127,19 @@ Windows location is a future portability contract, not a support claim.
 
 The installer invokes a Rust bootstrap use case after staging the binary. It
 creates/migrates global state idempotently and reports failure rather than
-claiming successful provisioning. Reinstallation and upgrade preserve records.
-Binary uninstall must preserve user data. Direct/package-manager distribution
-needs the same bootstrap hook, with idempotent first-use provisioning as a
-fallback where installation hooks cannot run. No initialization prompt is
-required. A newer unsupported schema fails without modifying its database.
+claiming successful provisioning. Reinstallation and package replacement
+reuse the same Global data root, so successful operations retain its records.
+The current direct installer runs Global bootstrap after publishing package
+files and can restore the previous package on failure, but it does not yet pair
+that rollback with restoration of a matching physical Global database backup.
+A previous package restored after an interrupted or failed bootstrap therefore
+does not by itself prove that the package and Global database are a compatible
+pair. Keep a verified physical backup for updates that may require an
+incompatible Global schema migration. Binary uninstall must preserve user data.
+Direct/package-manager distribution needs the same bootstrap hook, with
+idempotent first-use provisioning as a fallback where installation hooks
+cannot run. No initialization prompt is required. A newer unsupported schema
+fails without modifying its database.
 
 The current independent SQLite schema uses `global_schema`,
 `global_manager_state`, `global_operation`, `global_revision_snapshot` and

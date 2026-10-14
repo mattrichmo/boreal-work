@@ -130,11 +130,15 @@ boundary; it intentionally does not hash generated binaries or TUI output.
 `build_release.py` adds those generated assets, records Rust/Node/TypeScript
 toolchain versions, and creates the archive. The current process still does
 not sign artifacts, contact a registry, pause active attempts during an
-upgrade, or migrate a project database. No checked-in workflow publishes
-release archives or a rendered Homebrew formula. The formula can be rendered
-locally from reviewed archives with `scripts/release/render_homebrew_formula.py`;
-publishing it to a tap is a separate manual release step. The remaining
-behaviors are part of the P4/P5 compatibility and cutover gates.
+upgrade, or migrate a project database. The direct installer runs Global
+bootstrap after publishing package files and can restore the previous package
+on failure, but it does not yet pair package rollback with restoration of a
+matching physical Global database backup. Keep a verified Global backup for
+updates that may require a Global schema migration. No checked-in workflow
+publishes release archives or a rendered Homebrew formula. The formula can be
+rendered locally from reviewed archives with
+`scripts/release/render_homebrew_formula.py`; publishing it to a tap is a
+separate manual release step. These remaining behaviors are release-gate work.
 
 The direct installer downloads `SHA256SUMS` from the same GitHub Release as
 the selected archive and verifies the archive digest. This detects transfer or
