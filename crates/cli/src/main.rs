@@ -3352,19 +3352,43 @@ fn review_list_result(
     store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
-    let reviews = app
-        .review_list(
-            &project,
-            parsed.options.limit.unwrap_or(50).clamp(1, 500),
+    let page = app
+        .review_history_list(
+            project.as_str(),
+            None,
+            parsed.options.limit.unwrap_or(50).clamp(1, 100),
             parsed.options.offset.unwrap_or(0),
         )
         .map_err(map_application_error)?;
+    let mut items = Vec::with_capacity(page.items.len());
+    for record in &page.items {
+        let legacy = match record.provenance {
+            boreal_store::completion::ReviewHistoryProvenance::LegacyReview => {
+                let id = record.event_id.strip_prefix("legacy:").ok_or_else(|| {
+                    CliError::with(
+                        ErrorCode::ProtocolMismatch,
+                        ApplicationOutcome::Failed,
+                        "legacy review history returned an unqualified event id",
+                    )
+                })?;
+                Some(
+                    app.review_show(&project, id)
+                        .map_err(map_application_error)?,
+                )
+            }
+            boreal_store::completion::ReviewHistoryProvenance::CanonicalEvent => None,
+        };
+        items.push(review_history_record_json(record, legacy.as_ref()));
+    }
     let revision = store_revision(store, &project)?;
     bounded_result(
         Some(json!({
             "command": "review_list",
             "project_id": project.as_str(),
-            "items": reviews.iter().map(review_record_json).collect::<Vec<_>>(),
+            "items": items,
+            "limit": page.limit,
+            "offset": page.offset,
+            "has_more": page.has_more,
         })),
         Some(revision),
     )
@@ -3382,18 +3406,89 @@ fn review_show_result(
         .positionals
         .get(index)
         .ok_or_else(|| CliError::invalid("review show requires a review identifier"))?;
-    let review = app
-        .review_show(&project, review_id)
-        .map_err(map_application_error)?;
+    let history = if review_id.starts_with("canonical:") || review_id.starts_with("legacy:") {
+        app.review_history_show(project.as_str(), review_id)
+            .map_err(map_application_error)?
+    } else {
+        // Keep the historical unqualified legacy ID spelling working. If it
+        // is not a legacy row, accept a raw canonical event ID as a fallback.
+        match app
+            .review_history_show(project.as_str(), &format!("legacy:{review_id}"))
+            .map_err(map_application_error)?
+        {
+            Some(legacy) => Some(legacy),
+            None => app
+                .review_history_show(project.as_str(), &format!("canonical:{review_id}"))
+                .map_err(map_application_error)?,
+        }
+    }
+    .ok_or_else(|| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("review history event not found: {review_id}"),
+        )
+    })?;
+    let legacy = match history.provenance {
+        boreal_store::completion::ReviewHistoryProvenance::LegacyReview => {
+            let id = history.event_id.strip_prefix("legacy:").ok_or_else(|| {
+                CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    "legacy review history returned an unqualified event id",
+                )
+            })?;
+            Some(
+                app.review_show(&project, id)
+                    .map_err(map_application_error)?,
+            )
+        }
+        boreal_store::completion::ReviewHistoryProvenance::CanonicalEvent => None,
+    };
     let revision = store_revision(store, &project)?;
     bounded_result(
         Some(json!({
             "command": "review_show",
             "project_id": project.as_str(),
-            "review": review_record_json(&review),
+            "review": review_history_record_json(&history, legacy.as_ref()),
         })),
         Some(revision),
     )
+}
+
+fn review_history_record_json(
+    record: &boreal_store::completion::ReviewHistoryRecord,
+    legacy: Option<&boreal_store::ReviewRecord>,
+) -> Value {
+    let mut value = legacy.map(review_record_json).unwrap_or_else(|| {
+        json!({
+            "review_id": record.event_id,
+            "project_id": record.project_id,
+            "work_id": record.work_id,
+            "attempt_id": record.attempt_id,
+            "fence": record.fence,
+            "gate_id": record.gate_id,
+            "reviewer_actor_id": record.reviewer_actor_id,
+            "decision": record.outcome,
+            "reason": record.reason,
+            "source_version_id": null,
+            "policy_digest": null,
+            "created_at": record.created_at,
+        })
+    });
+    if record.provenance == boreal_store::completion::ReviewHistoryProvenance::CanonicalEvent {
+        value["review_id"] = json!(record.event_id);
+    }
+    value["event_id"] = json!(record.event_id);
+    value["provenance"] = json!(match record.provenance {
+        boreal_store::completion::ReviewHistoryProvenance::CanonicalEvent => "canonical_event",
+        boreal_store::completion::ReviewHistoryProvenance::LegacyReview => "legacy_review",
+    });
+    value["submission_id"] = json!(record.submission_id);
+    value["operation_id"] = json!(record.operation_id);
+    value["outcome"] = json!(record.outcome);
+    value["superseded_by"] = json!(record.superseded_by);
+    value
 }
 
 fn review_record_json(review: &boreal_store::ReviewRecord) -> Value {

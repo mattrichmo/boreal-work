@@ -3,6 +3,53 @@ use boreal_store::{
     SqliteStore, StoreError, SummaryArtifactPage, SummaryArtifactRecord, SummaryRecord,
 };
 
+/// Maximum UTF-8 body bytes returned by one public summary readback page.
+/// This leaves room for worst-case JSON escaping and envelope metadata under
+/// the protocol's 64 KiB inline response bound.
+pub const MAX_SUMMARY_BODY_PAGE_BYTES: u64 = 4 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SummaryBodyPage {
+    pub body: String,
+    pub body_offset: u64,
+    pub next_body_offset: Option<u64>,
+    pub body_size: u64,
+}
+
+/// Returns a UTF-8-safe slice bounded by the public summary response limit.
+/// Offsets are byte offsets; an offset inside a code point advances to the
+/// next code-point boundary so callers can continue without duplicate bytes.
+pub fn summary_body_page(body: &str, offset: u64, limit: Option<u64>) -> SummaryBodyPage {
+    let requested_limit = limit
+        .unwrap_or(MAX_SUMMARY_BODY_PAGE_BYTES)
+        .clamp(1, MAX_SUMMARY_BODY_PAGE_BYTES) as usize;
+    let mut start = usize::try_from(offset)
+        .unwrap_or(usize::MAX)
+        .min(body.len());
+    while start < body.len() && !body.is_char_boundary(start) {
+        start += 1;
+    }
+
+    let mut end = start;
+    for (relative, character) in body[start..].char_indices() {
+        let next = start + relative + character.len_utf8();
+        if next - start > requested_limit && end > start {
+            break;
+        }
+        end = next;
+        if end - start >= requested_limit {
+            break;
+        }
+    }
+    let next_body_offset = (end < body.len()).then_some(end as u64);
+    SummaryBodyPage {
+        body: body[start..end].to_owned(),
+        body_offset: start as u64,
+        next_body_offset,
+        body_size: body.len() as u64,
+    }
+}
+
 pub struct SummaryQueries<'a> {
     store: &'a SqliteStore,
 }
@@ -138,6 +185,23 @@ impl<'a> SummaryQueries<'a> {
         Ok(page)
     }
 
+    /// Returns a bounded summary page without inline bodies. Each row keeps
+    /// its durable summary identity so a caller can fetch body pages with
+    /// `show` instead of hydrating every retained body in one response.
+    pub fn list_metadata(
+        &self,
+        project_id: &str,
+        work_id: Option<&str>,
+        limit: u64,
+        offset: u64,
+    ) -> Result<SummaryArtifactPage, StoreError> {
+        let mut page = self.list(project_id, work_id, limit, offset)?;
+        for item in &mut page.items {
+            item.body = None;
+        }
+        Ok(page)
+    }
+
     /// Compatibility helper for output paths that need metadata only.
     pub fn metadata(
         &self,
@@ -182,6 +246,17 @@ impl crate::WorkApplication<'_> {
         offset: u64,
     ) -> Result<SummaryArtifactPage, crate::ApplicationError> {
         Ok(SummaryQueries::new(self.store_ref()).list(project_id, work_id, limit, offset)?)
+    }
+
+    pub fn read_summary_artifact_metadata(
+        &self,
+        project_id: &str,
+        work_id: Option<&str>,
+        limit: u64,
+        offset: u64,
+    ) -> Result<SummaryArtifactPage, crate::ApplicationError> {
+        Ok(SummaryQueries::new(self.store_ref())
+            .list_metadata(project_id, work_id, limit, offset)?)
     }
 
     pub fn read_final_result_summary(
@@ -247,5 +322,49 @@ impl crate::WorkApplication<'_> {
         Ok(self
             .store_ref()
             .insert_summary_with_body(&request, body, &summary.body_digest)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_body_pages_are_bounded_utf8_safe_and_concatenate_exactly() {
+        let body = format!("{}{}{}", "\u{1}".repeat(9_000), "λ🙂e\u{301}", "\nend");
+        let mut offset = 0;
+        let mut assembled = String::new();
+        loop {
+            let page = summary_body_page(&body, offset, None);
+            assert!(page.body.len() <= MAX_SUMMARY_BODY_PAGE_BYTES as usize + 3);
+            assert_eq!(page.body_offset, offset);
+            let encoded = serde_json::to_vec(&serde_json::json!({
+                "summary_id": "summary-test",
+                "body": page.body,
+                "body_offset": page.body_offset,
+                "next_body_offset": page.next_body_offset,
+                "body_size": page.body_size,
+            }))
+            .expect("body page serializes");
+            assert!(
+                encoded.len() < 32 * 1024,
+                "JSON page remains well below the inline cap"
+            );
+            assembled.push_str(&page.body);
+            match page.next_body_offset {
+                Some(next) => offset = next,
+                None => break,
+            }
+        }
+        assert_eq!(assembled, body);
+    }
+
+    #[test]
+    fn summary_body_page_advances_offsets_inside_multibyte_characters() {
+        let body = "aλ🙂b";
+        let page = summary_body_page(body, 2, Some(1));
+        assert_eq!(page.body_offset, 3);
+        assert_eq!(page.body, "🙂");
+        assert_eq!(page.next_body_offset, Some(7));
     }
 }

@@ -6007,10 +6007,12 @@ mod unix {
                 }
             };
             let summary_result = app
-                .record_summary(
+                .record_summary_with_body(
+                    project.as_str(),
                     &actor,
                     Some(&session),
                     &summary,
+                    &summary_body,
                     &sub_operation(operation, "summary"),
                     None,
                     TimestampMs::from_millis(now_ms_u64()),
@@ -11193,6 +11195,14 @@ mod tests {
             .expect("missing gate list")
             .iter()
             .any(|gate| gate.as_str().is_some_and(|id| id.ends_with(":summary"))));
+        let summary_id = "summary-attempt-finish-service_finish_close";
+        let retained = boreal_application::SummaryQueries::new(&handler.store)
+            .show("service-project", summary_id)
+            .expect("service finish retains a readable summary body");
+        assert_eq!(
+            retained.body.as_deref(),
+            Some("Completed service finish fixture.")
+        );
         let replay = handler
             .finish_close(&finish, "op_service_finish_close")
             .expect("finish close replays its durable result");
@@ -11200,6 +11210,110 @@ mod tests {
         assert_eq!(
             replay.2.expect("replayed finish data")["close_state"],
             "open"
+        );
+        let replayed_summary = boreal_application::SummaryQueries::new(&handler.store)
+            .show("service-project", summary_id)
+            .expect("summary body remains readable after finish replay");
+        assert_eq!(replayed_summary.body, retained.body);
+
+        // Public review list/show must expose canonical events while keeping
+        // old review rows addressable through their historical IDs.
+        handler
+            .store
+            .execute_batch(
+                "INSERT INTO boreal_submission(
+                    submission_id,project_id,work_id,attempt_id,fence,entity_revision,
+                    proof_revision,source_version_id,config_identity,profile_id,
+                    profile_version,profile_digest,summary_id,summary_digest,
+                    receipt_ids_json,sealed_at
+                 )
+                 SELECT 'service-review-submission',a.project_id,a.work_id,a.attempt_id,
+                    a.fence,0,1,a.source_version_id,a.config_identity,
+                    w.acceptance_profile_id,w.acceptance_profile_version,p.policy_digest,
+                    s.summary_id,s.body_digest,'[]','unix-ms:9000000000000'
+                 FROM attempt a
+                 JOIN work_item w ON w.project_id=a.project_id AND w.work_id=a.work_id
+                 JOIN acceptance_profile p ON p.profile_id=w.acceptance_profile_id
+                    AND p.version=w.acceptance_profile_version
+                 JOIN summary s ON s.work_id=a.work_id AND s.attempt_id=a.attempt_id
+                    AND s.fence=a.fence
+                 WHERE a.project_id='service-project' AND a.work_id='service-work'
+                    AND a.attempt_id='attempt-finish';
+                 INSERT INTO boreal_review_event(
+                    review_event_id,project_id,work_id,submission_id,gate_id,
+                    reviewer_actor_id,outcome,reason,operation_id,created_at
+                 ) VALUES (
+                    'service-canonical-review','service-project','service-work',
+                    'service-review-submission','verification','operator','approved',
+                    'canonical reviewed','op_service_finish_close','unix-ms:9000000000001'
+                 );
+                 INSERT INTO review(
+                    review_id,work_id,attempt_id,fence,gate_id,reviewer_actor_id,
+                    decision,reason,source_version_id,policy_digest,created_at
+                 ) VALUES (
+                    'service-legacy-review','service-work','attempt-finish',1,
+                    'verification','operator','accepted','legacy reviewed',
+                    (SELECT source_version_id FROM attempt WHERE attempt_id='attempt-finish'),
+                    'legacy-policy','unix-ms:9000000000000'
+                 );",
+            )
+            .expect("canonical and legacy review history fixtures insert");
+        let mut list_command = ParsedCommand {
+            path: vec!["review".to_owned(), "list".to_owned()],
+            options: CliOptions::default(),
+        };
+        list_command.options.project = Some("service-project".to_owned());
+        list_command.options.limit = Some(50);
+        let listed = super::super::review_list_result(
+            &list_command,
+            &WorkApplication::new(&handler.store),
+            &handler.store,
+        )
+        .expect("shared service/direct review list reads canonical history");
+        let listed_data = listed.data.expect("review list data");
+        let reviews = listed_data["items"]
+            .as_array()
+            .expect("review history page items");
+        assert!(reviews.iter().any(|review| {
+            review["event_id"] == "canonical:service-canonical-review"
+                && review["provenance"] == "canonical_event"
+                && review["submission_id"].as_str().is_some()
+        }));
+        assert!(reviews.iter().any(|review| {
+            review["event_id"] == "legacy:service-legacy-review"
+                && review["provenance"] == "legacy_review"
+                && review["policy_digest"] == "legacy-policy"
+        }));
+        let review_show = |review_id: &str| {
+            let mut parsed = ParsedCommand {
+                path: vec!["review".to_owned(), "show".to_owned()],
+                options: CliOptions::default(),
+            };
+            parsed.options.project = Some("service-project".to_owned());
+            parsed.options.positionals.push(review_id.to_owned());
+            super::super::review_show_result(
+                &parsed,
+                &WorkApplication::new(&handler.store),
+                &handler.store,
+            )
+        };
+        let canonical_show = review_show("canonical:service-canonical-review")
+            .expect("qualified canonical review show succeeds");
+        assert_eq!(
+            canonical_show.data.expect("canonical review data")["review"]["event_id"],
+            "canonical:service-canonical-review"
+        );
+        let raw_canonical_show = review_show("service-canonical-review")
+            .expect("raw canonical review ID remains readable");
+        assert_eq!(
+            raw_canonical_show.data.expect("raw canonical review data")["review"]["event_id"],
+            "canonical:service-canonical-review"
+        );
+        let legacy_show = review_show("service-legacy-review")
+            .expect("unqualified legacy review ID remains readable");
+        assert_eq!(
+            legacy_show.data.expect("legacy review data")["review"]["policy_digest"],
+            "legacy-policy"
         );
         let parent = handler
             .store
