@@ -20,7 +20,7 @@
   "contract_only_schemas": {
     "callable": false,
     "status": "frozen_contract_not_callable",
-    "reason": "BW-S12-T01 freezes these generic deliverable request and outcome shapes. S12-T02/T03/T04 provide narrower application behavior, but these generic schemas are still not registered public routes and do not imply callable storage, validation or authorization.",
+    "reason": "These generic T01 deliverable request and outcome DTOs remain frozen and non-callable. S12 tasks provide narrower callable behavior: typed artifact-result binding computes inspection facts, while generic artifact submission and human deliverable-decision routes remain unavailable.",
     "artifact_submission": {
       "schema_version": "boreal.artifact_submission.v1",
       "submission_id": "submission_01",
@@ -264,14 +264,15 @@
       "confirmed": true
     },
     "contract_status": "implemented",
-    "authority": "The authenticated actor/session and application role policy authorize review; reviewer identity is not supplied as an unauthenticated payload field."
+    "authority": "The authenticated actor/session and application role policy authorize review; reviewer identity is not supplied as an unauthenticated payload field.",
+    "scope": "General proof-gate review.approve only; this does not implement the generic artifact_acceptance decision route."
   },
   "v4_optional_contracts": {
     "immutable_source_input_identity": "implemented",
     "gate_receipt_and_attempt_proof": "implemented",
-    "generic_deliverable_submission_identity": {"status":"partial","schema_status":"typed_artifact_result_binding_only","reason":"Exact producer result and output identities are bindable, but the generic frozen T01 submission schema is not a callable route."},
-    "typed_output_inspection": {"status":"implemented","request_schema":"boreal.artifact_result_bind.v1","bind_readback_schema":"boreal.artifact_result_bind_readback.v1","readback_schema":"boreal.artifact_result_readback.v1"},
+    "generic_deliverable_submission_identity": {"status":"partial","schema_status":"typed_artifact_result_binding_only","reason":"Exact producer result and output identities are bindable through the typed artifact-result route, but the generic frozen T01 artifact_submission schema is not a callable route."},
+    "typed_output_inspection": {"status":"implemented","request_schema":"boreal.artifact_result_bind.v1","bind_readback_schema":"boreal.artifact_result_bind_readback.v1","readback_schema":"boreal.artifact_result_readback.v1","routes":["artifact result bind","artifact result attempt","artifact result operation"],"direct_cli":true,"service_dispatch":true,"inspection_authority":"application_revalidates_exact_source_versions_and_computes_output_inspection_facts","generic_artifact_submission":"unavailable","generic_human_deliverable_decision":"unavailable"},
     "requirement_coverage_for_deliverables": "implemented_by_registered_application_profile_and_exact_output_binding",
-    "generic_human_acceptance_of_deliverables": {"status":"unavailable","schema_status":"frozen_contract_not_callable"}
+    "generic_human_acceptance_of_deliverables": {"status":"unavailable","schema_status":"frozen_contract_not_callable","reason":"The generic artifact_acceptance request/readback DTO is not registered as a public route; general review.approve does not decide deliverable acceptance."}
   }
 }
