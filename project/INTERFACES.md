@@ -203,8 +203,27 @@ preserves result, actor/session, pinned profile/contract, output criteria,
 replay and lineage outcomes. Schema-v2 stores return explicit unavailable
 without migration. This callable result binding does not make the frozen T01
 generic submission or human artifact-decision DTOs callable. The final-result
-source binding remains a separate proof-generation operation. S13 owns
-date/wait and TUI contract work.
+source binding remains a separate proof-generation operation.
+
+BW-S13-T01 exposes the typed date and external-wait boundary through direct
+CLI and the local service. `project civil-time set/show` uses the append-only
+`project_civil_time_v1` history and derives the TZif identity from the
+installed timezone database; set requests bind expected project and setting
+revisions. `work schedule set/show` replaces all four business-date fields
+at expected project and schedule revisions. Each update request must include
+all fields, using JSON `null` to clear one; four nulls create a durable clear
+revision that shadows the untouched legacy due value. Reads distinguish no
+schedule row (`schedule_revision: 0`, `schedule: null`) from a cleared row.
+Date-only values are retained as civil dates and require the current project
+setting revision. `wait create/resolve/list/show` reads and writes immutable
+wait scope and revision history, binds expected project and wait revisions,
+and attributes resolution to the authenticated Operator. The service supplies
+actor, session, operation ID and trusted timestamps. Strict v1 DTOs reject
+unknown fields; schema-v2 stores return unavailable without migration.
+
+These routes expose planning facts and obligations. They do not write lifecycle
+state or status/attention projections; coordinator status integration and the
+TUI consumer are separate S13 lanes.
 
 Artifact inspections are attributable observations over an exact submitted
 artifact-set digest. They are not command receipts and do not establish

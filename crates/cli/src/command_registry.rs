@@ -2630,6 +2630,78 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "read bounded receipt history for one exact attempt fence",
     },
     CommandSpec {
+        path: "project civil-time set",
+        syntax: "bwrk project civil-time set --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "project_civil_time",
+        direct: true,
+        service: true,
+        summary: "append an operator-authorized project timezone revision with the installed TZif identity",
+    },
+    CommandSpec {
+        path: "project civil-time show",
+        syntax: "bwrk project civil-time show --project PROJECT [--socket PATH --json]",
+        action: "read",
+        output: "project_civil_time",
+        direct: true,
+        service: true,
+        summary: "read the current project civil-time setting and revision",
+    },
+    CommandSpec {
+        path: "work schedule set",
+        syntax: "bwrk work schedule set --project PROJECT WORK_ID --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "work_schedule",
+        direct: true,
+        service: true,
+        summary: "replace the full business schedule at expected project and schedule revisions",
+    },
+    CommandSpec {
+        path: "work schedule show",
+        syntax: "bwrk work schedule show --project PROJECT WORK_ID [--socket PATH --json]",
+        action: "read",
+        output: "work_schedule",
+        direct: true,
+        service: true,
+        summary: "read the current business schedule, explicit clear revision, or untouched legacy due value",
+    },
+    CommandSpec {
+        path: "wait create",
+        syntax: "bwrk wait create --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "external_wait",
+        direct: true,
+        service: true,
+        summary: "create an operator-authorized external decision or output obligation",
+    },
+    CommandSpec {
+        path: "wait resolve",
+        syntax: "bwrk wait resolve --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "external_wait",
+        direct: true,
+        service: true,
+        summary: "resolve or explicitly cancel an open external wait with attributed evidence",
+    },
+    CommandSpec {
+        path: "wait list",
+        syntax: "bwrk wait list --project PROJECT [--socket PATH --json]",
+        action: "read",
+        output: "external_wait",
+        direct: true,
+        service: true,
+        summary: "read current project-scoped external waits",
+    },
+    CommandSpec {
+        path: "wait show",
+        syntax: "bwrk wait show --project PROJECT WAIT_ID [--socket PATH --json]",
+        action: "read",
+        output: "external_wait",
+        direct: true,
+        service: true,
+        summary: "read one external wait and its attributed resolution history",
+    },
+    CommandSpec {
         path: "artifact result bind",
         syntax: "bwrk artifact result bind --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
         action: "mutate",
@@ -3155,6 +3227,81 @@ fn flag_metadata(command: &CommandSpec) -> Vec<Value> {
 }
 fn input_schema(path: &str) -> Value {
     match path {
+        "project civil-time set" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["schema_version", "expected_project_revision", "expected_setting_revision", "timezone"],
+            "properties": {
+                "schema_version": {"const": "boreal.project_civil_time_update.v1"},
+                "expected_project_revision": {"type": "integer", "minimum": 0},
+                "expected_setting_revision": {"type": "integer", "minimum": 0},
+                "timezone": {"type": "string", "minLength": 1, "maxLength": 255}
+            }
+        }),
+        "project civil-time show" | "wait list" => json!({
+            "type": "object", "additionalProperties": false, "properties": {}
+        }),
+        "work schedule set" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["schema_version", "expected_project_revision", "expected_schedule_revision", "schedule"],
+            "properties": {
+                "schema_version": {"const": "boreal.work_schedule_update.v1"},
+                "expected_project_revision": {"type": "integer", "minimum": 0},
+                "expected_schedule_revision": {"type": "integer", "minimum": 0},
+                "schedule": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["not_before", "due", "planned_start", "planned_end"],
+                    "properties": {
+                        "not_before": {"anyOf": [business_date_schema(), {"type":"null"}]},
+                        "due": {"anyOf": [business_date_schema(), {"type":"null"}]},
+                        "planned_start": {"anyOf": [business_date_schema(), {"type":"null"}]},
+                        "planned_end": {"anyOf": [business_date_schema(), {"type":"null"}]}
+                    }
+                }
+            }
+        }),
+        "work schedule show" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["work_id"],
+            "properties": {"work_id": {"type":"string", "minLength":1}}
+        }),
+        "wait create" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["schema_version", "expected_project_revision", "expected_wait_revision", "wait_id", "source_work_id", "affected_work_ids", "category", "reason", "accountable", "expected_decision", "expected_output", "follow_up"],
+            "properties": {
+                "schema_version": {"const": "boreal.external_wait_create.v1"},
+                "expected_project_revision": {"type":"integer", "minimum":0},
+                "expected_wait_revision": {"const":0},
+                "wait_id": {"type":"string", "minLength":1},
+                "source_work_id": {"type":"string", "minLength":1},
+                "affected_work_ids": {"type":"array", "minItems":1, "uniqueItems":true, "items":{"type":"string", "minLength":1}},
+                "category": {"enum":["decision","approval","information","access","service","other"]},
+                "reason": {"type":"string", "minLength":1},
+                "accountable": {"anyOf":[accountable_schema()]},
+                "expected_decision": {"anyOf":[{"type":"string"},{"type":"null"}]},
+                "expected_output": {"anyOf":[{"type":"string"},{"type":"null"}]},
+                "follow_up": {"anyOf":[business_date_schema(),{"type":"null"}]}
+            }
+        }),
+        "wait resolve" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["schema_version", "expected_project_revision", "expected_wait_revision", "wait_id", "next_state", "outcome", "detail", "output_ref", "supplied_by"],
+            "properties": {
+                "schema_version": {"const": "boreal.external_wait_resolve.v1"},
+                "expected_project_revision": {"type":"integer", "minimum":0},
+                "expected_wait_revision": {"type":"integer", "minimum":1},
+                "wait_id": {"type":"string", "minLength":1},
+                "next_state": {"enum":["resolved","cancelled"]},
+                "outcome": {"enum":["approved","rejected","decision_provided","output_provided","declined","unavailable","cancelled"]},
+                "detail": {"type":"string", "minLength":1},
+                "output_ref": {"anyOf":[{"type":"string"},{"type":"null"}]},
+                "supplied_by": {"anyOf":[accountable_schema()]}
+            }
+        }),
+        "wait show" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["wait_id"],
+            "properties": {"wait_id": {"type":"string", "minLength":1}}
+        }),
         "merge plan" | "merge apply" | "compact apply" => {
             let merging = path.starts_with("merge");
             let applying = path.ends_with("apply");
@@ -3390,6 +3537,26 @@ fn input_schema(path: &str) -> Value {
         }
         _ => Value::Null,
     }
+}
+
+fn business_date_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"type":"object","additionalProperties":false,"required":["kind","at_ms"],"properties":{"kind":{"const":"instant"},"at_ms":{"type":"integer","minimum":0}}},
+            {"type":"object","additionalProperties":false,"required":["kind","year","month","day"],"properties":{"kind":{"const":"local_date"},"year":{"type":"integer"},"month":{"type":"integer","minimum":1,"maximum":12},"day":{"type":"integer","minimum":1,"maximum":31}}},
+            {"type":"object","additionalProperties":false,"required":["kind","nominal_local","utc_instant_ms","utc_offset_minutes","timezone","tzdb_identity","gap_policy","fold_policy"],"properties":{"kind":{"const":"resolved_local"},"nominal_local":{"type":"object","additionalProperties":false,"required":["year","month","day","hour","minute"],"properties":{"year":{"type":"integer"},"month":{"type":"integer","minimum":1,"maximum":12},"day":{"type":"integer","minimum":1,"maximum":31},"hour":{"type":"integer","minimum":0,"maximum":23},"minute":{"type":"integer","minimum":0,"maximum":59},"second":{"type":"integer","minimum":0,"maximum":59}}},"utc_instant_ms":{"type":"integer","minimum":0},"utc_offset_minutes":{"type":"integer","minimum":-1440,"maximum":1440},"timezone":{"type":"string","minLength":1},"tzdb_identity":{"type":"string","minLength":1},"gap_policy":{"const":"next_valid"},"fold_policy":{"enum":["earlier_offset","later_offset"]}}}
+        ]
+    })
+}
+
+fn accountable_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"type":"object","additionalProperties":false,"required":["kind","reference","display_name"],"properties":{"kind":{"const":"person"},"reference":{"type":"string","minLength":1},"display_name":{"type":"string","minLength":1}}},
+            {"type":"object","additionalProperties":false,"required":["kind","role"],"properties":{"kind":{"const":"role"},"role":{"enum":["agent","operator","reviewer","publisher"]}}},
+            {"type":"object","additionalProperties":false,"required":["kind","reference","display_name"],"properties":{"kind":{"const":"service"},"reference":{"type":"string","minLength":1},"display_name":{"type":"string","minLength":1}}}
+        ]
+    })
 }
 
 fn completion_result(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
@@ -3874,6 +4041,68 @@ mod tests {
                     "{path} input schema must require {field}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn scheduling_routes_advertise_versioned_inputs_and_clear_semantics() {
+        for (path, action, direct, service) in [
+            ("project civil-time set", "mutate", true, true),
+            ("project civil-time show", "read", true, true),
+            ("work schedule set", "mutate", true, true),
+            ("work schedule show", "read", true, true),
+            ("wait create", "mutate", true, true),
+            ("wait resolve", "mutate", true, true),
+            ("wait list", "read", true, true),
+            ("wait show", "read", true, true),
+        ] {
+            let route = COMMANDS
+                .iter()
+                .find(|command| command.path == path)
+                .unwrap_or_else(|| panic!("{path} is registered"));
+            let data = command_json(route);
+            assert_eq!(data["action"], action, "{path}");
+            assert_eq!(data["adapters"]["direct"], direct, "{path}");
+            assert_eq!(data["adapters"]["service"], service, "{path}");
+            assert_eq!(
+                data["input_schema"]["additionalProperties"], false,
+                "{path}"
+            );
+        }
+
+        let schedule = COMMANDS
+            .iter()
+            .find(|command| command.path == "work schedule set")
+            .map(command_json)
+            .unwrap();
+        assert_eq!(
+            schedule["input_schema"]["properties"]["schema_version"]["const"],
+            "boreal.work_schedule_update.v1"
+        );
+        assert_eq!(
+            schedule["input_schema"]["properties"]["schedule"]["required"],
+            json!(["not_before", "due", "planned_start", "planned_end"])
+        );
+        assert_eq!(
+            schedule["input_schema"]["properties"]["schedule"]["additionalProperties"],
+            false
+        );
+
+        let wait_create = COMMANDS
+            .iter()
+            .find(|command| command.path == "wait create")
+            .map(command_json)
+            .unwrap();
+        assert_eq!(
+            wait_create["input_schema"]["properties"]["schema_version"]["const"],
+            "boreal.external_wait_create.v1"
+        );
+        for field in ["expected_decision", "expected_output", "follow_up"] {
+            assert!(wait_create["input_schema"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|required| required == field));
         }
     }
 

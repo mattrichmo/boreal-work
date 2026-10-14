@@ -25,6 +25,9 @@ fn parity_supported(path: &[String]) -> bool {
             .as_slice(),
         ["agent", "guide" | "next"]
             | ["next"]
+            | ["project", "civil-time", "set" | "show"]
+            | ["work", "schedule", "set" | "show"]
+            | ["wait", "create" | "resolve" | "list" | "show"]
             | ["evidence", "bind-result" | "receipts"]
             | ["artifact", "result", "bind" | "attempt" | "operation"]
             | ["work", "close-readiness"]
@@ -177,17 +180,19 @@ mod unix {
     use boreal_domain::{ActorContext, ActorRole, ReasonCode};
     use boreal_protocol::{
         models::{
-            ArtifactResultBindRequestDto, FinalResultCaptureReadbackDto,
-            FinalResultCaptureRequestDto, IntakeBucketCreateDto, IntakeBucketReadbackDto,
-            IntakeCaptureDto, IntakeCaptureReadbackDto, IntakeDeliveryReadbackRequestDto,
-            IntakeDeliveryReceiveDto, IntakeKindDto, SourceAvailabilityDto, SourceShowReadbackDto,
+            ArtifactResultBindRequestDto, ExternalWaitCreateDto, ExternalWaitResolveDto,
+            FinalResultCaptureReadbackDto, FinalResultCaptureRequestDto, IntakeBucketCreateDto,
+            IntakeBucketReadbackDto, IntakeCaptureDto, IntakeCaptureReadbackDto,
+            IntakeDeliveryReadbackRequestDto, IntakeDeliveryReceiveDto, IntakeKindDto,
+            ProjectCivilTimeUpdateDto, SourceAvailabilityDto, SourceShowReadbackDto,
             SourceVerifyReadbackDto, SourceVersionLookupDto, SourceVersionMetadataDto,
-            SourceVersionRegistrationDto, FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION,
-            FINAL_RESULT_CAPTURE_SCHEMA_VERSION, INTAKE_BUCKET_CREATE_SCHEMA_VERSION,
-            INTAKE_BUCKET_READBACK_SCHEMA_VERSION, INTAKE_CAPTURE_READBACK_SCHEMA_VERSION,
-            INTAKE_CAPTURE_SCHEMA_VERSION, INTAKE_DELIVERY_READBACK_SCHEMA_VERSION,
-            INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION, SOURCE_LOOKUP_SCHEMA_VERSION,
-            SOURCE_SHOW_READBACK_SCHEMA_VERSION, SOURCE_VERIFY_READBACK_SCHEMA_VERSION,
+            SourceVersionRegistrationDto, WorkScheduleUpdateDto,
+            FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION, FINAL_RESULT_CAPTURE_SCHEMA_VERSION,
+            INTAKE_BUCKET_CREATE_SCHEMA_VERSION, INTAKE_BUCKET_READBACK_SCHEMA_VERSION,
+            INTAKE_CAPTURE_READBACK_SCHEMA_VERSION, INTAKE_CAPTURE_SCHEMA_VERSION,
+            INTAKE_DELIVERY_READBACK_SCHEMA_VERSION, INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION,
+            SOURCE_LOOKUP_SCHEMA_VERSION, SOURCE_SHOW_READBACK_SCHEMA_VERSION,
+            SOURCE_VERIFY_READBACK_SCHEMA_VERSION,
         },
         schema, Envelope, ProtocolError as WireError, TransportOutcome,
     };
@@ -1813,6 +1818,80 @@ mod unix {
             return Ok(data);
         }
         match path.as_slice() {
+            ["project", "civil-time", "set"] => {
+                let input = parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("project civil-time set requires --input REQUEST.json")
+                })?;
+                let request: ProjectCivilTimeUpdateDto =
+                    super::super::read_scheduling_request(input)?;
+                data["command"] = json!("project_civil_time_update_v1");
+                data["civil_time_update"] = serde_json::to_value(request)
+                    .map_err(|error| CliError::invalid(error.to_string()))?;
+                return Ok(data);
+            }
+            ["project", "civil-time", "show"] => {
+                data["command"] = json!("project_civil_time_readback_v1");
+                return Ok(data);
+            }
+            ["work", "schedule", "set"] => {
+                let index = usize::from(parsed.options.project.is_none());
+                data["work_id"] =
+                    json!(parsed.options.positionals.get(index).ok_or_else(|| {
+                        CliError::invalid("work schedule set requires a work identifier")
+                    })?);
+                let input = parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("work schedule set requires --input REQUEST.json")
+                })?;
+                let request: WorkScheduleUpdateDto = super::super::read_scheduling_request(input)?;
+                data["command"] = json!("work_schedule_update_v1");
+                data["schedule_update"] = serde_json::to_value(request)
+                    .map_err(|error| CliError::invalid(error.to_string()))?;
+                return Ok(data);
+            }
+            ["work", "schedule", "show"] => {
+                let index = usize::from(parsed.options.project.is_none());
+                data["work_id"] =
+                    json!(parsed.options.positionals.get(index).ok_or_else(|| {
+                        CliError::invalid("work schedule show requires a work identifier")
+                    })?);
+                data["command"] = json!("work_schedule_readback_v1");
+                return Ok(data);
+            }
+            ["wait", "create"] | ["wait", "resolve"] => {
+                let input = parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("wait mutation requires --input REQUEST.json")
+                })?;
+                if path[1] == "create" {
+                    let request: ExternalWaitCreateDto =
+                        super::super::read_scheduling_request(input)?;
+                    data["command"] = json!("external_wait_create_v1");
+                    data["wait_create"] = serde_json::to_value(request)
+                        .map_err(|error| CliError::invalid(error.to_string()))?;
+                } else {
+                    let request: ExternalWaitResolveDto =
+                        super::super::read_scheduling_request(input)?;
+                    data["command"] = json!("external_wait_resolve_v1");
+                    data["wait_resolve"] = serde_json::to_value(request)
+                        .map_err(|error| CliError::invalid(error.to_string()))?;
+                }
+                return Ok(data);
+            }
+            ["wait", "list"] => {
+                data["command"] = json!("external_wait_readback_v1");
+                return Ok(data);
+            }
+            ["wait", "show"] => {
+                let index = usize::from(parsed.options.project.is_none());
+                data["wait_id"] =
+                    json!(parsed.options.positionals.get(index).ok_or_else(|| {
+                        CliError::invalid("wait show requires a wait identifier")
+                    })?);
+                data["command"] = json!("external_wait_readback_v1");
+                return Ok(data);
+            }
+            _ => {}
+        }
+        match path.as_slice() {
             ["artifact", "result", "bind"] => {
                 let input = parsed.options.input.as_deref().ok_or_else(|| {
                     CliError::invalid("artifact result bind requires --input REQUEST.json")
@@ -2972,6 +3051,13 @@ mod unix {
                 "intake_delivery_readback_v1" => self.intake_delivery_readback(data),
                 "intake_bucket_v1" => self.intake_bucket(data, &request.operation_id),
                 "intake_capture_v1" => self.intake_capture(data, &request.operation_id),
+                "project_civil_time_update_v1"
+                | "project_civil_time_readback_v1"
+                | "work_schedule_update_v1"
+                | "work_schedule_readback_v1"
+                | "external_wait_create_v1"
+                | "external_wait_resolve_v1"
+                | "external_wait_readback_v1" => self.scheduling_route(request, data),
                 "memory_command" => {
                     let result = super::super::memory_commands::apply(
                         &self.store,
@@ -3131,6 +3217,100 @@ mod unix {
                 None,
                 Some(super::super::workflow_package_json(&registry)),
             ))
+        }
+
+        fn scheduling_route(&self, request: &ApplicationRequest, data: &Value) -> ServiceResult {
+            let project = string(data, "project_id")?;
+            let actor = string(data, "actor_id")?;
+            let session = string(data, "session_id")?;
+            let app = WorkApplication::new(&self.store);
+            let result = match request.command.as_str() {
+                "project_civil_time_update_v1" => {
+                    let dto: ProjectCivilTimeUpdateDto = serde_json::from_value(
+                        data.get("civil_time_update").cloned().ok_or_else(|| {
+                            CliError::invalid("civil-time update DTO is required")
+                        })?,
+                    )
+                    .map_err(|error| invalid_service_dto("project_civil_time_update_v1", error))?;
+                    super::super::project_civil_time_set(
+                        &project,
+                        &actor,
+                        &session,
+                        &request.operation_id,
+                        dto,
+                        &app,
+                        &self.store,
+                    )?
+                }
+                "project_civil_time_readback_v1" => {
+                    super::super::project_civil_time_show(&project, &self.store)?
+                }
+                "work_schedule_update_v1" => {
+                    let dto: WorkScheduleUpdateDto =
+                        serde_json::from_value(data.get("schedule_update").cloned().ok_or_else(
+                            || CliError::invalid("work schedule update DTO is required"),
+                        )?)
+                        .map_err(|error| invalid_service_dto("work_schedule_update_v1", error))?;
+                    super::super::work_schedule_set(
+                        &project,
+                        &string(data, "work_id")?,
+                        &actor,
+                        &session,
+                        &request.operation_id,
+                        dto,
+                        &app,
+                        &self.store,
+                    )?
+                }
+                "work_schedule_readback_v1" => super::super::work_schedule_show(
+                    &project,
+                    &string(data, "work_id")?,
+                    &self.store,
+                )?,
+                "external_wait_create_v1" => {
+                    let dto: ExternalWaitCreateDto =
+                        serde_json::from_value(data.get("wait_create").cloned().ok_or_else(
+                            || CliError::invalid("external-wait create DTO is required"),
+                        )?)
+                        .map_err(|error| invalid_service_dto("external_wait_create_v1", error))?;
+                    super::super::external_wait_create(
+                        &project,
+                        &actor,
+                        &session,
+                        &request.operation_id,
+                        dto,
+                        &app,
+                        &self.store,
+                    )?
+                }
+                "external_wait_resolve_v1" => {
+                    let dto: ExternalWaitResolveDto =
+                        serde_json::from_value(data.get("wait_resolve").cloned().ok_or_else(
+                            || CliError::invalid("external-wait resolve DTO is required"),
+                        )?)
+                        .map_err(|error| invalid_service_dto("external_wait_resolve_v1", error))?;
+                    super::super::external_wait_resolve(
+                        &project,
+                        &actor,
+                        &session,
+                        &request.operation_id,
+                        dto,
+                        &app,
+                        &self.store,
+                    )?
+                }
+                "external_wait_readback_v1" => super::super::external_wait_read(
+                    &project,
+                    data.get("wait_id").and_then(Value::as_str),
+                    &self.store,
+                )?,
+                _ => {
+                    return Err(CliError::invalid(
+                        "unknown date and external-wait service route",
+                    ))
+                }
+            };
+            Ok((result.outcome, result.revision, result.data))
         }
 
         fn intake_delivery_receive(
@@ -6779,11 +6959,18 @@ mod tests {
     use super::*;
     use boreal_protocol::{
         models::{
+            ExternalWaitCreateDto, ExternalWaitMutationReadbackDto, ExternalWaitReadbackDto,
             FinalResultCaptureReadbackDto, IntakeBucketReadbackDto, IntakeCaptureReadbackDto,
-            IntakeKindDto, SourceAvailabilityDto, SourceShowReadbackDto, SourceVerifyReadbackDto,
-            FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION, FINAL_RESULT_CAPTURE_SCHEMA_VERSION,
-            INTAKE_BUCKET_CREATE_SCHEMA_VERSION, INTAKE_CAPTURE_SCHEMA_VERSION,
-            SOURCE_LOOKUP_SCHEMA_VERSION, SOURCE_SHOW_READBACK_SCHEMA_VERSION,
+            IntakeKindDto, ProjectCivilTimeMutationReadbackDto, ProjectCivilTimeReadbackDto,
+            SourceAvailabilityDto, SourceShowReadbackDto, SourceVerifyReadbackDto,
+            WorkScheduleMutationReadbackDto, WorkScheduleReadbackDto,
+            EXTERNAL_WAIT_CREATE_SCHEMA_VERSION, EXTERNAL_WAIT_READBACK_SCHEMA_VERSION,
+            EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION, FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION,
+            FINAL_RESULT_CAPTURE_SCHEMA_VERSION, INTAKE_BUCKET_CREATE_SCHEMA_VERSION,
+            INTAKE_CAPTURE_SCHEMA_VERSION, PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION,
+            PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION, SOURCE_LOOKUP_SCHEMA_VERSION,
+            SOURCE_SHOW_READBACK_SCHEMA_VERSION, WORK_SCHEDULE_READBACK_SCHEMA_VERSION,
+            WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
         },
         Envelope,
     };
@@ -8056,6 +8243,448 @@ mod tests {
                 "service final-result request must require {missing}"
             );
         }
+    }
+
+    #[test]
+    fn scheduling_service_routes_enforce_revisions_replay_and_operator_authority() {
+        let root = temp_path("scheduling-service-routes");
+        let store = seed_project_store(&root);
+        let mut handler = make_handler(store);
+        let base = || {
+            json!({
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": "service-test-session"
+            })
+        };
+
+        let expected_project_revision =
+            handler.store.project_revision("service-project").unwrap().0;
+        let mut civil_time_request = base();
+        civil_time_request["command"] = json!("project_civil_time_update_v1");
+        civil_time_request["civil_time_update"] = json!({
+            "schema_version": PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+            "expected_project_revision": expected_project_revision,
+            "expected_setting_revision": 0,
+            "timezone": "America/Regina"
+        });
+        let civil_time = application_envelope(
+            &mut handler,
+            "op_s13_civil_time",
+            civil_time_request.clone(),
+        );
+        assert_eq!(civil_time.outcome, ApplicationOutcome::Changed);
+        let civil_time_readback: ProjectCivilTimeMutationReadbackDto =
+            serde_json::from_value(civil_time.data.as_ref().unwrap()["readback"].clone())
+                .expect("civil-time mutation returns the typed readback");
+        assert_eq!(
+            civil_time_readback.schema_version,
+            PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(civil_time_readback.setting.timezone, "America/Regina");
+
+        let civil_time_replay =
+            application_envelope(&mut handler, "op_s13_civil_time", civil_time_request);
+        assert_eq!(
+            civil_time_replay.outcome,
+            ApplicationOutcome::Unchanged,
+            "civil-time replay failed: {:?}",
+            civil_time_replay.error
+        );
+        let civil_time_readback: ProjectCivilTimeMutationReadbackDto =
+            serde_json::from_value(civil_time_replay.data.unwrap()["readback"].clone())
+                .expect("civil-time replay returns the typed readback");
+        assert!(civil_time_readback.replayed);
+
+        let mut civil_time_show = base();
+        civil_time_show["command"] = json!("project_civil_time_readback_v1");
+        let civil_time_show =
+            application_envelope(&mut handler, "op_s13_civil_time_show", civil_time_show);
+        let civil_time_readback: ProjectCivilTimeReadbackDto =
+            serde_json::from_value(civil_time_show.data.unwrap()["readback"].clone())
+                .expect("civil-time read returns the typed readback");
+        assert_eq!(
+            civil_time_readback.schema_version,
+            PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(civil_time_readback.setting.unwrap().setting_revision, 1);
+
+        let mut schedule = base();
+        schedule["command"] = json!("work_schedule_update_v1");
+        schedule["work_id"] = json!("service-work");
+        schedule["schedule_update"] = json!({
+            "schema_version": WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+            "expected_project_revision": civil_time.revision.unwrap(),
+            "expected_schedule_revision": 0,
+            "schedule": {
+                "not_before": null,
+                "due": {"kind": "local_date", "year": 2026, "month": 10, "day": 14},
+                "planned_start": null,
+                "planned_end": null
+            }
+        });
+        let schedule_first =
+            application_envelope(&mut handler, "op_s13_schedule_set", schedule.clone());
+        assert_eq!(schedule_first.outcome, ApplicationOutcome::Changed);
+        let schedule_readback: WorkScheduleMutationReadbackDto =
+            serde_json::from_value(schedule_first.data.as_ref().unwrap()["readback"].clone())
+                .expect("schedule mutation returns the typed readback");
+        assert_eq!(schedule_readback.schedule_revision, 1);
+        assert!(!schedule_readback.replayed);
+
+        let mut stale_project_schedule = schedule.clone();
+        stale_project_schedule["schedule_update"]["expected_project_revision"] =
+            json!(expected_project_revision);
+        stale_project_schedule["schedule_update"]["expected_schedule_revision"] = json!(1);
+        let stale_project = application_envelope(
+            &mut handler,
+            "op_s13_schedule_stale_project",
+            stale_project_schedule,
+        );
+        assert_eq!(stale_project.outcome, ApplicationOutcome::Conflict);
+
+        let mut stale_object_schedule = schedule.clone();
+        stale_object_schedule["schedule_update"]["expected_project_revision"] =
+            json!(schedule_first.revision.unwrap());
+        stale_object_schedule["schedule_update"]["expected_schedule_revision"] = json!(0);
+        let stale_object = application_envelope(
+            &mut handler,
+            "op_s13_schedule_stale_object",
+            stale_object_schedule,
+        );
+        assert_eq!(stale_object.outcome, ApplicationOutcome::Conflict);
+
+        let schedule_replay = application_envelope(&mut handler, "op_s13_schedule_set", schedule);
+        assert_eq!(schedule_replay.outcome, ApplicationOutcome::Unchanged);
+        let schedule_replay: WorkScheduleMutationReadbackDto =
+            serde_json::from_value(schedule_replay.data.unwrap()["readback"].clone())
+                .expect("schedule replay returns the typed readback");
+        assert!(schedule_replay.replayed);
+        assert_eq!(schedule_replay.schedule_revision, 1);
+
+        let mut schedule_clear = base();
+        schedule_clear["command"] = json!("work_schedule_update_v1");
+        schedule_clear["work_id"] = json!("service-work");
+        schedule_clear["schedule_update"] = json!({
+            "schema_version": WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+            "expected_project_revision": schedule_first.revision.unwrap(),
+            "expected_schedule_revision": 1,
+            "schedule": {
+                "not_before": null,
+                "due": null,
+                "planned_start": null,
+                "planned_end": null
+            }
+        });
+        let schedule_clear =
+            application_envelope(&mut handler, "op_s13_schedule_clear", schedule_clear);
+        assert_eq!(schedule_clear.outcome, ApplicationOutcome::Changed);
+        let schedule_clear: WorkScheduleMutationReadbackDto =
+            serde_json::from_value(schedule_clear.data.as_ref().unwrap()["readback"].clone())
+                .expect("schedule clear returns the typed readback");
+        assert_eq!(schedule_clear.schedule_revision, 2);
+        assert_eq!(schedule_clear.schedule.due, None);
+
+        let mut schedule_show = base();
+        schedule_show["command"] = json!("work_schedule_readback_v1");
+        schedule_show["work_id"] = json!("service-work");
+        let schedule_show =
+            application_envelope(&mut handler, "op_s13_schedule_show", schedule_show);
+        let schedule_readback: WorkScheduleReadbackDto =
+            serde_json::from_value(schedule_show.data.unwrap()["readback"].clone())
+                .expect("schedule read returns the typed readback");
+        assert_eq!(
+            schedule_readback.schema_version,
+            WORK_SCHEDULE_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(schedule_readback.schedule_revision, 2);
+        assert!(schedule_readback.schedule.is_some());
+
+        let mut wait_create_request = base();
+        wait_create_request["command"] = json!("external_wait_create_v1");
+        wait_create_request["wait_create"] = json!({
+            "schema_version": EXTERNAL_WAIT_CREATE_SCHEMA_VERSION,
+            "expected_project_revision": schedule_clear.project_revision,
+            "expected_wait_revision": 0,
+            "wait_id": "wait-service-1",
+            "source_work_id": "service-work",
+            "affected_work_ids": ["service-work"],
+            "category": "decision",
+            "reason": "Need the owner to choose a direction",
+            "accountable": {"kind": "person", "reference": "owner-1", "display_name": "Owner"},
+            "expected_decision": "Choose a direction",
+            "expected_output": null,
+            "follow_up": null
+        });
+        let wait_create = application_envelope(
+            &mut handler,
+            "op_s13_wait_create",
+            wait_create_request.clone(),
+        );
+        assert_eq!(wait_create.outcome, ApplicationOutcome::Changed);
+        let wait_readback: ExternalWaitMutationReadbackDto =
+            serde_json::from_value(wait_create.data.as_ref().unwrap()["readback"].clone())
+                .expect("wait creation returns the typed readback");
+        assert_eq!(wait_readback.wait.wait_revision, 1);
+        assert_eq!(
+            wait_readback.wait.state,
+            boreal_protocol::models::ExternalWaitStateDto::Open
+        );
+
+        let wait_create_replay =
+            application_envelope(&mut handler, "op_s13_wait_create", wait_create_request);
+        assert_eq!(wait_create_replay.outcome, ApplicationOutcome::Unchanged);
+        let wait_readback: ExternalWaitMutationReadbackDto =
+            serde_json::from_value(wait_create_replay.data.unwrap()["readback"].clone())
+                .expect("wait create replay returns the typed readback");
+        assert!(wait_readback.replayed);
+
+        let mut wait_list = base();
+        wait_list["command"] = json!("external_wait_readback_v1");
+        let wait_list = application_envelope(&mut handler, "op_s13_wait_list", wait_list);
+        let wait_readback: ExternalWaitReadbackDto =
+            serde_json::from_value(wait_list.data.unwrap()["readback"].clone())
+                .expect("wait list returns the typed readback");
+        assert_eq!(
+            wait_readback.schema_version,
+            EXTERNAL_WAIT_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(wait_readback.waits.len(), 1);
+
+        let mut wait_show = base();
+        wait_show["command"] = json!("external_wait_readback_v1");
+        wait_show["wait_id"] = json!("wait-service-1");
+        let wait_show = application_envelope(&mut handler, "op_s13_wait_show", wait_show);
+        let wait_readback: ExternalWaitReadbackDto =
+            serde_json::from_value(wait_show.data.unwrap()["readback"].clone())
+                .expect("single-wait read returns the typed readback");
+        assert_eq!(wait_readback.waits.len(), 1);
+        assert_eq!(wait_readback.waits[0].wait_id, "wait-service-1");
+
+        let mut wait_resolve_request = base();
+        wait_resolve_request["command"] = json!("external_wait_resolve_v1");
+        wait_resolve_request["wait_resolve"] = json!({
+            "schema_version": EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
+            "expected_project_revision": wait_create.revision,
+            "expected_wait_revision": 1,
+            "wait_id": "wait-service-1",
+            "next_state": "resolved",
+            "outcome": "decision_provided",
+            "detail": "The owner selected the second direction",
+            "output_ref": null,
+            "supplied_by": {"kind": "person", "reference": "owner-1", "display_name": "Owner"}
+        });
+        let wait_resolve = application_envelope(
+            &mut handler,
+            "op_s13_wait_resolve",
+            wait_resolve_request.clone(),
+        );
+        assert_eq!(wait_resolve.outcome, ApplicationOutcome::Changed);
+        let wait_readback: ExternalWaitMutationReadbackDto =
+            serde_json::from_value(wait_resolve.data.as_ref().unwrap()["readback"].clone())
+                .expect("wait resolution returns the typed readback");
+        assert_eq!(wait_readback.wait.wait_revision, 2);
+        let resolution = wait_readback.wait.resolution.as_ref().unwrap();
+        assert_eq!(resolution.recorded_by, DEFAULT_ACTOR);
+        assert_eq!(
+            resolution.recorded_as,
+            boreal_protocol::models::ExternalWaitRoleDto::Operator
+        );
+
+        let wait_replay =
+            application_envelope(&mut handler, "op_s13_wait_resolve", wait_resolve_request);
+        assert_eq!(wait_replay.outcome, ApplicationOutcome::Unchanged);
+        let wait_readback: ExternalWaitMutationReadbackDto =
+            serde_json::from_value(wait_replay.data.unwrap()["readback"].clone())
+                .expect("wait replay returns the typed readback");
+        assert!(wait_readback.replayed);
+
+        let agent_session_revision = register_fixture_session(
+            &handler.store,
+            "service-project",
+            "agent-1",
+            "service-agent-session",
+            "op_s13_agent_session",
+        );
+        let mut agent_update = json!({
+            "command": "project_civil_time_update_v1",
+            "project_id": "service-project",
+            "actor_id": "agent-1",
+            "credential_ref": SERVICE_TEST_AGENT_CREDENTIAL,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "service-agent-session",
+            "civil_time_update": {
+                "schema_version": PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+                "expected_project_revision": agent_session_revision,
+                "expected_setting_revision": 1,
+                "timezone": "America/Edmonton"
+            }
+        });
+        agent_update["credential_ref"] = json!(SERVICE_TEST_AGENT_CREDENTIAL);
+        let denied = application_envelope(&mut handler, "op_s13_agent_civil_time", agent_update);
+        assert_eq!(denied.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code),
+            Some(ErrorCode::PermissionDenied)
+        );
+
+        let direct_read = ParsedCommand {
+            path: vec!["project".into(), "civil-time".into(), "show".into()],
+            options: CliOptions {
+                project: Some("service-project".into()),
+                actor: DEFAULT_ACTOR.into(),
+                session: "service-test-session".into(),
+                json: true,
+                ..CliOptions::default()
+            },
+        };
+        let app = WorkApplication::new(&handler.store);
+        let adapter = SqliteAttemptAdapter::new(&handler.store);
+        let direct = super::super::dispatch(
+            &direct_read,
+            "op_s13_direct_civil_time_show",
+            &app,
+            &adapter,
+            &handler.store,
+        )
+        .expect("the direct CLI dispatch reaches the civil-time read route");
+        let direct_readback: ProjectCivilTimeReadbackDto =
+            serde_json::from_value(direct.data.unwrap()["readback"].clone())
+                .expect("direct CLI route returns the typed readback");
+        assert_eq!(direct_readback.setting.unwrap().timezone, "America/Regina");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scheduling_cli_requests_cross_the_typed_versioned_boundary() {
+        let root = temp_path("scheduling-cli-request-dtos");
+        fs::create_dir_all(&root).expect("request fixture directory creates");
+        let write_request = |name: &str, value: Value| {
+            let path = root.join(name);
+            fs::write(&path, value.to_string()).expect("typed request fixture writes");
+            path.to_string_lossy().into_owned()
+        };
+        let parsed = |path: &[&str], input: Option<String>, positionals: &[&str]| ParsedCommand {
+            path: path.iter().map(|part| (*part).to_owned()).collect(),
+            options: CliOptions {
+                project: Some("service-project".to_owned()),
+                input,
+                positionals: positionals.iter().map(|part| (*part).to_owned()).collect(),
+                ..CliOptions::default()
+            },
+        };
+
+        let civil_time = write_request(
+            "civil-time.json",
+            json!({
+                "schema_version": PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+                "expected_project_revision": 9,
+                "expected_setting_revision": 0,
+                "timezone": "America/Regina"
+            }),
+        );
+        let civil_time_command = parsed(&["project", "civil-time", "set"], Some(civil_time), &[]);
+        assert!(supports(&civil_time_command));
+        let civil_time_data = request_data(&civil_time_command, "op_s13_cli_civil_time").unwrap();
+        assert_eq!(civil_time_data["command"], "project_civil_time_update_v1");
+        assert_eq!(
+            civil_time_data["civil_time_update"]["expected_project_revision"],
+            9
+        );
+
+        let schedule = write_request(
+            "schedule.json",
+            json!({
+                "schema_version": WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+                "expected_project_revision": 10,
+                "expected_schedule_revision": 0,
+                "schedule": {
+                    "not_before": null,
+                    "due": null,
+                    "planned_start": null,
+                    "planned_end": null
+                }
+            }),
+        );
+        let schedule_command = parsed(
+            &["work", "schedule", "set"],
+            Some(schedule),
+            &["service-work"],
+        );
+        let schedule_data = request_data(&schedule_command, "op_s13_cli_schedule").unwrap();
+        assert_eq!(schedule_data["command"], "work_schedule_update_v1");
+        assert_eq!(schedule_data["work_id"], "service-work");
+        assert!(schedule_data["schedule_update"]["schedule"]["due"].is_null());
+
+        let incomplete_schedule = write_request(
+            "incomplete-schedule.json",
+            json!({
+                "schema_version": WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+                "expected_project_revision": 10,
+                "expected_schedule_revision": 0,
+                "schedule": {
+                    "not_before": null,
+                    "due": null,
+                    "planned_start": null
+                }
+            }),
+        );
+        let incomplete_command = parsed(
+            &["work", "schedule", "set"],
+            Some(incomplete_schedule),
+            &["service-work"],
+        );
+        assert!(request_data(&incomplete_command, "op_s13_cli_schedule_incomplete").is_err());
+
+        let wait_create = write_request(
+            "wait-create.json",
+            json!({
+                "schema_version": EXTERNAL_WAIT_CREATE_SCHEMA_VERSION,
+                "expected_project_revision": 11,
+                "expected_wait_revision": 0,
+                "wait_id": "wait-cli-1",
+                "source_work_id": "service-work",
+                "affected_work_ids": ["service-work"],
+                "category": "decision",
+                "reason": "Need a decision",
+                "accountable": {"kind": "person", "reference": "owner-1", "display_name": "Owner"},
+                "expected_decision": "Choose a direction",
+                "expected_output": null,
+                "follow_up": null
+            }),
+        );
+        let create_command = parsed(&["wait", "create"], Some(wait_create), &[]);
+        let create_data = request_data(&create_command, "op_s13_cli_wait_create").unwrap();
+        let decoded: ExternalWaitCreateDto =
+            serde_json::from_value(create_data["wait_create"].clone())
+                .expect("service input uses the strict wait-create DTO");
+        assert_eq!(decoded.expected_wait_revision, 0);
+        assert_eq!(
+            decoded.expected_decision.0.as_deref(),
+            Some("Choose a direction")
+        );
+
+        let wait_resolve = write_request(
+            "wait-resolve.json",
+            json!({
+                "schema_version": EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
+                "expected_project_revision": 12,
+                "expected_wait_revision": 1,
+                "wait_id": "wait-cli-1",
+                "next_state": "resolved",
+                "outcome": "decision_provided",
+                "detail": "The owner chose an option",
+                "output_ref": null,
+                "supplied_by": {"kind": "person", "reference": "owner-1", "display_name": "Owner"}
+            }),
+        );
+        let resolve_command = parsed(&["wait", "resolve"], Some(wait_resolve), &[]);
+        let resolve_data = request_data(&resolve_command, "op_s13_cli_wait_resolve").unwrap();
+        assert_eq!(resolve_data["command"], "external_wait_resolve_v1");
+        assert!(resolve_data["wait_resolve"]["output_ref"].is_null());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

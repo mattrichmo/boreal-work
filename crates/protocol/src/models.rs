@@ -2207,3 +2207,373 @@ pub struct WorkActionDecisionDto {
     pub allowed: Vec<WorkActionDescriptorDto>,
     pub denied: Vec<DeniedWorkActionDto>,
 }
+
+// S13 date and external-wait command boundary. These DTOs intentionally keep
+// actor, session, operation and trusted observation time in the authenticated
+// CLI/service envelope rather than accepting them from request JSON.
+pub const PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION: &str = "boreal.project_civil_time_update.v1";
+pub const PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION: &str =
+    "boreal.project_civil_time_readback.v1";
+pub const WORK_SCHEDULE_UPDATE_SCHEMA_VERSION: &str = "boreal.work_schedule_update.v1";
+pub const WORK_SCHEDULE_READBACK_SCHEMA_VERSION: &str = "boreal.work_schedule_readback.v1";
+pub const EXTERNAL_WAIT_CREATE_SCHEMA_VERSION: &str = "boreal.external_wait_create.v1";
+pub const EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION: &str = "boreal.external_wait_resolve.v1";
+pub const EXTERNAL_WAIT_READBACK_SCHEMA_VERSION: &str = "boreal.external_wait_readback.v1";
+
+/// A required JSON key whose value may explicitly be `null`. Serde rejects a
+/// missing key because this wrapper itself has no default implementation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RequiredNullableDto<T>(pub Option<T>);
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> Result<RequiredNullableDto<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(RequiredNullableDto)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCivilTimeUpdateDto {
+    pub schema_version: String,
+    pub expected_project_revision: u64,
+    pub expected_setting_revision: u64,
+    pub timezone: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCivilTimeSettingDto {
+    pub setting_revision: u64,
+    pub timezone: String,
+    pub tzdb_identity: String,
+    pub changed_by: String,
+    pub changed_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCivilTimeReadbackDto {
+    pub schema_version: String,
+    pub project_revision: u64,
+    pub setting: Option<ProjectCivilTimeSettingDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCivilTimeMutationReadbackDto {
+    pub schema_version: String,
+    pub operation_id: String,
+    pub replayed: bool,
+    pub project_revision: u64,
+    pub setting: ProjectCivilTimeSettingDto,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BusinessDateDto {
+    Instant {
+        at_ms: u64,
+    },
+    LocalDate {
+        year: i32,
+        month: u8,
+        day: u8,
+    },
+    ResolvedLocal {
+        nominal_local: LocalDateTimeDto,
+        utc_instant_ms: u64,
+        utc_offset_minutes: i32,
+        timezone: String,
+        tzdb_identity: String,
+        gap_policy: GapPolicyDto,
+        fold_policy: FoldPolicyDto,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GapPolicyDto {
+    NextValid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FoldPolicyDto {
+    EarlierOffset,
+    LaterOffset,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusinessScheduleUpdateDto {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub not_before: RequiredNullableDto<BusinessDateDto>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub due: RequiredNullableDto<BusinessDateDto>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub planned_start: RequiredNullableDto<BusinessDateDto>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub planned_end: RequiredNullableDto<BusinessDateDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusinessScheduleDto {
+    pub not_before: Option<BusinessDateDto>,
+    pub due: Option<BusinessDateDto>,
+    pub planned_start: Option<BusinessDateDto>,
+    pub planned_end: Option<BusinessDateDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkScheduleUpdateDto {
+    pub schema_version: String,
+    pub expected_project_revision: u64,
+    pub expected_schedule_revision: u64,
+    pub schedule: BusinessScheduleUpdateDto,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkScheduleReadbackDto {
+    pub schema_version: String,
+    pub project_revision: u64,
+    pub work_id: String,
+    pub schedule_revision: u64,
+    /// `None` means no revisioned schedule exists. A present schedule with
+    /// four null fields is a durable clear at a positive revision.
+    pub schedule: Option<BusinessScheduleDto>,
+    pub legacy_due_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkScheduleMutationReadbackDto {
+    pub schema_version: String,
+    pub operation_id: String,
+    pub replayed: bool,
+    pub project_revision: u64,
+    pub work_id: String,
+    pub schedule_revision: u64,
+    pub schedule: BusinessScheduleDto,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalWaitCategoryDto {
+    Decision,
+    Approval,
+    Information,
+    Access,
+    Service,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalWaitStateDto {
+    Open,
+    Resolved,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalWaitOutcomeDto {
+    Approved,
+    Rejected,
+    DecisionProvided,
+    OutputProvided,
+    Declined,
+    Unavailable,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalWaitRoleDto {
+    Agent,
+    Operator,
+    Reviewer,
+    Publisher,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalWaitAccountableDto {
+    Person {
+        reference: String,
+        display_name: String,
+    },
+    Role {
+        role: ExternalWaitRoleDto,
+    },
+    Service {
+        reference: String,
+        display_name: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWaitResolutionDto {
+    pub outcome: ExternalWaitOutcomeDto,
+    pub detail: String,
+    pub output_ref: Option<String>,
+    pub supplied_by: ExternalWaitAccountableDto,
+    pub recorded_by: String,
+    pub recorded_as: ExternalWaitRoleDto,
+    pub recorded_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWaitDto {
+    pub wait_id: String,
+    pub source_work_id: String,
+    pub affected_work_ids: Vec<String>,
+    pub category: ExternalWaitCategoryDto,
+    pub reason: String,
+    pub accountable: ExternalWaitAccountableDto,
+    pub expected_decision: Option<String>,
+    pub expected_output: Option<String>,
+    pub follow_up: Option<BusinessDateDto>,
+    pub civil_time_setting_revision: Option<u64>,
+    pub wait_revision: u64,
+    pub state: ExternalWaitStateDto,
+    pub created_by: String,
+    pub created_at_ms: u64,
+    pub resolution: Option<ExternalWaitResolutionDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWaitCreateDto {
+    pub schema_version: String,
+    pub expected_project_revision: u64,
+    pub expected_wait_revision: u64,
+    pub wait_id: String,
+    pub source_work_id: String,
+    pub affected_work_ids: Vec<String>,
+    pub category: ExternalWaitCategoryDto,
+    pub reason: String,
+    pub accountable: ExternalWaitAccountableDto,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub expected_decision: RequiredNullableDto<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub expected_output: RequiredNullableDto<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub follow_up: RequiredNullableDto<BusinessDateDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWaitResolveDto {
+    pub schema_version: String,
+    pub expected_project_revision: u64,
+    pub expected_wait_revision: u64,
+    pub wait_id: String,
+    pub next_state: ExternalWaitStateDto,
+    pub outcome: ExternalWaitOutcomeDto,
+    pub detail: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub output_ref: RequiredNullableDto<String>,
+    pub supplied_by: ExternalWaitAccountableDto,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWaitReadbackDto {
+    pub schema_version: String,
+    pub project_revision: u64,
+    pub waits: Vec<ExternalWaitDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWaitMutationReadbackDto {
+    pub schema_version: String,
+    pub operation_id: String,
+    pub replayed: bool,
+    pub project_revision: u64,
+    pub wait: ExternalWaitDto,
+}
+
+#[cfg(test)]
+mod scheduling_dto_tests {
+    use super::*;
+
+    #[test]
+    fn schedule_mutations_require_every_explicit_nullable_field() {
+        let request = serde_json::json!({
+            "schema_version": WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+            "expected_project_revision": 12,
+            "expected_schedule_revision": 0,
+            "schedule": {
+                "not_before": null,
+                "due": {"kind": "local_date", "year": 2026, "month": 10, "day": 14},
+                "planned_start": null,
+                "planned_end": null
+            }
+        });
+        let decoded: WorkScheduleUpdateDto = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(
+            decoded.schedule.due.0,
+            Some(BusinessDateDto::LocalDate {
+                year: 2026,
+                month: 10,
+                day: 14,
+            })
+        );
+        assert_eq!(serde_json::to_value(decoded).unwrap(), request);
+
+        let mut missing_clear = request.clone();
+        missing_clear["schedule"]
+            .as_object_mut()
+            .unwrap()
+            .remove("planned_end");
+        assert!(serde_json::from_value::<WorkScheduleUpdateDto>(missing_clear).is_err());
+
+        let mut unknown = request;
+        unknown["schedule"]["extra"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<WorkScheduleUpdateDto>(unknown).is_err());
+    }
+
+    #[test]
+    fn wait_mutations_reject_unknown_keys_and_missing_nullable_values() {
+        let request = serde_json::json!({
+            "schema_version": EXTERNAL_WAIT_CREATE_SCHEMA_VERSION,
+            "expected_project_revision": 7,
+            "expected_wait_revision": 0,
+            "wait_id": "wait_01",
+            "source_work_id": "work_01",
+            "affected_work_ids": ["work_01"],
+            "category": "decision",
+            "reason": "Need a decision",
+            "accountable": {"kind": "person", "reference": "person_01", "display_name": "Owner"},
+            "expected_decision": "Choose one option",
+            "expected_output": null,
+            "follow_up": null
+        });
+        let decoded: ExternalWaitCreateDto = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(decoded.expected_output.0, None);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), request);
+
+        let mut missing_nullable = request.clone();
+        missing_nullable
+            .as_object_mut()
+            .unwrap()
+            .remove("follow_up");
+        assert!(serde_json::from_value::<ExternalWaitCreateDto>(missing_nullable).is_err());
+
+        let mut unknown = request;
+        unknown["untrusted_actor_id"] = serde_json::json!("operator");
+        assert!(serde_json::from_value::<ExternalWaitCreateDto>(unknown).is_err());
+    }
+}

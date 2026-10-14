@@ -1,21 +1,28 @@
 use boreal_application::{
-    canonical_request_digest, resolve_planning_acceptance_profile, sha256_content_digest,
-    AcceptanceGateDefinition, ApplicationError, ArtifactAcceptanceRequest, AttemptPolicy,
-    AttemptRequest, AuthenticatedOperationJournal, BoundedExecutionResult, CommandSpec,
-    EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest, ExecutorAttestation,
-    IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle,
-    KnowledgeApplication, LivenessMetadata, OperationResult, PlanningScope, ProducedArtifactInput,
-    ReceiptCoverage, ReceiptExpectation, ReceiptPayload, SessionRegistrationRequest,
-    SourceCaptureInput, SqliteAttemptAdapter, SummaryPayload, WorkApplication,
-    WorkPlanningEditV3Input, WorkflowRegistry,
+    canonical_request_digest, plan_project_civil_time_update, resolve_planning_acceptance_profile,
+    sha256_content_digest, AcceptanceGateDefinition, ApplicationError, ArtifactAcceptanceRequest,
+    AttemptPolicy, AttemptRequest, AuthenticatedOperationJournal, BoundedExecutionResult,
+    CommandSpec, EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest,
+    ExecutorAttestation, ExternalWaitCreateRequest, ExternalWaitResolutionRequest, IntakeBucket,
+    IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle, KnowledgeApplication,
+    LivenessMetadata, OperationResult, PlanningScope, ProducedArtifactInput,
+    ProjectCivilTimeUpdateRequest, ReceiptCoverage, ReceiptExpectation, ReceiptPayload,
+    SchedulingSnapshot, SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter,
+    SummaryPayload, SystemTimeZoneDatabase, WorkApplication, WorkPlanningEditV3Input,
+    WorkScheduleUpdateRequest, WorkflowRegistry,
 };
-use boreal_domain::work_model_v3::ExecutionMode;
+use boreal_domain::work_model_v3::{
+    BusinessDate, BusinessSchedule, DirectDependency, ExecutionMode, ExternalWait,
+    ExternalWaitAccountable, ExternalWaitCategory, ExternalWaitId, ExternalWaitOutcome,
+    ExternalWaitResolution, ExternalWaitState, FoldPolicy, GapPolicy, LocalDate, LocalDateTime,
+    LocalTime, ProjectCivilTimeSetting, TimeResolution, WorkNode,
+};
 use boreal_domain::{
-    AcceptanceProfile, AcceptedResultIdentity, ActorId, ArtifactProductionIdentity, AttemptId,
-    AttemptPhase, ConfigIdentity, DeliverableCriterion, DeliverableRequirement, DeliverableType,
-    DispatchPolicy, Fence, GateId, GateKind, HarnessId, InputArtifactRef, InputArtifactRole,
-    InputArtifactScope, OperationId, PersistedLifecycle, ProjectId, ReasonCode, ReceiptId,
-    ReceiptResult, SessionId, SourceVersionId, TimestampMs, WorkId, WorkItem, WorkKind,
+    AcceptanceProfile, AcceptedResultIdentity, ActorId, ActorRole, ArtifactProductionIdentity,
+    AttemptId, AttemptPhase, ConfigIdentity, DeliverableCriterion, DeliverableRequirement,
+    DeliverableType, DispatchPolicy, Fence, GateId, GateKind, HarnessId, InputArtifactRef,
+    InputArtifactRole, InputArtifactScope, OperationId, PersistedLifecycle, ProjectId, ReasonCode,
+    ReceiptId, ReceiptResult, SessionId, SourceVersionId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
 use boreal_protocol::{
     models::{
@@ -23,14 +30,25 @@ use boreal_protocol::{
         ArtifactResultAvailabilityDto, ArtifactResultBindReadbackDto, ArtifactResultBindRequestDto,
         ArtifactResultCriterionDto, ArtifactResultOutputReadbackDto, ArtifactResultReadbackDto,
         ArtifactResultRecordDto, ArtifactResultRightsDto, ArtifactResultSourceIdentityDto,
-        CloseReadinessGapDto, CloseReadinessGateDto, CloseReadinessReadbackDto, ContextRefDto,
-        CoverageDto, DeliverableCriterionV2Dto, DeliverableRequirementV2Dto, DeliverableTypeDto,
-        GuidanceContextDto, GuidanceProvenanceDto, GuidanceStatusDto, InputArtifactRoleV2Dto,
-        InputArtifactScopeV2Dto, NextActionDto, NextReasonDto, NextStatusDto, ReceiptDto,
-        ReceiptSubjectDto, RequirementDto, SubjectDto, WorkflowAssetDto, WorkflowCriterionDto,
-        WorkflowInputDto, WorkflowPackageDto, WorkflowShowDto,
-        ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION, ARTIFACT_RESULT_BIND_SCHEMA_VERSION,
-        ARTIFACT_RESULT_READBACK_SCHEMA_VERSION, CLOSE_READINESS_READBACK_SCHEMA_VERSION,
+        BusinessDateDto, BusinessScheduleDto, BusinessScheduleUpdateDto, CloseReadinessGapDto,
+        CloseReadinessGateDto, CloseReadinessReadbackDto, ContextRefDto, CoverageDto,
+        DeliverableCriterionV2Dto, DeliverableRequirementV2Dto, DeliverableTypeDto,
+        ExternalWaitAccountableDto, ExternalWaitCategoryDto, ExternalWaitCreateDto,
+        ExternalWaitDto, ExternalWaitMutationReadbackDto, ExternalWaitOutcomeDto,
+        ExternalWaitReadbackDto, ExternalWaitResolutionDto, ExternalWaitResolveDto,
+        ExternalWaitRoleDto, ExternalWaitStateDto, FoldPolicyDto, GapPolicyDto, GuidanceContextDto,
+        GuidanceProvenanceDto, GuidanceStatusDto, InputArtifactRoleV2Dto, InputArtifactScopeV2Dto,
+        LocalDateTimeDto, NextActionDto, NextReasonDto, NextStatusDto,
+        ProjectCivilTimeMutationReadbackDto, ProjectCivilTimeReadbackDto,
+        ProjectCivilTimeSettingDto, ProjectCivilTimeUpdateDto, ReceiptDto, ReceiptSubjectDto,
+        RequirementDto, SubjectDto, WorkScheduleMutationReadbackDto, WorkScheduleReadbackDto,
+        WorkScheduleUpdateDto, WorkflowAssetDto, WorkflowCriterionDto, WorkflowInputDto,
+        WorkflowPackageDto, WorkflowShowDto, ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION,
+        ARTIFACT_RESULT_BIND_SCHEMA_VERSION, ARTIFACT_RESULT_READBACK_SCHEMA_VERSION,
+        CLOSE_READINESS_READBACK_SCHEMA_VERSION, EXTERNAL_WAIT_CREATE_SCHEMA_VERSION,
+        EXTERNAL_WAIT_READBACK_SCHEMA_VERSION, EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
+        PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION, PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+        WORK_SCHEDULE_READBACK_SCHEMA_VERSION, WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
     },
     schema, ApplicationOutcome, DetailReference, Envelope, ErrorCode, ProtocolError,
     TransportOutcome, API_VERSION,
@@ -42,10 +60,11 @@ use boreal_store::{
         AcceptanceResultRecord, AcceptanceStore, ArtifactInspectionAvailability,
         CompletionAttestationInput,
     },
-    AuditEventRecord, EvidenceExecutionState, MaintenanceJobInput, MaintenanceJobTransition,
-    OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation, ReceiptOutcome,
-    ReceiptRecord, SqliteBackupPackageReport, SqliteRestorePackageReport, SqliteStore, StoreError,
-    WorkRecord,
+    AuditEventRecord, EvidenceExecutionState, ExternalWaitV1Input, MaintenanceJobInput,
+    MaintenanceJobTransition, OperationOutcome as StoreOperationOutcome, OperationRecord,
+    ProjectCivilTimeV1Input, ReceiptAttestation, ReceiptOutcome, ReceiptRecord,
+    SqliteBackupPackageReport, SqliteRestorePackageReport, SqliteStore, StoreError,
+    V3MutationContext, WorkRecord, WorkScheduleV3Input,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -194,6 +213,14 @@ Usage:
   bwrk artifact result bind --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
   bwrk artifact result attempt --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--socket PATH --json]
   bwrk artifact result operation --project PROJECT OPERATION_ID [--socket PATH --json]
+  bwrk project civil-time set --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk project civil-time show --project PROJECT [--socket PATH --json]
+  bwrk work schedule set --project PROJECT WORK_ID --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk work schedule show --project PROJECT WORK_ID [--socket PATH --json]
+  bwrk wait create --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk wait resolve --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk wait list --project PROJECT [--socket PATH --json]
+  bwrk wait show --project PROJECT WAIT_ID [--socket PATH --json]
   bwrk gate policy publish --project PROJECT --gate GATE_ID --input PATH --expected-revision N --yes [--socket PATH] [--json]
   bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]
   bwrk session start --project PROJECT --session SESSION_ID --harness HARNESS_ID [--json]
@@ -1816,6 +1843,14 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         }
         ["artifact", "result", "attempt"] => artifact_result_for_attempt_command(parsed, app),
         ["artifact", "result", "operation"] => artifact_result_for_operation_command(parsed, app),
+        ["project", "civil-time", "set"]
+        | ["project", "civil-time", "show"]
+        | ["work", "schedule", "set"]
+        | ["work", "schedule", "show"]
+        | ["wait", "create"]
+        | ["wait", "resolve"]
+        | ["wait", "list"]
+        | ["wait", "show"] => scheduling_route(parsed, operation, app, store),
         ["evidence", "run"] => evidence_run_result(
             parsed,
             app,
@@ -2509,6 +2544,19 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
             positionals == 1 + usize::from(options.project.is_none())
         }
         ["work", "hold", "resolve"] => positionals == 2 + usize::from(options.project.is_none()),
+        ["project", "civil-time", "set"] => {
+            positionals == usize::from(options.project.is_none()) && options.input.is_some()
+        }
+        ["project", "civil-time", "show"] => positionals == usize::from(options.project.is_none()),
+        ["work", "schedule", "set"] => {
+            positionals == 1 + usize::from(options.project.is_none()) && options.input.is_some()
+        }
+        ["work", "schedule", "show"] => positionals == 1 + usize::from(options.project.is_none()),
+        ["wait", "create"] | ["wait", "resolve"] => {
+            positionals == usize::from(options.project.is_none()) && options.input.is_some()
+        }
+        ["wait", "list"] => positionals == usize::from(options.project.is_none()),
+        ["wait", "show"] => positionals == 1 + usize::from(options.project.is_none()),
         ["dep", "tree"] | ["dep", "cycles"] => {
             positionals == usize::from(options.project.is_none())
         }
@@ -7705,6 +7753,1102 @@ fn evidence_bind_result_result(
     })
 }
 
+fn scheduling_route(
+    parsed: &ParsedCommand,
+    operation: &str,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let actor = parsed.options.actor.clone();
+    let session = parsed.options.session.clone();
+    match parsed
+        .path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["project", "civil-time", "set"] => {
+            let request: ProjectCivilTimeUpdateDto =
+                read_scheduling_request(parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("project civil-time set requires --input REQUEST.json")
+                })?)?;
+            project_civil_time_set(&project, &actor, &session, operation, request, app, store)
+        }
+        ["project", "civil-time", "show"] => project_civil_time_show(&project, store),
+        ["work", "schedule", "set"] => {
+            let index = usize::from(parsed.options.project.is_none());
+            let work_id =
+                parsed.options.positionals.get(index).ok_or_else(|| {
+                    CliError::invalid("work schedule set requires a work identifier")
+                })?;
+            let request: WorkScheduleUpdateDto =
+                read_scheduling_request(parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("work schedule set requires --input REQUEST.json")
+                })?)?;
+            work_schedule_set(
+                &project, work_id, &actor, &session, operation, request, app, store,
+            )
+        }
+        ["work", "schedule", "show"] => {
+            let index = usize::from(parsed.options.project.is_none());
+            let work_id = parsed.options.positionals.get(index).ok_or_else(|| {
+                CliError::invalid("work schedule show requires a work identifier")
+            })?;
+            work_schedule_show(&project, work_id, store)
+        }
+        ["wait", "create"] => {
+            let request: ExternalWaitCreateDto =
+                read_scheduling_request(parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("wait create requires --input REQUEST.json")
+                })?)?;
+            external_wait_create(&project, &actor, &session, operation, request, app, store)
+        }
+        ["wait", "resolve"] => {
+            let request: ExternalWaitResolveDto =
+                read_scheduling_request(parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("wait resolve requires --input REQUEST.json")
+                })?)?;
+            external_wait_resolve(&project, &actor, &session, operation, request, app, store)
+        }
+        ["wait", "list"] => external_wait_read(&project, None, store),
+        ["wait", "show"] => {
+            let index = usize::from(parsed.options.project.is_none());
+            let wait_id = parsed
+                .options
+                .positionals
+                .get(index)
+                .ok_or_else(|| CliError::invalid("wait show requires a wait identifier"))?;
+            external_wait_read(&project, Some(wait_id), store)
+        }
+        _ => Err(CliError::invalid("unknown scheduling route")),
+    }
+}
+
+fn read_scheduling_request<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, CliError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("cannot read request file {path}: {error}"),
+        )
+    })?;
+    if metadata.len() > MAX_JSON_BYTES as u64 {
+        return Err(CliError::invalid(
+            "scheduling request exceeds the JSON size limit",
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| CliError::invalid(error.to_string()))?;
+    if bytes.len() > MAX_JSON_BYTES {
+        return Err(CliError::invalid(
+            "scheduling request exceeds the JSON size limit",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        CliError::invalid(format!("invalid versioned scheduling request: {error}"))
+    })
+}
+
+fn require_scheduling_schema(actual: &str, expected: &str) -> Result<(), CliError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Rejected,
+            format!("unsupported scheduling request schema; expected {expected}, found {actual}"),
+        ))
+    }
+}
+
+fn ensure_scheduling_enabled(app: &WorkApplication<'_>) -> Result<(), CliError> {
+    if app.work_model_v3_enabled().map_err(map_application_error)? {
+        Ok(())
+    } else {
+        Err(CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Rejected,
+            "date and external-wait routes require the registered work-model/3 schema",
+        ))
+    }
+}
+
+fn scheduling_snapshot(
+    store: &SqliteStore,
+    project_id: &str,
+    planning_revision: u64,
+) -> Result<SchedulingSnapshot, CliError> {
+    for _ in 0..3 {
+        let status = store
+            .read_project_status(project_id)
+            .map_err(map_store_error)?;
+        let nodes = store
+            .work_nodes_v3(project_id)
+            .map_err(map_store_error)?
+            .into_iter()
+            .map(|record| {
+                let project = ProjectId::new(record.project_id);
+                let work_id = WorkId::new(record.work_id);
+                let parent_id = record.parent_id.map(WorkId::new);
+                match record.decomposition_kind.as_str() {
+                    "milestone" if record.execution_mode == "container" => {
+                        Ok(WorkNode::milestone(project, work_id, ""))
+                    }
+                    "task" => {
+                        let mode = match record.execution_mode.as_str() {
+                            "direct" => ExecutionMode::Direct,
+                            "container" => ExecutionMode::Container,
+                            _ => {
+                                return Err(StoreError::Corrupt(
+                                    "unknown work execution mode".into(),
+                                ))
+                            }
+                        };
+                        Ok(WorkNode::task(project, work_id, mode, parent_id, ""))
+                    }
+                    _ => Err(StoreError::Corrupt(
+                        "unknown work decomposition kind".into(),
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_store_error)?;
+        let dependencies = status
+            .dependencies
+            .into_iter()
+            .map(|edge| DirectDependency {
+                blocker_id: edge.prerequisite_id,
+                blocked_id: edge.dependent_id,
+            })
+            .collect();
+        let project_civil_time = store
+            .project_civil_time_v1(project_id)
+            .map_err(map_store_error)?;
+        let schedules = store
+            .work_schedules_v3(project_id)
+            .map_err(map_store_error)?;
+        let external_waits = store
+            .external_waits_v1(project_id)
+            .map_err(map_store_error)?;
+        let after = store
+            .project_revision(project_id)
+            .map_err(map_store_error)?
+            .0;
+        if status.revision.0 == after {
+            return Ok(SchedulingSnapshot {
+                project_id: ProjectId::new(project_id),
+                revision: planning_revision,
+                project_civil_time,
+                nodes,
+                dependencies,
+                schedules,
+                external_waits,
+            });
+        }
+    }
+    Err(CliError::with(
+        ErrorCode::RevisionConflict,
+        ApplicationOutcome::Conflict,
+        "project changed while reading date and external-wait planning facts; refresh and retry",
+    ))
+}
+
+fn scheduling_replay_candidate(
+    store: &SqliteStore,
+    project: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    command: &str,
+    expected_revision: u64,
+) -> Result<bool, CliError> {
+    let Some(existing) = store.operation(operation).map_err(map_store_error)? else {
+        return Ok(false);
+    };
+    Ok(existing.project_id == project
+        && existing.actor_id == actor
+        && existing.session_id.as_deref() == Some(session)
+        && existing.command == command
+        && existing.expected_revision == Some(expected_revision)
+        && existing.outcome == StoreOperationOutcome::Changed)
+}
+
+fn project_civil_time_set(
+    project: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    request: ProjectCivilTimeUpdateDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    require_scheduling_schema(
+        &request.schema_version,
+        PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+    )?;
+    ensure_scheduling_enabled(app)?;
+    let replay = scheduling_replay_candidate(
+        store,
+        project,
+        actor,
+        session,
+        operation,
+        "project.civil-time.update.v1",
+        request.expected_project_revision,
+    )?;
+    let mut snapshot = scheduling_snapshot(store, project, request.expected_project_revision)?;
+    let timestamp = if replay {
+        let current = snapshot.project_civil_time.as_ref().ok_or_else(|| {
+            CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "civil-time update replay readback is missing",
+            )
+        })?;
+        if current.revision != request.expected_setting_revision.saturating_add(1) {
+            return Err(CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "civil-time update is no longer the current revision; inspect operation readback",
+            ));
+        }
+        current.changed_at
+    } else {
+        TimestampMs::from_millis(now_ms_u64())
+    };
+    if replay {
+        if request.expected_setting_revision == 0 {
+            snapshot.project_civil_time = None;
+        } else if let Some(setting) = snapshot.project_civil_time.as_mut() {
+            setting.revision = request.expected_setting_revision;
+        }
+    }
+    let identity = SystemTimeZoneDatabase::system()
+        .resolve(
+            &request.timezone,
+            LocalDateTime::new(LocalDate::new(1970, 1, 1), LocalTime::new(0, 0, 0)),
+            GapPolicy::NextValid,
+            FoldPolicy::EarlierOffset,
+        )
+        .map_err(|error| map_application_error(ApplicationError::from(error)))?;
+    let scope = PlanningScope::new(ProjectId::new(project), actor.to_owned())
+        .with_session(session.to_owned())
+        .at_revision(request.expected_project_revision);
+    let plan = plan_project_civil_time_update(
+        &snapshot,
+        &ProjectCivilTimeUpdateRequest {
+            scope,
+            operation_id: operation.to_owned(),
+            expected_setting_revision: request.expected_setting_revision,
+            timezone: request.timezone,
+            tzdb_identity: identity.tzdb_identity,
+            updated_at: timestamp,
+        },
+        &SystemTimeZoneDatabase::system(),
+    )
+    .map_err(|error| map_application_error(ApplicationError::from(error)))?;
+    let mutation = store
+        .update_project_civil_time_v1(
+            &V3MutationContext {
+                project_id: plan.project_id.to_string(),
+                actor_id: plan.actor_id,
+                session_id: plan.session_id,
+                operation_id: plan.operation_id.clone(),
+                request_digest: plan.request_digest,
+                expected_revision: Some(plan.expected_revision),
+                now: stamp(timestamp.as_millis()),
+            },
+            &ProjectCivilTimeV1Input {
+                setting: plan.value,
+                expected_setting_revision: request.expected_setting_revision,
+            },
+        )
+        .map_err(map_store_error)?;
+    let setting = store
+        .project_civil_time_v1(project)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            CliError::invalid("civil-time update completed without a setting readback")
+        })?;
+    let readback = ProjectCivilTimeMutationReadbackDto {
+        schema_version: PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION.to_owned(),
+        operation_id: operation.to_owned(),
+        replayed: mutation.replayed,
+        project_revision: mutation.revision,
+        setting: civil_time_setting_dto(&setting),
+    };
+    scheduling_cli_result(
+        "project_civil_time_update_v1",
+        readback,
+        mutation.revision,
+        mutation.replayed,
+    )
+}
+
+fn project_civil_time_show(project: &str, store: &SqliteStore) -> Result<CliResult, CliError> {
+    let revision = store.project_revision(project).map_err(map_store_error)?.0;
+    let setting = store
+        .project_civil_time_v1(project)
+        .map_err(map_store_error)?;
+    let readback = ProjectCivilTimeReadbackDto {
+        schema_version: PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION.to_owned(),
+        project_revision: revision,
+        setting: setting.as_ref().map(civil_time_setting_dto),
+    };
+    scheduling_read_cli_result("project_civil_time_readback_v1", readback, revision)
+}
+
+fn work_schedule_set(
+    project: &str,
+    work_id: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    request: WorkScheduleUpdateDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    require_scheduling_schema(&request.schema_version, WORK_SCHEDULE_UPDATE_SCHEMA_VERSION)?;
+    ensure_scheduling_enabled(app)?;
+    let replay = scheduling_replay_candidate(
+        store,
+        project,
+        actor,
+        session,
+        operation,
+        "work.schedule.update.v3",
+        request.expected_project_revision,
+    )?;
+    let mut snapshot = scheduling_snapshot(store, project, request.expected_project_revision)?;
+    let current = store
+        .work_schedule_v3(project, work_id)
+        .map_err(map_store_error)?;
+    let timestamp = if replay {
+        let value = current.as_ref().ok_or_else(|| {
+            CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "schedule update replay readback is missing",
+            )
+        })?;
+        if value.revision != request.expected_schedule_revision.saturating_add(1) {
+            return Err(CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "schedule update is no longer the current revision; inspect operation readback",
+            ));
+        }
+        value.updated_at
+    } else {
+        TimestampMs::from_millis(now_ms_u64())
+    };
+    if replay {
+        snapshot
+            .schedules
+            .retain(|record| record.work_id.as_str() != work_id);
+        if let Some(mut record) = current.clone() {
+            if request.expected_schedule_revision > 0 {
+                record.revision = request.expected_schedule_revision;
+                snapshot.schedules.push(record);
+            }
+        }
+    }
+    let schedule = schedule_from_update_dto(request.schedule)?;
+    let scope = PlanningScope::new(ProjectId::new(project), actor.to_owned())
+        .with_session(session.to_owned())
+        .at_revision(request.expected_project_revision);
+    let plan = app
+        .plan_work_schedule_update(
+            &snapshot,
+            &WorkScheduleUpdateRequest {
+                scope,
+                operation_id: operation.to_owned(),
+                work_id: WorkId::parse(work_id.to_owned())
+                    .map_err(|error| CliError::invalid(error.to_string()))?,
+                expected_schedule_revision: request.expected_schedule_revision,
+                schedule,
+                updated_at: timestamp,
+            },
+        )
+        .map_err(map_application_error)?;
+    let mutation = store
+        .append_work_schedule_v3(
+            &V3MutationContext {
+                project_id: plan.project_id.to_string(),
+                actor_id: plan.actor_id,
+                session_id: plan.session_id,
+                operation_id: plan.operation_id.clone(),
+                request_digest: plan.request_digest,
+                expected_revision: Some(plan.expected_revision),
+                now: stamp(timestamp.as_millis()),
+            },
+            &WorkScheduleV3Input {
+                record: plan.value,
+                expected_schedule_revision: request.expected_schedule_revision,
+            },
+        )
+        .map_err(map_store_error)?;
+    let record = store
+        .work_schedule_v3(project, work_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CliError::invalid("schedule update completed without a readback"))?;
+    let readback = WorkScheduleMutationReadbackDto {
+        schema_version: WORK_SCHEDULE_READBACK_SCHEMA_VERSION.to_owned(),
+        operation_id: operation.to_owned(),
+        replayed: mutation.replayed,
+        project_revision: mutation.revision,
+        work_id: record.work_id.to_string(),
+        schedule_revision: record.revision,
+        schedule: business_schedule_dto(&record.schedule),
+    };
+    scheduling_cli_result(
+        "work_schedule_update_v1",
+        readback,
+        mutation.revision,
+        mutation.replayed,
+    )
+}
+
+fn work_schedule_show(
+    project: &str,
+    work_id: &str,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let work = store.work(project, work_id).map_err(map_store_error)?;
+    if work.is_none() {
+        return Err(CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("work item not found: {work_id}"),
+        ));
+    }
+    let revision = store.project_revision(project).map_err(map_store_error)?.0;
+    let record = store
+        .work_schedule_v3(project, work_id)
+        .map_err(map_store_error)?;
+    let legacy_due_at = store
+        .legacy_due_at_v3_if_no_schedule(project, work_id)
+        .map_err(map_store_error)?;
+    let readback = WorkScheduleReadbackDto {
+        schema_version: WORK_SCHEDULE_READBACK_SCHEMA_VERSION.to_owned(),
+        project_revision: revision,
+        work_id: work_id.to_owned(),
+        schedule_revision: record.as_ref().map_or(0, |value| value.revision),
+        schedule: record
+            .as_ref()
+            .map(|value| business_schedule_dto(&value.schedule)),
+        legacy_due_at,
+    };
+    scheduling_read_cli_result("work_schedule_readback_v1", readback, revision)
+}
+
+fn external_wait_create(
+    project: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    request: ExternalWaitCreateDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    require_scheduling_schema(&request.schema_version, EXTERNAL_WAIT_CREATE_SCHEMA_VERSION)?;
+    ensure_scheduling_enabled(app)?;
+    if request.expected_wait_revision != 0 {
+        return Err(CliError::invalid(
+            "new external waits require expected_wait_revision 0",
+        ));
+    }
+    let replay = scheduling_replay_candidate(
+        store,
+        project,
+        actor,
+        session,
+        operation,
+        "external-wait.create.v1",
+        request.expected_project_revision,
+    )?;
+    let mut snapshot = scheduling_snapshot(store, project, request.expected_project_revision)?;
+    let existing = snapshot
+        .external_waits
+        .iter()
+        .find(|wait| wait.id.as_str() == request.wait_id)
+        .cloned();
+    let timestamp = if replay {
+        let value = existing.as_ref().ok_or_else(|| {
+            CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "external-wait create replay readback is missing",
+            )
+        })?;
+        if value.revision != 1 {
+            return Err(CliError::with(ErrorCode::RevisionConflict, ApplicationOutcome::Conflict, "external-wait create is no longer the current revision; inspect operation readback"));
+        }
+        value.created_at
+    } else {
+        TimestampMs::from_millis(now_ms_u64())
+    };
+    if replay {
+        snapshot
+            .external_waits
+            .retain(|wait| wait.id.as_str() != request.wait_id);
+    }
+    let follow_up = request
+        .follow_up
+        .0
+        .map(business_date_from_dto)
+        .transpose()?;
+    let wait = ExternalWait {
+        id: ExternalWaitId::parse(request.wait_id.clone())
+            .map_err(|error| CliError::invalid(error.to_string()))?,
+        project_id: ProjectId::new(project),
+        source_work_id: WorkId::parse(request.source_work_id)
+            .map_err(|error| CliError::invalid(error.to_string()))?,
+        affected_work_ids: request
+            .affected_work_ids
+            .into_iter()
+            .map(WorkId::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| CliError::invalid(error.to_string()))?,
+        category: wait_category_from_dto(request.category),
+        reason: request.reason,
+        accountable: accountable_from_dto(request.accountable),
+        expected_decision: request.expected_decision.0,
+        expected_output: request.expected_output.0,
+        follow_up,
+        civil_time_setting_revision: None,
+        revision: 1,
+        state: ExternalWaitState::Open,
+        created_by: actor.to_owned(),
+        created_at: timestamp,
+        resolution: None,
+    };
+    let scope = PlanningScope::new(ProjectId::new(project), actor.to_owned())
+        .with_session(session.to_owned())
+        .at_revision(request.expected_project_revision);
+    let plan = app
+        .plan_external_wait_create(
+            &snapshot,
+            &ExternalWaitCreateRequest {
+                scope,
+                operation_id: operation.to_owned(),
+                wait,
+            },
+        )
+        .map_err(map_application_error)?;
+    let mutation = store
+        .append_external_wait_v1(
+            &V3MutationContext {
+                project_id: plan.project_id.to_string(),
+                actor_id: plan.actor_id,
+                session_id: plan.session_id,
+                operation_id: plan.operation_id.clone(),
+                request_digest: plan.request_digest,
+                expected_revision: Some(plan.expected_revision),
+                now: stamp(timestamp.as_millis()),
+            },
+            &ExternalWaitV1Input {
+                wait: plan.value,
+                expected_wait_revision: 0,
+            },
+        )
+        .map_err(map_store_error)?;
+    let created = store
+        .external_waits_v1(project)
+        .map_err(map_store_error)?
+        .into_iter()
+        .find(|wait| wait.id.as_str() == request.wait_id)
+        .ok_or_else(|| CliError::invalid("external-wait create completed without a readback"))?;
+    let readback = ExternalWaitMutationReadbackDto {
+        schema_version: EXTERNAL_WAIT_READBACK_SCHEMA_VERSION.to_owned(),
+        operation_id: operation.to_owned(),
+        replayed: mutation.replayed,
+        project_revision: mutation.revision,
+        wait: external_wait_dto(&created),
+    };
+    scheduling_cli_result(
+        "external_wait_create_v1",
+        readback,
+        mutation.revision,
+        mutation.replayed,
+    )
+}
+
+fn external_wait_resolve(
+    project: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    request: ExternalWaitResolveDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    require_scheduling_schema(
+        &request.schema_version,
+        EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
+    )?;
+    ensure_scheduling_enabled(app)?;
+    let next_state = wait_state_from_dto(request.next_state);
+    if !matches!(
+        next_state,
+        ExternalWaitState::Resolved | ExternalWaitState::Cancelled
+    ) {
+        return Err(CliError::invalid(
+            "external-wait resolution requires resolved or cancelled state",
+        ));
+    }
+    let replay = scheduling_replay_candidate(
+        store,
+        project,
+        actor,
+        session,
+        operation,
+        "external-wait.resolve.v1",
+        request.expected_project_revision,
+    )?;
+    let mut snapshot = scheduling_snapshot(store, project, request.expected_project_revision)?;
+    let current = snapshot
+        .external_waits
+        .iter()
+        .find(|wait| wait.id.as_str() == request.wait_id)
+        .cloned()
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("external wait not found: {}", request.wait_id),
+            )
+        })?;
+    let timestamp = if replay {
+        let resolution = current.resolution.as_ref().ok_or_else(|| {
+            CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "external-wait resolution replay readback is missing",
+            )
+        })?;
+        if current.revision != request.expected_wait_revision.saturating_add(1) {
+            return Err(CliError::with(ErrorCode::RevisionConflict, ApplicationOutcome::Conflict, "external-wait resolution is no longer the current revision; inspect operation readback"));
+        }
+        resolution.recorded_at
+    } else {
+        TimestampMs::from_millis(now_ms_u64())
+    };
+    if replay {
+        if let Some(wait) = snapshot
+            .external_waits
+            .iter_mut()
+            .find(|wait| wait.id.as_str() == request.wait_id)
+        {
+            wait.revision = request.expected_wait_revision;
+            wait.state = ExternalWaitState::Open;
+            wait.resolution = None;
+        }
+    }
+    let scope = PlanningScope::new(ProjectId::new(project), actor.to_owned())
+        .with_session(session.to_owned())
+        .at_revision(request.expected_project_revision);
+    let plan = app
+        .plan_external_wait_resolution(
+            &snapshot,
+            &ExternalWaitResolutionRequest {
+                scope,
+                operation_id: operation.to_owned(),
+                wait_id: ExternalWaitId::parse(request.wait_id.clone())
+                    .map_err(|error| CliError::invalid(error.to_string()))?,
+                expected_wait_revision: request.expected_wait_revision,
+                next_state,
+                resolution: ExternalWaitResolution {
+                    outcome: wait_outcome_from_dto(request.outcome),
+                    detail: request.detail,
+                    output_ref: request.output_ref.0,
+                    supplied_by: accountable_from_dto(request.supplied_by),
+                    recorded_by: actor.to_owned(),
+                    recorded_as: ActorRole::Operator,
+                    recorded_at: timestamp,
+                },
+            },
+        )
+        .map_err(map_application_error)?;
+    let mutation = store
+        .append_external_wait_v1(
+            &V3MutationContext {
+                project_id: plan.project_id.to_string(),
+                actor_id: plan.actor_id,
+                session_id: plan.session_id,
+                operation_id: plan.operation_id.clone(),
+                request_digest: plan.request_digest,
+                expected_revision: Some(plan.expected_revision),
+                now: stamp(timestamp.as_millis()),
+            },
+            &ExternalWaitV1Input {
+                wait: plan.value,
+                expected_wait_revision: request.expected_wait_revision,
+            },
+        )
+        .map_err(map_store_error)?;
+    let resolved = store
+        .external_waits_v1(project)
+        .map_err(map_store_error)?
+        .into_iter()
+        .find(|wait| wait.id.as_str() == request.wait_id)
+        .ok_or_else(|| CliError::invalid("external-wait resolve completed without a readback"))?;
+    let readback = ExternalWaitMutationReadbackDto {
+        schema_version: EXTERNAL_WAIT_READBACK_SCHEMA_VERSION.to_owned(),
+        operation_id: operation.to_owned(),
+        replayed: mutation.replayed,
+        project_revision: mutation.revision,
+        wait: external_wait_dto(&resolved),
+    };
+    scheduling_cli_result(
+        "external_wait_resolve_v1",
+        readback,
+        mutation.revision,
+        mutation.replayed,
+    )
+}
+
+fn external_wait_read(
+    project: &str,
+    selected: Option<&str>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let revision = store.project_revision(project).map_err(map_store_error)?.0;
+    let mut waits = store.external_waits_v1(project).map_err(map_store_error)?;
+    if let Some(wait_id) = selected {
+        waits.retain(|wait| wait.id.as_str() == wait_id);
+        if waits.is_empty() {
+            return Err(CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("external wait not found: {wait_id}"),
+            ));
+        }
+    }
+    let readback = ExternalWaitReadbackDto {
+        schema_version: EXTERNAL_WAIT_READBACK_SCHEMA_VERSION.to_owned(),
+        project_revision: revision,
+        waits: waits.iter().map(external_wait_dto).collect(),
+    };
+    scheduling_read_cli_result("external_wait_readback_v1", readback, revision)
+}
+
+fn schedule_from_update_dto(dto: BusinessScheduleUpdateDto) -> Result<BusinessSchedule, CliError> {
+    Ok(BusinessSchedule {
+        not_before: dto.not_before.0.map(business_date_from_dto).transpose()?,
+        due: dto.due.0.map(business_date_from_dto).transpose()?,
+        planned_start: dto
+            .planned_start
+            .0
+            .map(business_date_from_dto)
+            .transpose()?,
+        planned_end: dto.planned_end.0.map(business_date_from_dto).transpose()?,
+    })
+}
+
+fn business_date_from_dto(dto: BusinessDateDto) -> Result<BusinessDate, CliError> {
+    match dto {
+        BusinessDateDto::Instant { at_ms } => {
+            Ok(BusinessDate::Instant(TimestampMs::from_millis(at_ms)))
+        }
+        BusinessDateDto::LocalDate { year, month, day } => {
+            let date = LocalDate::new(year, month, day);
+            date.validate()
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            Ok(BusinessDate::LocalDate(date))
+        }
+        BusinessDateDto::ResolvedLocal {
+            nominal_local,
+            utc_instant_ms,
+            utc_offset_minutes,
+            timezone,
+            tzdb_identity,
+            gap_policy,
+            fold_policy,
+        } => {
+            let local = LocalDateTime::new(
+                LocalDate::new(nominal_local.year, nominal_local.month, nominal_local.day),
+                LocalTime::new(
+                    nominal_local.hour,
+                    nominal_local.minute,
+                    nominal_local.second,
+                ),
+            );
+            let gap_policy = match gap_policy {
+                GapPolicyDto::NextValid => GapPolicy::NextValid,
+            };
+            let fold_policy = match fold_policy {
+                FoldPolicyDto::EarlierOffset => FoldPolicy::EarlierOffset,
+                FoldPolicyDto::LaterOffset => FoldPolicy::LaterOffset,
+            };
+            let actual = SystemTimeZoneDatabase::system()
+                .resolve(&timezone, local, gap_policy, fold_policy)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            if actual.utc_instant.as_millis() != utc_instant_ms
+                || actual.utc_offset_minutes != utc_offset_minutes
+                || actual.tzdb_identity != tzdb_identity
+            {
+                return Err(CliError::invalid(
+                    "resolved local date-time does not match the installed timezone database",
+                ));
+            }
+            Ok(BusinessDate::ResolvedLocal(actual))
+        }
+    }
+}
+
+fn business_date_dto(value: &BusinessDate) -> BusinessDateDto {
+    match value {
+        BusinessDate::Instant(at) => BusinessDateDto::Instant {
+            at_ms: at.as_millis(),
+        },
+        BusinessDate::LocalDate(date) => BusinessDateDto::LocalDate {
+            year: date.year,
+            month: date.month,
+            day: date.day,
+        },
+        BusinessDate::ResolvedLocal(TimeResolution {
+            nominal_local,
+            utc_instant,
+            utc_offset_minutes,
+            timezone,
+            tzdb_identity,
+            gap_policy,
+            fold_policy,
+        }) => BusinessDateDto::ResolvedLocal {
+            nominal_local: LocalDateTimeDto {
+                year: nominal_local.date.year,
+                month: nominal_local.date.month,
+                day: nominal_local.date.day,
+                hour: nominal_local.time.hour,
+                minute: nominal_local.time.minute,
+                second: nominal_local.time.second,
+            },
+            utc_instant_ms: utc_instant.as_millis(),
+            utc_offset_minutes: *utc_offset_minutes,
+            timezone: timezone.clone(),
+            tzdb_identity: tzdb_identity.clone(),
+            gap_policy: match gap_policy {
+                GapPolicy::NextValid => GapPolicyDto::NextValid,
+            },
+            fold_policy: match fold_policy {
+                FoldPolicy::EarlierOffset => FoldPolicyDto::EarlierOffset,
+                FoldPolicy::LaterOffset => FoldPolicyDto::LaterOffset,
+            },
+        },
+    }
+}
+
+fn business_schedule_dto(schedule: &BusinessSchedule) -> BusinessScheduleDto {
+    BusinessScheduleDto {
+        not_before: schedule.not_before.as_ref().map(business_date_dto),
+        due: schedule.due.as_ref().map(business_date_dto),
+        planned_start: schedule.planned_start.as_ref().map(business_date_dto),
+        planned_end: schedule.planned_end.as_ref().map(business_date_dto),
+    }
+}
+
+fn civil_time_setting_dto(value: &ProjectCivilTimeSetting) -> ProjectCivilTimeSettingDto {
+    ProjectCivilTimeSettingDto {
+        setting_revision: value.revision,
+        timezone: value.timezone.clone(),
+        tzdb_identity: value.tzdb_identity.clone(),
+        changed_by: value.changed_by.clone(),
+        changed_at_ms: value.changed_at.as_millis(),
+    }
+}
+
+fn role_from_dto(value: ExternalWaitRoleDto) -> ActorRole {
+    match value {
+        ExternalWaitRoleDto::Agent => ActorRole::Agent,
+        ExternalWaitRoleDto::Operator => ActorRole::Operator,
+        ExternalWaitRoleDto::Reviewer => ActorRole::Reviewer,
+        ExternalWaitRoleDto::Publisher => ActorRole::Publisher,
+    }
+}
+
+fn role_dto(value: ActorRole) -> ExternalWaitRoleDto {
+    match value {
+        ActorRole::Agent => ExternalWaitRoleDto::Agent,
+        ActorRole::Operator => ExternalWaitRoleDto::Operator,
+        ActorRole::Reviewer => ExternalWaitRoleDto::Reviewer,
+        ActorRole::Publisher => ExternalWaitRoleDto::Publisher,
+    }
+}
+
+fn accountable_from_dto(value: ExternalWaitAccountableDto) -> ExternalWaitAccountable {
+    match value {
+        ExternalWaitAccountableDto::Person {
+            reference,
+            display_name,
+        } => ExternalWaitAccountable::Person {
+            reference,
+            display_name,
+        },
+        ExternalWaitAccountableDto::Role { role } => {
+            ExternalWaitAccountable::Role(role_from_dto(role))
+        }
+        ExternalWaitAccountableDto::Service {
+            reference,
+            display_name,
+        } => ExternalWaitAccountable::Service {
+            reference,
+            display_name,
+        },
+    }
+}
+
+fn accountable_dto(value: &ExternalWaitAccountable) -> ExternalWaitAccountableDto {
+    match value {
+        ExternalWaitAccountable::Person {
+            reference,
+            display_name,
+        } => ExternalWaitAccountableDto::Person {
+            reference: reference.clone(),
+            display_name: display_name.clone(),
+        },
+        ExternalWaitAccountable::Role(role) => ExternalWaitAccountableDto::Role {
+            role: role_dto(*role),
+        },
+        ExternalWaitAccountable::Service {
+            reference,
+            display_name,
+        } => ExternalWaitAccountableDto::Service {
+            reference: reference.clone(),
+            display_name: display_name.clone(),
+        },
+    }
+}
+
+fn wait_category_from_dto(value: ExternalWaitCategoryDto) -> ExternalWaitCategory {
+    match value {
+        ExternalWaitCategoryDto::Decision => ExternalWaitCategory::Decision,
+        ExternalWaitCategoryDto::Approval => ExternalWaitCategory::Approval,
+        ExternalWaitCategoryDto::Information => ExternalWaitCategory::Information,
+        ExternalWaitCategoryDto::Access => ExternalWaitCategory::Access,
+        ExternalWaitCategoryDto::Service => ExternalWaitCategory::Service,
+        ExternalWaitCategoryDto::Other => ExternalWaitCategory::Other,
+    }
+}
+
+fn wait_category_dto(value: ExternalWaitCategory) -> ExternalWaitCategoryDto {
+    match value {
+        ExternalWaitCategory::Decision => ExternalWaitCategoryDto::Decision,
+        ExternalWaitCategory::Approval => ExternalWaitCategoryDto::Approval,
+        ExternalWaitCategory::Information => ExternalWaitCategoryDto::Information,
+        ExternalWaitCategory::Access => ExternalWaitCategoryDto::Access,
+        ExternalWaitCategory::Service => ExternalWaitCategoryDto::Service,
+        ExternalWaitCategory::Other => ExternalWaitCategoryDto::Other,
+    }
+}
+
+fn wait_state_from_dto(value: ExternalWaitStateDto) -> ExternalWaitState {
+    match value {
+        ExternalWaitStateDto::Open => ExternalWaitState::Open,
+        ExternalWaitStateDto::Resolved => ExternalWaitState::Resolved,
+        ExternalWaitStateDto::Cancelled => ExternalWaitState::Cancelled,
+    }
+}
+
+fn wait_state_dto(value: ExternalWaitState) -> ExternalWaitStateDto {
+    match value {
+        ExternalWaitState::Open => ExternalWaitStateDto::Open,
+        ExternalWaitState::Resolved => ExternalWaitStateDto::Resolved,
+        ExternalWaitState::Cancelled => ExternalWaitStateDto::Cancelled,
+    }
+}
+
+fn wait_outcome_from_dto(value: ExternalWaitOutcomeDto) -> ExternalWaitOutcome {
+    match value {
+        ExternalWaitOutcomeDto::Approved => ExternalWaitOutcome::Approved,
+        ExternalWaitOutcomeDto::Rejected => ExternalWaitOutcome::Rejected,
+        ExternalWaitOutcomeDto::DecisionProvided => ExternalWaitOutcome::DecisionProvided,
+        ExternalWaitOutcomeDto::OutputProvided => ExternalWaitOutcome::OutputProvided,
+        ExternalWaitOutcomeDto::Declined => ExternalWaitOutcome::Declined,
+        ExternalWaitOutcomeDto::Unavailable => ExternalWaitOutcome::Unavailable,
+        ExternalWaitOutcomeDto::Cancelled => ExternalWaitOutcome::Cancelled,
+    }
+}
+
+fn wait_outcome_dto(value: ExternalWaitOutcome) -> ExternalWaitOutcomeDto {
+    match value {
+        ExternalWaitOutcome::Approved => ExternalWaitOutcomeDto::Approved,
+        ExternalWaitOutcome::Rejected => ExternalWaitOutcomeDto::Rejected,
+        ExternalWaitOutcome::DecisionProvided => ExternalWaitOutcomeDto::DecisionProvided,
+        ExternalWaitOutcome::OutputProvided => ExternalWaitOutcomeDto::OutputProvided,
+        ExternalWaitOutcome::Declined => ExternalWaitOutcomeDto::Declined,
+        ExternalWaitOutcome::Unavailable => ExternalWaitOutcomeDto::Unavailable,
+        ExternalWaitOutcome::Cancelled => ExternalWaitOutcomeDto::Cancelled,
+    }
+}
+
+fn external_wait_dto(value: &ExternalWait) -> ExternalWaitDto {
+    ExternalWaitDto {
+        wait_id: value.id.to_string(),
+        source_work_id: value.source_work_id.to_string(),
+        affected_work_ids: value
+            .affected_work_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        category: wait_category_dto(value.category),
+        reason: value.reason.clone(),
+        accountable: accountable_dto(&value.accountable),
+        expected_decision: value.expected_decision.clone(),
+        expected_output: value.expected_output.clone(),
+        follow_up: value.follow_up.as_ref().map(business_date_dto),
+        civil_time_setting_revision: value.civil_time_setting_revision,
+        wait_revision: value.revision,
+        state: wait_state_dto(value.state),
+        created_by: value.created_by.clone(),
+        created_at_ms: value.created_at.as_millis(),
+        resolution: value
+            .resolution
+            .as_ref()
+            .map(|resolution| ExternalWaitResolutionDto {
+                outcome: wait_outcome_dto(resolution.outcome),
+                detail: resolution.detail.clone(),
+                output_ref: resolution.output_ref.clone(),
+                supplied_by: accountable_dto(&resolution.supplied_by),
+                recorded_by: resolution.recorded_by.clone(),
+                recorded_as: role_dto(resolution.recorded_as),
+                recorded_at_ms: resolution.recorded_at.as_millis(),
+            }),
+    }
+}
+
+fn scheduling_cli_result<T: Serialize>(
+    command: &str,
+    readback: T,
+    revision: u64,
+    replayed: bool,
+) -> Result<CliResult, CliError> {
+    let mut result = bounded_result(
+        Some(json!({"command":command,"readback":readback})),
+        Some(revision),
+    )?;
+    result.outcome = if replayed {
+        ApplicationOutcome::Unchanged
+    } else {
+        ApplicationOutcome::Changed
+    };
+    Ok(result)
+}
+
+fn scheduling_read_cli_result<T: Serialize>(
+    command: &str,
+    readback: T,
+    revision: u64,
+) -> Result<CliResult, CliError> {
+    let mut result = bounded_result(
+        Some(json!({"command":command,"readback":readback})),
+        Some(revision),
+    )?;
+    result.outcome = ApplicationOutcome::Unchanged;
+    Ok(result)
+}
+
 fn artifact_result_bind_command(
     parsed: &ParsedCommand,
     operation: &str,
@@ -11402,6 +12546,14 @@ fn map_application_error(error: ApplicationError) -> CliError {
             CliError::with(code, ApplicationOutcome::Rejected, error.to_string())
         }
         ApplicationError::Invalid(message) => CliError::invalid(message),
+        ApplicationError::Planning(boreal_application::PlanningError::RevisionConflict {
+            expected,
+            actual,
+        }) => CliError::with(
+            ErrorCode::RevisionConflict,
+            ApplicationOutcome::Conflict,
+            format!("stale planning revision: expected {expected}, actual {actual}"),
+        ),
         ApplicationError::Planning(error) => CliError::invalid(error.to_string()),
     }
 }
@@ -11484,6 +12636,9 @@ fn map_store_error(error: StoreError) -> CliError {
     let (code, outcome) = match error {
         StoreError::Unavailable(_) => (ErrorCode::ServiceUnavailable, ApplicationOutcome::Failed),
         StoreError::Busy(_) => (ErrorCode::ServiceBusy, ApplicationOutcome::Busy),
+        StoreError::Invalid(ref message) if message.contains("principal role does not permit") => {
+            (ErrorCode::PermissionDenied, ApplicationOutcome::Rejected)
+        }
         StoreError::Invalid(_) => (ErrorCode::InvalidArgument, ApplicationOutcome::Rejected),
         StoreError::Conflict(_) => (ErrorCode::ClaimConflict, ApplicationOutcome::Conflict),
         StoreError::StaleRevision { .. } => {
