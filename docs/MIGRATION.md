@@ -150,14 +150,31 @@ capture, so separate workers cannot silently overwrite one another's source
 metadata. A stale lock is reported for operator recovery; it is never
 force-removed by the library.
 
-The migration crate does not write v2 store rows, publish memory, fetch Git
-data, resolve legacy aliases, or infer unsupported lifecycle/dependency
-semantics. Those operations remain responsibilities of the eventual store
-integrator and its explicit migration policy. `apply` here means validated
-in-memory materialization; a public `migration apply` adapter must stage the
-document under one durable operation, checkpoint batches, verify the expected
-source/document fingerprint, and provide a rollback/restore path before
-committing store rows.
+The migration crate itself remains side-effect free: it does not write v2
+store rows, publish memory, fetch Git data, resolve legacy aliases, or infer
+unsupported lifecycle/dependency semantics. The public CLI/store adapter adds
+the durable application path. Use `migration dry-run` and `migration verify`
+to inspect the exact source fingerprint, accepted counts, and loss ledger;
+`migration apply` is Operator-authorized, confirmation- and revision-bound,
+and exposes its committed result through operation readback. It archives the
+source document and applies only the materialized safe work graph. Unsupported
+and ambiguous rows remain explicit in the loss report; they do not become
+accepted v2 history. Take a verified project backup before applying an import,
+and retain the report beside that backup.
+
+Project migration commands:
+
+```sh
+bwrk migration dry-run --project PROJECT --input /path/to/import.json --json
+bwrk migration verify --project PROJECT --input /path/to/import.json --json
+bwrk migration apply --project PROJECT --input /path/to/import.json \
+  --expected-revision REV --yes --operation-id OPERATION_ID --json
+bwrk operation show PROJECT OPERATION_ID --json
+```
+
+The migration adapter does not make global-manager imports or unsupported
+legacy semantics lossless. Keep those dispositions explicit until a dedicated
+import contract exists.
 
 ## Restored CLI workflows
 

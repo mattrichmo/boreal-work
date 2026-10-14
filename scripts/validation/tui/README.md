@@ -11,8 +11,9 @@ skip; strict aggregate validation rejects that skip.
 ## Forensic V04/V06/V07 fixture
 
 `forensic_closeout.mjs` is the production-composition fixture for the TUI-owned
-forensic gates. It creates an isolated SQLite fixture, starts the real
-`target/debug/bwrk service run` host, validates live status DTOs through the
+forensic gates. It creates an isolated SQLite fixture, starts the selected
+`--bin` executable's real service host (defaulting to `target/debug/bwrk` for
+standalone local use), validates live status DTOs through the
 compiled TypeScript client, injects the three debug evidence failpoints,
 restarts and reads back each operation, and drives the compiled full-screen
 controller through a typed closeout followed by a deliberate refresh failure.
@@ -22,6 +23,9 @@ Run it from the repository root with Unix-socket/process permission:
 ```sh
 node scripts/validation/tui/forensic_closeout.mjs
 ```
+
+The aggregate qualification runner supplies its exact selected executable
+with `--bin`, so installed-package evidence exercises those same bytes.
 
 The fixture writes its generated reports under the ignored `results/` directory
 as `forensic-closeout.latest.json` and `forensic-closeout.latest.md`, keeping

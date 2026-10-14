@@ -28,7 +28,11 @@ import { UnixSocketFramedTransport } from "../../../apps/tui/dist/node-transport
 import { runFullScreen } from "../../../apps/tui/dist/full-screen.js";
 
 const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../../..");
-const BIN = join(ROOT, "target/debug/bwrk");
+const binaryFlag = process.argv.indexOf("--bin");
+if (binaryFlag >= 0 && !process.argv[binaryFlag + 1]) {
+  throw new Error("--bin requires an executable path");
+}
+const BIN = resolve(binaryFlag >= 0 ? process.argv[binaryFlag + 1] : join(ROOT, "target/debug/bwrk"));
 const REPORT_DIR = join(ROOT, "scripts/validation/tui/results");
 const REPORT_JSON = join(REPORT_DIR, "forensic-closeout.latest.json");
 const REPORT_MD = join(REPORT_DIR, "forensic-closeout.latest.md");

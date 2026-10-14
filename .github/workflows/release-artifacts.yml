@@ -39,7 +39,7 @@ jobs:
 
       - name: Install pinned TUI compiler
         run: |
-          npm install --prefix "$RUNNER_TEMP/typescript" --no-save --no-audit --no-fund typescript@5.7.3
+          npm install --prefix "$RUNNER_TEMP/typescript" --no-save --no-audit --no-fund typescript@5.8.3
           echo "$RUNNER_TEMP/typescript/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Build installer inputs
@@ -53,6 +53,12 @@ jobs:
           python3 scripts/release/build_release.py
           --target "${{ matrix.target }}"
           --output-dir "$RUNNER_TEMP/release"
+
+      - name: Install candidate and smoke the packaged CLI/TUI
+        run: |
+          archive=$(find "$RUNNER_TEMP/release" -maxdepth 1 -type f -name "bwrk-v*-${{ matrix.target }}.tar.gz" -print -quit)
+          test -n "$archive"
+          sh scripts/release/package-target-smoke.sh "$archive" "${{ matrix.target }}"
 
       - name: Retain platform archive and manifest
         uses: actions/upload-artifact@v4

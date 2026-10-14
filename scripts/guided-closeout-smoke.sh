@@ -1,9 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT/target"}
-BIN=${BWRK_BIN:-"$TARGET_DIR/debug/bwrk"}
+BIN=${BWRK_BIN:-}
+while (($#)); do
+  case "$1" in
+    --bin)
+      [[ $# -ge 2 ]] || { printf 'guided closeout smoke: --bin requires an executable path\n' >&2; exit 2; }
+      BIN=$2
+      shift 2
+      ;;
+    *)
+      printf 'guided closeout smoke: unexpected argument: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ -z "$BIN" ]]; then
+  BIN=$(command -v bwrk || true)
+fi
+if [[ -z "$BIN" || ! -x "$BIN" ]]; then
+  printf 'guided closeout smoke: pass --bin /absolute/path/to/bwrk or set BWRK_BIN\n' >&2
+  exit 2
+fi
+BIN=$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).expanduser().resolve())' "$BIN")
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/boreal-guided-closeout.XXXXXX")
 PROJECT=guided-project
 OPERATOR=guided-operator
@@ -33,9 +52,6 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$PROJECT_ROOT"
-cd "$ROOT"
-cargo build -p boreal-cli --locked --offline >/dev/null
-
 cd "$PROJECT_ROOT"
 direct() {
   "$BIN" "$@" --db "$DB" --json
@@ -84,6 +100,18 @@ sessions=(guided-session-a guided-session-b guided-session-c)
 gates=(checkpoint verification summary)
 declare -A policy_versions=()
 
+sha256_file() {
+  local path=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    printf 'guided closeout smoke: no SHA-256 utility is available\n' >&2
+    return 1
+  fi
+}
+
 initialized=$(require_direct 'project initialization' init --project "$PROJECT" --actor "$OPERATOR" --yes)
 revision=$(jq -er '.revision' <<<"$initialized")
 mkdir -p "$GATES" "$VERIFIERS"
@@ -130,9 +158,28 @@ done
 
 for gate in "${gates[@]}"; do
   verifier="$VERIFIERS/$gate.sh"
-  printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$gate" >"$verifier"
+  case "$gate" in
+    checkpoint) expected='checkpoint:complete' ;;
+    verification) expected='verification:passed' ;;
+    summary) expected='summary:documented' ;;
+    *) printf 'guided closeout smoke: no verifier fixture for %s\n' "$gate" >&2; exit 1 ;;
+  esac
+  cat >"$verifier" <<EOF
+#!/bin/sh
+set -eu
+grep -Fx '$expected' ./implementation.txt >/dev/null
+printf '%s\\n' '$gate verifier passed'
+EOF
   chmod 755 "$verifier"
 done
+
+# The public capture below freezes this source file and the verifier programs.
+# Each accepted receipt therefore proves a real assertion over captured bytes.
+cat >"$PROJECT_ROOT/implementation.txt" <<'EOF'
+checkpoint:complete
+verification:passed
+summary:documented
+EOF
 
 # Directory input is required here: it records the verifier executables and
 # their executable modes in the immutable workspace snapshot used by gates.
@@ -155,7 +202,7 @@ jq -e --arg id "$source_version" \
 # digests are tied to the bytes that the evidence executor will unpack.
 for gate in "${gates[@]}"; do
   verifier="./verifiers/$gate.sh"
-  verifier_digest="sha256:$(sha256sum "$PROJECT_ROOT/${verifier#./}" | awk '{print $1}')"
+  verifier_digest="sha256:$(sha256_file "$PROJECT_ROOT/${verifier#./}")"
   jq -n \
     --arg gate "$gate" \
     --arg verifier "$verifier" \
@@ -184,7 +231,7 @@ for gate in "${gates[@]}"; do
   jq -e --arg gate "$gate" --arg source "$source_version" --arg config "$CONFIG_ID" \
     '.gate_id == $gate and .policy_revision == 1 and .source_snapshot_hash == $source and .config_identity == $config and (.verifier_digest | test("^sha256:[0-9a-f]{64}$"))' \
     "$policy" >/dev/null
-  expected_verifier_digest="sha256:$(sha256sum "$PROJECT_ROOT/$(jq -er '.executable | sub("^\\./"; "")' "$policy")" | awk '{print $1}')"
+  expected_verifier_digest="sha256:$(sha256_file "$PROJECT_ROOT/$(jq -er '.executable | sub("^\\./"; "")' "$policy")")"
   jq -e --arg digest "$expected_verifier_digest" '.verifier_digest == $digest' "$policy" >/dev/null
 
   published=$(require_direct "gate policy publication ($gate)" gate policy publish \

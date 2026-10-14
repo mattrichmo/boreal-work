@@ -15,12 +15,12 @@ python3 scripts/release/build_release.py \
   --output-dir /tmp/boreal-release
 ```
 
-The builder runs the locked Rust release build and `npm run build` for both
-TUI packages, then stages this runtime and source layout:
+The builder runs the locked Rust release build and compiles both TUI packages
+to fresh temporary output directories. It stages only the executable, required
+runtime JavaScript modules derived from current TypeScript sources, and authored
+release metadata:
 
 ```text
-apps/tui/...
-apps/global-tui/...
 bin/bwrk
 lib/boreal/tui/...
 lib/boreal/global-tui/...
@@ -28,6 +28,12 @@ share/boreal/release.json
 share/boreal/LICENSE
 share/boreal/install.sh
 ```
+
+The archive excludes TypeScript source trees, `node_modules`, compiler caches,
+checked-in `dist/` output, and runtime files that no longer have a source
+module. The manifest lists every packaged file with its size and SHA-256.
+`verify_release_package.py` checks the staged file set and identities before
+the normalized archive is written.
 
 It creates a normalized `bwrk-vX.Y.Z-TARGET.tar.gz`, a per-target release
 manifest, and `SHA256SUMS`. The checksum file contains only the target archives
@@ -43,6 +49,10 @@ The complete local build/install check is:
 ```sh
 scripts/release/package-smoke.sh
 ```
+
+The archive version must match the `version` reported by its embedded CLI.
+`--version` selects a package filename and manifest version; it cannot relabel
+a binary built with another workspace version.
 
 The release helper in `scripts/release/release_identity.py` is a dependency-
 light, standard-library-only boundary for the checked-in v2 contract assets.

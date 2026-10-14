@@ -1,6 +1,8 @@
 # C4-B production-client status evidence
 
-Run the V11 boundary probe with:
+Run the V11 boundary probe with the exact candidate executable. The aggregate
+acceptance runner passes this path through automatically; for a standalone
+local probe, use:
 
 ```sh
 python3 production_client.py --bin ../../../../target/debug/bwrk

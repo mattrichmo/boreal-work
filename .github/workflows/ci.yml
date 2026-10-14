@@ -29,12 +29,16 @@ jobs:
         with:
           node-version: 20
 
+      - name: Build validation CLI
+        run: cargo build --bin bwrk --locked
+
       - name: Run smoke validation
         run: >-
           python3 scripts/validation/run_full_suite.py
           --profile smoke
           --online
           --require-current-binary
+          --bin "${{ github.workspace }}/target/debug/bwrk"
           --output "$RUNNER_TEMP/boreal-validation.json"
 
       - name: Test validation identity and report contracts
@@ -45,12 +49,12 @@ jobs:
       - name: Run Global service smoke
         run: >-
           python3 scripts/validation/global/smoke.py
-          --binary target/debug/bwrk
+          --binary "${{ github.workspace }}/target/debug/bwrk"
 
       - name: Run Global TUI PTY resize smoke
         run: >-
           python3 scripts/validation/global-tui/pty_smoke.py
-          --bin target/debug/bwrk
+          --bin "${{ github.workspace }}/target/debug/bwrk"
           --identity-output "$RUNNER_TEMP/global-tui-pty-identity.json"
 
       - name: Retain validation report and logs

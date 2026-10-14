@@ -6,8 +6,9 @@ ARM64 (`aarch64-apple-darwin`), macOS Intel (`x86_64-apple-darwin`), and Linux
 x86_64 (`x86_64-unknown-linux-gnu`). It verifies generated installer bundles,
 compiles each TUI into a clean temporary output directory, packages only
 source-backed runtime JavaScript, and records the CLI and TUI source identities
-in each release manifest. It uploads artifacts for review; it does not publish
-a GitHub Release or activate an installation.
+in each release manifest. Each native job installs and smokes its own packaged
+CLI/TUI archive before upload. The workflow retains artifacts for review; it
+does not publish a GitHub Release or activate an installation.
 
 ## Candidate procedure
 

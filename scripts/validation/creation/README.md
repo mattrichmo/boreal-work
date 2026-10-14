@@ -51,15 +51,17 @@ python3 scripts/validation/run_full_suite.py --profile smoke
 python3 scripts/validation/run_full_suite.py --profile full
 ```
 
-For CI or release gating, use strict mode. It builds/tests the current
-`target/debug/bwrk`, runs the benchmark and SQLite floor check, and treats
-contract mutation probes, a bounded process soak, and treats environment skips
-as failures. `--online` is required on fresh runners that
+For CI or release gating, pass the absolute candidate executable explicitly.
+Strict mode fingerprints that exact binary against the current CLI source,
+runs the benchmark and SQLite floor check, and treats environment skips as
+failures. It does not replace an explicit candidate with `target/debug/bwrk`.
+`--online` is required on fresh runners that
 do not already have every Cargo dependency cached:
 
 ```sh
 python3 scripts/validation/run_full_suite.py \
-  --profile full --strict --online
+  --profile full --strict --online \
+  --bin /absolute/path/to/qualification-prefix/bin/bwrk
 ```
 
 The aggregate runner writes JSON and Markdown reports plus per-check stdout and

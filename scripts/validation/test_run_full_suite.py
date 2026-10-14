@@ -167,26 +167,42 @@ class RunCheckTests(unittest.TestCase):
         self.assertEqual(result["status"], "fail")
         self.assertIn("binary is missing", result["reason"])
 
-    def test_global_tui_sources_participate_in_binary_freshness(self) -> None:
+    def test_embedded_source_identity_controls_binary_freshness_not_mtime(self) -> None:
         with tempfile.TemporaryDirectory(prefix="boreal-runner-freshness-") as directory:
             root = Path(directory)
             (root / "Cargo.toml").write_text("", encoding="utf-8")
             (root / "Cargo.lock").write_text("", encoding="utf-8")
-            source = root / "apps/global-tui/src/entrypoint.ts"
+            source = root / "crates/cli/src/main.rs"
             source.parent.mkdir(parents=True)
-            source.write_text("// global tui source\n", encoding="utf-8")
+            source.write_text("// CLI source snapshot 1\n", encoding="utf-8")
+            builder_spec = importlib.util.spec_from_file_location(
+                "boreal_release_builder_fixture", RUNNER.RELEASE_BUILDER
+            )
+            assert builder_spec and builder_spec.loader
+            builder = importlib.util.module_from_spec(builder_spec)
+            builder_spec.loader.exec_module(builder)
+            expected_source = builder.source_identity(root)
             binary = root / "bwrk"
-            binary.write_bytes(b"validation binary")
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                f"print(json.dumps({{'data': {{'build_source_id': {expected_source!r}}}}}))\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
             old = 100.0
             newest = old + 10.0
             os.utime(binary, (old, old))
             os.utime(source, (newest, newest))
 
             with patch.object(RUNNER, "ROOT", root):
-                result = RUNNER.binary_freshness(binary)
+                matching = RUNNER.binary_freshness(binary)
+                source.write_text("// CLI source snapshot 2\n", encoding="utf-8")
+                changed = RUNNER.binary_freshness(binary)
 
-        self.assertEqual(result["status"], "fail")
-        self.assertIn("older than current Rust/TypeScript source", result["reason"])
+        self.assertEqual(matching["status"], "pass")
+        self.assertEqual(changed["status"], "fail")
+        self.assertIn("different CLI inputs", changed["reason"])
 
     def test_global_tui_gates_run_in_smoke_and_pty_is_full_only(self) -> None:
         binary = Path("/tmp/bwrk")

@@ -476,6 +476,11 @@ def build_archive(
         raise ReleaseBuildError(f"release binary is missing: {binary}")
     source_id = source_identity(root)
     version_data = binary_version(binary)
+    if version_data.get("version") != version:
+        raise ReleaseBuildError(
+            "release version does not match the version embedded in the CLI: "
+            f"binary={version_data.get('version')!r}, package={version!r}"
+        )
     if version_data.get("build_source_id") != source_id:
         raise ReleaseBuildError(
             "release binary is stale for the current source tree: "
