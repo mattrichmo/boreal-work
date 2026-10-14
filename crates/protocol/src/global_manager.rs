@@ -401,6 +401,15 @@ mod tests {
                 .map(|context| context.system_civil_date.as_str()),
             Some("1970-01-01")
         );
+        let attention_wire = serde_json::to_value(&response)
+            .expect("attention page reserializes with its resolved time context");
+        assert_eq!(attention_wire["civil_time"]["observed_at_unix_ms"], 1000);
+        assert_eq!(attention_wire["civil_time"]["timezone"], "Etc/UTC");
+        assert_eq!(
+            attention_wire["civil_time"]["system_civil_date"],
+            "1970-01-01"
+        );
+        assert_eq!(attention_wire["civil_time"]["tzdb_identity"], "test-tzdb");
 
         let detail_payload = json!({
             "collection": "projects",
@@ -424,5 +433,8 @@ mod tests {
             .expect("detail page matches the versioned response contract");
         assert_eq!(detail.collection.as_deref(), Some("projects"));
         assert_eq!(detail.revision, 12);
+        let detail_wire = serde_json::to_value(&detail)
+            .expect("detail page reserializes with its resolved time context");
+        assert_eq!(detail_wire["civil_time"]["system_civil_date"], "1970-01-01");
     }
 }

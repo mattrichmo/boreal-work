@@ -363,7 +363,11 @@ fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
     {
         return None;
     }
-    let (year, month, day) = parse_date(&value[..10])?;
+    // `value` is user data. A byte index can land inside a multibyte UTF-8
+    // character, so use a checked slice instead of panicking on malformed
+    // timestamps.
+    let date = value.get(..10)?;
+    let (year, month, day) = parse_date(date)?;
     let hour = parse_two(bytes, 11)?;
     let minute = parse_two(bytes, 14)?;
     let second = parse_two(bytes, 17)?;
@@ -459,4 +463,185 @@ fn format_civil_date(days: i64) -> String {
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOUR: i32 = 60 * 60;
+
+    fn unix_seconds(year: i64, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> i64 {
+        days_from_civil(year, month, day) * 86_400
+            + i64::from(hour) * 3_600
+            + i64::from(minute) * 60
+            + i64::from(second)
+    }
+
+    fn unix_ms(year: i64, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> u64 {
+        (unix_seconds(year, month, day, hour, minute, second) as u64) * 1_000
+    }
+
+    fn tzif_v1(
+        transitions: &[(i64, u8)],
+        offsets: &[(i32, bool, u8)],
+        abbreviations: &[u8],
+    ) -> Vec<u8> {
+        let mut bytes = b"TZif\0".to_vec();
+        bytes.extend_from_slice(&[0; 15]);
+        for count in [
+            0_u32,
+            0,
+            0,
+            transitions.len() as u32,
+            offsets.len() as u32,
+            abbreviations.len() as u32,
+        ] {
+            bytes.extend_from_slice(&count.to_be_bytes());
+        }
+        for (at, _) in transitions {
+            bytes.extend_from_slice(
+                &i32::try_from(*at)
+                    .expect("test transition fits a TZif v1 timestamp")
+                    .to_be_bytes(),
+            );
+        }
+        for (_, type_index) in transitions {
+            bytes.push(*type_index);
+        }
+        for (offset, is_dst, abbreviation_index) in offsets {
+            bytes.extend_from_slice(&offset.to_be_bytes());
+            bytes.push(u8::from(*is_dst));
+            bytes.push(*abbreviation_index);
+        }
+        bytes.extend_from_slice(abbreviations);
+        bytes
+    }
+
+    fn new_york_tzif() -> Vec<u8> {
+        tzif_v1(
+            &[
+                (unix_seconds(2024, 3, 10, 7, 0, 0), 1),
+                (unix_seconds(2024, 11, 3, 6, 0, 0), 0),
+            ],
+            &[(-5 * HOUR, false, 0), (-4 * HOUR, true, 4)],
+            b"EST\0EDT\0",
+        )
+    }
+
+    #[test]
+    fn injected_instant_uses_the_resolved_zone_for_local_midnight() {
+        let tzif = new_york_tzif();
+        let before_midnight = GlobalCivilTimeContext::from_tzif(
+            unix_ms(2024, 3, 10, 4, 59, 59),
+            "America/New_York",
+            &tzif,
+        )
+        .unwrap();
+        let at_midnight = GlobalCivilTimeContext::from_tzif(
+            unix_ms(2024, 3, 10, 5, 0, 0),
+            "America/New_York",
+            &tzif,
+        )
+        .unwrap();
+
+        assert_eq!(
+            before_midnight.observed_at_unix_ms,
+            unix_ms(2024, 3, 10, 4, 59, 59)
+        );
+        assert_eq!(before_midnight.system_civil_date, "2024-03-09");
+        assert_eq!(at_midnight.system_civil_date, "2024-03-10");
+        assert_eq!(at_midnight.timezone, "America/New_York");
+        assert_eq!(at_midnight.tzdb_identity, sha256_content_digest(&tzif));
+    }
+
+    #[test]
+    fn timestamp_dates_follow_dst_offsets_while_date_only_values_stay_civil() {
+        let context = GlobalCivilTimeContext::from_tzif(
+            unix_ms(2024, 3, 10, 7, 30, 0),
+            "America/New_York",
+            &new_york_tzif(),
+        )
+        .unwrap();
+
+        assert_eq!(context.system_civil_date, "2024-03-10");
+        assert_eq!(
+            context.zone.offset_at(unix_seconds(2024, 3, 10, 6, 59, 59)),
+            -5 * HOUR
+        );
+        assert_eq!(
+            context.zone.offset_at(unix_seconds(2024, 3, 10, 7, 0, 0)),
+            -4 * HOUR
+        );
+        assert_eq!(
+            context.zone.offset_at(unix_seconds(2024, 11, 3, 5, 59, 59)),
+            -4 * HOUR
+        );
+        assert_eq!(
+            context.zone.offset_at(unix_seconds(2024, 11, 3, 6, 0, 0)),
+            -5 * HOUR
+        );
+
+        assert_eq!(
+            context.civil_day_for("2024-03-10"),
+            Some("2024-03-10".into())
+        );
+        assert_eq!(
+            context.civil_day_for("2024-03-10T00:30:00Z"),
+            Some("2024-03-09".into())
+        );
+        assert_eq!(
+            context.civil_day_for("2024-03-10T07:00:00Z"),
+            Some("2024-03-10".into())
+        );
+    }
+
+    #[test]
+    fn newly_resolved_zone_recomputes_the_civil_date_after_a_timezone_change() {
+        let instant = unix_ms(2024, 1, 1, 0, 30, 0);
+        let utc = tzif_v1(&[], &[(0, false, 0)], b"UTC\0");
+        let pacific = tzif_v1(&[], &[(-8 * HOUR, false, 0)], b"PST\0");
+        let first = GlobalCivilTimeContext::from_tzif(instant, "Etc/UTC", &utc).unwrap();
+        let refreshed =
+            GlobalCivilTimeContext::from_tzif(instant, "America/Los_Angeles", &pacific).unwrap();
+
+        assert_eq!(first.system_civil_date, "2024-01-01");
+        assert_eq!(refreshed.system_civil_date, "2023-12-31");
+        assert_ne!(first.timezone, refreshed.timezone);
+        assert_ne!(first.tzdb_identity, refreshed.tzdb_identity);
+    }
+
+    #[test]
+    fn context_wire_shape_is_serialized_without_the_internal_zone_table() {
+        let context = GlobalCivilTimeContext::from_tzif(
+            unix_ms(2024, 3, 10, 7, 30, 0),
+            "America/New_York",
+            &new_york_tzif(),
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(&context).unwrap();
+
+        assert_eq!(encoded["observed_at_unix_ms"], context.observed_at_unix_ms);
+        assert_eq!(encoded["timezone"], "America/New_York");
+        assert_eq!(encoded["system_civil_date"], "2024-03-10");
+        assert_eq!(encoded["tzdb_identity"], context.tzdb_identity);
+        assert!(encoded.get("zone").is_none());
+    }
+
+    #[test]
+    fn malformed_timestamp_text_returns_none_without_panicking() {
+        let context = GlobalCivilTimeContext::from_tzif(
+            unix_ms(2024, 1, 1, 0, 0, 0),
+            "Etc/UTC",
+            &tzif_v1(&[], &[(0, false, 0)], b"UTC\0"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            context.civil_day_for("2024-01-01T00:00:00Z"),
+            Some("2024-01-01".into())
+        );
+        assert_eq!(context.civil_day_for("2024-01-0éT00:00:00Z"), None);
+        assert_eq!(context.civil_day_for("2024-02-30"), None);
+    }
 }
