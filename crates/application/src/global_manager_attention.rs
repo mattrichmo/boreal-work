@@ -13,6 +13,24 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_BLOCKED_CANDIDATES: usize = 5;
 const MAX_BLOCKERS_PER_CANDIDATE: usize = 5;
 
+#[derive(Clone, Copy)]
+enum AttentionScope<'a> {
+    Portfolio,
+    Project(&'a str),
+    Personal,
+}
+
+impl AttentionScope<'_> {
+    fn owns(self, item: &Value, archived_projects: &BTreeSet<String>) -> bool {
+        let owner = item.get("project_id").and_then(Value::as_str);
+        match self {
+            Self::Portfolio => owner.map_or(true, |id| !archived_projects.contains(id)),
+            Self::Project(project_id) => owner == Some(project_id),
+            Self::Personal => owner.is_none(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     open: u64,
@@ -115,10 +133,18 @@ pub(crate) fn attention_summary(
         if archived_projects.contains(project_id) {
             continue;
         }
-        populate_attention_details(state, Some(project_id), summary, time)?;
+        populate_attention_details(state, AttentionScope::Project(project_id), summary, time)?;
     }
     let mut personal_summary = empty_attention(personal);
-    populate_attention_details(state, None, &mut personal_summary, time)?;
+    populate_attention_details(state, AttentionScope::Personal, &mut personal_summary, time)?;
+
+    let mut portfolio_summary = empty_attention(portfolio);
+    populate_attention_details(
+        state,
+        AttentionScope::Portfolio,
+        &mut portfolio_summary,
+        time,
+    )?;
 
     // Preserve the legacy snapshot path while keeping Personal first-class.
     // This compatibility entry is only a projection: totals and page bounds
@@ -131,7 +157,7 @@ pub(crate) fn attention_summary(
     let projects_sampled = included.len() as u64;
     let projects_truncated = projects_sampled < projects_total;
     Ok(json!({
-        "portfolio": portfolio.value(),
+        "portfolio": portfolio_summary,
         "projects": project_summaries,
         "projects_total": projects_total,
         "projects_limit": projects_sampled,
@@ -152,14 +178,16 @@ fn empty_attention(counts: Counts) -> Value {
 
 fn populate_attention_details(
     state: &Value,
-    project_id: Option<&str>,
+    scope: AttentionScope<'_>,
     summary: &mut Value,
     time: &GlobalCivilTimeContext,
 ) -> Result<(), String> {
-    let owns = |item: &Value| match project_id {
-        Some(project_id) => item.get("project_id").and_then(Value::as_str) == Some(project_id),
-        None => item.get("project_id").is_some_and(Value::is_null),
-    };
+    let archived_projects = rows(state, "projects")
+        .iter()
+        .filter(|project| project.get("archived").and_then(Value::as_bool) == Some(true))
+        .filter_map(|project| project.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    let owns = |item: &Value| scope.owns(item, &archived_projects);
     let mut candidates = rows(state, "items")
         .iter()
         .filter(|item| {
@@ -253,7 +281,8 @@ fn populate_attention_details(
             let label = rows(state, "statuses")
                 .iter()
                 .find(|status| {
-                    status.get("project_id").and_then(Value::as_str) == project_id
+                    status.get("project_id").and_then(Value::as_str)
+                        == candidate.get("project_id").and_then(Value::as_str)
                         && status.get("status_id").and_then(Value::as_str) == Some(status_id)
                 })
                 .and_then(|status| status.get("label"))
@@ -531,6 +560,82 @@ mod tests {
     }
 
     #[test]
+    fn portfolio_exposes_next_action_and_milestone_across_personal_and_projects() {
+        let mut milestone = task(Some("business"), "launch", "2999-01-01");
+        milestone["kind"] = json!("milestone");
+        let mut completed_child = task_with_status(
+            Some("business"),
+            "finished-checklist-item",
+            "2999-01-01",
+            "done",
+            false,
+        );
+        completed_child["parent_id"] = json!("launch");
+        let time = GlobalCivilTimeContext::system().unwrap();
+        let mut personal_waiting = task_with_status(None, "personal-waiting", "", "waiting", false);
+        personal_waiting["due_at"] = Value::Null;
+        let mut personal_unscheduled = task(None, "personal-unscheduled", "");
+        personal_unscheduled["due_at"] = Value::Null;
+        let mut personal_milestone = task(None, "personal-milestone", "3000-01-01");
+        personal_milestone["kind"] = json!("milestone");
+        let state = json!({
+            "projects": [
+                {"id":"business", "archived":false},
+                {"id":"archived", "archived":true},
+            ],
+            "items": [
+                task(None, "personal-overdue", "1900-01-01"),
+                task(None, "personal-due-today", &time.system_civil_date),
+                personal_waiting,
+                personal_unscheduled,
+                personal_milestone,
+                task(Some("business"), "business-action", "2999-01-01"),
+                milestone,
+                completed_child,
+                task(Some("archived"), "hidden-action", "1900-01-01"),
+            ],
+            "statuses": [
+                status(None),
+                workflow_status(None, "waiting", "waiting"),
+                status(Some("business")),
+                status(Some("archived")),
+                workflow_status(Some("business"), "done", "completed"),
+            ],
+            "relationships": [],
+        });
+
+        let summary = attention_summary(&state, &["business".into()], &time).unwrap();
+
+        assert_eq!(summary["portfolio"]["open"], 7);
+        assert_eq!(summary["portfolio"]["overdue"], 1);
+        assert_eq!(summary["portfolio"]["due_today"], 1);
+        assert_eq!(summary["portfolio"]["waiting"], 1);
+        assert_eq!(summary["portfolio"]["unscheduled"], 2);
+        assert_eq!(
+            summary["portfolio"]["next_action"]["item_id"],
+            "personal-overdue"
+        );
+        assert_eq!(summary["portfolio"]["next_milestone"]["item_id"], "launch");
+        assert_eq!(
+            summary["portfolio"]["next_milestone"]["completed_children"],
+            1
+        );
+        assert_eq!(summary["portfolio"]["next_milestone"]["total_children"], 1);
+        assert_eq!(
+            summary["personal"]["next_action"]["item_id"],
+            "personal-overdue"
+        );
+        assert_eq!(
+            summary["personal"]["next_milestone"]["item_id"],
+            "personal-milestone"
+        );
+        assert_eq!(
+            summary["projects"]["business"]["next_action"]["item_id"],
+            "business-action"
+        );
+    }
+
+    #[test]
     fn dependency_orientation_is_consistent_for_depends_on_and_blocks() {
         for (kind, source, target) in [
             ("depends_on", "candidate", "prerequisite"),
@@ -652,11 +757,9 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(blockers.len(), 2);
-        assert!(
-            blockers
-                .iter()
-                .all(|blocker| blocker["reason_code"] == "missing")
-        );
+        assert!(blockers
+            .iter()
+            .all(|blocker| blocker["reason_code"] == "missing"));
 
         state["items"]
             .as_array_mut()

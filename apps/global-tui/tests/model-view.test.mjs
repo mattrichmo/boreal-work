@@ -249,3 +249,32 @@ test("responsive layouts preserve selected row, scope, freshness and bounded lin
 test("bulk selection marker is visible on ordinary item rows",async()=>{const {client}=fixture();const c=new GlobalController(client);await c.refresh();c.setScope("biz");c.setRoute("list");c.toggleBulkSelected("item2");assert.match(render(c,100,24),/☑ Status 2/);});
 
 test("Home labels missing project activity as absent from the recent sample",async()=>{const {client}=fixture();const c=new GlobalController(client);await c.refresh();c.setScope("biz");c.setRoute("overview");c.selectId("biz");assert.match(render(c,100,40),/Last management activity: not in recent activity sample/);});
+
+test("Home shows portfolio and Personal next action and milestone from attention summaries",async()=>{
+ const {snapshot}=fixture();
+ snapshot.items.push(
+  {...snapshot.items[0],id:"personal-next",project_id:null,parent_id:null,kind:"task",title:"Book dentist",status_id:"todo",due_at:"2026-10-20"},
+  {...snapshot.items[0],id:"personal-milestone",project_id:null,parent_id:null,kind:"milestone",title:"Home repairs",status_id:"todo",due_at:"2026-11-01"}
+ );
+ const prepared=serverSnapshot(snapshot);
+ prepared.attention.portfolio={...prepared.attention.portfolio,next_action:{item_id:"portfolio-next",title:"Review launch blockers",due_at:"2026-10-16"},next_milestone:{item_id:"portfolio-milestone",title:"Launch milestone",due_at:"2026-10-30",completed_children:2,total_children:5},blocked_by:[],next_action_unavailable_reason:null};
+ const c=new GlobalController({snapshot:async()=>structuredClone(prepared),execute:async()=>({})});await c.refresh();c.setRoute("overview");
+ const screen=render(c,100,40);
+ assert.match(screen,/PORTFOLIO NEXT ACTION · Review launch blockers/);
+ assert.match(screen,/PORTFOLIO NEXT MILESTONE · Launch milestone/);
+ assert.match(screen,/PERSONAL NEXT ACTION · Book dentist/);
+ assert.match(screen,/PERSONAL NEXT MILESTONE · Home repairs/);
+});
+
+test("Home keeps authored project metadata and linked execution freshness/counts in separate blocks",async()=>{
+ const {snapshot}=fixture();const project=snapshot.projects.find(p=>p.id==="biz");project.lifecycle="paused";project.health="watch";
+ snapshot.linked_projects[0]={...snapshot.linked_projects[0],availability:"stale",revision:3,as_of:"2026-10-12",counts:{open:4,completed:2}};
+ const c=new GlobalController({snapshot:async()=>serverSnapshot(snapshot),execute:async()=>({})});await c.refresh();c.setScope("biz");c.setRoute("overview");c.selectId("biz");
+ const screen=render(c,240,40);
+ assert.deepEqual(c.snapshot.linked_projects[0].counts,{open:4,completed:2});
+ assert.match(screen,/PROJECT METADATA · lifecycle paused · health watch/);
+ assert.match(screen,/MANAGEMENT ·/);
+ assert.match(screen,/LINKED EXECUTION · 1 workspaces · 0 current · 1 stale · 0 unavailable/);
+ assert.match(screen,/latest known 2026-10-12/);
+ assert.match(screen,/last-known counts · open 4 · completed 2/);
+});
