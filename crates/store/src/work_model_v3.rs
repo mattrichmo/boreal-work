@@ -3268,25 +3268,8 @@ fn bind_optional_signed_i64(
 mod scheduling_codec_tests {
     use super::*;
 
-    fn store_with_schedule_table() -> SqliteStore {
-        let store = SqliteStore::open_in_memory(crate::PRODUCTION_SCHEMA_SQL).unwrap();
-        store
-            .execute_batch(
-                "CREATE TABLE work_schedule_v3 (
-                   project_id TEXT NOT NULL,
-                   work_id TEXT NOT NULL,
-                   schedule_revision INTEGER NOT NULL,
-                   payload_json TEXT NOT NULL,
-                   civil_time_setting_revision INTEGER,
-                   updated_at_ms INTEGER NOT NULL,
-                   created_project_revision INTEGER NOT NULL,
-                   operation_id TEXT NOT NULL,
-                   request_digest TEXT NOT NULL,
-                   PRIMARY KEY (project_id, work_id, schedule_revision)
-                 );",
-            )
-            .unwrap();
-        store
+    fn store_with_scheduling_schema() -> SqliteStore {
+        SqliteStore::open_in_memory(crate::PRODUCTION_SCHEMA_SQL).unwrap()
     }
 
     fn local_date(year: i32, month: u8, day: u8) -> BusinessDate {
@@ -3409,7 +3392,7 @@ mod scheduling_codec_tests {
 
     #[test]
     fn legacy_due_at_reader_preserves_raw_date_text_and_project_scope() {
-        let store = store_with_schedule_table();
+        let store = store_with_scheduling_schema();
         store.create_project("project-1", "unix-ms:1").unwrap();
         let work = boreal_domain::WorkItem::new(
             ProjectId::new("project-1"),
@@ -3459,7 +3442,7 @@ mod scheduling_codec_tests {
 
     #[test]
     fn explicit_schedule_revision_shadows_legacy_due_at_even_when_cleared() {
-        let store = store_with_schedule_table();
+        let store = store_with_scheduling_schema();
         store.create_project("project-1", "unix-ms:1").unwrap();
         let work = boreal_domain::WorkItem::new(
             ProjectId::new("project-1"),
