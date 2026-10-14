@@ -9,7 +9,6 @@ import io
 import json
 import os
 import platform
-import re
 import shutil
 import socket
 import sqlite3
@@ -66,30 +65,12 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def redact_output(value: str) -> str:
-    """Keep short failure context without persisting fixture content or secrets."""
-    output = re.sub(
-        r'(?i)("(?:credential(?:_ref)?|secret|token|password|content)"\s*:\s*)"(?:\\.|[^"\\])*"',
-        r'\1"<redacted>"',
-        value,
-    )
-    for fixture_content in (
-        "Captured before any delivery.",
-        "Frozen delivery content.",
-        "Conflicting payload content.",
-        "Edited mutable Intake fixture content.",
-    ):
-        output = output.replace(fixture_content, "<fixture-content>")
-    output = output.replace("\x00", "")
-    return output[:512]
-
-
 def output_metadata(value: str) -> dict[str, Any]:
+    """Retain only output size and digest; output may contain arbitrary fixture text."""
     encoded = value.encode("utf-8", errors="replace")
     return {
         "bytes": len(encoded),
         "sha256": hashlib.sha256(encoded).hexdigest(),
-        "excerpt": redact_output(value),
     }
 
 
@@ -101,13 +82,12 @@ def persist_failure(error: BaseException) -> Path | None:
         os.chmod(root, 0o700)
         destination = Path(tempfile.mkdtemp(prefix="run-", dir=root))
         os.chmod(destination, 0o700)
-        message = str(error).splitlines()[0] if str(error) else type(error).__name__
         record = {
             "schema": "boreal.s08.t05.failure.v1",
             "metadata": RUN_METADATA,
             "failure": {
                 "type": type(error).__name__,
-                "summary": redact_output(message),
+                "summary": "validation failed; inspect the labeled command digests and rerun locally",
             },
             "commands": COMMAND_EVENTS[-40:],
             "retained_data": "bounded command metadata only; fixture database and service logs were removed",
@@ -151,7 +131,7 @@ def run_cli(
         text=True,
         timeout=90,
     )
-    command_path = [str(args[0])] if args else []
+    command_path = [Path(args[0]).name] if args else []
     if args and str(args[0]) in {"work", "intake", "service"} and len(args) > 1:
         if not str(args[1]).startswith("--"):
             command_path.append(str(args[1]))

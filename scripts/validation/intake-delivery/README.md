@@ -19,10 +19,10 @@ each CLI command and exit code, and the key delivery/restore readbacks.
 
 On failure, the harness writes a mode-restricted `failure.json` under
 `$TMPDIR/boreal-s08-t05-failures/`. It retains source/runtime and binary
-identities, the failed scenario, command exit codes, output hashes, and short
-redacted excerpts. The disposable project database, service log, credentials,
-and full payload output are not retained. Successful runs remove their
-temporary fixture.
+identities, the failed scenario, command exit codes, and output byte counts
+and hashes. It does not retain command output, paths, credentials, or payload
+text. The disposable project database and service log are not retained.
+Successful runs remove their temporary fixture.
 
 The compatibility result covers ordinary work and Intake reads by this one
 source-pinned predecessor against the receipt-bearing work-model/3 database.
