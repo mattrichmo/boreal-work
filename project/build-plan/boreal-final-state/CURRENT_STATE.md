@@ -144,3 +144,34 @@ blocked on S07-T90 and S08-T90. S12-T05 has typed source routes, but the
 callable contract inventory and general-work/artifact-acceptance fixtures
 disagree about available operations; T05 and T90 evidence are absent. S12-T06
 also waits on accepted S12-T05 and S02-T90. S10-T01 must wait for S07-T90.
+
+## Continuation update — 2026-10-14
+
+The integration branch advanced through `d0fccd3f42799b3760238591b430803697df0ea8`
+(`Reconcile S12 T05 typed contract fixtures`). This bounded change edits only
+the callable CLI contract rows for source/Intake and typed output inspection,
+plus the general-work and artifact-acceptance fixtures. It distinguishes
+implemented typed artifact-result binding/computed inspection from generic
+artifact submission and generic human deliverable decisions, which remain
+unavailable. The contract validator, workflow-package validator and
+`git diff --check` passed on the agent's committed tree. No S12-T05 journey or
+T90 acceptance is claimed.
+
+A subsequent read-only S05–S07 source audit found substantial existing daily,
+Inbox and provenance implementation, but no S05/S06/S07 T90 evidence. Concrete
+remaining source gaps include S06 raw-v1 identity/text/time import and
+idempotency/loss-conflict reporting; bulk triage does not yet validate or
+apply `due_at` and `follow_up_at`; collision resistance of new Global IDs is
+not established; and capture-witness physical backup/restore evidence is
+absent. S07 still lacks distinct Personal/current-project/all-inboxes scope,
+the required archive wording, a CLI bulk-triage route, Global-versus-project
+authority-first route guidance, and accurate Global help/install documentation.
+S07 T02 also lacks its small-terminal/offline qualification record. These are
+source observations, not acceptance results.
+
+Do not take the audited S06/S07 shared files while their active whole-file
+grants remain recorded. Their sprint dependencies also remain open: S06 needs
+S03-T90 and S05-T90; S07 needs S06-T90. S09, S10 and S11 remain downstream of
+those gates. The user cannot yet confirm that the two named S00 review workers
+stopped, so their session recovery and any dependent runtime mutation remain
+untouched. No canonical database or installation state was changed.

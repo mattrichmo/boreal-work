@@ -248,8 +248,8 @@
     "release_url": null,
     "channel_verification": "not_run"
   },
-  "note": "Current integration source includes the PR #22 baseline, workflow finish-recipe grammar and fixture-revision fixes, integrated F1 local guidance/onboarding, S07-T03 Global provenance inspection, and S13 typed scheduling/external-wait TUI. Contract, workflow-package and skill-package validators pass. Focused machine-update tests pass; TUI typecheck and 106 tests pass. S13 T02 source is integrated, but its wait readback consumes an unbounded service list and S13-T90 acceptance remains open. F1 and S07 sprint acceptance remain unrun. S08 restore identity and Intake receipt code exists with limited T05 evidence, but S08-T90 remains open. S09 Global Send is not implemented and depends on S07-T90 plus S08-T90. S12-T05 typed routes exist but contract inventory and fixtures disagree; T05/T90 evidence is absent, and T06 waits on S02-T90. S10-T01 waits on S07-T90. Remaining source/gate work includes S02/S03 paired package/Global migration recovery, S05–S07 daily/Inbox/CLI parity and snapshot privacy, S10 scale qualification, S11 release journeys/handover, and S13-T01/T03/T90. Integrated qualification, installation activation and release delivery have not occurred. S00-T01/T04 worker-stop confirmation is unavailable, so their expiry recovery and dependent runtime actions remain untouched. The installed 0.2.0 binary is not current source and uses SQLite 3.43.2 below the declared 3.51.3 floor; do not activate a candidate until qualification and binding review are complete.",
-  "current_source_commit": "ef89994fc8afa05c1f6286a70b740fbd8a232355",
+  "note": "Current integration source includes the PR #22 baseline, workflow finish-recipe grammar and fixture-revision fixes, integrated F1 local guidance/onboarding, S07-T03 Global provenance inspection, and S13 typed scheduling/external-wait TUI. The S12-T05 callable contract and workflow fixtures were reconciled on d0fccd3f; focused contract and workflow-package validators pass, along with prior skill-package validation, machine-update tests, and TUI checks. S13-T02 source is integrated, but its wait readback consumes an unbounded service list and S13-T90 acceptance remains open. S05–S07 source has substantial implementation, but sprint acceptance remains absent; audited gaps include S06 raw v1 import and scheduling fields in bulk triage, S07 separate inbox scopes, CLI bulk triage, authority-first skill routing and accurate discovery/install documentation. Some of these paths remain under active S06 grants. S08 restore identity and Intake receipt code exists with limited T05 evidence, but S08-T90 remains open. S09 Global Send is not implemented and depends on S07-T90 plus S08-T90. S12-T05 route/fixture disagreement is corrected, but T05/T90 evidence is absent, and T06 waits on S02-T90. S10-T01 waits on S07-T90. Remaining source/gate work includes S02/S03 paired package/Global migration recovery, S05–S07 daily/Inbox/CLI parity and snapshot privacy, S10 scale qualification, S11 release journeys/handover, and S13-T01/T03/T90. Integrated qualification, installation activation and release delivery have not occurred. S00-T01/T04 worker-stop confirmation is unavailable, so their expiry recovery and dependent runtime actions remain untouched. The installed 0.2.0 binary is not current source and uses SQLite 3.43.2 below the declared 3.51.3 floor; do not activate a candidate until qualification and binding review are complete.",
+  "current_source_commit": "d0fccd3f42799b3760238591b430803697df0ea8",
   "environment_inventory": {
     "checked_date": "2026-10-14",
     "native_platform": "macOS ARM64",
@@ -449,6 +449,12 @@
       "event": "S11_entry_dependency_reconciled",
       "source_commit": "ef89994fc8afa05c1f6286a70b740fbd8a232355",
       "summary": "Corrected BW-S11/SPRINT.md entry text to include BW-S13-T90, matching the sprint task table and master plan. S11 remains blocked until S09, S10, S12, and S13 sprint acceptance is recorded."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S12_T05_callable_contract_reconciled",
+      "source_commit": "d0fccd3f42799b3760238591b430803697df0ea8",
+      "summary": "Reconciled only the granted CLI contract rows and general-work/artifact-acceptance workflow fixtures. Typed artifact-result binding and computed inspection are recorded as callable; generic artifact submission and generic human deliverable-decision routes remain unavailable. Contract and workflow-package validators pass. This is source-contract progress only; no T05 journey or T90 acceptance evidence was recorded."
     }
   ]
 }
