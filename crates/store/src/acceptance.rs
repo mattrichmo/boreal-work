@@ -2279,6 +2279,25 @@ impl SqliteStore {
                         .into(),
                 ));
             }
+            let claim_source_id = attempt.source_version_id.as_deref().ok_or_else(|| {
+                StoreError::Conflict(
+                    "claim input source is unavailable; changed-result identity cannot be established".into(),
+                )
+            })?;
+            let claim_source = self
+                .source_version(&request.project_id, claim_source_id)?
+                .ok_or_else(|| {
+                    StoreError::Conflict(
+                        "claim input source is unavailable; changed-result identity cannot be established".into(),
+                    )
+                })?;
+            if claim_source.source_version_id == source.source_version_id
+                || claim_source.content_digest == source.content_digest
+            {
+                return Err(StoreError::Conflict(
+                    "final result must have a different source identity and content digest from the claim input".into(),
+                ));
+            }
 
             let pin = super::ProfileStore::new(self)
                 .current_pinned_requirements(&request.project_id, &request.work_id)?;
@@ -3274,6 +3293,13 @@ impl SqliteStore {
             ));
         }
         let current_final = self.current_final_result_for_attempt(&attempt)?;
+        let pin =
+            super::ProfileStore::new(self).current_pinned_requirements(project_id, work_id)?;
+        if pin.requires_kind("verification") && current_final.is_none() {
+            return Err(StoreError::Conflict(
+                "software submission requires a final-result binding for the current proof".into(),
+            ));
+        }
         let source = current_final
             .as_ref()
             .map(|binding| binding.source_version_id.as_str())
@@ -3293,14 +3319,16 @@ impl SqliteStore {
                     entity: "summary",
                     id: summary_id.into(),
                 })?;
-        let pin =
-            super::ProfileStore::new(self).current_pinned_requirements(project_id, work_id)?;
         let (entity_revision, proof_revision) = self.proof_cursor(project_id, work_id)?;
         if let Some(binding) = &current_final {
             if binding.entity_revision != entity_revision
                 || binding.proof_revision != proof_revision
                 || binding.attempt_id != attempt_id
                 || binding.fence != fence
+                || binding.config_identity != attempt.config_identity
+                || binding.profile_id != pin.profile.profile_id
+                || binding.profile_version != pin.profile.version
+                || binding.profile_digest != pin.profile.policy_digest
             {
                 return Err(StoreError::Conflict(
                     "final result binding does not match the submitted attempt fence and revisions"

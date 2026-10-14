@@ -295,8 +295,51 @@ fn untrusted_pass_is_retained_as_rejected_and_cannot_satisfy_current_proof() {
 }
 
 #[test]
+fn verification_pass_without_final_result_is_retained_but_inapplicable() {
+    let (store, app) = setup();
+    let imported = receipt(
+        "verification",
+        GateKind::Verification,
+        ReceiptResult::Passed,
+        ExecutorAttestation::ExternalAttested,
+    );
+    let inserted = app
+        .record_receipt("agent-1", None, &imported, None, TimestampMs(12))
+        .expect("retain historical verifier receipt");
+    assert_eq!(inserted.receipt.result, ReceiptOutcome::Rejected);
+    assert_eq!(
+        inserted.receipt.rejection_code.as_deref(),
+        Some("receipt_source_mismatch")
+    );
+
+    let current = app
+        .evaluate_current_acceptance(
+            "proof-project",
+            &WorkId::new("work-1"),
+            &AttemptId::new("attempt-1"),
+            Fence::new(1),
+            &AcceptanceDefinition::focused(),
+        )
+        .expect("evaluate without a final-result binding");
+    let verification = current
+        .gates
+        .iter()
+        .find(|gate| gate.gate_id == GateId::new("verification"))
+        .expect("verification gate");
+    assert_eq!(verification.state, boreal_domain::GateState::Failed);
+    assert_eq!(
+        verification.reason,
+        Some(EvidenceErrorCode::ReceiptSourceMismatch)
+    );
+    assert_eq!(
+        store.receipt("receipt-verification").unwrap().unwrap(),
+        inserted.receipt
+    );
+}
+
+#[test]
 fn public_receipt_facade_conflicts_when_an_operation_payload_changes() {
-    let (_store, app) = setup();
+    let (store, app) = setup();
     let original = receipt(
         "verification",
         GateKind::Verification,
@@ -305,13 +348,30 @@ fn public_receipt_facade_conflicts_when_an_operation_payload_changes() {
     );
     let inserted = app
         .record_receipt("agent-1", None, &original, None, TimestampMs(12))
-        .unwrap();
+        .expect("retain an unbound verification pass as rejected");
     assert!(!inserted.replayed);
-    assert!(
-        app.record_receipt("agent-1", None, &original, None, TimestampMs(12))
-            .unwrap()
-            .replayed
+    assert_eq!(inserted.receipt.result, ReceiptOutcome::Rejected);
+    assert_eq!(
+        inserted.receipt.rejection_code.as_deref(),
+        Some("receipt_source_mismatch")
     );
+    assert_eq!(
+        store
+            .receipt("receipt-verification")
+            .unwrap()
+            .unwrap()
+            .result,
+        ReceiptOutcome::Rejected
+    );
+    let replay = app
+        .record_receipt("agent-1", None, &original, None, TimestampMs(12))
+        .expect_err("replay reports the retained rejection");
+    assert!(matches!(
+        replay,
+        boreal_application::ApplicationError::Store(
+            boreal_store::StoreError::Invalid(message)
+        ) if message.contains("receipt_source_mismatch")
+    ));
 
     let mut changed = original;
     changed.output_digest = Some("sha256:changed-output".to_owned());

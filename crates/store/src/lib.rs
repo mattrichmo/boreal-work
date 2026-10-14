@@ -9369,9 +9369,7 @@ impl SqliteStore {
         {
             return Err(StoreError::LeaseExpired);
         }
-        if attempt.source_version_id != request.source_version_id
-            || attempt.config_identity != request.config_identity
-        {
+        if attempt.config_identity != request.config_identity {
             return Err(StoreError::Conflict(
                 "evidence execution context no longer matches the current attempt".to_owned(),
             ));
@@ -9386,6 +9384,69 @@ impl SqliteStore {
         {
             return Err(StoreError::Conflict(
                 "evidence execution policy no longer matches the work profile".to_owned(),
+            ));
+        }
+
+        // Verification runs against a produced final result when the current
+        // proof generation has one. Keep the attempt's original input source
+        // immutable, and independently prove that the verifier request names
+        // the bound output and its recorded source lineage. Unbound legacy
+        // verification admissions continue to use the attempt input identity.
+        let current_final = if gate.kind == GateKind::Verification {
+            self.current_final_result_for_attempt(&attempt)?
+        } else {
+            None
+        };
+        if let Some(binding) = current_final {
+            let pinned = ProfileStore::new(self)
+                .current_pinned_requirements(&request.project_id, &request.work_id)?;
+            let requested_source = request.source_version_id.as_deref().ok_or_else(|| {
+                StoreError::Conflict(
+                    "bound verification admission requires the final-result source identity"
+                        .to_owned(),
+                )
+            })?;
+            let claim_source_id = attempt.source_version_id.as_deref().ok_or_else(|| {
+                StoreError::Conflict(
+                    "claim input source is unavailable for final-result verification".to_owned(),
+                )
+            })?;
+            let claim_source = self
+                .source_version(&request.project_id, claim_source_id)?
+                .ok_or_else(|| {
+                    StoreError::Conflict(
+                        "claim input source is unavailable for final-result verification"
+                            .to_owned(),
+                    )
+                })?;
+            let result_source = self
+                .source_version(&request.project_id, requested_source)?
+                .ok_or_else(|| {
+                    StoreError::Conflict(
+                        "bound final-result source is unavailable for verifier admission"
+                            .to_owned(),
+                    )
+                })?;
+            if !pinned.requires_kind("verification")
+                || binding.source_version_id != requested_source
+                || binding.config_identity != attempt.config_identity
+                || binding.profile_id != pinned.profile.profile_id
+                || binding.profile_version != pinned.profile.version
+                || binding.profile_digest != pinned.profile.policy_digest
+                || binding.profile_id != request.profile_id
+                || binding.profile_version != request.profile_version
+                || claim_source.source_version_id == result_source.source_version_id
+                || claim_source.content_digest == binding.content_digest
+                || result_source.content_digest != binding.content_digest
+                || result_source.availability != "available"
+            {
+                return Err(StoreError::Conflict(
+                    "evidence execution source no longer matches the current final-result binding and source lineage".to_owned(),
+                ));
+            }
+        } else if attempt.source_version_id != request.source_version_id {
+            return Err(StoreError::Conflict(
+                "evidence execution context no longer matches the current attempt".to_owned(),
             ));
         }
 

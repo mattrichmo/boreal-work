@@ -83,6 +83,13 @@ impl WorkApplication<'_> {
         let submission =
             self.store_ref()
                 .current_submission(project_id, work_id, proof_revision)?;
+        let requirements = boreal_store::profiles::ProfileStore::new(self.store_ref())
+            .current_pinned_requirements(project_id, work_id)?;
+        if requires_bound_final_result(&requirements) && binding.is_none() && submission.is_some() {
+            return Err(ApplicationError::Store(StoreError::Conflict(
+                "current software submission has no final-result binding".into(),
+            )));
+        }
         if let (Some(binding), Some(submission)) = (&binding, &submission) {
             if submission.attempt_id != binding.attempt_id
                 || submission.fence != binding.fence
@@ -308,6 +315,19 @@ impl WorkApplication<'_> {
             close_intent,
         };
         let mut readiness = crate::evaluate_close_readiness(&input)?;
+        if snapshot.final_result.is_none() {
+            if let Some(requirement) = snapshot
+                .pinned_requirements
+                .required_declarations()
+                .find(|declaration| declaration.kind == "verification")
+            {
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::GateUnsatisfied(GateId::new(
+                        requirement.gate_id.clone(),
+                    )));
+            }
+        }
         let attempt_context = snapshot.proof_attempt.as_ref();
         let binding_mismatch = snapshot.final_result.as_ref().is_some_and(|binding| {
             let Some(attempt) = attempt_context else {
@@ -489,6 +509,11 @@ impl WorkApplication<'_> {
         receipt
             .validate_for_import(&expected)
             .map_err(ApplicationError::from)?;
+        let missing_final_result = expected.gate.kind == GateKind::Verification
+            && self.verification_result_is_unbound(
+                expected.work_id.as_str(),
+                expected.attempt_id.as_str(),
+            )?;
 
         // An imported/self-reported passing payload is retained as a rejected
         // fact. It is never allowed to satisfy a gate merely because its JSON
@@ -499,6 +524,11 @@ impl WorkApplication<'_> {
                 (
                     ReceiptOutcome::Rejected,
                     Some(EvidenceErrorCode::ReceiptAttestationMissing.as_str()),
+                )
+            } else if receipt.result == ReceiptResult::Passed && missing_final_result {
+                (
+                    ReceiptOutcome::Rejected,
+                    Some(EvidenceErrorCode::ReceiptSourceMismatch.as_str()),
                 )
             } else {
                 (receipt_outcome(receipt.result), None)
@@ -548,6 +578,87 @@ impl WorkApplication<'_> {
             request.expectation.work_id.as_str(),
             request.expectation.gate.id.as_str(),
         )?;
+        let gate = self
+            .store()
+            .gate(&project_id, request.expectation.work_id.as_str(), &gate_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "gate",
+                id: gate_id.as_str().to_owned(),
+            })?;
+        if gate.kind == GateKind::Verification {
+            let attempt = self
+                .store()
+                .proof_attempt(&project_id, request.expectation.attempt_id.as_str())?;
+            if attempt.work_id != request.expectation.work_id.as_str()
+                || attempt.fence != request.expectation.fence.get()
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::StaleFence),
+                ));
+            }
+            if attempt.actor_id != actor_id || attempt.session_id.as_deref() != session_id {
+                return Err(ApplicationError::Store(StoreError::WrongOwner {
+                    expected: actor_id.to_owned(),
+                    actual: attempt.actor_id,
+                }));
+            }
+            if now.as_millis() >= parse_stamp(&attempt.hard_deadline)?.as_millis() {
+                return Err(ApplicationError::Store(StoreError::HardDeadlineElapsed));
+            }
+            if now.as_millis() >= parse_stamp(&attempt.lease_deadline)?.as_millis() {
+                return Err(ApplicationError::Store(StoreError::LeaseExpired));
+            }
+            let requirements = boreal_store::profiles::ProfileStore::new(self.store_ref())
+                .current_pinned_requirements(&project_id, request.expectation.work_id.as_str())?;
+            let binding = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+                .current_final_result_for_attempt(&attempt)?
+                .ok_or_else(|| {
+                    ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                        EvidenceErrorCode::ReceiptSourceMismatch,
+                    ))
+                })?;
+            if attempt.config_identity != request.expectation.config_identity.as_str()
+                || binding.source_version_id != request.expectation.source_snapshot_hash.as_str()
+                || binding.config_identity != request.expectation.config_identity.as_str()
+                || binding.profile_id != gate.profile_id
+                || binding.profile_version != gate.profile_version
+                || binding.profile_digest != requirements.profile.policy_digest
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptPolicyMismatch),
+                ));
+            }
+            let claim_source_id = attempt.source_version_id.as_deref().ok_or_else(|| {
+                ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                    EvidenceErrorCode::ReceiptSourceMismatch,
+                ))
+            })?;
+            let claim_source = self
+                .store()
+                .source_version(&project_id, claim_source_id)?
+                .ok_or_else(|| {
+                    ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                        EvidenceErrorCode::ReceiptSourceMismatch,
+                    ))
+                })?;
+            let result_source = self
+                .store()
+                .source_version(&project_id, &binding.source_version_id)?
+                .ok_or_else(|| {
+                    ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                        EvidenceErrorCode::ReceiptSourceMismatch,
+                    ))
+                })?;
+            if claim_source.source_version_id == result_source.source_version_id
+                || claim_source.content_digest == binding.content_digest
+                || result_source.content_digest != binding.content_digest
+                || result_source.availability != "available"
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptSourceMismatch),
+                ));
+            }
+        }
         let profile_version = request.expectation.profile_version.parse().map_err(|_| {
             ApplicationError::Evidence(crate::EvidenceValidationError::new(
                 EvidenceErrorCode::ReceiptPolicyMismatch,
@@ -931,11 +1042,21 @@ impl WorkApplication<'_> {
         receipt
             .validate_for_import(expected)
             .map_err(ApplicationError::from)?;
+        let missing_final_result = expected.gate.kind == GateKind::Verification
+            && self.verification_result_is_unbound(
+                expected.work_id.as_str(),
+                expected.attempt_id.as_str(),
+            )?;
         let (result, rejection_code) =
             if receipt.result == ReceiptResult::Passed && !receipt.attestation.is_gate_trusted() {
                 (
                     ReceiptOutcome::Rejected,
                     Some(EvidenceErrorCode::ReceiptAttestationMissing.as_str()),
+                )
+            } else if receipt.result == ReceiptResult::Passed && missing_final_result {
+                (
+                    ReceiptOutcome::Rejected,
+                    Some(EvidenceErrorCode::ReceiptSourceMismatch.as_str()),
                 )
             } else {
                 (receipt_outcome(receipt.result), None)
@@ -978,10 +1099,13 @@ impl WorkApplication<'_> {
         }
         let current_final = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
             .current_final_result_for_attempt(&attempt)?;
+        let requirements = boreal_store::profiles::ProfileStore::new(self.store_ref())
+            .current_pinned_requirements(project_id, work_id.as_str())?;
         if let Some(binding) = &current_final {
             if binding.config_identity != attempt.config_identity
                 || binding.profile_id != definition.id.as_str()
                 || binding.profile_version.to_string() != definition.version
+                || binding.profile_digest != requirements.profile.policy_digest
             {
                 return Err(ApplicationError::Evidence(
                     crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptPolicyMismatch),
@@ -1045,7 +1169,18 @@ impl WorkApplication<'_> {
                 receipts.push(payload);
             }
         }
-        Ok(crate::evaluate_acceptance(definition, &receipts, &base)?)
+        let mut evaluation = crate::evaluate_acceptance(definition, &receipts, &base)?;
+        if requires_bound_final_result(&requirements) && current_final.is_none() {
+            for gate in evaluation
+                .gates
+                .iter_mut()
+                .filter(|gate| gate.kind == GateKind::Verification)
+            {
+                gate.state = boreal_domain::GateState::Failed;
+                gate.reason = Some(EvidenceErrorCode::ReceiptSourceMismatch);
+            }
+        }
+        Ok(evaluation)
     }
 
     fn current_receipt_expectation(
@@ -1069,6 +1204,8 @@ impl WorkApplication<'_> {
         }
         let current_final = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
             .current_final_result_for_attempt(&attempt)?;
+        let requirements = boreal_store::profiles::ProfileStore::new(self.store_ref())
+            .current_pinned_requirements(&project_id, receipt.work_id.as_str())?;
         let persisted_gate_id = self.store().gate_id_for_work(
             &project_id,
             receipt.work_id.as_str(),
@@ -1085,6 +1222,7 @@ impl WorkApplication<'_> {
             if binding.config_identity != attempt.config_identity
                 || binding.profile_id != gate.profile_id
                 || binding.profile_version != gate.profile_version
+                || binding.profile_digest != requirements.profile.policy_digest
             {
                 return Err(ApplicationError::Evidence(
                     crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptPolicyMismatch),
@@ -1117,6 +1255,20 @@ impl WorkApplication<'_> {
                 required_observables: Vec::new(),
             },
         })
+    }
+
+    fn verification_result_is_unbound(
+        &self,
+        work_id: &str,
+        attempt_id: &str,
+    ) -> Result<bool, ApplicationError> {
+        let project_id = self.project_for_work(work_id)?;
+        let attempt = self.store().proof_attempt(&project_id, attempt_id)?;
+        Ok(
+            boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+                .current_final_result_for_attempt(&attempt)?
+                .is_none(),
+        )
     }
 
     fn ensure_current_context(
@@ -1946,6 +2098,10 @@ fn validate_final_result_capture_request(
         ));
     }
     Ok(())
+}
+
+fn requires_bound_final_result(requirements: &boreal_store::profiles::PinnedRequirements) -> bool {
+    requirements.requires_kind("verification")
 }
 
 fn close_readiness_definition(
