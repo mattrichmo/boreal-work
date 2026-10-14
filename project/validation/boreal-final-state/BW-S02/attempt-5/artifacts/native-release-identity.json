@@ -1,0 +1,16 @@
+{
+  "acceptance_source_commit": "32e46d19fac5f970388ff67c1234a2c19fa91ee8",
+  "source_id": "sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad",
+  "version": "0.2.2",
+  "target": "aarch64-apple-darwin",
+  "archive_sha256": "sha256:753fe0790601f0152a62ea87c0cfde77cc8531631abcf4f7c41687bc1fdbcfb3",
+  "artifact_identity": "sha256:9870770241c143c7f8c1620ab81effdafcbf5ed5984f8f6b645a765547dc5a89",
+  "release_manifest_sha256": "sha256:de342a486bd89d25f6f097be7e9fbe9e19d7c278c25754b35716c3a78297cfea",
+  "contracts_snapshot_identity": "sha256:1b4c260456a1c5fffd3a5c7fc7a5adf577ffe5b3e0f3493cf2b8540f03d7247b",
+  "binary_sha256": "sha256:cc38aed6f16a892460f613b8e4b381f5ee37a79a08dbd556ebf0e04645ba54b3",
+  "tui_source_id": "sha256:fdab01964b4f81980a8483d4d31962ad210630e62e01f752396c43d26e2f093c",
+  "global_tui_source_id": "sha256:e08e23c1f3184e19e239b3d0219c5237dafb9e5c8876b9aee0cc7163e7179f1b",
+  "node_range": ">=20 <27",
+  "package_asset_count": 31,
+  "contract_asset_count": 86
+}
