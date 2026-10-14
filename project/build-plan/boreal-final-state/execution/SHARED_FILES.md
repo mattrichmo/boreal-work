@@ -22,6 +22,7 @@ take ownership of implementation work.
 | `crates/store/src/intake_delivery.rs`, `crates/store/src/work_model_v3.rs` | Project-store steward; serialize Intake-delivery and typed work-model persistence changes with `lib.rs` and migration ownership. |
 | `crates/protocol/src/models.rs`, `crates/protocol/src/global_manager.rs`, protocol manifests | Protocol steward; coordinate versioned contract changes and all consumers. |
 | `apps/global-tui/src/model.ts`, `interaction.ts`, `view.ts`, `client.ts` | Global TUI integrator; serialize edits to each existing file and check mounted behavior. |
+| `apps/global-tui/tests/model-view.test.mjs` | BW-S05-T04 owns this focused Home attention presentation test file under its dated coordinator amendment. |
 | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `install.sh`, `scripts/release/`, `packaging/` | Release and CI integrator; keep source, generated, embedded, and packaged identities aligned. |
 | `scripts/validation/run_full_suite.py` and shared validation entry points | Validation integrator; coordinate invocation order, fixtures, and output contracts. |
 | `scripts/validation/` | Validation integration steward; BW-S13-T03 has a broad directory grant, so serialize it against every task owning any child path here, including BW-S12-T06's `scripts/validation/boreal-portability/`. |
