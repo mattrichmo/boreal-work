@@ -21,6 +21,7 @@ take ownership of implementation work.
 | `crates/store/src/lib.rs`, `crates/store/src/global_manager.rs`, schema manifests, SQL migrations, migration ordering | Store and migration steward; serialize store wiring and schema changes. |
 | `crates/store/src/intake_delivery.rs`, `crates/store/src/work_model_v3.rs` | Project-store steward; serialize Intake-delivery and typed work-model persistence changes with `lib.rs` and migration ownership. |
 | `crates/protocol/src/models.rs`, `crates/protocol/src/global_manager.rs`, protocol manifests | Protocol steward; coordinate versioned contract changes and all consumers. |
+| `crates/protocol/src/models.rs`, `crates/cli/src/command_registry.rs`, `crates/cli/src/main.rs`, `crates/cli/src/service.rs`, `project/INTERFACES.md`, `project/spec/cli-contract.json` | BW-S13-T01 dated coordinator amendment assigns `/root/s13_boundary` as the whole-file steward for typed schedule and external-wait service/CLI parity; serialize all edits until handoff. |
 | `apps/global-tui/src/model.ts`, `interaction.ts`, `view.ts`, `client.ts` | Global TUI integrator; serialize edits to each existing file and check mounted behavior. |
 | `apps/global-tui/tests/model-view.test.mjs` | BW-S05-T04 owns this focused Home attention presentation test file under its dated coordinator amendment. |
 | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `install.sh`, `scripts/release/`, `packaging/` | Release and CI integrator; keep source, generated, embedded, and packaged identities aligned. |
