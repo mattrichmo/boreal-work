@@ -199,7 +199,10 @@ export async function runInteractive(controller: GlobalController, terminal: Key
         }catch{}
       })();
     };
-    const projectId = parent?.project_id ?? controller.projectId ?? null;
+    // Quick capture is classification-free and always belongs to the Personal
+    // Inbox. Detailed creation remains scoped to the current project, and
+    // child creation remains scoped to its parent.
+    const projectId = parent?.project_id ?? (detail ? controller.projectId ?? null : null);
     begin(projectId);
   };
   const editItem = (item: Item): void => {
@@ -608,7 +611,7 @@ function helpLines(c: GlobalController): string[] {
     planning:"Enter inspect · n new item · g milestone · h child · z collapse/expand · P parent",
     archive:"u restore selected record · Enter inspect",
     history:"Enter open activity · PgUp/PgDn page · ↑↓ scroll",
-    inbox:"n quick capture to selected project or Personal inbox · Enter inspect · e triage"
+    inbox:"n quick capture to Personal inbox · Enter inspect · e triage"
   };
   const selected=selectedItem(c)?"Selected work: e edit · h add child · m status · c complete · o reopen · b dependency · J jump related · K/W notes · y mark bulk triage · a archive":"";
   return [`${c.route} · ${c.activeProject?.name ?? "All projects"}`, routeActions[c.route], selected, "Tab focus · Space toggle all/last project · s choose scope · : search all views and actions", "? help · r refresh/read receipt · Esc back · q quit. Palette : contains every view and action."].filter(Boolean);

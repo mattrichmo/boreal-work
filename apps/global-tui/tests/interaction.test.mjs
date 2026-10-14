@@ -73,6 +73,7 @@ test('quick capture retains Unicode and commas in its title and submits once', a
   const h = harness(); await h.key('n'); await h.key('Café 家, groceries'); await h.key('\r'); await new Promise(r => setTimeout(r, 5));
   assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0].command, 'todo add');
+  assert.equal(h.calls[0].payload.project_id, null, 'quick capture is always Personal Inbox, even in project scope');
   assert.equal(h.calls[0].payload.title, 'Café 家, groceries');
   await h.key('q'); await h.run;
 });
@@ -81,6 +82,7 @@ test('command palette quick capture performs the selected action', async () => {
   const h = harness(); await h.key(':'); await h.key('Quick capture'); await h.key('\r');
   await h.key('Call, then Café'); await h.key('\r');
   assert.equal(h.calls[0].command, 'todo add');
+  assert.equal(h.calls[0].payload.project_id, null, 'palette capture is always Personal Inbox, even in project scope');
   assert.equal(h.calls[0].payload.title, 'Call, then Café');
   await h.key('\x03'); await h.run;
 });
@@ -437,6 +439,21 @@ test('global detailed capture defaults to Personal inbox and exposes destination
   assert.match(h.terminal.output,/Parent/);
   assert.match(h.terminal.output,/Workflow status/);
   await h.key('\x03');await h.run;
+});
+
+test('detailed capture and child creation retain their project-aware destination', async () => {
+  const detailed=harness();await detailed.key('N');
+  assert.match(detailed.terminal.output,/New task · details/);
+  assert.match(detailed.terminal.output,/Destination[\s\S]*Life/);
+  await detailed.key('Scoped detail');await detailed.key('\x13');
+  assert.equal(detailed.calls[0].payload.project_id,'p1');
+  await detailed.key('\x03');await detailed.run;
+
+  const child=harness();await child.key('h');await child.key('Child task');await child.key('\x13');
+  assert.equal(child.calls[0].command,'subtask add');
+  assert.equal(child.calls[0].payload.project_id,'p1');
+  assert.equal(child.calls[0].payload.parent_id,'i1');
+  await child.key('\x03');await child.run;
 });
 
 test('Escape from a searchable form picker returns to the retained form draft', async () => {
