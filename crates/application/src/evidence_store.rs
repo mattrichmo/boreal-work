@@ -5,26 +5,26 @@ use boreal_domain::{
     ReceiptId, ReceiptResult, SourceVersionId, TimestampMs, WorkId,
 };
 use boreal_store::{
-    identity::{IdentityContext, IdentityError, IdentityStore},
     AuditEventRecord, CloseIntentRequest, CloseIntentResult, EvidenceExecutionAdmissionRequest,
     EvidenceExecutionAdmissionResult, EvidenceExecutionRecord, OperationOutcome, OperationRecord,
     ReceiptAcceptanceExpectation, ReceiptAttestation, ReceiptInsertRequest, ReceiptInsertResult,
     ReceiptOutcome, ReceiptRecord, ReceiptSubmissionKind, ReviewDecision as StoreReviewDecision,
     ReviewInsertRequest, StoreError, SummaryInsertRequest, SummaryInsertResult,
+    identity::{IdentityContext, IdentityError, IdentityStore},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
-    canonical_request_digest, validate_review_decision, AcceptanceDefinition, AcceptanceEvaluation,
-    AcceptanceGateDefinition, ApplicationError, CloseIntent, CloseoutInput, EvidenceErrorCode,
-    EvidenceRunRequest, EvidenceRunResult, ExternalEffectAcquisition, ExternalEffectAdapter,
-    ExternalEffectReadback, ExternalEffectRequest, ExternalEffectResolution, ExternalJobKind,
-    ReceiptExpectation, ReceiptExpectationBase, ReceiptPayload, ReviewDecision,
-    ReviewDecisionRequest, SqliteStore, SummaryPayload, WorkApplication,
+    AcceptanceDefinition, AcceptanceEvaluation, AcceptanceGateDefinition, ApplicationError,
+    CloseIntent, CloseoutInput, EvidenceErrorCode, EvidenceRunRequest, EvidenceRunResult,
+    ExternalEffectAcquisition, ExternalEffectAdapter, ExternalEffectReadback,
+    ExternalEffectRequest, ExternalEffectResolution, ExternalJobKind, ReceiptExpectation,
+    ReceiptExpectationBase, ReceiptPayload, ReviewDecision, ReviewDecisionRequest, SqliteStore,
+    SummaryPayload, WorkApplication, canonical_request_digest, validate_review_decision,
 };
 use boreal_source::{
     ArtifactProducer, ArtifactRelationshipInput, ArtifactRightsProvenance, ArtifactRole,
-    ArtifactScope, SourceCatalog, SourceIdentity, DEFAULT_MAX_ARTIFACT_BYTES,
+    ArtifactScope, DEFAULT_MAX_ARTIFACT_BYTES, SourceCatalog, SourceIdentity,
 };
 use boreal_store::jobs::ExternalJobInput;
 
@@ -322,10 +322,9 @@ impl WorkApplication<'_> {
                 || binding.config_identity.as_str() != attempt.config_identity.as_str()
                 || binding.profile_id.as_str()
                     != snapshot.pinned_requirements.profile.profile_id.as_str()
-                || binding.profile_version.to_string()
-                    != snapshot.pinned_requirements.profile.version.as_str()
+                || binding.profile_version != snapshot.pinned_requirements.profile.version
                 || binding.profile_digest.as_str()
-                    != snapshot.pinned_requirements.profile.digest.as_str()
+                    != snapshot.pinned_requirements.profile.policy_digest.as_str()
         });
         let submission_mismatch = snapshot.submission.as_ref().is_some_and(|submission| {
             let Some(attempt) = attempt_context else {
@@ -340,10 +339,9 @@ impl WorkApplication<'_> {
                 || submission.config_identity.as_str() != attempt.config_identity.as_str()
                 || submission.profile_id.as_str()
                     != snapshot.pinned_requirements.profile.profile_id.as_str()
-                || submission.profile_version.to_string()
-                    != snapshot.pinned_requirements.profile.version.as_str()
+                || submission.profile_version != snapshot.pinned_requirements.profile.version
                 || submission.profile_digest.as_str()
-                    != snapshot.pinned_requirements.profile.digest.as_str()
+                    != snapshot.pinned_requirements.profile.policy_digest.as_str()
                 || snapshot.final_result.as_ref().is_some_and(|binding| {
                     submission.attempt_id != binding.attempt_id
                         || submission.fence != binding.fence
@@ -1967,7 +1965,7 @@ fn close_readiness_definition(
                 other => {
                     return Err(ApplicationError::Store(StoreError::Corrupt(format!(
                         "pinned close-readiness gate has unknown kind {other}"
-                    ))))
+                    ))));
                 }
             };
             Ok(AcceptanceGateDefinition {
@@ -1981,8 +1979,8 @@ fn close_readiness_definition(
         })
         .collect::<Result<Vec<_>, ApplicationError>>()?;
     Ok(AcceptanceDefinition {
-        id: requirements.profile.profile_id.clone(),
-        version: requirements.profile.version.clone(),
+        id: ProfileId::new(requirements.profile.profile_id.clone()),
+        version: requirements.profile.version.to_string(),
         gates,
         close_requires_intent: true,
     })
@@ -2047,7 +2045,7 @@ fn close_readiness_source(
                     .map(|record| record.config_identity.as_str())
                     .unwrap_or_default()
             && binding.profile_id == snapshot.pinned_requirements.profile.profile_id.as_str()
-            && binding.profile_version.to_string() == snapshot.pinned_requirements.profile.version)
+            && binding.profile_version == snapshot.pinned_requirements.profile.version)
             .then(|| binding.source_version_id.clone())
     });
     let submission_source = snapshot.submission.as_ref().and_then(|submission| {
@@ -2060,8 +2058,7 @@ fn close_readiness_source(
                     .map(|record| record.config_identity.as_str())
                     .unwrap_or_default()
             && submission.profile_id == snapshot.pinned_requirements.profile.profile_id.as_str()
-            && submission.profile_version.to_string()
-                == snapshot.pinned_requirements.profile.version)
+            && submission.profile_version == snapshot.pinned_requirements.profile.version)
             .then(|| submission.source_version_id.clone())
     });
     SourceVersionId::new(
@@ -2203,7 +2200,7 @@ fn parse_coverage(value: &str) -> Result<crate::ReceiptCoverage, ApplicationErro
         _ => {
             return Err(ApplicationError::Evidence(
                 crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptInvalid),
-            ))
+            ));
         }
     };
     let profile_id = value
@@ -2294,9 +2291,9 @@ mod tests {
         ProjectId, WorkId, WorkItem, WorkKind,
     };
     use boreal_store::{
+        EvidenceExecutionState,
         identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
         principals::{PrincipalGrantRequest, PrincipalRevocationRequest},
-        EvidenceExecutionState,
     };
 
     const FIXTURE_SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -2542,8 +2539,18 @@ mod tests {
         project: &ProjectId,
         work_id: &str,
         attempt_id: &str,
+        session_id: &str,
     ) {
         let app = WorkApplication::new(store);
+        app.register_session_as(
+            project,
+            "agent-one",
+            "verifier-harness",
+            session_id,
+            "unix-ms:12",
+            &format!("op-session-{work_id}"),
+        )
+        .expect("register reviewed verifier agent session");
         let mut work = verifier_work(project);
         work.id = WorkId::new(work_id);
         work.acceptance_profile = AcceptanceProfile::reviewed();
@@ -2566,7 +2573,7 @@ mod tests {
             work_id,
             "agent-one",
             "verifier-harness",
-            Some(VERIFIER_SESSION),
+            Some(session_id),
             attempt_id,
             &format!("op-claim-{work_id}"),
             &format!("sha256:{work_id}-claim"),
@@ -2598,6 +2605,10 @@ mod tests {
             .current_attempt_for_work(project.as_str(), work_id)
             .expect("read current attempt")
             .expect("current attempt exists");
+        let session_id = attempt
+            .session_id
+            .as_deref()
+            .expect("test attempt has a session");
         store
             .apply_attempt_mutation(boreal_store::AttemptMutationRequest {
                 project_id: project.as_str().to_owned(),
@@ -2605,7 +2616,7 @@ mod tests {
                 attempt_id: attempt_id.to_owned(),
                 actor_id: "agent-one".to_owned(),
                 harness_id: Some("verifier-harness".to_owned()),
-                session_id: Some(VERIFIER_SESSION.to_owned()),
+                session_id: Some(session_id.to_owned()),
                 fence: attempt.fence,
                 operation_id: format!("op-submit-{work_id}"),
                 request_digest: format!("sha256:submit-{work_id}"),
@@ -2638,7 +2649,7 @@ mod tests {
         app.record_summary_with_body(
             project.as_str(),
             "agent-one",
-            Some(VERIFIER_SESSION),
+            Some(session_id),
             &summary,
             &body,
             &format!("op-summary-{work_id}"),
@@ -2664,7 +2675,7 @@ mod tests {
         };
         app.request_close(
             "agent-one",
-            Some(VERIFIER_SESSION),
+            Some(session_id),
             &intent,
             Some(
                 store
@@ -2709,7 +2720,7 @@ mod tests {
             reason: "reviewed close-readiness test submission".to_owned(),
             source_snapshot_hash: SourceVersionId::new("source-one"),
             config_identity: ConfigIdentity::new("config-one"),
-            policy_version: requirements.profile.version,
+            policy_version: requirements.profile.version.to_string(),
         };
         WorkApplication::new(store)
             .record_review(
@@ -2857,10 +2868,12 @@ mod tests {
         let application = WorkApplication::new(&store);
 
         assert!(!store.is_canonical_production());
-        assert!(application
-            .identity_context("fixture-project")
-            .expect("fixture identity lookup")
-            .is_none());
+        assert!(
+            application
+                .identity_context("fixture-project")
+                .expect("fixture identity lookup")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2869,10 +2882,12 @@ mod tests {
         assert_eq!(binding["mode"], "reference_only");
         assert_eq!(binding["content_bound"], false);
         assert_eq!(binding["reference"], "artifact://verifier-output");
-        assert!(binding["diagnostic"]
-            .as_str()
-            .expect("reference diagnostic")
-            .contains("not a content digest"));
+        assert!(
+            binding["diagnostic"]
+                .as_str()
+                .expect("reference diagnostic")
+                .contains("not a content digest")
+        );
         assert!(binding.get("artifact_digest").is_none());
     }
 
@@ -2893,22 +2908,30 @@ mod tests {
             error,
             Err(ApplicationError::Store(StoreError::HardDeadlineElapsed))
         ));
-        assert!(store
-            .evidence_execution(request.operation_id.as_str())
-            .expect("read execution")
-            .is_none());
-        assert!(store
-            .operation("verifier:op-verifier-admission-order")
-            .expect("read verifier operation")
-            .is_some());
-        assert!(store
-            .audit_event("verifier:op-verifier-admission-order")
-            .expect("read verifier audit")
-            .is_some());
-        assert!(store
-            .external_job(project.as_str(), "verifier:op-verifier-admission-order")
-            .expect("read verifier job")
-            .is_none());
+        assert!(
+            store
+                .evidence_execution(request.operation_id.as_str())
+                .expect("read execution")
+                .is_none()
+        );
+        assert!(
+            store
+                .operation("verifier:op-verifier-admission-order")
+                .expect("read verifier operation")
+                .is_some()
+        );
+        assert!(
+            store
+                .audit_event("verifier:op-verifier-admission-order")
+                .expect("read verifier audit")
+                .is_some()
+        );
+        assert!(
+            store
+                .external_job(project.as_str(), "verifier:op-verifier-admission-order")
+                .expect("read verifier job")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2983,10 +3006,12 @@ mod tests {
             )
             .expect("repair missing evidence execution");
         assert!(!repaired_execution.replayed);
-        assert!(store
-            .evidence_execution(request.operation_id.as_str())
-            .expect("read repaired evidence execution")
-            .is_some());
+        assert!(
+            store
+                .evidence_execution(request.operation_id.as_str())
+                .expect("read repaired evidence execution")
+                .is_some()
+        );
         assert_eq!(
             store
                 .external_job_with_identity(&context, job_id)
@@ -3069,10 +3094,12 @@ mod tests {
             )) | Err(ApplicationError::Store(StoreError::Conflict(_)))
                 | Err(ApplicationError::Store(StoreError::Invalid(_)))
         ));
-        assert!(store
-            .receipt(request.receipt_id.as_str())
-            .expect("read receipt")
-            .is_none());
+        assert!(
+            store
+                .receipt(request.receipt_id.as_str())
+                .expect("read receipt")
+                .is_none()
+        );
         let context = IdentityStore::new(&store)
             .context(project.as_str())
             .expect("read production identity");
@@ -3110,10 +3137,12 @@ mod tests {
             Err(ApplicationError::Evidence(error))
                 if error.code() == EvidenceErrorCode::ExecutionResultInvalid
         ));
-        assert!(store
-            .receipt(request.receipt_id.as_str())
-            .expect("read mismatched verifier receipt")
-            .is_none());
+        assert!(
+            store
+                .receipt(request.receipt_id.as_str())
+                .expect("read mismatched verifier receipt")
+                .is_none()
+        );
 
         let identity = IdentityStore::new(&store)
             .context(project.as_str())
@@ -3154,10 +3183,12 @@ mod tests {
             error,
             Err(ApplicationError::Store(StoreError::StaleRevision { .. }))
         ));
-        assert!(store
-            .receipt(request.receipt_id.as_str())
-            .expect("read pending receipt")
-            .is_none());
+        assert!(
+            store
+                .receipt(request.receipt_id.as_str())
+                .expect("read pending receipt")
+                .is_none()
+        );
         let context = IdentityStore::new(&store)
             .context(project.as_str())
             .expect("read production identity");
@@ -3185,10 +3216,12 @@ mod tests {
             )
             .expect("retry persists receipt after readback");
         assert!(!recorded.replayed);
-        assert!(store
-            .receipt(request.receipt_id.as_str())
-            .expect("read recorded receipt")
-            .is_some());
+        assert!(
+            store
+                .receipt(request.receipt_id.as_str())
+                .expect("read recorded receipt")
+                .is_some()
+        );
         let reconciled = ExternalEffectAdapter::new_with_identity(&store, &context)
             .readback(
                 project.as_str(),
@@ -3233,16 +3266,18 @@ mod tests {
         second_request.receipt_id = first_request.receipt_id.clone();
         second_result.receipt.receipt_id = second_request.receipt_id.clone();
 
-        assert!(second_app
-            .record_witnessed_execution(
-                "agent-one",
-                Some(VERIFIER_SESSION),
-                &second_request,
-                &second_result,
-                None,
-                TimestampMs::from_millis(1_500),
-            )
-            .is_err());
+        assert!(
+            second_app
+                .record_witnessed_execution(
+                    "agent-one",
+                    Some(VERIFIER_SESSION),
+                    &second_request,
+                    &second_result,
+                    None,
+                    TimestampMs::from_millis(1_500),
+                )
+                .is_err()
+        );
 
         let execution = store
             .evidence_execution(second_request.operation_id.as_str())
@@ -3250,10 +3285,12 @@ mod tests {
             .expect("second execution remains durable");
         assert_eq!(execution.state, EvidenceExecutionState::Exited);
         assert!(execution.receipt_id.is_none());
-        assert!(store
-            .operation(second_request.operation_id.as_str())
-            .expect("read failed receipt operation")
-            .is_none());
+        assert!(
+            store
+                .operation(second_request.operation_id.as_str())
+                .expect("read failed receipt operation")
+                .is_none()
+        );
     }
 
     #[test]
@@ -3289,25 +3326,34 @@ mod tests {
         assert_eq!(current.work_id, WorkId::new("verifier-work"));
         assert_eq!(current.attempt_id.as_deref(), Some("verifier-attempt"));
         assert_eq!(current.fence, Some(1));
-        assert!(!current
-            .readiness
-            .gaps
-            .iter()
-            .any(|gap| gap.code() == "attempt_not_current"));
+        assert!(
+            !current
+                .readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "attempt_not_current")
+        );
 
         store
-            .execute_batch("UPDATE attempt SET current=0 WHERE attempt_id='verifier-attempt'")
+            .execute_batch(
+                "UPDATE attempt
+                 SET current=0, state='released', terminal_at='unix-ms:1600',
+                     terminal_reason='test_stale_readback'
+                 WHERE attempt_id='verifier-attempt'",
+            )
             .expect("stale the persisted attempt for projection test");
         let stale = app
             .read_close_readiness_readback(project.as_str(), "verifier-work")
             .expect("read stale attempt readiness");
         assert_eq!(stale.attempt_id, None);
         assert_eq!(stale.fence, None);
-        assert!(stale
-            .readiness
-            .gaps
-            .iter()
-            .any(|gap| gap.code() == "attempt_not_current"));
+        assert!(
+            stale
+                .readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "attempt_not_current")
+        );
     }
 
     #[test]
@@ -3331,10 +3377,12 @@ mod tests {
         let readiness = WorkApplication::new(&store)
             .read_close_readiness(project.as_str(), "verifier-work")
             .expect("read tampered summary readiness");
-        assert!(readiness
-            .gaps
-            .iter()
-            .any(|gap| gap.code() == "summary_mismatch"));
+        assert!(
+            readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "summary_mismatch")
+        );
     }
 
     #[test]
@@ -3357,10 +3405,12 @@ mod tests {
         let readiness = WorkApplication::new(&store)
             .read_close_readiness(project.as_str(), "verifier-work")
             .expect("read mismatched close intent readiness");
-        assert!(readiness
-            .gaps
-            .iter()
-            .any(|gap| gap.code() == "close_intent_invalid"));
+        assert!(
+            readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "close_intent_invalid")
+        );
     }
 
     #[test]
@@ -3385,10 +3435,12 @@ mod tests {
         let readiness = WorkApplication::new(&store)
             .read_close_readiness(project.as_str(), "verifier-work")
             .expect("read invalidated close intent readiness");
-        assert!(readiness
-            .gaps
-            .iter()
-            .any(|gap| gap.code() == "close_intent_invalid"));
+        assert!(
+            readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "close_intent_invalid")
+        );
     }
 
     #[test]
@@ -3430,6 +3482,7 @@ mod tests {
             &project,
             "reviewed-accepted-work",
             "reviewed-accepted-attempt",
+            "reviewed-accepted-session",
         );
         persist_open_close_intent(
             &store,
@@ -3450,20 +3503,25 @@ mod tests {
         let accepted = WorkApplication::new(&store)
             .read_close_readiness(project.as_str(), "reviewed-accepted-work")
             .expect("read accepted review readiness");
-        assert!(!accepted
-            .gaps
-            .iter()
-            .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRequired(_))));
-        assert!(!accepted
-            .gaps
-            .iter()
-            .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRejected(_))));
+        assert!(
+            !accepted
+                .gaps
+                .iter()
+                .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRequired(_)))
+        );
+        assert!(
+            !accepted
+                .gaps
+                .iter()
+                .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRejected(_)))
+        );
 
         production_reviewed_verifier_work(
             &store,
             &project,
             "reviewed-rejected-work",
             "reviewed-rejected-attempt",
+            "reviewed-rejected-session",
         );
         persist_open_close_intent(
             &store,
@@ -3484,14 +3542,18 @@ mod tests {
         let rejected = WorkApplication::new(&store)
             .read_close_readiness(project.as_str(), "reviewed-rejected-work")
             .expect("read rejected review readiness");
-        assert!(!rejected
-            .gaps
-            .iter()
-            .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRequired(_))));
-        assert!(rejected
-            .gaps
-            .iter()
-            .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRejected(_))));
+        assert!(
+            !rejected
+                .gaps
+                .iter()
+                .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRequired(_)))
+        );
+        assert!(
+            rejected
+                .gaps
+                .iter()
+                .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRejected(_)))
+        );
     }
 
     #[test]
