@@ -428,6 +428,15 @@ mod tests {
         })
     }
 
+    fn workflow_status(project_id: Option<&str>, status_id: &str, category: &str) -> Value {
+        json!({
+            "project_id": project_id,
+            "status_id": status_id,
+            "category": category,
+            "label": status_id,
+        })
+    }
+
     fn task(project_id: Option<&str>, id: &str, due_at: &str) -> Value {
         json!({
             "id": id,
@@ -440,6 +449,27 @@ mod tests {
             "priority": 0,
             "position": 0,
             "archived": false,
+        })
+    }
+
+    fn task_with_status(
+        project_id: Option<&str>,
+        id: &str,
+        due_at: &str,
+        status_id: &str,
+        archived: bool,
+    ) -> Value {
+        let mut item = task(project_id, id, due_at);
+        item["status_id"] = json!(status_id);
+        item["archived"] = json!(archived);
+        item
+    }
+
+    fn relationship(source_id: &str, target_id: &str, kind: &str) -> Value {
+        json!({
+            "source_id": source_id,
+            "target_id": target_id,
+            "kind": kind,
         })
     }
 
@@ -498,5 +528,159 @@ mod tests {
             summary["personal"]["next_action"]["item_id"],
             "personal-action"
         );
+    }
+
+    #[test]
+    fn dependency_orientation_is_consistent_for_depends_on_and_blocks() {
+        for (kind, source, target) in [
+            ("depends_on", "candidate", "prerequisite"),
+            ("blocks", "prerequisite", "candidate"),
+        ] {
+            let state = json!({
+                "projects": [],
+                "items": [
+                    task(None, "candidate", "2999-01-01"),
+                    task_with_status(None, "prerequisite", "2999-01-01", "waiting", false),
+                ],
+                "statuses": [
+                    status(None),
+                    workflow_status(None, "waiting", "waiting"),
+                ],
+                "relationships": [relationship(source, target, kind)],
+            });
+
+            let summary =
+                attention_summary(&state, &[], &GlobalCivilTimeContext::system().unwrap()).unwrap();
+
+            assert!(summary["personal"]["next_action"].is_null(), "{kind}");
+            assert_eq!(
+                summary["personal"]["next_action_unavailable_reason"], "unresolved_prerequisites",
+                "{kind}"
+            );
+            assert_eq!(
+                summary["personal"]["blocked_by"][0]["prerequisites"][0]["item_id"], "prerequisite",
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn related_links_and_incomplete_parents_do_not_block_an_action() {
+        let mut child = task(None, "child", "2999-01-01");
+        child["kind"] = json!("subtask");
+        child["parent_id"] = json!("zz-parent");
+        let state = json!({
+            "projects": [],
+            "items": [
+                child,
+                task(None, "zz-parent", "2999-01-01"),
+                task_with_status(None, "related-item", "2999-01-01", "waiting", false),
+            ],
+            "statuses": [
+                status(None),
+                workflow_status(None, "waiting", "waiting"),
+            ],
+            "relationships": [relationship("child", "related-item", "related")],
+        });
+
+        let summary =
+            attention_summary(&state, &[], &GlobalCivilTimeContext::system().unwrap()).unwrap();
+
+        assert_eq!(summary["personal"]["next_action"]["item_id"], "child");
+        assert_eq!(summary["personal"]["blocked_by"], json!([]));
+    }
+
+    #[test]
+    fn every_direct_prerequisite_must_be_completed_and_archived_completion_satisfies() {
+        let mut state = json!({
+            "projects": [],
+            "items": [
+                task(None, "candidate", "2999-01-01"),
+                task_with_status(None, "done", "2999-01-01", "done", true),
+                task_with_status(None, "cancelled", "2999-01-01", "cancelled", false),
+                task_with_status(None, "archived-open", "2999-01-01", "open", true),
+            ],
+            "statuses": [
+                status(None),
+                workflow_status(None, "done", "completed"),
+                workflow_status(None, "cancelled", "cancelled"),
+            ],
+            "relationships": [
+                relationship("done", "candidate", "blocks"),
+                relationship("cancelled", "candidate", "blocks"),
+                relationship("archived-open", "candidate", "blocks"),
+            ],
+        });
+
+        let time = GlobalCivilTimeContext::system().unwrap();
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert!(summary["personal"]["next_action"].is_null());
+        let blockers = summary["personal"]["blocked_by"][0]["prerequisites"]
+            .as_array()
+            .unwrap();
+        assert_eq!(blockers.len(), 2);
+        assert_eq!(blockers[0]["item_id"], "archived-open");
+        assert_eq!(blockers[0]["reason_code"], "archived_incomplete");
+        assert_eq!(blockers[1]["item_id"], "cancelled");
+        assert_eq!(blockers[1]["reason_code"], "cancelled");
+
+        state["items"][2]["status_id"] = json!("done");
+        state["items"][3]["status_id"] = json!("done");
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert_eq!(summary["personal"]["next_action"]["item_id"], "candidate");
+    }
+
+    #[test]
+    fn blocked_by_reasons_are_bounded_by_count_and_text_size() {
+        let mut items = Vec::new();
+        let mut relationships = Vec::new();
+        for candidate_index in 0..7 {
+            let candidate_id = format!("candidate-{candidate_index}");
+            let mut candidate = task(None, &candidate_id, "2999-01-01");
+            candidate["title"] = json!("候".repeat(100));
+            items.push(candidate);
+
+            for prerequisite_index in 0..7 {
+                let prerequisite_id =
+                    format!("prerequisite-{candidate_index}-{prerequisite_index}");
+                items.push(task_with_status(
+                    None,
+                    &prerequisite_id,
+                    "2999-01-01",
+                    "waiting",
+                    false,
+                ));
+                relationships.push(relationship(&prerequisite_id, &candidate_id, "blocks"));
+            }
+        }
+        let state = json!({
+            "projects": [],
+            "items": items,
+            "statuses": [
+                status(None),
+                workflow_status(None, "waiting", "waiting"),
+            ],
+            "relationships": relationships,
+        });
+
+        let summary =
+            attention_summary(&state, &[], &GlobalCivilTimeContext::system().unwrap()).unwrap();
+        let blocked_by = summary["personal"]["blocked_by"].as_array().unwrap();
+
+        assert_eq!(
+            summary["personal"]["next_action_unavailable_reason"],
+            "unresolved_prerequisites"
+        );
+        assert_eq!(blocked_by.len(), super::MAX_BLOCKED_CANDIDATES);
+        for candidate in blocked_by {
+            assert!(candidate["title"].as_str().unwrap().len() <= 160);
+            let prerequisites = candidate["prerequisites"].as_array().unwrap();
+            assert_eq!(prerequisites.len(), super::MAX_BLOCKERS_PER_CANDIDATE);
+            for prerequisite in prerequisites {
+                assert!(prerequisite["title"].as_str().unwrap().len() <= 160);
+                assert!(prerequisite["status_id"].as_str().unwrap().len() <= 80);
+                assert!(prerequisite["reason"].as_str().unwrap().len() <= 160);
+            }
+        }
     }
 }

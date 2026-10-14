@@ -368,10 +368,64 @@ impl std::error::Error for GlobalManagerDomainError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn dependency_validation_rejects_cycles() {
         let edges = vec![("a".into(), "b".into()), ("b".into(), "c".into())];
         assert!(validate_dependency("c", "a", &edges).is_err());
         assert!(validate_dependency("a", "d", &edges).is_ok());
+    }
+
+    #[test]
+    fn dependency_relationship_kinds_share_prerequisite_direction() {
+        let expected = Some(("prerequisite".to_owned(), "dependent".to_owned()));
+        assert_eq!(
+            prerequisite_to_dependent(
+                "dependent",
+                "prerequisite",
+                ManagementRelationshipKind::DependsOn,
+            ),
+            expected
+        );
+        assert_eq!(
+            prerequisite_to_dependent(
+                "prerequisite",
+                "dependent",
+                ManagementRelationshipKind::Blocks,
+            ),
+            expected
+        );
+        assert_eq!(
+            prerequisite_to_dependent(
+                "dependent",
+                "prerequisite",
+                ManagementRelationshipKind::Related,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_completed_management_work_satisfies_a_prerequisite() {
+        assert_eq!(
+            management_prerequisite_state(Some(StatusCategory::Completed), true),
+            ManagementPrerequisiteState::Satisfied
+        );
+        assert_eq!(
+            management_prerequisite_state(Some(StatusCategory::Cancelled), true),
+            ManagementPrerequisiteState::Cancelled
+        );
+        assert_eq!(
+            management_prerequisite_state(Some(StatusCategory::Open), true),
+            ManagementPrerequisiteState::ArchivedIncomplete
+        );
+        assert_eq!(
+            management_prerequisite_state(Some(StatusCategory::Waiting), false),
+            ManagementPrerequisiteState::Incomplete
+        );
+        assert_eq!(
+            management_prerequisite_state(None, false),
+            ManagementPrerequisiteState::Missing
+        );
     }
 }
