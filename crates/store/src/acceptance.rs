@@ -1190,6 +1190,46 @@ mod typed_acceptance_tests {
             .unwrap();
         assert!(!store.table_exists("boreal_artifact_decision_v1").unwrap());
     }
+
+    #[test]
+    fn close_readiness_snapshot_is_revision_consistent_and_retains_stale_attempt() {
+        let (store, _, _) = active_acceptance_work("focused", false);
+        let before = store.project_revision("p1").unwrap().0;
+        let snapshot = AcceptanceStore::new(&store)
+            .close_readiness_snapshot("p1", "w1")
+            .unwrap();
+        let after = store.project_revision("p1").unwrap().0;
+        assert_eq!(snapshot.project_revision, before);
+        assert_eq!(snapshot.project_revision, after);
+        assert_eq!(
+            snapshot.current_attempt.as_ref().unwrap().attempt_id,
+            "attempt-1"
+        );
+        assert!(snapshot.proof_attempt.as_ref().unwrap().current);
+
+        store
+            .execute_batch("UPDATE attempt SET current=0 WHERE attempt_id='attempt-1'")
+            .unwrap();
+        let stale = AcceptanceStore::new(&store)
+            .close_readiness_snapshot("p1", "w1")
+            .unwrap();
+        assert!(stale.current_attempt.is_none());
+        assert_eq!(
+            stale.proof_attempt.as_ref().unwrap().attempt_id,
+            "attempt-1"
+        );
+        assert!(!stale.proof_attempt.as_ref().unwrap().current);
+    }
+
+    #[test]
+    fn close_readiness_snapshot_rejects_a_work_item_from_another_project() {
+        let (store, _, _) = active_acceptance_work("focused", false);
+        store.create_project("p2", "unix-ms:1").unwrap();
+        let error = AcceptanceStore::new(&store)
+            .close_readiness_snapshot("p2", "w1")
+            .unwrap_err();
+        assert!(matches!(error, StoreError::WrongSubject { .. }));
+    }
 }
 
 impl AcceptanceBinding {
@@ -1200,6 +1240,63 @@ impl AcceptanceBinding {
 
 pub struct AcceptanceStore<'a> {
     store: &'a SqliteStore,
+}
+
+/// Persisted facts used to evaluate close readiness. Every field is read from
+/// one deferred SQLite transaction so a caller cannot combine an attempt,
+/// proof, review, summary, or intent from different project revisions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseReadinessSnapshot {
+    pub project_id: String,
+    pub work_id: String,
+    pub project_revision: u64,
+    pub entity_revision: u64,
+    pub proof_revision: u64,
+    pub current_attempt: Option<super::AttemptRecord>,
+    /// The current attempt, or the latest persisted proof attempt when no
+    /// current attempt remains. `AttemptRecord::current` preserves the
+    /// distinction for the application evaluator.
+    pub proof_attempt: Option<super::AttemptRecord>,
+    pub pinned_requirements: super::profiles::PinnedRequirements,
+    pub final_result: Option<FinalResultBindingRecord>,
+    pub submission: Option<SubmissionRecord>,
+    /// Receipt history for `proof_attempt`, in canonical row order, including
+    /// failed, rejected, and superseded facts.
+    pub ordered_receipts: Vec<ReceiptRecord>,
+    pub required_review: Option<CloseReadinessReviewRecord>,
+    pub current_summary: Option<CloseReadinessSummaryRecord>,
+    /// The newest intent for this work item, including non-open states so the
+    /// application can report stale or invalidated intents precisely.
+    pub close_intent: Option<CloseIntentRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseReadinessReviewRecord {
+    pub review_id: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub submission_id: Option<String>,
+    pub gate_id: Option<String>,
+    pub reviewer_actor_id: String,
+    pub reviewer_role: Option<boreal_domain::ActorRole>,
+    pub outcome: String,
+    pub reason: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseReadinessSummaryIntegrity {
+    MissingBody,
+    Valid,
+    Invalid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseReadinessSummaryRecord {
+    pub summary: SummaryRecord,
+    pub body_integrity: CloseReadinessSummaryIntegrity,
 }
 
 /// Deterministic result of evaluating one contract criterion against an
@@ -1420,6 +1517,368 @@ pub struct ArtifactDecisionRecord {
 impl<'a> AcceptanceStore<'a> {
     pub const fn new(store: &'a SqliteStore) -> Self {
         Self { store }
+    }
+
+    /// Reads every canonical close-readiness fact from one revision-consistent
+    /// SQLite snapshot. This method is read-only and never trusts a caller's
+    /// claimed attempt, evidence, review, summary, or close-intent state.
+    pub fn close_readiness_snapshot(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<CloseReadinessSnapshot, StoreError> {
+        if project_id.trim().is_empty() || work_id.trim().is_empty() {
+            return Err(StoreError::Invalid(
+                "project and work ids are required for close readiness".into(),
+            ));
+        }
+
+        self.store.execute_batch("BEGIN")?;
+        let result = (|| {
+            let project_revision = self.store.project_revision(project_id)?.0;
+            let actual_project = self.store.project_for_work(work_id)?;
+            if actual_project != project_id {
+                return Err(StoreError::WrongSubject {
+                    expected: project_id.to_owned(),
+                    actual: actual_project,
+                });
+            }
+
+            let (entity_revision, proof_revision) = self.store.proof_cursor(project_id, work_id)?;
+            if proof_revision == 0 {
+                return Err(StoreError::Corrupt(
+                    "close-readiness work has no positive proof revision".into(),
+                ));
+            }
+            let pinned_requirements = super::ProfileStore::new(self.store)
+                .current_pinned_requirements(project_id, work_id)?;
+            if pinned_requirements.project_id != project_id
+                || pinned_requirements.work_id != work_id
+                || pinned_requirements.proof_revision != proof_revision
+            {
+                return Err(StoreError::Corrupt(
+                    "close-readiness profile pin is not current for the work proof".into(),
+                ));
+            }
+
+            let current_attempt = self.store.current_attempt_for_work(project_id, work_id)?;
+            let final_result =
+                self.store
+                    .current_final_result_binding(project_id, work_id, proof_revision)?;
+            let submission = self
+                .store
+                .current_submission(project_id, work_id, proof_revision)?;
+            let proof_attempt = if let Some(attempt) = current_attempt.clone() {
+                Some(attempt)
+            } else {
+                let attempt_id = final_result
+                    .as_ref()
+                    .map(|binding| binding.attempt_id.clone())
+                    .or_else(|| submission.as_ref().map(|record| record.attempt_id.clone()));
+                let attempt_id = match attempt_id {
+                    Some(attempt_id) => Some(attempt_id),
+                    None => self.latest_attempt_id(project_id, work_id)?,
+                };
+                match attempt_id {
+                    Some(attempt_id) => Some(
+                        self.store
+                            .attempt_record_by_id(project_id, &attempt_id)?
+                            .ok_or_else(|| {
+                                StoreError::Corrupt(
+                                    "close-readiness proof refers to a missing attempt".into(),
+                                )
+                            })?,
+                    ),
+                    None => None,
+                }
+            };
+
+            let ordered_receipts = if let Some(attempt) = &proof_attempt {
+                self.ordered_receipts_for_attempt(attempt)?
+            } else {
+                Vec::new()
+            };
+            let required_review_gate = pinned_requirements
+                .declarations
+                .iter()
+                .find(|declaration| declaration.required && declaration.kind == "review");
+            let required_review = match (required_review_gate, submission.as_ref()) {
+                (Some(gate), Some(submission)) => {
+                    self.current_required_review(project_id, work_id, &gate.gate_id, submission)?
+                }
+                _ => None,
+            };
+            let current_summary = self.current_summary_integrity(project_id, work_id)?;
+            let close_intent = self.current_close_intent(project_id, work_id)?;
+
+            let ending_revision = self.store.project_revision(project_id)?.0;
+            if ending_revision != project_revision {
+                return Err(StoreError::Conflict(format!(
+                    "project revision changed inside close-readiness snapshot: {project_revision} to {ending_revision}"
+                )));
+            }
+
+            Ok(CloseReadinessSnapshot {
+                project_id: project_id.to_owned(),
+                work_id: work_id.to_owned(),
+                project_revision,
+                entity_revision,
+                proof_revision,
+                current_attempt,
+                proof_attempt,
+                pinned_requirements,
+                final_result,
+                submission,
+                ordered_receipts,
+                required_review,
+                current_summary,
+                close_intent,
+            })
+        })();
+        super::finish_transaction(self.store, result)
+    }
+
+    fn ordered_receipts_for_attempt(
+        &self,
+        attempt: &super::AttemptRecord,
+    ) -> Result<Vec<ReceiptRecord>, StoreError> {
+        let mut receipts = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = self.store.receipts_for_attempt(
+                &attempt.project_id,
+                &attempt.work_id,
+                &attempt.attempt_id,
+                attempt.fence,
+                100,
+                offset,
+            )?;
+            let has_more = page.has_more;
+            let count = page.items.len() as u64;
+            receipts.extend(page.items);
+            if !has_more {
+                return Ok(receipts);
+            }
+            offset = offset.checked_add(count).ok_or_else(|| {
+                StoreError::Invalid("close-readiness receipt offset overflow".into())
+            })?;
+            if offset >= 1_000_000 {
+                return Err(StoreError::Invalid(
+                    "close-readiness receipt history exceeds the supported read bound".into(),
+                ));
+            }
+        }
+    }
+
+    fn latest_attempt_id(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let mut row = self.store.prepare(
+            "SELECT a.attempt_id FROM attempt a
+             JOIN work_item wi ON wi.project_id=?1 AND wi.work_id=a.work_id
+             WHERE a.work_id=?2 ORDER BY a.rowid DESC LIMIT 1",
+        )?;
+        row.bind_text(1, project_id)?;
+        row.bind_text(2, work_id)?;
+        if row.step()? != super::SQLITE_ROW {
+            return Ok(None);
+        }
+        Ok(Some(row.column_text(0)?))
+    }
+
+    fn current_required_review(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        required_gate_id: &str,
+        submission: &SubmissionRecord,
+    ) -> Result<Option<CloseReadinessReviewRecord>, StoreError> {
+        let scoped_gate_id = format!("{work_id}:{required_gate_id}");
+        let row = if self.store.table_exists("boreal_review_event")? {
+            let mut row = self.store.prepare(
+                "SELECT 'canonical:'||r.review_event_id,r.project_id,r.work_id,s.attempt_id,
+                        s.fence,r.submission_id,r.gate_id,r.reviewer_actor_id,r.outcome,r.reason,r.created_at
+                 FROM boreal_review_event r
+                 JOIN boreal_submission s ON s.project_id=r.project_id AND s.work_id=r.work_id
+                   AND s.submission_id=r.submission_id
+                 WHERE r.project_id=?1 AND r.work_id=?2 AND r.submission_id=?3
+                   AND (r.gate_id=?4 OR r.gate_id=?5)
+                 ORDER BY r.rowid DESC LIMIT 1",
+            )?;
+            row.bind_text(1, project_id)?;
+            row.bind_text(2, work_id)?;
+            row.bind_text(3, &submission.submission_id)?;
+            row.bind_text(4, required_gate_id)?;
+            row.bind_text(5, &scoped_gate_id)?;
+            if row.step()? != super::SQLITE_ROW {
+                None
+            } else {
+                Some((
+                    row.column_text(0)?,
+                    row.column_text(1)?,
+                    row.column_text(2)?,
+                    row.column_text(3)?,
+                    row.column_u64(4)?,
+                    Some(row.column_text(5)?),
+                    Some(row.column_text(6)?),
+                    row.column_text(7)?,
+                    row.column_text(8)?,
+                    row.column_text(9)?,
+                    row.column_text(10)?,
+                ))
+            }
+        } else {
+            None
+        };
+        let row = if row.is_some() || !self.store.table_exists("review")? {
+            row
+        } else {
+            let mut row = self.store.prepare(
+                "SELECT 'legacy:'||r.review_id,w.project_id,r.work_id,r.attempt_id,r.fence,
+                        r.gate_id,r.reviewer_actor_id,r.decision,r.reason,r.created_at
+                 FROM review r JOIN work_item w ON w.work_id=r.work_id
+                 WHERE w.project_id=?1 AND r.work_id=?2 AND r.attempt_id=?3 AND r.fence=?4
+                   AND (r.gate_id=?5 OR r.gate_id=?6)
+                 ORDER BY r.rowid DESC LIMIT 1",
+            )?;
+            row.bind_text(1, project_id)?;
+            row.bind_text(2, work_id)?;
+            row.bind_text(3, &submission.attempt_id)?;
+            row.bind_i64(4, submission.fence)?;
+            row.bind_text(5, required_gate_id)?;
+            row.bind_text(6, &scoped_gate_id)?;
+            if row.step()? != super::SQLITE_ROW {
+                None
+            } else {
+                let outcome = match row.column_text(7)?.as_str() {
+                    "accepted" | "approved" => "approved".to_owned(),
+                    "rejected" | "returned" | "revoked" => "rejected".to_owned(),
+                    other => {
+                        return Err(StoreError::Corrupt(format!(
+                            "unknown close-readiness review outcome: {other}"
+                        )))
+                    }
+                };
+                Some((
+                    row.column_text(0)?,
+                    row.column_text(1)?,
+                    row.column_text(2)?,
+                    row.column_text(3)?,
+                    row.column_u64(4)?,
+                    None,
+                    Some(row.column_text(5)?),
+                    row.column_text(6)?,
+                    outcome,
+                    row.column_text(8)?,
+                    row.column_text(9)?,
+                ))
+            }
+        };
+
+        let Some((
+            review_id,
+            project_id,
+            work_id,
+            attempt_id,
+            fence,
+            submission_id,
+            gate_id,
+            reviewer_actor_id,
+            outcome,
+            reason,
+            created_at,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let reviewer_role = match self
+            .store
+            .project_actor_context(&project_id, &reviewer_actor_id)
+        {
+            Ok(context) => Some(context.role),
+            Err(StoreError::Conflict(_)) | Err(StoreError::NotFound { .. }) => None,
+            Err(error) => return Err(error),
+        };
+        Ok(Some(CloseReadinessReviewRecord {
+            review_id,
+            project_id,
+            work_id,
+            attempt_id,
+            fence,
+            submission_id,
+            gate_id,
+            reviewer_actor_id,
+            reviewer_role,
+            outcome,
+            reason,
+            created_at,
+        }))
+    }
+
+    fn current_summary_integrity(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<Option<CloseReadinessSummaryRecord>, StoreError> {
+        let Some(summary) = self.store.current_summary(project_id, work_id)? else {
+            return Ok(None);
+        };
+        if !self.store.table_exists("summary_body_v1")? {
+            return Ok(Some(CloseReadinessSummaryRecord {
+                summary,
+                body_integrity: CloseReadinessSummaryIntegrity::MissingBody,
+            }));
+        }
+        let mut body = self.store.prepare(
+            "SELECT body_text,body_digest,body_size FROM summary_body_v1 WHERE summary_id=?1",
+        )?;
+        body.bind_text(1, &summary.summary_id)?;
+        if body.step()? != super::SQLITE_ROW {
+            return Ok(Some(CloseReadinessSummaryRecord {
+                summary,
+                body_integrity: CloseReadinessSummaryIntegrity::MissingBody,
+            }));
+        }
+        let body_text = body.column_text(0)?;
+        let body_digest = body.column_text(1)?;
+        let body_size = body.column_u64(2)?;
+        let body_integrity = if body_digest == summary.body_digest
+            && body_size == summary.body_size
+            && body_text.len() as u64 == summary.body_size
+            && super::valid_sha256_digest(&summary.body_digest)
+            && checksum(body_text.as_bytes()) == summary.body_digest
+        {
+            CloseReadinessSummaryIntegrity::Valid
+        } else {
+            CloseReadinessSummaryIntegrity::Invalid
+        };
+        Ok(Some(CloseReadinessSummaryRecord {
+            summary,
+            body_integrity,
+        }))
+    }
+
+    fn current_close_intent(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<Option<CloseIntentRecord>, StoreError> {
+        if !self.store.table_exists("close_intent")? {
+            return Ok(None);
+        }
+        let mut row = self.store.prepare(
+            "SELECT ci.close_intent_id FROM close_intent ci
+             JOIN work_item wi ON wi.project_id=?1 AND wi.work_id=ci.work_id
+             WHERE ci.work_id=?2 ORDER BY ci.rowid DESC LIMIT 1",
+        )?;
+        row.bind_text(1, project_id)?;
+        row.bind_text(2, work_id)?;
+        if row.step()? != super::SQLITE_ROW {
+            return Ok(None);
+        }
+        self.store.close_intent(project_id, &row.column_text(0)?)
     }
 
     pub fn bind_result(

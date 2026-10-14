@@ -1,8 +1,8 @@
 //! Durable application façade for receipts, reviews, and proof-gated closeout.
 
 use boreal_domain::{
-    ActorId, AttemptId, ConfigIdentity, Fence, GateId, GateKind, ProfileId, ReceiptId,
-    ReceiptResult, SourceVersionId, TimestampMs, WorkId,
+    ActorId, AttemptId, AttemptPhase, ConfigIdentity, Fence, GateId, GateKind, ProfileId,
+    ReceiptId, ReceiptResult, SourceVersionId, TimestampMs, WorkId,
 };
 use boreal_store::{
     identity::{IdentityContext, IdentityError, IdentityStore},
@@ -161,6 +161,207 @@ impl WorkApplication<'_> {
                 proof_revision,
             )?,
         )
+    }
+
+    /// Evaluates close readiness from one revision-consistent projection of
+    /// persisted proof, review, summary, profile, and close-intent facts.
+    /// Callers provide only the subject identity; no proof facts are accepted
+    /// here, and this read never changes lifecycle state.
+    pub fn read_close_readiness(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<crate::CloseReadiness, ApplicationError> {
+        let snapshot = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+            .close_readiness_snapshot(project_id, work_id)?;
+        let definition = close_readiness_definition(&snapshot.pinned_requirements)?;
+        let attempt = close_readiness_attempt_snapshot(&snapshot)?;
+        let source_snapshot_hash = close_readiness_source(&snapshot, &attempt);
+        let config_identity = ConfigIdentity::new(
+            snapshot
+                .proof_attempt
+                .as_ref()
+                .map(|attempt| attempt.config_identity.as_str())
+                .unwrap_or_default(),
+        );
+        let expected_fence = attempt.fence;
+
+        let receipts = snapshot
+            .ordered_receipts
+            .iter()
+            .filter(|record| {
+                snapshot.submission.as_ref().is_none_or(|submission| {
+                    submission
+                        .receipt_ids
+                        .iter()
+                        .any(|id| id == &record.receipt_id)
+                })
+            })
+            .map(|record| {
+                let mut receipt = receipt_payload_from_record(record)?;
+                if let Some(local_gate_id) = definition.gates.iter().find_map(|gate| {
+                    let local = gate.id.as_str();
+                    let scoped = format!("{}:{local}", snapshot.work_id);
+                    (receipt.gate_id.as_str() == scoped.as_str()
+                        || receipt.gate_id.as_str() == local)
+                        .then_some(gate.id.clone())
+                }) {
+                    receipt.gate_id = local_gate_id;
+                }
+                Ok(receipt)
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let review = snapshot
+            .required_review
+            .as_ref()
+            .map(|record| ReviewDecisionRequest {
+                review_id: record.review_id.clone(),
+                work_id: WorkId::new(record.work_id.clone()),
+                attempt_id: AttemptId::new(record.attempt_id.clone()),
+                fence: Fence::new(record.fence),
+                reviewer_actor_id: ActorId::new(record.reviewer_actor_id.clone()),
+                attempt_actor_id: attempt.actor_id.clone(),
+                reviewer_role: record
+                    .reviewer_role
+                    .unwrap_or(boreal_domain::ActorRole::Agent),
+                decision: match record.outcome.as_str() {
+                    "approved" | "accepted" => ReviewDecision::Accepted,
+                    _ => ReviewDecision::Rejected,
+                },
+                reason: record.reason.clone(),
+                source_snapshot_hash: source_snapshot_hash.clone(),
+                config_identity: config_identity.clone(),
+                policy_version: definition.version.clone(),
+            });
+        let summary = snapshot
+            .current_summary
+            .as_ref()
+            .map(|record| SummaryPayload {
+                summary_id: record.summary.summary_id.clone(),
+                work_id: WorkId::new(record.summary.work_id.clone()),
+                attempt_id: AttemptId::new(record.summary.attempt_id.clone()),
+                fence: Fence::new(record.summary.fence),
+                source_snapshot_hash: SourceVersionId::new(
+                    record.summary.source_version_id.clone(),
+                ),
+                config_identity: ConfigIdentity::new(record.summary.config_identity.clone()),
+                profile_id: ProfileId::new(record.summary.profile_id.clone()),
+                profile_version: record.summary.profile_version.to_string(),
+                body_digest: record.summary.body_digest.clone(),
+                body_size: record.summary.body_size,
+            });
+        let close_intent = snapshot.close_intent.as_ref().map(|record| CloseIntent {
+            work_id: WorkId::new(record.work_id.clone()),
+            attempt_id: AttemptId::new(record.attempt_id.clone()),
+            fence: Fence::new(record.fence),
+            source_snapshot_hash: SourceVersionId::new(
+                record.source_version_id.clone().unwrap_or_default(),
+            ),
+            config_identity: ConfigIdentity::new(record.config_identity.clone()),
+            profile_id: ProfileId::new(record.profile_id.clone()),
+            profile_version: record.profile_version.to_string(),
+            summary_id: record.summary_id.clone(),
+        });
+
+        let input = CloseoutInput {
+            definition: definition.clone(),
+            work_id: WorkId::new(snapshot.work_id.clone()),
+            attempt,
+            expected_fence,
+            source_snapshot_hash,
+            config_identity,
+            policy_version: definition.version.clone(),
+            receipts,
+            gates: Vec::new(),
+            review,
+            summary,
+            close_intent,
+        };
+        let mut readiness = crate::evaluate_close_readiness(&input)?;
+        let attempt_context = snapshot.proof_attempt.as_ref();
+        let binding_mismatch = snapshot.final_result.as_ref().is_some_and(|binding| {
+            let Some(attempt) = attempt_context else {
+                return true;
+            };
+            binding.project_id.as_str() != snapshot.project_id.as_str()
+                || binding.work_id.as_str() != snapshot.work_id.as_str()
+                || binding.attempt_id.as_str() != attempt.attempt_id.as_str()
+                || binding.fence != attempt.fence
+                || binding.entity_revision != snapshot.entity_revision
+                || binding.proof_revision != snapshot.proof_revision
+                || binding.config_identity.as_str() != attempt.config_identity.as_str()
+                || binding.profile_id.as_str()
+                    != snapshot.pinned_requirements.profile.profile_id.as_str()
+                || binding.profile_version.to_string()
+                    != snapshot.pinned_requirements.profile.version.as_str()
+                || binding.profile_digest.as_str()
+                    != snapshot.pinned_requirements.profile.digest.as_str()
+        });
+        let submission_mismatch = snapshot.submission.as_ref().is_some_and(|submission| {
+            let Some(attempt) = attempt_context else {
+                return true;
+            };
+            submission.project_id.as_str() != snapshot.project_id.as_str()
+                || submission.work_id.as_str() != snapshot.work_id.as_str()
+                || submission.attempt_id.as_str() != attempt.attempt_id.as_str()
+                || submission.fence != attempt.fence
+                || submission.entity_revision != snapshot.entity_revision
+                || submission.proof_revision != snapshot.proof_revision
+                || submission.config_identity.as_str() != attempt.config_identity.as_str()
+                || submission.profile_id.as_str()
+                    != snapshot.pinned_requirements.profile.profile_id.as_str()
+                || submission.profile_version.to_string()
+                    != snapshot.pinned_requirements.profile.version.as_str()
+                || submission.profile_digest.as_str()
+                    != snapshot.pinned_requirements.profile.digest.as_str()
+                || snapshot.final_result.as_ref().is_some_and(|binding| {
+                    submission.attempt_id != binding.attempt_id
+                        || submission.fence != binding.fence
+                        || submission.entity_revision != binding.entity_revision
+                        || submission.source_version_id != binding.source_version_id
+                        || submission.config_identity != binding.config_identity
+                        || submission.profile_id != binding.profile_id
+                        || submission.profile_version != binding.profile_version
+                        || submission.profile_digest != binding.profile_digest
+                })
+        });
+        if binding_mismatch || submission_mismatch {
+            readiness.gaps.push(crate::CloseoutGap::StaleFence);
+        }
+        if snapshot.submission.as_ref().is_some_and(|submission| {
+            !submission.receipt_ids.iter().all(|id| {
+                snapshot
+                    .ordered_receipts
+                    .iter()
+                    .any(|receipt| receipt.receipt_id == *id)
+            })
+        }) {
+            readiness.gaps.push(crate::CloseoutGap::StaleFence);
+        }
+        if snapshot.current_summary.as_ref().is_some_and(|record| {
+            record.body_integrity != boreal_store::acceptance::CloseReadinessSummaryIntegrity::Valid
+                || snapshot.submission.as_ref().is_some_and(|submission| {
+                    record.summary.summary_id != submission.summary_id
+                        || record.summary.body_digest != submission.summary_digest
+                })
+        }) {
+            readiness.gaps.push(crate::CloseoutGap::SummaryMismatch);
+        }
+        if snapshot
+            .close_intent
+            .as_ref()
+            .is_some_and(|record| record.state != boreal_store::CloseIntentState::Open)
+        {
+            readiness.gaps.push(crate::CloseoutGap::CloseIntentMismatch);
+        }
+        readiness.gaps.sort_by(|left, right| {
+            left.code()
+                .cmp(right.code())
+                .then_with(|| close_readiness_gap_id(left).cmp(close_readiness_gap_id(right)))
+        });
+        readiness.gaps.dedup();
+        readiness.ready = readiness.gaps.is_empty();
+        Ok(readiness)
     }
 
     pub fn read_final_result_for_operation(
@@ -1713,6 +1914,142 @@ fn validate_final_result_capture_request(
     Ok(())
 }
 
+fn close_readiness_definition(
+    requirements: &boreal_store::profiles::PinnedRequirements,
+) -> Result<AcceptanceDefinition, ApplicationError> {
+    let gates = requirements
+        .declarations
+        .iter()
+        .map(|declaration| {
+            let kind = match declaration.kind.as_str() {
+                "Checkpoint" | "checkpoint" => GateKind::Checkpoint,
+                "Verification" | "verification" => GateKind::Verification,
+                "Review" | "review" => GateKind::Review,
+                "OperatorApproval" | "operator_approval" => GateKind::OperatorApproval,
+                "Summary" | "summary" => GateKind::Summary,
+                "Audit" | "audit" => GateKind::Audit,
+                other => {
+                    return Err(ApplicationError::Store(StoreError::Corrupt(format!(
+                        "pinned close-readiness gate has unknown kind {other}"
+                    ))))
+                }
+            };
+            Ok(AcceptanceGateDefinition {
+                id: GateId::new(declaration.gate_id.clone()),
+                kind,
+                required: declaration.required,
+                command: None,
+                requires_attestation: true,
+                required_observables: declaration.observable_rules.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+    Ok(AcceptanceDefinition {
+        id: requirements.profile.profile_id.clone(),
+        version: requirements.profile.version.clone(),
+        gates,
+        close_requires_intent: true,
+    })
+}
+
+fn close_readiness_attempt_snapshot(
+    snapshot: &boreal_store::acceptance::CloseReadinessSnapshot,
+) -> Result<crate::AttemptSnapshot, ApplicationError> {
+    let Some(record) = snapshot.proof_attempt.as_ref() else {
+        return Ok(crate::AttemptSnapshot {
+            project_id: boreal_domain::ProjectId::new(snapshot.project_id.clone()),
+            work_id: WorkId::new(snapshot.work_id.clone()),
+            attempt_id: AttemptId::new(""),
+            actor_id: ActorId::new(""),
+            harness_id: None,
+            session_id: None,
+            fence: Fence::new(0),
+            phase: AttemptPhase::Failed,
+            claimed_at: TimestampMs::from_millis(0),
+            accepted_at: None,
+            lease_deadline: TimestampMs::from_millis(0),
+            hard_deadline: TimestampMs::from_millis(0),
+            current: false,
+        });
+    };
+    Ok(crate::AttemptSnapshot {
+        project_id: boreal_domain::ProjectId::new(record.project_id.clone()),
+        work_id: WorkId::new(record.work_id.clone()),
+        attempt_id: AttemptId::new(record.attempt_id.clone()),
+        actor_id: ActorId::new(record.actor_id.clone()),
+        harness_id: record
+            .harness_id
+            .as_deref()
+            .map(boreal_domain::HarnessId::new),
+        session_id: record
+            .session_id
+            .as_deref()
+            .map(boreal_domain::SessionId::new),
+        fence: Fence::new(record.fence),
+        phase: record.phase,
+        claimed_at: parse_stamp(&record.claimed_at)?,
+        accepted_at: record.accepted_at.as_deref().map(parse_stamp).transpose()?,
+        lease_deadline: parse_stamp(&record.lease_deadline)?,
+        hard_deadline: parse_stamp(&record.hard_deadline)?,
+        current: snapshot.current_attempt.as_ref().is_some_and(|current| {
+            current.attempt_id == record.attempt_id && current.fence == record.fence
+        }),
+    })
+}
+
+fn close_readiness_source(
+    snapshot: &boreal_store::acceptance::CloseReadinessSnapshot,
+    attempt: &crate::AttemptSnapshot,
+) -> SourceVersionId {
+    let binding_source = snapshot.final_result.as_ref().and_then(|binding| {
+        (binding.attempt_id == attempt.attempt_id.as_str()
+            && binding.fence == attempt.fence.get()
+            && binding.config_identity
+                == snapshot
+                    .proof_attempt
+                    .as_ref()
+                    .map(|record| record.config_identity.as_str())
+                    .unwrap_or_default()
+            && binding.profile_id == snapshot.pinned_requirements.profile.profile_id.as_str()
+            && binding.profile_version.to_string() == snapshot.pinned_requirements.profile.version)
+            .then(|| binding.source_version_id.clone())
+    });
+    let submission_source = snapshot.submission.as_ref().and_then(|submission| {
+        (submission.attempt_id == attempt.attempt_id.as_str()
+            && submission.fence == attempt.fence.get()
+            && submission.config_identity
+                == snapshot
+                    .proof_attempt
+                    .as_ref()
+                    .map(|record| record.config_identity.as_str())
+                    .unwrap_or_default()
+            && submission.profile_id == snapshot.pinned_requirements.profile.profile_id.as_str()
+            && submission.profile_version.to_string()
+                == snapshot.pinned_requirements.profile.version)
+            .then(|| submission.source_version_id.clone())
+    });
+    SourceVersionId::new(
+        binding_source
+            .or(submission_source)
+            .or_else(|| {
+                snapshot
+                    .proof_attempt
+                    .as_ref()
+                    .and_then(|record| record.source_version_id.clone())
+            })
+            .unwrap_or_default(),
+    )
+}
+
+fn close_readiness_gap_id(gap: &crate::CloseoutGap) -> &str {
+    match gap {
+        crate::CloseoutGap::GateUnsatisfied(id)
+        | crate::CloseoutGap::ReviewRequired(id)
+        | crate::CloseoutGap::ReviewRejected(id) => id.as_str(),
+        _ => "",
+    }
+}
+
 fn record_final_result_lineage(
     catalog: &SourceCatalog,
     binding: &boreal_store::acceptance::FinalResultBindingRecord,
@@ -2690,5 +3027,63 @@ mod tests {
             .operation(second_request.operation_id.as_str())
             .expect("read failed receipt operation")
             .is_none());
+    }
+
+    #[test]
+    fn close_readiness_reports_gaps_from_persisted_inputs() {
+        let (store, project) = production_verifier_setup();
+        let readiness = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read canonical close readiness");
+        let codes = readiness
+            .gaps
+            .iter()
+            .map(crate::CloseoutGap::code)
+            .collect::<Vec<_>>();
+        assert!(!readiness.ready);
+        assert!(codes.contains(&"attempt_not_verifying"));
+        assert!(codes.contains(&"gate_unsatisfied"));
+        assert!(codes.contains(&"summary_missing"));
+        assert!(codes.contains(&"close_intent_missing"));
+        assert!(!codes.contains(&"attempt_not_current"));
+    }
+
+    #[test]
+    fn close_readiness_distinguishes_a_stale_attempt_from_the_current_attempt() {
+        let (store, project) = production_verifier_setup();
+        let app = WorkApplication::new(&store);
+        let current = app
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read current attempt readiness");
+        assert!(!current
+            .gaps
+            .iter()
+            .any(|gap| gap.code() == "attempt_not_current"));
+
+        store
+            .execute_batch("UPDATE attempt SET current=0 WHERE attempt_id='verifier-attempt'")
+            .expect("stale the persisted attempt for projection test");
+        let stale = app
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read stale attempt readiness");
+        assert!(stale
+            .gaps
+            .iter()
+            .any(|gap| gap.code() == "attempt_not_current"));
+    }
+
+    #[test]
+    fn close_readiness_rejects_a_work_item_from_another_project() {
+        let (store, _project) = production_verifier_setup();
+        store
+            .create_project("other-project", "unix-ms:5")
+            .expect("create other project");
+        let error = WorkApplication::new(&store)
+            .read_close_readiness("other-project", "verifier-work")
+            .expect_err("cross-project work read must fail");
+        assert!(matches!(
+            error,
+            ApplicationError::Store(StoreError::WrongSubject { .. })
+        ));
     }
 }
