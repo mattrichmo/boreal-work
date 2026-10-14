@@ -631,6 +631,64 @@ mod tests {
     }
 
     #[test]
+    fn missing_or_unresolved_prerequisites_block_and_reopening_rechecks_readiness() {
+        let mut state = json!({
+            "projects": [],
+            "items": [
+                task(None, "candidate", "2999-01-01"),
+                task_with_status(None, "unresolved-item", "2999-01-01", "unknown", false),
+            ],
+            "statuses": [status(None)],
+            "relationships": [
+                relationship("missing-item", "candidate", "blocks"),
+                relationship("unresolved-item", "candidate", "blocks"),
+            ],
+        });
+        let time = GlobalCivilTimeContext::system().unwrap();
+
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert!(summary["personal"]["next_action"].is_null());
+        let blockers = summary["personal"]["blocked_by"][0]["prerequisites"]
+            .as_array()
+            .unwrap();
+        assert_eq!(blockers.len(), 2);
+        assert!(
+            blockers
+                .iter()
+                .all(|blocker| blocker["reason_code"] == "missing")
+        );
+
+        state["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(task_with_status(
+                None,
+                "missing-item",
+                "2999-01-01",
+                "done",
+                true,
+            ));
+        state["items"][2]["kind"] = json!("milestone");
+        state["items"][1]["status_id"] = json!("done");
+        state["statuses"]
+            .as_array_mut()
+            .unwrap()
+            .push(workflow_status(None, "done", "completed"));
+
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert_eq!(summary["personal"]["next_action"]["item_id"], "candidate");
+
+        state["items"][2]["status_id"] = json!("open");
+        state["items"][2]["archived"] = json!(false);
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert!(summary["personal"]["next_action"].is_null());
+        assert_eq!(
+            summary["personal"]["blocked_by"][0]["prerequisites"][0]["reason_code"],
+            "not_completed"
+        );
+    }
+
+    #[test]
     fn blocked_by_reasons_are_bounded_by_count_and_text_size() {
         let mut items = Vec::new();
         let mut relationships = Vec::new();
