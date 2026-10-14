@@ -273,8 +273,8 @@
     "release_url": null,
     "channel_verification": "not_run"
   },
-  "note": "Integrated the versioned guidance action descriptors, Global TUI inbox hardening, bounded backup artifact continuity, F2 summary/review readbacks, mixed-revision context guard, release preparation, revision-bound container disposition CLI/service route, the missing store export needed by hierarchy callers, and strict candidate assembly plus machine-update rollback hardening. Focused machine-update, authority, release-assembly, shell, YAML, formatting and diff checks passed in the worker lane; target package smoke and full qualification remain unrun. A pre-migration Global database backup/readback seam is still required to prove paired package/Global recovery. Final-result binding and Global capture provenance remain active; BW-S13-T01 dates/waits has started on source 87c05ed5. F1 onboarding, remaining F3/F4 paths, S08/S09 intake receipts and Global Send, S10 scale qualification, S11 handover, S12-T05/T06, S13 TUI/reference workflow parity, T90 sprint gates, integrated qualification, safe installation activation, and release delivery remain open. No final qualification, installation activation, or release claim is implied.",
-  "current_source_commit": "46c8d6be",
+  "note": "Integrated the versioned guidance action descriptors, Global TUI inbox hardening, bounded backup artifact continuity, F2 summary/review readbacks, mixed-revision context guard, release preparation, revision-bound container disposition CLI/service route, the missing store export needed by hierarchy callers, and strict candidate assembly plus machine-update rollback hardening. Focused machine-update, authority, release-assembly, shell, YAML, formatting and diff checks passed in the worker lane; target package smoke and full qualification remain unrun. A pre-migration Global database backup/readback seam is still required to prove paired package/Global recovery. Final-result binding and Global capture provenance remain active; BW-S13-T01 dates/waits has started on source 87c05ed5. F1 onboarding, remaining F3/F4 paths, S08/S09 intake receipts and Global Send, S10 scale qualification, S11 handover, S12-T05/T06, S13 TUI/reference workflow parity, T90 sprint gates, integrated qualification, safe installation activation, and release delivery remain open. No final qualification, installation activation, or release claim is implied. The S06 capture/provenance implementation and the S07 Personal Inbox status filter are now integrated; the combined Global TUI suite passes (97/97), while sprint-level acceptance and the remaining S07 lanes are still open.",
+  "current_source_commit": "990b109a",
   "environment_inventory": {
     "checked_date": "2026-10-13",
     "native_platform": "macOS ARM64",
@@ -401,6 +401,12 @@
       "event": "current_v4_implementation_lanes_dispatched",
       "source_commit": "2fa9bf3ed717ae9f917688b6a6b0fb944a6c5b65",
       "summary": "Dispatched three isolated Luna Extra High implementation lanes: F2 final-result binding, BW-S06 capture provenance/logical transfer, and BW-S02/S03 package plus machine update recovery. Each assignment has a scoped file lease and current-source basis; qualification remains coordinator-owned."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S06_capture_provenance_and_personal_inbox_status_integrated",
+      "source_commit": "990b109a",
+      "summary": "Integrated schema-3 Personal Inbox status and explicit capture-origin witness, legacy migration without fabricated origins, schema-3 metadata round-trip, and status-based Global TUI Inbox filtering. The combined Global TUI typecheck and all 97 tests pass. S06-T90/S07-T90 acceptance remains open."
     }
   ]
 }
