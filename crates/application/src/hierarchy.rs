@@ -2158,7 +2158,7 @@ fn validate_nonempty(field: &'static str, value: &str) -> Result<(), Application
 }
 
 fn container_descendant_ids(
-    snapshot: &boreal_store::ContainerRollupSnapshotV3,
+    snapshot: &boreal_store::cycle_commands::ContainerRollupSnapshotV3,
     container_id: &str,
 ) -> BTreeSet<String> {
     let mut descendants = BTreeSet::new();
@@ -2521,10 +2521,14 @@ fn disposition_kind(value: DispositionKind) -> String {
 #[cfg(test)]
 mod container_disposition_tests {
     use super::*;
-    use boreal_domain::{AcceptanceProfile, PersistedLifecycle, WorkKind};
-    use boreal_store::SqliteStore;
+    use boreal_domain::{AcceptanceProfile, ActorRole, PersistedLifecycle, WorkKind};
+    use boreal_store::{
+        identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
+        principals::PrincipalGrantRequest,
+        SqliteStore,
+    };
 
-    const SCHEMA_V2: &str = include_str!("../../../project/spec/schema-v2.sql");
+    const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 
     fn work(project_id: &ProjectId, id: &str, kind: WorkKind, parent_id: Option<&str>) -> WorkItem {
         WorkItem {
@@ -2544,64 +2548,88 @@ mod container_disposition_tests {
 
     fn scope(store: &SqliteStore, project_id: &ProjectId) -> PlanningScope {
         PlanningScope::new(project_id.clone(), "operator-1")
+            .with_session("session-1")
             .at_revision(store.project_revision(project_id.as_str()).unwrap().0)
     }
 
     #[test]
     fn disposition_retry_replays_after_a_successor_was_appended() {
-        let store = SqliteStore::open_in_memory(SCHEMA_V2).unwrap();
+        let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).unwrap();
         let app = WorkApplication::new(&store);
         let project = ProjectId::new("p-disposition");
-        app.init_project(
+        store.create_project(project.as_str(), "unix-ms:0").unwrap();
+        let identities = IdentityStore::new(&store);
+        identities
+            .install(
+                &DatabaseIdentity::new("database-disposition", 1).unwrap(),
+                "unix-ms:1",
+            )
+            .unwrap();
+        identities
+            .bind_project(
+                project.as_str(),
+                &WorkspaceBinding::new(
+                    "/tmp/disposition-project",
+                    "/tmp/disposition-project",
+                    "sha256:disposition-project",
+                )
+                .unwrap(),
+                "unix-ms:1",
+            )
+            .unwrap();
+        store
+            .bootstrap_project_principal(&PrincipalGrantRequest {
+                project_id: project.to_string(),
+                actor_id: "operator-1".to_owned(),
+                session_id: None,
+                principal_actor_id: "operator-1".to_owned(),
+                role: ActorRole::Operator,
+                independent: true,
+                credential: format!("bwrk1_{}", "a".repeat(64)),
+                expires_at_ms: None,
+                display_name: "Disposition Operator".to_owned(),
+                reason: "bootstrap container disposition test".to_owned(),
+                expected_revision: store.project_revision(project.as_str()).unwrap().0,
+                operation_id: "op-disposition-bootstrap".to_owned(),
+                at: "unix-ms:2".to_owned(),
+            })
+            .unwrap();
+        app.register_session_as(
             &project,
             "operator-1",
-            "operator",
-            "credential",
-            "Operator",
-            "t1",
-            "op-init",
+            "test-harness",
+            "session-1",
+            "unix-ms:3",
+            "op-disposition-session",
         )
         .unwrap();
-        app.create_work_as(
+        app.create_work_as_session_checked(
             &work(&project, "container", WorkKind::Milestone, None),
             "operator-1",
-            "t2",
+            "session-1",
+            Some(store.project_revision(project.as_str()).unwrap().0),
+            "unix-ms:4",
             "op-work-container",
         )
         .unwrap();
-        app.create_work_as(
-            &work(&project, "descendant", WorkKind::Task, Some("container")),
+        app.create_work_as_session_checked(
+            &work(&project, "sprint", WorkKind::Sprint, Some("container")),
             "operator-1",
-            "t3",
+            "session-1",
+            Some(store.project_revision(project.as_str()).unwrap().0),
+            "unix-ms:5",
+            "op-work-sprint",
+        )
+        .unwrap();
+        app.create_work_as_session_checked(
+            &work(&project, "descendant", WorkKind::Task, Some("sprint")),
+            "operator-1",
+            "session-1",
+            Some(store.project_revision(project.as_str()).unwrap().0),
+            "unix-ms:6",
             "op-work-descendant",
         )
         .unwrap();
-        app.ensure_work_model_v3().unwrap();
-
-        let container_node =
-            WorkNode::milestone(project.clone(), WorkId::new("container"), "Container");
-        app.create_work_node_v3(
-            &scope(&store, &project),
-            "op-node-container",
-            &container_node,
-            "t4",
-        )
-        .unwrap();
-        let descendant_node = WorkNode::task(
-            project.clone(),
-            WorkId::new("descendant"),
-            ExecutionMode::Direct,
-            Some(WorkId::new("container")),
-            "Descendant",
-        );
-        app.create_work_node_v3(
-            &scope(&store, &project),
-            "op-node-descendant",
-            &descendant_node,
-            "t5",
-        )
-        .unwrap();
-
         let first_scope = scope(&store, &project);
         let first = app
             .apply_container_disposition_v3(
@@ -2614,8 +2642,8 @@ mod container_disposition_tests {
                 None,
                 Some("waiting on an external dependency".to_owned()),
                 None,
-                TimestampMs(6),
-                "t6",
+                TimestampMs(7),
+                "unix-ms:7",
             )
             .unwrap();
         assert!(first.changed);
@@ -2630,8 +2658,8 @@ mod container_disposition_tests {
             None,
             Some("dependency is still unresolved".to_owned()),
             Some(CloseoutDispositionId::new("disposition-first")),
-            TimestampMs(7),
-            "t7",
+            TimestampMs(8),
+            "unix-ms:8",
         )
         .unwrap();
 
@@ -2647,7 +2675,7 @@ mod container_disposition_tests {
                 Some("waiting on an external dependency".to_owned()),
                 None,
                 TimestampMs(8),
-                "t8",
+                "unix-ms:9",
             )
             .expect("exact retry reaches durable store replay after supersession");
         assert!(!replay.changed);

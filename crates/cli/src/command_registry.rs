@@ -2396,6 +2396,15 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "edit planning fields under an expected project revision",
     },
     CommandSpec {
+        path: "work disposition",
+        syntax: "bwrk work disposition --project PROJECT CONTAINER_ID DESCENDANT_ID --kind accepted_closed|accepted_cancelled|deferred|replaced [--replacement WORK_ID] [--supersedes DISPOSITION_ID] [--reason TEXT] --expected-revision N --yes [--operation-id ID] [--socket PATH] [--json]",
+        action: "mutate",
+        output: "container_disposition",
+        direct: true,
+        service: true,
+        summary: "account for one descendant through revision-bound container closeout",
+    },
+    CommandSpec {
         path: "work rollup",
         syntax: "bwrk work rollup PROJECT CONTAINER_ID [--json]",
         action: "read",

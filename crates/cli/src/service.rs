@@ -28,6 +28,7 @@ fn parity_supported(path: &[String]) -> bool {
             | ["evidence", "bind-result" | "receipts"]
             | ["artifact", "result", "bind" | "attempt" | "operation"]
             | ["work", "close-readiness"]
+            | ["work", "disposition"]
             | ["work", "create"]
             | ["cycle" | "sprint", "current"]
     ) || super::directive_commands::supported(path)

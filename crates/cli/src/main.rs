@@ -67,6 +67,7 @@ use std::os::unix::process::CommandExt;
 mod authority;
 mod command_registry;
 mod completion_commands;
+mod container_commands;
 mod credentials;
 mod cycle_commands;
 mod dashboard;
@@ -169,6 +170,7 @@ Usage:
   bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk work show <project> <work-id> [--db PATH] [--json]
   bwrk work close-readiness <project> <work-id> [--socket PATH] [--db PATH] [--json]
+  bwrk work disposition --project PROJECT CONTAINER_ID DESCENDANT_ID --kind accepted_closed|accepted_cancelled|deferred|replaced [--replacement WORK_ID] [--supersedes DISPOSITION_ID] [--reason TEXT] --expected-revision N --yes [--operation-id ID] [--socket PATH] [--json]
   bwrk work claim <project> <work-id> --source-version ID --config-identity ID [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--db PATH] [--json]
   bwrk work accept <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
   bwrk work heartbeat <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
@@ -1674,6 +1676,9 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
     if cycle_commands::read_kind(&parsed.path).is_some() {
         return cycle_commands::read(parsed, store);
     }
+    if container_commands::supported(&parsed.path) {
+        return container_commands::run(parsed, operation, app);
+    }
     if directive_commands::supported(&parsed.path) {
         return directive_commands::run(parsed, operation, store);
     }
@@ -2007,6 +2012,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--target-id"
                 | "--decision"
                 | "--supersedes"
+                | "--replacement"
                 | "--citation"
                 | "--purpose"
                 | "--policy"
@@ -2202,6 +2208,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 "--kind" => {
                     let kind = value.unwrap();
                     let intake_kind = path.as_slice() == ["intake", "capture"];
+                    let disposition_kind = path.as_slice() == ["work", "disposition"];
                     let relationship_kind = path.iter().map(String::as_str).collect::<Vec<_>>()
                         == ["global", "relationship", "add"]
                         || path.iter().map(String::as_str).collect::<Vec<_>>()
@@ -2209,20 +2216,26 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                     if relationship_kind && kind.trim().is_empty() {
                         return Err(CliError::invalid("--kind must not be empty"));
                     }
-                    if !relationship_kind
-                        && ((intake_kind
-                            && !matches!(
+                    if !relationship_kind {
+                        let valid_kind = if intake_kind {
+                            matches!(kind.as_str(), "note" | "discovery" | "question" | "revisit")
+                        } else if disposition_kind {
+                            matches!(
                                 kind.as_str(),
-                                "note" | "discovery" | "question" | "revisit"
-                            ))
-                            || (!intake_kind
-                                && !matches!(kind.as_str(), "milestone" | "sprint" | "task")))
-                    {
-                        return Err(CliError::invalid(if intake_kind {
-                            "--kind must be note, discovery, question, or revisit"
+                                "accepted_closed" | "accepted_cancelled" | "deferred" | "replaced"
+                            )
                         } else {
-                            "--kind must be milestone, sprint, or task"
-                        }));
+                            matches!(kind.as_str(), "milestone" | "sprint" | "task")
+                        };
+                        if !valid_kind {
+                            return Err(CliError::invalid(if intake_kind {
+                                "--kind must be note, discovery, question, or revisit"
+                            } else if disposition_kind {
+                                "--kind must be accepted_closed, accepted_cancelled, deferred, or replaced"
+                            } else {
+                                "--kind must be milestone, sprint, or task"
+                            }));
+                        }
                     }
                     options.kind = Some(kind);
                 }
@@ -2483,6 +2496,13 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         }
         ["work", "create"] => positionals == 2 + usize::from(options.project.is_none()),
         ["work", "edit"] => positionals == 1 + usize::from(options.project.is_none()),
+        ["work", "disposition"] => {
+            positionals == 2 + usize::from(options.project.is_none())
+                && options.project.is_some()
+                && options.expected_revision.is_some()
+                && options.kind.is_some()
+                && options.setup.yes
+        }
         ["work", "rollup"] => positionals == 1 + usize::from(options.project.is_none()),
         ["work", "hold", "add"] | ["work", "dispatch", "set"] => {
             positionals == 1 + usize::from(options.project.is_none())
@@ -12197,6 +12217,69 @@ mod tests {
 
         let intake = parse(&args(&["intake", "show", "project-1", "intake-1"])).unwrap();
         assert_eq!(intake.path, vec!["intake", "show"]);
+    }
+
+    #[test]
+    fn parser_accepts_revisioned_container_disposition_inputs() {
+        let disposition = parse(&args(&[
+            "work",
+            "disposition",
+            "container-1",
+            "task-1",
+            "--project",
+            "project-1",
+            "--kind",
+            "replaced",
+            "--replacement",
+            "task-2",
+            "--supersedes",
+            "disposition-old",
+            "--reason",
+            "scope changed",
+            "--expected-revision",
+            "9",
+            "--operation-id",
+            "op-disposition-1",
+            "--yes",
+        ]))
+        .expect("work disposition contract parses");
+        assert_eq!(disposition.path, vec!["work", "disposition"]);
+        assert_eq!(disposition.options.project.as_deref(), Some("project-1"));
+        assert_eq!(
+            disposition.options.positionals,
+            vec!["container-1", "task-1"]
+        );
+        assert_eq!(disposition.options.kind.as_deref(), Some("replaced"));
+        assert_eq!(
+            extra_value(&disposition.options, "--replacement"),
+            Some("task-2")
+        );
+        assert_eq!(
+            extra_value(&disposition.options, "--supersedes"),
+            Some("disposition-old")
+        );
+        assert_eq!(disposition.options.reason.as_deref(), Some("scope changed"));
+        assert_eq!(disposition.options.expected_revision, Some(9));
+        assert_eq!(
+            disposition.options.operation_id.as_deref(),
+            Some("op-disposition-1")
+        );
+        assert!(disposition.options.setup.yes);
+
+        let bad_kind = parse(&args(&[
+            "work",
+            "disposition",
+            "container-1",
+            "task-1",
+            "--project",
+            "project-1",
+            "--kind",
+            "released",
+            "--expected-revision",
+            "9",
+            "--yes",
+        ]));
+        assert!(bad_kind.is_err());
     }
 
     #[test]
