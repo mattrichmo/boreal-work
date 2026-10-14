@@ -244,8 +244,70 @@ pub struct AgentGuideDto {
     #[serde(default)]
     pub requirements: Vec<RequirementDto>,
     pub next_action: Option<NextActionDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_descriptor: Option<AgentActionDescriptorDto>,
     pub provenance: GuidanceProvenanceDto,
     pub selection_key: String,
+}
+
+/// Typed input value categories for a trusted, revision-bound guided action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentActionInputValueTypeDto {
+    UnsignedInteger,
+    Identifier,
+    Boolean,
+    Text,
+    EvidencePayload,
+    ReviewDecision,
+    RecoveryDisposition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentActionRoleDto {
+    Agent,
+    Reviewer,
+    Operator,
+    Publisher,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentActionTargetDto {
+    pub project_id: String,
+    pub work_id: String,
+    pub entity_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentActionAttemptDto {
+    pub attempt_id: String,
+    pub fence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentActionInputDto {
+    pub kind: String,
+    pub value_type: AgentActionInputValueTypeDto,
+}
+
+/// Full server-produced action descriptor carried alongside agent guidance.
+/// It is advisory context; the application rechecks authorization and every
+/// revision when an action request is submitted.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentActionDescriptorDto {
+    pub schema_version: String,
+    pub action: String,
+    pub target: AgentActionTargetDto,
+    pub expected_project_revision: u64,
+    pub expected_entity_revision: u64,
+    pub expected_proof_revision: Option<u64>,
+    pub attempt: Option<AgentActionAttemptDto>,
+    pub required_roles: Vec<AgentActionRoleDto>,
+    pub required_inputs: Vec<AgentActionInputDto>,
+    pub confirmation: Option<String>,
+    pub read_only: bool,
+    pub recovery: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -298,6 +360,8 @@ pub struct AgentNextDto {
     pub status: NextStatusDto,
     pub reason: NextReasonDto,
     pub next_action: Option<NextActionDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_descriptor: Option<AgentActionDescriptorDto>,
     #[serde(default)]
     pub context_refs: Vec<ContextRefDto>,
     pub no_goal: bool,
@@ -762,7 +826,82 @@ mod tests {
         .unwrap();
         let guide: AgentGuideDto = serde_json::from_value(envelope.data.unwrap()).unwrap();
         assert_eq!(guide.kind, "agent_guide");
-        assert!(!guide.next_action.unwrap().shell);
+        assert!(!guide.next_action.as_ref().unwrap().shell);
+        assert!(guide.action_descriptor.is_none());
+        assert!(serde_json::to_value(&guide)
+            .unwrap()
+            .get("action_descriptor")
+            .is_none());
+    }
+
+    #[test]
+    fn guide_and_next_round_trip_versioned_action_descriptors_additively() {
+        let descriptor = AgentActionDescriptorDto {
+            schema_version: "boreal.agent_action_descriptor.v1".to_owned(),
+            action: "checkpoint".to_owned(),
+            target: AgentActionTargetDto {
+                project_id: "project-1".to_owned(),
+                work_id: "work-1".to_owned(),
+                entity_revision: 5,
+            },
+            expected_project_revision: 11,
+            expected_entity_revision: 5,
+            expected_proof_revision: Some(3),
+            attempt: Some(AgentActionAttemptDto {
+                attempt_id: "attempt-1".to_owned(),
+                fence: 7,
+            }),
+            required_roles: vec![AgentActionRoleDto::Agent],
+            required_inputs: vec![AgentActionInputDto {
+                kind: "expected_project_revision".to_owned(),
+                value_type: AgentActionInputValueTypeDto::UnsignedInteger,
+            }],
+            confirmation: Some("Record this checkpoint?".to_owned()),
+            read_only: false,
+            recovery: false,
+        };
+
+        let guide_envelope: crate::Envelope<serde_json::Value> = serde_json::from_str(
+            include_str!("../../../project/spec/protocol/guide-dto.json"),
+        )
+        .unwrap();
+        let mut guide: AgentGuideDto =
+            serde_json::from_value(guide_envelope.data.unwrap()).unwrap();
+        assert!(guide.action_descriptor.is_none());
+        guide.action_descriptor = Some(descriptor.clone());
+        let guide_data = serde_json::to_value(&guide).unwrap();
+        assert_eq!(
+            guide_data["action_descriptor"]["schema_version"],
+            "boreal.agent_action_descriptor.v1"
+        );
+        assert_eq!(
+            guide_data["action_descriptor"]["required_inputs"][0]["value_type"],
+            "unsigned_integer"
+        );
+        let decoded_guide: AgentGuideDto = serde_json::from_value(guide_data).unwrap();
+        assert_eq!(decoded_guide.action_descriptor, Some(descriptor.clone()));
+
+        let next_envelope: crate::Envelope<serde_json::Value> =
+            serde_json::from_str(include_str!("../../../project/spec/protocol/next-dto.json"))
+                .unwrap();
+        let mut next: AgentNextDto = serde_json::from_value(next_envelope.data.unwrap()).unwrap();
+        assert!(next.action_descriptor.is_none());
+        assert!(serde_json::to_value(&next)
+            .unwrap()
+            .get("action_descriptor")
+            .is_none());
+        next.action_descriptor = Some(descriptor.clone());
+        let next_data = serde_json::to_value(&next).unwrap();
+        assert_eq!(
+            next_data["action_descriptor"]["target"]["entity_revision"],
+            5
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentNextDto>(next_data)
+                .unwrap()
+                .action_descriptor,
+            Some(descriptor)
+        );
     }
 
     #[test]

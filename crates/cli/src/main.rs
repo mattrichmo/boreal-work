@@ -6727,7 +6727,84 @@ fn guide_for_work(
         .iter()
         .map(|reason| reason.stable_code().to_owned())
         .collect::<Vec<_>>();
-    let selected = boreal_application::guided_action(&item);
+    let selected_descriptor = boreal_application::guided_action_descriptor(&item);
+    let selected = selected_descriptor.map(|descriptor| descriptor.action);
+    let action_descriptor = selected_descriptor.map(|descriptor| {
+        use boreal_domain::actions::ActionInputKind;
+
+        boreal_protocol::models::AgentActionDescriptorDto {
+            schema_version: "boreal.agent_action_descriptor.v1".to_owned(),
+            action: action_kind_name(descriptor.action).to_owned(),
+            target: boreal_protocol::models::AgentActionTargetDto {
+                project_id: descriptor.target.project_id.as_str().to_owned(),
+                work_id: descriptor.target.work_id.as_str().to_owned(),
+                entity_revision: descriptor.target.revision.get(),
+            },
+            expected_project_revision: descriptor.expected_project_revision.0,
+            expected_entity_revision: descriptor.expected_entity_revision.get(),
+            expected_proof_revision: descriptor.expected_proof_revision.map(|revision| revision.get()),
+            attempt: descriptor
+                .attempt
+                .as_ref()
+                .map(|attempt| boreal_protocol::models::AgentActionAttemptDto {
+                    attempt_id: attempt.attempt_id.as_str().to_owned(),
+                    fence: attempt.fence.get(),
+                }),
+            required_roles: descriptor
+                .required_roles
+                .iter()
+                .map(|role| match role {
+                    boreal_domain::ActorRole::Agent => boreal_protocol::models::AgentActionRoleDto::Agent,
+                    boreal_domain::ActorRole::Reviewer => boreal_protocol::models::AgentActionRoleDto::Reviewer,
+                    boreal_domain::ActorRole::Operator => boreal_protocol::models::AgentActionRoleDto::Operator,
+                    boreal_domain::ActorRole::Publisher => boreal_protocol::models::AgentActionRoleDto::Publisher,
+                })
+                .collect(),
+            required_inputs: descriptor
+                .required_inputs
+                .iter()
+                .map(|input| {
+                    let value_type = match input {
+                        ActionInputKind::ExpectedProjectRevision
+                        | ActionInputKind::ExpectedEntityRevision
+                        | ActionInputKind::ExpectedProofRevision
+                        | ActionInputKind::Fence => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::UnsignedInteger
+                        }
+                        ActionInputKind::AttemptId
+                        | ActionInputKind::SessionId
+                        | ActionInputKind::OperationId => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::Identifier
+                        }
+                        ActionInputKind::Confirmation => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::Boolean
+                        }
+                        ActionInputKind::Reason
+                        | ActionInputKind::Comment
+                        | ActionInputKind::Summary => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::Text
+                        }
+                        ActionInputKind::Evidence => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::EvidencePayload
+                        }
+                        ActionInputKind::ReviewDecision => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::ReviewDecision
+                        }
+                        ActionInputKind::RecoveryDisposition => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::RecoveryDisposition
+                        }
+                    };
+                    boreal_protocol::models::AgentActionInputDto {
+                        kind: action_input_name(*input).to_owned(),
+                        value_type,
+                    }
+                })
+                .collect(),
+            confirmation: descriptor.confirmation.map(str::to_owned),
+            read_only: descriptor.read_only,
+            recovery: descriptor.recovery,
+        }
+    });
     let next_action = if let Some(kind) = selected {
         if kind == boreal_domain::actions::ActionKind::Claim {
             Some(start_action(
@@ -6785,17 +6862,49 @@ fn guide_for_work(
                 subject:SubjectDto{subject_type:"work".into(),id:work_id.into()},
                 safe_argv:vec!["bwrk".into(),"evidence".into(),"run".into(),"--project".into(),project.to_string(),"--work".into(),work_id.into(),"--gate".into(),gate.to_string(),"--attempt".into(),attempt.attempt_id.to_string(),"--fence".into(),attempt.fence.get().to_string(),"--actor".into(),parsed.options.actor.clone(),"--session".into(),parsed.options.session.clone(),"--json".into()],cwd:".".into(),runner:"boreal_cli".into(),shell:false,
             })
+        } else if kind == boreal_domain::actions::ActionKind::Inspect {
+            Some(NextActionDto {
+                directive_id: "guidance.inspect@v1".into(),
+                severity: "advisory".into(),
+                title: "Inspect the current work item".into(),
+                instruction: "Read the current work item and its action descriptor. The descriptor is advisory; the application rechecks authorization and revisions for any later request.".into(),
+                subject: SubjectDto { subject_type: "work".into(), id: work_id.into() },
+                safe_argv: vec!["bwrk".into(), "work".into(), "show".into(), project.to_string(), work_id.into(), "--json".into()],
+                cwd: ".".into(), runner: "boreal_cli".into(), shell: false,
+            })
+        } else if kind == boreal_domain::actions::ActionKind::ReadHistory {
+            Some(NextActionDto {
+                directive_id: "guidance.read_history@v1".into(),
+                severity: "advisory".into(),
+                title: "Read the work history".into(),
+                instruction: "Read the bounded work audit and operation history for this item."
+                    .into(),
+                subject: SubjectDto {
+                    subject_type: "work".into(),
+                    id: work_id.into(),
+                },
+                safe_argv: vec![
+                    "bwrk".into(),
+                    "work".into(),
+                    "history".into(),
+                    "--project".into(),
+                    project.to_string(),
+                    work_id.into(),
+                    "--json".into(),
+                ],
+                cwd: ".".into(),
+                runner: "boreal_cli".into(),
+                shell: false,
+            })
         } else {
-            // Non-claim actions require structured proof/decision inputs. Explain the
-            // exact server descriptor via a read rather than manufacturing an argv.
             Some(NextActionDto {
                 directive_id: format!("guidance.{}@v1", action_kind_name(kind)),
-                severity: "advisory".into(),
-                title: format!("Inspect the {} action", action_kind_name(kind)),
-                instruction: "Load the current server descriptor, bind its required inputs and confirmation, then submit that action. Guidance itself is not permission.".into(),
+                severity: "required".into(),
+                title: format!("Prepare the {} action request", action_kind_name(kind)),
+                instruction: "Build a structured request from the adjacent typed action descriptor. Bind every required input and its expected revisions and attempt fence, then submit it through the application; guidance does not authorize the transition.".into(),
                 subject: SubjectDto { subject_type: "work".into(), id: work_id.into() },
-                safe_argv: vec!["bwrk".into(), "work".into(), "show".into(), work_id.into(), "--project".into(), project.to_string(), "--json".into()],
-                cwd: ".".into(), runner: "boreal_cli".into(), shell: false,
+                safe_argv: Vec::new(),
+                cwd: ".".into(), runner: "agent_input".into(), shell: false,
             })
         }
     } else {
@@ -6868,6 +6977,7 @@ fn guide_for_work(
             )
             .collect(),
         next_action,
+        action_descriptor,
         provenance: GuidanceProvenanceDto {
             registry_version: "directives.v1".to_owned(),
             registry_path: "boreal.agent.directive.registry.v1".to_owned(),
@@ -6898,9 +7008,6 @@ fn guide_for_work(
             "finish or explicitly release",
             "refresh guidance after every transition"
         ]);
-        if let Some(kind) = selected {
-            data["action_descriptor"] = item.actions.as_ref().and_then(|actions| actions.allowed.iter().find(|a|a.action==kind)).map(|a|json!({"action":action_kind_name(a.action),"expected_project_revision":a.expected_project_revision.0,"expected_entity_revision":a.expected_entity_revision.get(),"expected_proof_revision":a.expected_proof_revision.map(|p|p.get()),"required_inputs":a.required_inputs.iter().map(|i|action_input_name(*i)).collect::<Vec<_>>(),"confirmation":a.confirmation})).unwrap_or(Value::Null);
-        }
     }
     Ok(result)
 }
@@ -7002,6 +7109,7 @@ fn guide_idle(
             })
             .collect(),
         next_action: None,
+        action_descriptor: None,
         provenance: GuidanceProvenanceDto {
             registry_version: "directives.v1".to_owned(),
             registry_path: "boreal.agent.directive.registry.v1".to_owned(),
@@ -7057,6 +7165,7 @@ fn next_from_guide(
             selection_key: guide.selection_key,
         },
         next_action: guide.next_action,
+        action_descriptor: guide.action_descriptor,
         context_refs: guide
             .status
             .work_id
