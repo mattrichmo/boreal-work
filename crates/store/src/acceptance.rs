@@ -5,10 +5,10 @@
 //! application/domain boundary and does not make a SQL status decision.
 
 use super::{
-    check_expected_revision, checksum, finish_transaction, CloseIntentRequest, CloseIntentResult,
-    GateDiagnostics, GateRecord, GateStateUpdateRequest, MutationResult, ReceiptInsertRequest,
-    ReceiptInsertResult, ReceiptRecord, ReviewInsertRequest, ReviewRecord, SqliteStore, StoreError,
-    SummaryInsertRequest, SummaryInsertResult, SummaryRecord,
+    check_expected_revision, checksum, finish_transaction, CloseIntentRecord, CloseIntentRequest,
+    CloseIntentResult, GateDiagnostics, GateRecord, GateStateUpdateRequest, MutationResult,
+    ReceiptInsertRequest, ReceiptInsertResult, ReceiptRecord, ReviewInsertRequest, ReviewRecord,
+    SqliteStore, StoreError, SummaryInsertRequest, SummaryInsertResult, SummaryRecord,
 };
 use serde_json::{json, Value};
 

@@ -30,6 +30,15 @@ use boreal_store::jobs::ExternalJobInput;
 
 const VERIFIER_JOB_PREFIX: &str = "verifier:";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseReadinessReadback {
+    pub project_revision: u64,
+    pub work_id: WorkId,
+    pub attempt_id: Option<String>,
+    pub fence: Option<u64>,
+    pub readiness: crate::CloseReadiness,
+}
+
 impl WorkApplication<'_> {
     /// Project-scoped durable receipt readback. A receipt remains available
     /// after its attempt is stale so failed and superseded evidence stays
@@ -172,8 +181,29 @@ impl WorkApplication<'_> {
         project_id: &str,
         work_id: &str,
     ) -> Result<crate::CloseReadiness, ApplicationError> {
+        self.read_close_readiness_readback(project_id, work_id)
+            .map(|readback| readback.readiness)
+    }
+
+    /// Returns the evaluated readiness with its project revision, requested
+    /// work identity, and current attempt identity from the same store snapshot.
+    pub fn read_close_readiness_readback(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<CloseReadinessReadback, ApplicationError> {
         let snapshot = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
             .close_readiness_snapshot(project_id, work_id)?;
+        let project_revision = snapshot.project_revision;
+        let requested_work_id = WorkId::new(snapshot.work_id.clone());
+        let current_attempt_id = snapshot
+            .current_attempt
+            .as_ref()
+            .map(|attempt| attempt.attempt_id.clone());
+        let current_fence = snapshot
+            .current_attempt
+            .as_ref()
+            .map(|attempt| attempt.fence);
         let definition = close_readiness_definition(&snapshot.pinned_requirements)?;
         let attempt = close_readiness_attempt_snapshot(&snapshot)?;
         let source_snapshot_hash = close_readiness_source(&snapshot, &attempt);
@@ -361,7 +391,13 @@ impl WorkApplication<'_> {
         });
         readiness.gaps.dedup();
         readiness.ready = readiness.gaps.is_empty();
-        Ok(readiness)
+        Ok(CloseReadinessReadback {
+            project_revision,
+            work_id: requested_work_id,
+            attempt_id: current_attempt_id,
+            fence: current_fence,
+            readiness,
+        })
     }
 
     pub fn read_final_result_for_operation(
@@ -2501,6 +2537,197 @@ mod tests {
         (store, project)
     }
 
+    fn production_reviewed_verifier_work(
+        store: &SqliteStore,
+        project: &ProjectId,
+        work_id: &str,
+        attempt_id: &str,
+    ) {
+        let app = WorkApplication::new(store);
+        let mut work = verifier_work(project);
+        work.id = WorkId::new(work_id);
+        work.acceptance_profile = AcceptanceProfile::reviewed();
+        app.create_work_as_session_checked(
+            &work,
+            "verifier-operator",
+            VERIFIER_OPERATOR_SESSION,
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            "unix-ms:10",
+            &format!("op-create-{work_id}"),
+        )
+        .expect("create reviewed verifier work");
+        app.claim_with_context(
+            project,
+            work_id,
+            "agent-one",
+            "verifier-harness",
+            Some(VERIFIER_SESSION),
+            attempt_id,
+            &format!("op-claim-{work_id}"),
+            &format!("sha256:{work_id}-claim"),
+            None,
+            "unix-ms:1000",
+            "unix-ms:2000",
+            "unix-ms:3000",
+            Some("source-one"),
+            "config-one",
+        )
+        .expect("claim reviewed verifier work");
+        store
+            .execute_batch(&format!(
+                "UPDATE attempt SET state = 'running', accepted_at = 'unix-ms:1001'
+                 WHERE attempt_id = '{attempt_id}'"
+            ))
+            .expect("put reviewed verifier attempt in running phase");
+    }
+
+    fn persist_open_close_intent(
+        store: &SqliteStore,
+        project: &ProjectId,
+        work_id: &str,
+        attempt_id: &str,
+        profile_id: &str,
+    ) -> String {
+        let app = WorkApplication::new(store);
+        let attempt = store
+            .current_attempt_for_work(project.as_str(), work_id)
+            .expect("read current attempt")
+            .expect("current attempt exists");
+        store
+            .apply_attempt_mutation(boreal_store::AttemptMutationRequest {
+                project_id: project.as_str().to_owned(),
+                work_id: work_id.to_owned(),
+                attempt_id: attempt_id.to_owned(),
+                actor_id: "agent-one".to_owned(),
+                harness_id: Some("verifier-harness".to_owned()),
+                session_id: Some(VERIFIER_SESSION.to_owned()),
+                fence: attempt.fence,
+                operation_id: format!("op-submit-{work_id}"),
+                request_digest: format!("sha256:submit-{work_id}"),
+                at: "unix-ms:1400".to_owned(),
+                expected_project_revision: None,
+                expected_work_revision: None,
+                expected_attempt_revision: Some(attempt.fence),
+                expected_phase: Some(AttemptPhase::Running),
+                expected_lease_deadline: None,
+                expected_hard_deadline: None,
+                mutation: boreal_store::AttemptMutationKind::Submit,
+                reason: None,
+            })
+            .expect("submit verifier attempt");
+
+        let body = format!("close readiness summary for {work_id}");
+        let summary_id = format!("summary-{work_id}");
+        let summary = SummaryPayload {
+            summary_id: summary_id.clone(),
+            work_id: WorkId::new(work_id),
+            attempt_id: AttemptId::new(attempt_id),
+            fence: Fence::new(attempt.fence),
+            source_snapshot_hash: SourceVersionId::new("source-one"),
+            config_identity: ConfigIdentity::new("config-one"),
+            profile_id: ProfileId::new(profile_id),
+            profile_version: "1".to_owned(),
+            body_digest: crate::sha256_content_digest(body.as_bytes()),
+            body_size: body.len() as u64,
+        };
+        app.record_summary_with_body(
+            project.as_str(),
+            "agent-one",
+            Some(VERIFIER_SESSION),
+            &summary,
+            &body,
+            &format!("op-summary-{work_id}"),
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            TimestampMs::from_millis(1500),
+        )
+        .expect("persist typed summary and body");
+
+        let intent = CloseIntent {
+            work_id: WorkId::new(work_id),
+            attempt_id: AttemptId::new(attempt_id),
+            fence: Fence::new(attempt.fence),
+            source_snapshot_hash: SourceVersionId::new("source-one"),
+            config_identity: ConfigIdentity::new("config-one"),
+            profile_id: ProfileId::new(profile_id),
+            profile_version: "1".to_owned(),
+            summary_id: Some(summary_id),
+        };
+        app.request_close(
+            "agent-one",
+            Some(VERIFIER_SESSION),
+            &intent,
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            TimestampMs::from_millis(1600),
+        )
+        .expect("persist open close intent")
+        .close_intent
+        .close_intent_id
+    }
+
+    fn record_required_review(
+        store: &SqliteStore,
+        project: &ProjectId,
+        work_id: &str,
+        attempt_id: &str,
+        review_id: &str,
+        decision: ReviewDecision,
+        now: u64,
+    ) {
+        let requirements = boreal_store::profiles::ProfileStore::new(store)
+            .current_pinned_requirements(project.as_str(), work_id)
+            .expect("read reviewed profile pin");
+        let definition = close_readiness_definition(&requirements)
+            .expect("build reviewed close-readiness definition");
+        let attempt = store
+            .attempt_record_by_id(project.as_str(), attempt_id)
+            .expect("read reviewed attempt")
+            .expect("reviewed attempt exists");
+        let request = ReviewDecisionRequest {
+            review_id: review_id.to_owned(),
+            work_id: WorkId::new(work_id),
+            attempt_id: AttemptId::new(attempt_id),
+            fence: Fence::new(attempt.fence),
+            reviewer_actor_id: ActorId::new("reviewer-one"),
+            attempt_actor_id: ActorId::new("agent-one"),
+            reviewer_role: ActorRole::Reviewer,
+            decision,
+            reason: "reviewed close-readiness test submission".to_owned(),
+            source_snapshot_hash: SourceVersionId::new("source-one"),
+            config_identity: ConfigIdentity::new("config-one"),
+            policy_version: requirements.profile.version,
+        };
+        WorkApplication::new(store)
+            .record_review(
+                &ActorId::new("reviewer-one"),
+                Some("reviewer-session"),
+                &request,
+                &definition,
+                Some(
+                    store
+                        .project_revision(project.as_str())
+                        .expect("project revision")
+                        .0,
+                ),
+                TimestampMs::from_millis(now),
+            )
+            .expect("persist required review decision");
+    }
+
     fn finished_production_execution<'a>(
         store: &'a SqliteStore,
         project: &ProjectId,
@@ -3053,9 +3280,17 @@ mod tests {
         let (store, project) = production_verifier_setup();
         let app = WorkApplication::new(&store);
         let current = app
-            .read_close_readiness(project.as_str(), "verifier-work")
+            .read_close_readiness_readback(project.as_str(), "verifier-work")
             .expect("read current attempt readiness");
+        assert_eq!(
+            current.project_revision,
+            store.project_revision(project.as_str()).unwrap().0
+        );
+        assert_eq!(current.work_id, WorkId::new("verifier-work"));
+        assert_eq!(current.attempt_id.as_deref(), Some("verifier-attempt"));
+        assert_eq!(current.fence, Some(1));
         assert!(!current
+            .readiness
             .gaps
             .iter()
             .any(|gap| gap.code() == "attempt_not_current"));
@@ -3064,12 +3299,199 @@ mod tests {
             .execute_batch("UPDATE attempt SET current=0 WHERE attempt_id='verifier-attempt'")
             .expect("stale the persisted attempt for projection test");
         let stale = app
-            .read_close_readiness(project.as_str(), "verifier-work")
+            .read_close_readiness_readback(project.as_str(), "verifier-work")
             .expect("read stale attempt readiness");
+        assert_eq!(stale.attempt_id, None);
+        assert_eq!(stale.fence, None);
         assert!(stale
+            .readiness
             .gaps
             .iter()
             .any(|gap| gap.code() == "attempt_not_current"));
+    }
+
+    #[test]
+    fn close_readiness_reports_summary_body_integrity_mismatch() {
+        let (store, project) = production_verifier_setup();
+        persist_open_close_intent(
+            &store,
+            &project,
+            "verifier-work",
+            "verifier-attempt",
+            "focused",
+        );
+        store
+            .execute_batch(
+                "DROP TRIGGER summary_body_v1_no_update;
+                 UPDATE summary_body_v1 SET body_text='tampered summary bytes'
+                 WHERE summary_id='summary-verifier-work';",
+            )
+            .expect("tamper with stored body integrity fixture");
+
+        let readiness = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read tampered summary readiness");
+        assert!(readiness
+            .gaps
+            .iter()
+            .any(|gap| gap.code() == "summary_mismatch"));
+    }
+
+    #[test]
+    fn close_readiness_reports_mismatched_close_intent() {
+        let (store, project) = production_verifier_setup();
+        persist_open_close_intent(
+            &store,
+            &project,
+            "verifier-work",
+            "verifier-attempt",
+            "focused",
+        );
+        store
+            .execute_batch(
+                "UPDATE close_intent SET config_identity='config-mismatch'
+                 WHERE work_id='verifier-work';",
+            )
+            .expect("mismatch persisted close intent context");
+
+        let readiness = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read mismatched close intent readiness");
+        assert!(readiness
+            .gaps
+            .iter()
+            .any(|gap| gap.code() == "close_intent_invalid"));
+    }
+
+    #[test]
+    fn close_readiness_reports_non_open_close_intent() {
+        let (store, project) = production_verifier_setup();
+        persist_open_close_intent(
+            &store,
+            &project,
+            "verifier-work",
+            "verifier-attempt",
+            "focused",
+        );
+        store
+            .execute_batch(
+                "UPDATE close_intent
+                 SET state='invalidated', invalidated_at='unix-ms:1700',
+                     invalidation_code='test.invalidated'
+                 WHERE work_id='verifier-work';",
+            )
+            .expect("invalidate persisted close intent fixture");
+
+        let readiness = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read invalidated close intent readiness");
+        assert!(readiness
+            .gaps
+            .iter()
+            .any(|gap| gap.code() == "close_intent_invalid"));
+    }
+
+    #[test]
+    fn close_readiness_accepts_and_rejects_required_reviews() {
+        let (store, project) = production_verifier_setup();
+        store
+            .grant_principal(&PrincipalGrantRequest {
+                project_id: project.as_str().to_owned(),
+                actor_id: "verifier-operator".to_owned(),
+                session_id: None,
+                principal_actor_id: "reviewer-one".to_owned(),
+                role: ActorRole::Reviewer,
+                independent: true,
+                credential: format!("bwrk1_{}", "c".repeat(64)),
+                expires_at_ms: None,
+                display_name: "Independent verifier reviewer".to_owned(),
+                reason: "grant independent reviewer for close-readiness test".to_owned(),
+                expected_revision: store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+                operation_id: "op-verifier-reviewer-grant".to_owned(),
+                at: "unix-ms:10".to_owned(),
+            })
+            .expect("grant independent reviewer");
+        WorkApplication::new(&store)
+            .register_session_as(
+                &project,
+                "reviewer-one",
+                "verifier-harness",
+                "reviewer-session",
+                "unix-ms:11",
+                "op-verifier-reviewer-session",
+            )
+            .expect("register independent reviewer session");
+
+        production_reviewed_verifier_work(
+            &store,
+            &project,
+            "reviewed-accepted-work",
+            "reviewed-accepted-attempt",
+        );
+        persist_open_close_intent(
+            &store,
+            &project,
+            "reviewed-accepted-work",
+            "reviewed-accepted-attempt",
+            "reviewed",
+        );
+        record_required_review(
+            &store,
+            &project,
+            "reviewed-accepted-work",
+            "reviewed-accepted-attempt",
+            "review-accepted",
+            ReviewDecision::Accepted,
+            1800,
+        );
+        let accepted = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "reviewed-accepted-work")
+            .expect("read accepted review readiness");
+        assert!(!accepted
+            .gaps
+            .iter()
+            .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRequired(_))));
+        assert!(!accepted
+            .gaps
+            .iter()
+            .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRejected(_))));
+
+        production_reviewed_verifier_work(
+            &store,
+            &project,
+            "reviewed-rejected-work",
+            "reviewed-rejected-attempt",
+        );
+        persist_open_close_intent(
+            &store,
+            &project,
+            "reviewed-rejected-work",
+            "reviewed-rejected-attempt",
+            "reviewed",
+        );
+        record_required_review(
+            &store,
+            &project,
+            "reviewed-rejected-work",
+            "reviewed-rejected-attempt",
+            "review-rejected",
+            ReviewDecision::Rejected,
+            1900,
+        );
+        let rejected = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "reviewed-rejected-work")
+            .expect("read rejected review readiness");
+        assert!(!rejected
+            .gaps
+            .iter()
+            .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRequired(_))));
+        assert!(rejected
+            .gaps
+            .iter()
+            .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRejected(_))));
     }
 
     #[test]
