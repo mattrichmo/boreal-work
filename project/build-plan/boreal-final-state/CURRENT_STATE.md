@@ -140,10 +140,11 @@ yet. No runtime session or installation state was changed.
 S08 restore identity and immutable Intake receipt source is present, and a
 limited T05 qualification record exists; the combined S08-T90 acceptance is
 still absent. S09 Global Send has no application/CLI implementation and is
-blocked on S07-T90 and S08-T90. S12-T05 has typed source routes, but the
-callable contract inventory and general-work/artifact-acceptance fixtures
-disagree about available operations; T05 and T90 evidence are absent. S12-T06
-also waits on accepted S12-T05 and S02-T90. S10-T01 must wait for S07-T90.
+blocked on S07-T90 and S08-T90. At the earlier source snapshot, S12-T05 had
+typed source routes but inconsistent callable-contract fixtures; see the
+continuation update below for the reconciliation. T05 and T90 acceptance
+evidence remain absent. S12-T06 also waits on accepted S12-T05 and S02-T90.
+S10-T01 must wait for S07-T90.
 
 ## Continuation update — 2026-10-14
 
@@ -179,9 +180,11 @@ untouched. No canonical database or installation state was changed.
 ## Dependency and acceptance audit — 2026-10-14
 
 Three additional read-only Luna Extra High audits checked the exact V4 source
-and checked-in evidence at `d0fccd3f` (the documentation-only coordinator
-commit `5690184e` followed). They did not access canonical runtime state or
-change source.
+and checked-in evidence at `d0fccd3f` (tree `1589ab5a`; the documentation-only
+coordinator commit `5690184e` followed). The branch was subsequently rebased
+onto local `main` at `61828ecf`; the equivalent contract source commit is now
+`38024aa4` with the same tree hash. The audits did not access canonical
+runtime state or change source.
 
 - **S00–S03:** The checked-in S00 qualification report is for `93faf2ad`, not
   this candidate. S00-T90 is unaccepted. S01 and S02 require S00-T90; S03
@@ -220,3 +223,22 @@ coordinator action is to obtain the required S00 worker-stop confirmation and
 then use the supported project workflow to read/reconcile task status and
 grants before recovery or further leaf dispatch. The user has not yet been
 able to provide that confirmation.
+
+## Sync and test follow-up — 2026-10-14
+
+Fetched `origin/main`; it remains `b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e`.
+The continuation branch was rebased onto local `main` commit
+`61828ecf7a9ef2368658d877b6b95e5613a2307c`, which contains the workflow-fixture
+correction already cherry-picked by the continuation branch; Git skipped that
+duplicate patch. Contract source tree identity is unchanged by the rebase.
+`gh` returned no open pull requests and no open issues at the time of the
+check. The continuation branch is committed locally but has not been pushed or
+merged.
+
+The exact-source full CLI package suite passed with
+`cargo test -p boreal-cli -- --test-threads=1`. A default parallel run failed
+once in the daily Global service route test (155/156 unit tests passed); that
+test passed alone. The daily route and physical-backup tests both mutate
+process-global `BOREAL_GLOBAL_ROOT`, which is the likely test race. Repair is
+held because `crates/cli/src/global_commands.rs` remains under the recorded S06
+whole-file grant. No canonical runtime or installation state was touched.
