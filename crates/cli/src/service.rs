@@ -7339,11 +7339,29 @@ mod tests {
         );
         let first_revision = first.revision.expect("receive returns committed revision");
         assert!(first_data["_scope"]["database_instance_id"].is_string());
+        assert!(!first_data.to_string().contains(SERVICE_TEST_CREDENTIAL));
+        assert!(!first_data
+            .to_string()
+            .contains(&root.canonicalize().unwrap().to_string_lossy().to_string()));
+
+        let mut denied_receive = receive_data.clone();
+        denied_receive["actor_id"] = json!("agent-1");
+        let denied =
+            application_envelope(&mut handler, "op_intake_delivery_denied", denied_receive);
+        assert_eq!(denied.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code),
+            Some(ErrorCode::PermissionDenied)
+        );
+        assert!(denied.data.is_none());
 
         // A fresh service operation resolves the stable semantic delivery even
         // though its original expected revision is now stale.
-        let duplicate =
-            application_envelope(&mut handler, "op_intake_delivery_duplicate", receive_data);
+        let duplicate = application_envelope(
+            &mut handler,
+            "op_intake_delivery_duplicate",
+            receive_data.clone(),
+        );
         assert_eq!(duplicate.outcome, ApplicationOutcome::Unchanged);
         assert_eq!(duplicate.revision, Some(first_revision));
         assert_eq!(
@@ -7353,6 +7371,16 @@ mod tests {
                 .expect("duplicate includes readback data")["intake"]["intake_id"],
             "intake-delivered-1"
         );
+
+        let mut stale_receive = receive_data.clone();
+        stale_receive["delivery"]["delivery_key"] = json!("delivery-stale-revision");
+        stale_receive["delivery"]["intake_id"] = json!("intake-stale-revision");
+        let stale = application_envelope(
+            &mut handler,
+            "op_intake_delivery_stale_revision",
+            stale_receive,
+        );
+        assert_eq!(stale.outcome, ApplicationOutcome::Conflict);
 
         let readback = application_envelope(
             &mut handler,
