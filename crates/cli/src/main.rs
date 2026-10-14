@@ -163,8 +163,8 @@ Usage:
   bwrk source show <project> <source-version-id> [--socket PATH] [--db PATH] [--json]
   bwrk source list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk source verify <project> <source-version-id> [--socket PATH] [--db PATH] [--json]
-  bwrk intake bucket <project> <bucket-id> <name> --expected-revision N [--socket PATH] [--db PATH] [--json]
-  bwrk intake capture <project> <intake-id> <content> --bucket ID --expected-revision N [--kind note|discovery|question|revisit] [--socket PATH] [--db PATH] [--json]
+  bwrk intake bucket <project> <bucket-id> <name> [--expected-revision N] [--socket PATH] [--db PATH] [--json]
+  bwrk intake capture <project> <intake-id> <content> --bucket ID [--expected-revision N] [--kind note|discovery|question|revisit] [--socket PATH] [--db PATH] [--json]
   bwrk doctor [--project PROJECT] [--db PATH] [--json]
   bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk work show <project> <work-id> [--db PATH] [--json]
@@ -2498,7 +2498,6 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["intake", "show"] => positionals == 1 + usize::from(options.project.is_none()),
         ["intake", "bucket"] | ["intake", "capture"] => {
             positionals == 2 + usize::from(options.project.is_none())
-                && options.expected_revision.is_some()
         }
         ["source", "add"] => {
             positionals == usize::from(options.project.is_none())
@@ -2595,16 +2594,6 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         }
         _ => true,
     };
-    if matches!(
-        path.as_slice(),
-        ["intake", "bucket"] | ["intake", "capture"]
-    ) && options.expected_revision.is_none()
-    {
-        return Err(CliError::invalid(format!(
-            "{} requires --expected-revision",
-            path.join(" ")
-        )));
-    }
     if !valid {
         return Err(CliError::invalid(format!(
             "invalid arguments for command path: {}",
@@ -3827,10 +3816,11 @@ fn intake_bucket_result(
         name: name.clone(),
         archived: false,
     };
-    let expected_revision = parsed
-        .options
-        .expected_revision
-        .ok_or_else(|| CliError::invalid("intake bucket requires --expected-revision"))?;
+    let revision = app
+        .intake_items_v3(&project)
+        .map_err(map_application_error)?
+        .revision;
+    let expected_revision = parsed.options.expected_revision.unwrap_or(revision);
     let scope =
         boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
@@ -3900,10 +3890,11 @@ fn intake_capture_result(
         content_digest: sha256_content_digest(content.as_bytes()),
         revisit_at: None,
     };
-    let expected_revision = parsed
-        .options
-        .expected_revision
-        .ok_or_else(|| CliError::invalid("intake capture requires --expected-revision"))?;
+    let revision = app
+        .intake_items_v3(&project)
+        .map_err(map_application_error)?
+        .revision;
+    let expected_revision = parsed.options.expected_revision.unwrap_or(revision);
     let scope =
         boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
@@ -11868,19 +11859,17 @@ mod tests {
     }
 
     #[test]
-    fn intake_routes_require_explicit_expected_revision_for_direct_and_service_parity() {
-        let bucket = parse(&args(&[
+    fn direct_intake_routes_keep_the_current_revision_fallback() {
+        assert!(parse(&args(&[
             "intake",
             "bucket",
             "project-1",
             "bucket-1",
             "Inbox",
         ]))
-        .expect_err("intake bucket without a revision must be rejected");
-        assert_eq!(bucket.code, ErrorCode::InvalidArgument);
-        assert!(bucket.message.contains("--expected-revision"));
+        .is_ok());
 
-        let capture = parse(&args(&[
+        assert!(parse(&args(&[
             "intake",
             "capture",
             "project-1",
@@ -11889,9 +11878,7 @@ mod tests {
             "--bucket",
             "bucket-1",
         ]))
-        .expect_err("intake capture without a revision must be rejected");
-        assert_eq!(capture.code, ErrorCode::InvalidArgument);
-        assert!(capture.message.contains("--expected-revision"));
+        .is_ok());
 
         assert!(parse(&args(&[
             "intake",

@@ -1137,12 +1137,12 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "global todo list",
-        syntax: "bwrk global todo list [--project PROJECT] [--include-archived] [--json]",
+        syntax: "bwrk global todo list [--project PROJECT] [--filter today|overdue|waiting|unscheduled|all-open] [--include-archived] [--limit N] [--offset N] [--json]",
         action: "read",
         output: "global_items",
         direct: true,
         service: true,
-        summary: "list management tasks",
+        summary: "list management tasks with application-owned daily filters and bounded paging",
     },
     CommandSpec {
         path: "global todo show",
@@ -1749,7 +1749,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "intake capture",
-        syntax: "bwrk intake capture PROJECT INTAKE_ID CONTENT --bucket BUCKET_ID --expected-revision N [--kind note|discovery|question|revisit] [--socket PATH --json]",
+        syntax: "bwrk intake capture PROJECT INTAKE_ID CONTENT --bucket BUCKET_ID [--expected-revision N] [--kind note|discovery|question|revisit] [--socket PATH --json]",
         action: "mutate",
         output: "intake",
         direct: true,
@@ -1758,7 +1758,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "intake bucket",
-        syntax: "bwrk intake bucket PROJECT BUCKET_ID NAME --expected-revision N [--socket PATH --json]",
+        syntax: "bwrk intake bucket PROJECT BUCKET_ID NAME [--expected-revision N] [--socket PATH --json]",
         action: "mutate",
         output: "intake",
         direct: true,
