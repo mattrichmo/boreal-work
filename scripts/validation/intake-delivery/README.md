@@ -17,6 +17,13 @@ disposable root when the run exits. The output records the candidate and
 predecessor binary SHA-256 values, the tested host/Python/SQLite versions,
 each CLI command and exit code, and the key delivery/restore readbacks.
 
+On failure, the harness writes a mode-restricted `failure.json` under
+`$TMPDIR/boreal-s08-t05-failures/`. It retains source/runtime and binary
+identities, the failed scenario, command exit codes, output hashes, and short
+redacted excerpts. The disposable project database, service log, credentials,
+and full payload output are not retained. Successful runs remove their
+temporary fixture.
+
 The compatibility result covers ordinary work and Intake reads by this one
 source-pinned predecessor against the receipt-bearing work-model/3 database.
 It is not a claim about every earlier Boreal version. The harness uses Unix
@@ -28,7 +35,8 @@ invariant through a mutable Intake-row edit, the harness updates that row with
 SQLite only inside the disposable fixture. The receipt table itself is tested
 through its immutable `UPDATE` and `DELETE` triggers, and the resulting
 receipt-bearing snapshot is restored through the supported CLI backup/restore
-path.
+path. The receipt-free snapshot is also checked for preservation of the
+preexisting Intake content and lifecycle, with no fabricated receipt.
 
 `--binary PATH` accepts a candidate binary only when `bwrk version --json`
 reports the current checkout's `HEAD`. `--predecessor-binary PATH` accepts a

@@ -9,6 +9,7 @@ import io
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import sqlite3
@@ -29,6 +30,12 @@ SESSION_ID = "session-operator"
 PREDECESSOR_SOURCE = "f735a903fdc1470f29e98201aedbbb8b3c7d34df"
 PREDECESSOR_REASON = "before the intake_delivery additive feature was installed"
 ACTIVE_SERVICES: dict[int, tuple[subprocess.Popen[str], Any, Path]] = {}
+TEMP_BUILD_DIRS: list[Path] = []
+RUN_METADATA: dict[str, Any] = {
+    "predecessor_source": PREDECESSOR_SOURCE,
+    "predecessor_reason": PREDECESSOR_REASON,
+}
+COMMAND_EVENTS: list[dict[str, Any]] = []
 
 
 class ValidationError(RuntimeError):
@@ -59,6 +66,64 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def redact_output(value: str) -> str:
+    """Keep short failure context without persisting fixture content or secrets."""
+    output = re.sub(
+        r'(?i)("(?:credential(?:_ref)?|secret|token|password|content)"\s*:\s*)"(?:\\.|[^"\\])*"',
+        r'\1"<redacted>"',
+        value,
+    )
+    for fixture_content in (
+        "Captured before any delivery.",
+        "Frozen delivery content.",
+        "Conflicting payload content.",
+        "Edited mutable Intake fixture content.",
+    ):
+        output = output.replace(fixture_content, "<fixture-content>")
+    output = output.replace("\x00", "")
+    return output[:512]
+
+
+def output_metadata(value: str) -> dict[str, Any]:
+    encoded = value.encode("utf-8", errors="replace")
+    return {
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "excerpt": redact_output(value),
+    }
+
+
+def persist_failure(error: BaseException) -> Path | None:
+    """Retain bounded diagnostics only; never retain the disposable project DB."""
+    try:
+        root = Path(tempfile.gettempdir()) / "boreal-s08-t05-failures"
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+        destination = Path(tempfile.mkdtemp(prefix="run-", dir=root))
+        os.chmod(destination, 0o700)
+        message = str(error).splitlines()[0] if str(error) else type(error).__name__
+        record = {
+            "schema": "boreal.s08.t05.failure.v1",
+            "metadata": RUN_METADATA,
+            "failure": {
+                "type": type(error).__name__,
+                "summary": redact_output(message),
+            },
+            "commands": COMMAND_EVENTS[-40:],
+            "retained_data": "bounded command metadata only; fixture database and service logs were removed",
+        }
+        output = destination / "failure.json"
+        output.write_text(
+            json.dumps(record, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(output, 0o600)
+        return output
+    except OSError as write_error:
+        print(f"could not persist bounded failure metadata: {write_error}", file=sys.stderr)
+        return None
+
+
 def print_json_result(label: str, value: Any) -> None:
     print(
         f"[{label}:result] "
@@ -85,6 +150,19 @@ def run_cli(
         capture_output=True,
         text=True,
         timeout=90,
+    )
+    command_path = [str(args[0])] if args else []
+    if args and str(args[0]) in {"work", "intake", "service"} and len(args) > 1:
+        if not str(args[1]).startswith("--"):
+            command_path.append(str(args[1]))
+    COMMAND_EVENTS.append(
+        {
+            "label": label,
+            "command": command_path,
+            "exit_code": completed.returncode,
+            "stdout": output_metadata(completed.stdout),
+            "stderr": output_metadata(completed.stderr),
+        }
     )
     if expect_success and completed.returncode != 0:
         raise ValidationError(
@@ -238,6 +316,9 @@ def cleanup_services() -> None:
         if not log.closed:
             log.close()
     ACTIVE_SERVICES.clear()
+    for build_dir in TEMP_BUILD_DIRS:
+        shutil.rmtree(build_dir, ignore_errors=True)
+    TEMP_BUILD_DIRS.clear()
 
 
 def send_application_request(
@@ -337,7 +418,23 @@ def build_predecessor(
         "boreal-cli",
     ]
     print(f"[predecessor-build] {quote_command(command)} source={PREDECESSOR_SOURCE}")
-    result = subprocess.run(command, cwd=source_dir, env=environment, text=True)
+    result = subprocess.run(
+        command,
+        cwd=source_dir,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+    COMMAND_EVENTS.append(
+        {
+            "label": "predecessor-build",
+            "command": ["cargo", "build", "--offline", "-p", "boreal-cli"],
+            "source_revision": PREDECESSOR_SOURCE,
+            "exit_code": result.returncode,
+            "stdout": output_metadata(result.stdout),
+            "stderr": output_metadata(result.stderr),
+        }
+    )
     if result.returncode != 0:
         raise ValidationError(
             "predecessor build failed; additive-feature compatibility remains "
@@ -354,14 +451,41 @@ def current_binary(repo: Path, configured: Path | None) -> Path:
         binary = configured.expanduser().resolve()
         require(binary.is_file(), f"CLI binary does not exist: {binary}")
         return binary
-    binary = repo / "target" / "debug" / ("bwrk.exe" if os.name == "nt" else "bwrk")
+    target_dir = Path(tempfile.mkdtemp(prefix="boreal-s08-t05-candidate-build-"))
+    TEMP_BUILD_DIRS.append(target_dir)
+    binary = target_dir / "debug" / ("bwrk.exe" if os.name == "nt" else "bwrk")
     environment = os.environ.copy()
-    environment.update({"CARGO_BUILD_JOBS": "2", "CARGO_PROFILE_DEV_DEBUG": "0"})
+    environment.update(
+        {
+            "CARGO_BUILD_JOBS": "2",
+            "CARGO_PROFILE_DEV_DEBUG": "0",
+            "CARGO_TARGET_DIR": str(target_dir),
+        }
+    )
     command = ["cargo", "build", "--offline", "-p", "boreal-cli"]
     print(f"[candidate-build] {quote_command(command)}")
-    result = subprocess.run(command, cwd=repo, env=environment, text=True)
+    result = subprocess.run(
+        command,
+        cwd=repo,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+    COMMAND_EVENTS.append(
+        {
+            "label": "candidate-build",
+            "command": ["cargo", "build", "--offline", "-p", "boreal-cli"],
+            "source_revision": RUN_METADATA.get("candidate_source"),
+            "exit_code": result.returncode,
+            "stdout": output_metadata(result.stdout),
+            "stderr": output_metadata(result.stderr),
+        }
+    )
     if result.returncode != 0:
-        raise ValidationError(f"candidate build failed with exit {result.returncode}")
+        raise ValidationError(
+            f"candidate build failed with exit {result.returncode}; "
+            "bounded build diagnostics are in the failure metadata"
+        )
     require(binary.is_file(), f"candidate binary not found at {binary}")
     return binary.resolve()
 
@@ -453,6 +577,13 @@ def main() -> int:
         ["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True
     ).stdout.strip()
     require(len(candidate_sha) == 40, f"unexpected candidate source SHA: {candidate_sha}")
+    RUN_METADATA["candidate_source"] = candidate_sha
+    RUN_METADATA["runtime"] = {
+        "os": platform.system(),
+        "release": platform.release(),
+        "python": platform.python_version(),
+        "sqlite": sqlite3.sqlite_version,
+    }
     clean_source = subprocess.run(
         ["git", "diff-index", "--quiet", "HEAD", "--"], cwd=repo, check=False
     )
@@ -462,8 +593,12 @@ def main() -> int:
     )
     candidate = current_binary(repo, args.binary)
     candidate_version = cli_json(candidate, ["version"], repo, "candidate-build-identity")
+    RUN_METADATA["candidate_binary_sha256"] = file_sha256(candidate)
+    RUN_METADATA["candidate_build_revision"] = object_data(candidate_version).get(
+        "build_revision"
+    )
     require(
-        object_data(candidate_version).get("build_revision") == candidate_sha,
+        RUN_METADATA["candidate_build_revision"] == candidate_sha,
         "candidate binary does not report the current source revision",
     )
     print_json_result("candidate-build-identity", object_data(candidate_version))
@@ -909,20 +1044,29 @@ def main() -> int:
             if predecessor is None:
                 candidate_copy = scratch / "candidate-bwrk"
                 shutil.copy2(candidate, candidate_copy)
-                predecessor, _ = build_predecessor(repo, scratch, repo / "target")
+                predecessor, _ = build_predecessor(
+                    repo, scratch, scratch / "predecessor-target"
+                )
                 candidate = candidate_copy
             require(predecessor.is_file(), f"predecessor binary does not exist: {predecessor}")
             print(f"predecessor source SHA: {PREDECESSOR_SOURCE} ({PREDECESSOR_REASON})")
             print(f"predecessor binary: {predecessor}")
-            print(f"predecessor binary SHA-256: {file_sha256(predecessor)}")
+            RUN_METADATA["predecessor_binary_sha256"] = file_sha256(predecessor)
+            print(
+                "predecessor binary SHA-256: "
+                + RUN_METADATA["predecessor_binary_sha256"]
+            )
             predecessor_version = cli_json(
                 predecessor,
                 ["version"],
                 root,
                 "predecessor-build-identity",
             )
+            RUN_METADATA["predecessor_build_revision"] = object_data(
+                predecessor_version
+            ).get("build_revision")
             require(
-                object_data(predecessor_version).get("build_revision") == PREDECESSOR_SOURCE,
+                RUN_METADATA["predecessor_build_revision"] == PREDECESSOR_SOURCE,
                 "predecessor binary does not report the pinned source revision",
             )
             print_json_result(
@@ -1013,6 +1157,13 @@ def main() -> int:
         require(
             object_data(no_receipt_read).get("delivery_receipt") is None,
             "restore without a receipt fabricated one",
+        )
+        no_receipt_item = object_data(no_receipt_read).get("item")
+        require(
+            isinstance(no_receipt_item, dict)
+            and no_receipt_item.get("content") == "Captured before any delivery."
+            and no_receipt_item.get("lifecycle") == "triaged",
+            "restore without a receipt changed the preexisting Intake row",
         )
         stop_service(process, root, expected_requests=1)
 
@@ -1105,8 +1256,11 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (ValidationError, subprocess.CalledProcessError, OSError) as error:
+    except Exception as error:
+        failure_record = persist_failure(error)
         print(f"intake-delivery validation failed: {error}", file=sys.stderr)
+        if failure_record is not None:
+            print(f"bounded failure metadata: {failure_record}", file=sys.stderr)
         raise SystemExit(1)
     finally:
         cleanup_services()
