@@ -90,6 +90,14 @@ impl SqliteStore {
         if initial_readback.receipt.is_some() {
             return resolve_delivery_readback(initial_readback, input, None);
         }
+        // A semantic retry is a read, so it can resolve without a project
+        // revision. An unseen delivery must carry one before entering the
+        // atomic project mutation boundary.
+        if context.expected_revision.is_none() {
+            return Err(StoreError::Invalid(
+                "expected project revision is required for new Intake delivery".to_owned(),
+            ));
+        }
 
         let bound = context.with_payload(serde_json::json!({
             "delivery_key": input.delivery_key,
@@ -461,11 +469,6 @@ fn validate_delivery_input(
     {
         return Err(StoreError::Invalid(
             "project session is required for Intake delivery".to_owned(),
-        ));
-    }
-    if context.expected_revision.is_none() {
-        return Err(StoreError::Invalid(
-            "expected project revision is required for Intake delivery".to_owned(),
         ));
     }
     if input.intake.content_revision != 1 || input.intake.lifecycle != "captured" {

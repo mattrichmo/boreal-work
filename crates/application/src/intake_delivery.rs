@@ -72,7 +72,9 @@ pub fn intake_delivery_payload_digest(payload: &IntakeDeliveryPayload) -> String
 impl WorkApplication<'_> {
     /// Accept a new Project Intake delivery or resolve the immutable receipt
     /// from an earlier attempt. Duplicate resolution is authenticated and
-    /// read-only even when the current Intake row has since changed.
+    /// read-only even when the current Intake row has since changed. It does
+    /// not need a project revision because it performs no write; an unseen
+    /// delivery is revision-checked by the store before it can be created.
     pub fn receive_intake_delivery(
         &self,
         request: &IntakeDeliveryRequest,
@@ -197,11 +199,6 @@ fn validate_receive_request(request: &IntakeDeliveryRequest) -> Result<(), Appli
         .scope
         .validate()
         .map_err(ApplicationError::Planning)?;
-    if request.scope.expected_revision.is_none() {
-        return Err(ApplicationError::Invalid(
-            "Intake delivery requires an expected project revision".to_owned(),
-        ));
-    }
     validate_read_scope(&request.scope)?;
     for (field, value) in [
         ("operation_id", request.operation_id.as_str()),
@@ -254,5 +251,246 @@ fn intake_kind(value: IntakeKind) -> &'static str {
         IntakeKind::Discovery => "discovery",
         IntakeKind::Question => "question",
         IntakeKind::Revisit => "revisit",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boreal_domain::ProjectId;
+    use boreal_store::{SqliteStore, StoreError, V3MutationContext};
+
+    const SCHEMA_V2: &str = include_str!("../../../project/spec/schema-v2.sql");
+
+    fn setup() -> (SqliteStore, ProjectId) {
+        let store = SqliteStore::open_in_memory(SCHEMA_V2).expect("open project store");
+        let app = WorkApplication::new(&store);
+        let project = ProjectId::new("project-intake-delivery");
+        app.init_project(
+            &project,
+            "agent-1",
+            "agent",
+            "credential",
+            "Intake delivery tests",
+            "unix-ms:1",
+            "op-init",
+        )
+        .expect("initialize project");
+        app.ensure_work_model_v3().expect("install work-model/3");
+        app.register_session_as(
+            &project,
+            "agent-1",
+            "test-harness",
+            "session-1",
+            "unix-ms:2",
+            "op-session",
+        )
+        .expect("register project session");
+        let bucket = crate::IntakeBucket {
+            id: IntakeBucketId::new("inbox"),
+            project_id: project.clone(),
+            name: "Inbox".to_owned(),
+            archived: false,
+        };
+        let scope = PlanningScope::new(project.clone(), "agent-1")
+            .at_revision(store.project_revision(project.as_str()).unwrap().0);
+        app.create_intake_bucket_v3(&scope, "op-bucket", &bucket, "unix-ms:2")
+            .expect("create Intake bucket");
+        (store, project)
+    }
+
+    fn request(
+        project: &ProjectId,
+        expected_revision: Option<u64>,
+        operation_id: &str,
+        origin_digest: &str,
+        content: &str,
+    ) -> IntakeDeliveryRequest {
+        let payload = IntakeDeliveryPayload {
+            bucket_id: IntakeBucketId::new("inbox"),
+            kind: IntakeKind::Discovery,
+            content: content.to_owned(),
+            revisit_at: None,
+        };
+        let mut scope = PlanningScope::new(project.clone(), "agent-1").with_session("session-1");
+        if let Some(revision) = expected_revision {
+            scope = scope.at_revision(revision);
+        }
+        IntakeDeliveryRequest {
+            scope,
+            operation_id: operation_id.to_owned(),
+            delivery_key: "delivery-1".to_owned(),
+            origin: IntakeDeliveryOrigin {
+                kind: "global_inbox".to_owned(),
+                item_id: "capture-1".to_owned(),
+                digest: origin_digest.to_owned(),
+            },
+            intake_id: IntakeItemId::new("intake-1"),
+            payload_digest: intake_delivery_payload_digest(&payload),
+            payload,
+            captured_at: "unix-ms:3".to_owned(),
+        }
+    }
+
+    #[test]
+    fn semantic_retry_without_revision_returns_the_edited_archived_promoted_intake_read_only() {
+        let (store, project) = setup();
+        let app = WorkApplication::new(&store);
+        let initial_revision = store.project_revision(project.as_str()).unwrap().0;
+        let original = request(
+            &project,
+            Some(initial_revision),
+            "op-delivery",
+            "sha256:origin-1",
+            "original delivered content",
+        );
+        let created = app
+            .receive_intake_delivery(&original)
+            .expect("new delivery commits");
+        assert!(created.operation.is_some());
+
+        let promotion_scope = PlanningScope::new(project.clone(), "agent-1")
+            .with_session("session-1")
+            .at_revision(store.project_revision(project.as_str()).unwrap().0);
+        app.promote_intake_v3(
+            &promotion_scope,
+            "op-promote",
+            &crate::IntakePromotion {
+                id: crate::PromotionId::new("promotion-1"),
+                project_id: project.clone(),
+                intake_id: IntakeItemId::new("intake-1"),
+                intake_revision: created.intake.content_revision,
+                intake_digest: created.intake.content_digest.clone(),
+                target_kind: crate::PromotionTargetKind::DraftWork,
+                target_id: "draft-task-1".to_owned(),
+            },
+            "unix-ms:4",
+        )
+        .expect("promote delivered Intake");
+
+        let edited_content = "edited after delivery";
+        let edited_digest = sha256_content_digest(edited_content.as_bytes());
+        store
+            .execute_batch(&format!(
+                "UPDATE intake_item_v3
+                 SET content = '{edited_content}', content_revision = 2,
+                     content_digest = '{edited_digest}', updated_at = 'unix-ms:5'
+                 WHERE project_id = '{}' AND intake_id = 'intake-1';",
+                project.as_str()
+            ))
+            .expect("edit current Intake content");
+
+        let archive_revision = store.project_revision(project.as_str()).unwrap().0;
+        crate::KnowledgeParityApplication::new(&store)
+            .update_intake_disposition(
+                &V3MutationContext {
+                    project_id: project.as_str().to_owned(),
+                    actor_id: "agent-1".to_owned(),
+                    session_id: Some("session-1".to_owned()),
+                    operation_id: "op-archive".to_owned(),
+                    request_digest: "sha256:archive-request".to_owned(),
+                    expected_revision: Some(archive_revision),
+                    now: "unix-ms:6".to_owned(),
+                },
+                "intake-1",
+                2,
+                crate::IntakeLifecycle::Archived,
+                None,
+            )
+            .expect("archive edited Intake");
+
+        let before_retry = app
+            .intake_delivery_readback_for_intake(
+                &PlanningScope::new(project.clone(), "agent-1").with_session("session-1"),
+                "intake-1",
+            )
+            .expect("read current Intake and receipt");
+        let retry_revision = store.project_revision(project.as_str()).unwrap().0;
+        let mut retry = original.clone();
+        retry.operation_id = "op-semantic-retry".to_owned();
+        retry.scope.expected_revision = None;
+
+        let resolved = app
+            .receive_intake_delivery(&retry)
+            .expect("semantic retry resolves without a project revision");
+        assert_eq!(resolved.operation, None);
+        assert_eq!(resolved.project_revision, retry_revision);
+        assert_eq!(resolved.receipt, created.receipt);
+        assert_eq!(resolved.intake, before_retry.intake.unwrap());
+        assert_eq!(resolved.intake.content, edited_content);
+        assert_eq!(resolved.intake.content_revision, 2);
+        assert_eq!(resolved.intake.lifecycle, "archived");
+        assert_eq!(
+            store.project_revision(project.as_str()).unwrap().0,
+            retry_revision
+        );
+        assert!(store.operation("op-semantic-retry").unwrap().is_none());
+        assert!(store.audit_event("op-semantic-retry").unwrap().is_none());
+
+        let mut changed_payload = retry.clone();
+        changed_payload.operation_id = "op-changed-payload".to_owned();
+        changed_payload.payload.content = "different frozen content".to_owned();
+        changed_payload.payload_digest = intake_delivery_payload_digest(&changed_payload.payload);
+        assert!(matches!(
+            app.receive_intake_delivery(&changed_payload),
+            Err(ApplicationError::Store(StoreError::Conflict(_)))
+        ));
+
+        let mut changed_origin = retry;
+        changed_origin.operation_id = "op-changed-origin".to_owned();
+        changed_origin.origin.digest = "sha256:other-origin".to_owned();
+        assert!(matches!(
+            app.receive_intake_delivery(&changed_origin),
+            Err(ApplicationError::Store(StoreError::Conflict(_)))
+        ));
+        assert_eq!(
+            store.project_revision(project.as_str()).unwrap().0,
+            retry_revision
+        );
+    }
+
+    #[test]
+    fn unseen_delivery_requires_an_expected_revision_and_rejects_stale_revision_atomically() {
+        let (store, project) = setup();
+        let app = WorkApplication::new(&store);
+        let current_revision = store.project_revision(project.as_str()).unwrap().0;
+
+        let without_revision = request(
+            &project,
+            None,
+            "op-no-revision",
+            "sha256:origin-1",
+            "new delivery",
+        );
+        assert!(matches!(
+            app.receive_intake_delivery(&without_revision),
+            Err(ApplicationError::Store(StoreError::Invalid(_)))
+        ));
+
+        let stale = request(
+            &project,
+            Some(current_revision.saturating_sub(1)),
+            "op-stale-revision",
+            "sha256:origin-1",
+            "new delivery",
+        );
+        assert!(matches!(
+            app.receive_intake_delivery(&stale),
+            Err(ApplicationError::Store(StoreError::StaleRevision { .. }))
+        ));
+
+        let readback_scope =
+            PlanningScope::new(project.clone(), "agent-1").with_session("session-1");
+        let readback = app
+            .intake_delivery_readback(&readback_scope, "delivery-1")
+            .expect("read back missing delivery");
+        assert!(readback.receipt.is_none());
+        assert!(readback.intake.is_none());
+        assert_eq!(
+            store.project_revision(project.as_str()).unwrap().0,
+            current_revision
+        );
+        assert!(store.operation("op-no-revision").unwrap().is_none());
+        assert!(store.operation("op-stale-revision").unwrap().is_none());
     }
 }
