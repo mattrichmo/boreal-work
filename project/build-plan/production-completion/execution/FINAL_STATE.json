@@ -501,6 +501,12 @@
       "event": "S07_T03_bounded_test_paths_and_F4_TUI_contract_dispatched",
       "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
       "summary": "Granted the S07-T03 worker only the focused model-view and client-recovery test files in addition to its three UI modules. Dispatched the F4 schedule/wait UI against existing typed service routes; no shared Rust, CLI, protocol, plan-state, or runtime path is included. These are source assignments only; dependent sprint gates remain unaccepted."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "F1_finish_recipe_cli_grammar_reconciled",
+      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
+      "summary": "Coordinator corrected the packaged finish workflow bind-result example to use the supported --expected-revision and --operation-id options, then recomputed the shared workflow asset identity. The full workflow-package validator passes on the current candidate state; onboarding changes remain in progress and will require one final identity recomputation."
     }
   ]
 }
