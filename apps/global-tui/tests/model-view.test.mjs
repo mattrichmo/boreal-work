@@ -41,7 +41,7 @@ function serverSnapshot(source){
 }
 function fixture(){
  const projects=[{id:"life",name:"Life",description:"Personal",archived:false,created_at:now,updated_at:now},{id:"biz",name:"Business",description:"Launch",archived:false,created_at:now,updated_at:now}];
- const statuses=[];for(const id of ["life","biz"])for(let n=0;n<9;n++)statuses.push({project_id:id,status_id:`s${n}`,label:`Status ${n}`,category:n===8?"completed":"open",position:n});
+ const statuses=[{project_id:null,status_id:"personal-inbox",label:"Inbox",category:"inbox",position:-1},{project_id:null,status_id:"todo",label:"To do",category:"open",position:0}];for(const id of ["life","biz"])for(let n=0;n<9;n++)statuses.push({project_id:id,status_id:`s${n}`,label:`Status ${n}`,category:n===8?"completed":"open",position:n});
  const items=[];for(let n=0;n<55;n++)items.push({id:`item${n}`,project_id:n%2?"life":"biz",parent_id:n===40?"item2":null,kind:n===2?"milestone":"task",title:`Task ${n}`,description:n===25?"Long detail ".repeat(24):"",labels:[],status_id:`s${n%9}`,priority:n%4,due_at:n===3?"2001-01-01T00:00:00Z":null,follow_up_at:null,archived:false,position:n,created_at:now,updated_at:now});
  const snapshot={schema_version:2,revision:6,projects,items,notes:[],statuses,relationships:[{source_id:"item25",target_id:"item2",kind:"depends_on"}],associations:[{project_id:"biz",kind:"workspace",identity:"code-project",path:"/work/code",updated_at:now}],linked_projects:[{management_project_id:"biz",project_id:"code-project",path:"/work/code",availability:"available",revision:3,as_of:now,counts:{open:4}}]};
  return {snapshot,client:{snapshot:async()=>serverSnapshot(snapshot),execute:async()=>({})}};
@@ -99,10 +99,10 @@ test("all record routes preserve a deep selection across 50+ rows",async()=>{
   ["links","workspace-49","workspace-49"],["planning","wide49","Wide task 49"],["archive","wide55","Wide task 55"],
   ["history","op49","Activity 49"],["overview","wide49","Wide task 49"]
  ];
- snapshot.items.push(...Array.from({length:60},(_,n)=>({id:`personal${n}`,project_id:null,parent_id:null,kind:"task",title:`Personal capture ${n}`,description:"",labels:[],status_id:"todo",priority:null,due_at:null,archived:false,position:200+n,created_at:now,updated_at:now})));await c.refresh();
+ snapshot.items.push(...Array.from({length:60},(_,n)=>({id:`personal${n}`,project_id:null,parent_id:null,kind:"task",title:`Personal capture ${n}`,description:"",labels:[],status_id:"personal-inbox",priority:null,due_at:null,archived:false,position:200+n,created_at:now,updated_at:now})));await c.refresh();
  for(const [route,id,visible] of cases){c.setScope();c.todoFilter="all_open";c.setRoute(route);if(route==="archive")c.selectId(id);else if(route==="todos")c.selectId(id);else c.selectId(id);assert.equal(c.selectedRow()?.id??c.selectedRow()?.identity,id,`${route} selected ID`);const screen=render(c,120,24);assert.match(screen,new RegExp(visible.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")),`${route} selected record visible`);}
  // Personal quick captures are immediately discoverable in All projects Inbox.
- c.setRoute("inbox");c.selectId("personal59");assert.equal(c.selectedRow()?.title,"Personal capture 59");assert.match(render(c,80,16),/Personal capture 59/);
+ c.setRoute("inbox");c.selectId("personal59");assert.equal(c.selectedRow()?.title,"Personal capture 59");assert.match(render(c,120,16),/Personal capture 59/);
 });
 test("todo views filter Today, overdue, waiting, and all open independently",async()=>{
  const {snapshot}=fixture();const today=SYSTEM_CIVIL_DATE;const project="life";
@@ -118,7 +118,10 @@ test("todo views filter Today, overdue, waiting, and all open independently",asy
  c.todoFilter="overdue";assert.deepEqual(c.rows().map(x=>x.id),["due-old"]);
  c.todoFilter="waiting";assert.deepEqual(c.rows().map(x=>x.id),["waiting"]);
  c.todoFilter="all_open";for(const id of ["due-today","due-old","waiting","unscheduled"])assert.ok(c.rows().some(x=>x.id===id));
- snapshot.items.push({...snapshot.items[0],id:"personal0",project_id:null,title:"Personal inbox capture",status_id:"todo",due_at:null});await c.refresh();c.setScope();c.setRoute("inbox");assert.ok(c.rows().some(x=>x.id==="personal0"));
+ snapshot.items.push(
+  {...snapshot.items[0],id:"personal-inbox-item",project_id:null,title:"Personal inbox capture",status_id:"personal-inbox",due_at:null},
+  {...snapshot.items[0],id:"personal-triaged-item",project_id:null,title:"Triaged personal task",status_id:"todo",due_at:null}
+ );await c.refresh();c.setScope();c.setRoute("inbox");assert.ok(c.rows().some(x=>x.id==="personal-inbox-item"));assert.ok(!c.rows().some(x=>x.id==="personal-triaged-item"));
 });
 test("Today/Open renders explicit service-classified groups and keeps the selected item visible when narrow",async()=>{
  const {snapshot}=fixture();const project="life";

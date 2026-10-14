@@ -301,7 +301,7 @@ export class GlobalController {
     const snap=this.snapshot; if(!snap)return [];
     const archivedOwners=new Set(snap.projects.filter(p=>p.archived).map(p=>p.id));
     const q=this.searchQuery.trim().toLocaleLowerCase();
-    return snap.items.filter(i=>!i.archived&&!(i.project_id&&archivedOwners.has(i.project_id))&&(route==="inbox"?(this.projectId?i.project_id===this.projectId:(i.project_id===null||isInbox(this.statusFor(i)))):(!this.projectId||i.project_id===this.projectId))&&!isDone(this.statusFor(i))&&(route==="inbox"?(i.project_id===null||isInbox(this.statusFor(i))):matchesTodoFilter(i,this.todoFilter))&&(!q||this.searchMatchedIds.has(i.id)||[i.title,i.description??"",this.projectName(i.project_id),this.statusFor(i)?.label??""].some(v=>v.toLocaleLowerCase().includes(q))))
+    return snap.items.filter(i=>!i.archived&&!(i.project_id&&archivedOwners.has(i.project_id))&&(route==="inbox"?(this.projectId?i.project_id===this.projectId:true):(!this.projectId||i.project_id===this.projectId))&&!isDone(this.statusFor(i))&&(route==="inbox"?isInbox(this.statusFor(i)):matchesTodoFilter(i,this.todoFilter))&&(!q||this.searchMatchedIds.has(i.id)||[i.title,i.description??"",this.projectName(i.project_id),this.statusFor(i)?.label??""].some(v=>v.toLocaleLowerCase().includes(q))))
       .sort((a,b)=>route==="todos"&&isWaiting(a)&&isWaiting(b)?(Date.parse(a.follow_up_at??"")||Number.MAX_SAFE_INTEGER)-(Date.parse(b.follow_up_at??"")||Number.MAX_SAFE_INTEGER):urgency(a)-urgency(b)||a.position-b.position);
   }
   statusFor(item:Item):Status|undefined{return this.snapshot?.statuses.find(s=>s.project_id===item.project_id&&s.status_id===item.status_id);}

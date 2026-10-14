@@ -12,7 +12,7 @@ export interface NoteLink { note_id:string; item_id:string }
 export interface ProjectAttentionItem { item_id:string; title:string; due_at:string|null; priority:number|null; status_id:string; status_label:string; kind:string }
 export interface ProjectAttentionMilestone { item_id:string; title:string; due_at:string|null; completed_children:number; total_children:number }
 export interface ProjectAttention { open:number; waiting:number; overdue:number; unscheduled:number; due_today:number; next_action:ProjectAttentionItem|null; next_milestone:ProjectAttentionMilestone|null }
-export interface Status { project_id: string; status_id: string; label: string; category: string; position: number }
+export interface Status { project_id: string | null; status_id: string; label: string; category: string; position: number }
 export interface StatusHistoryEntry { item_id: string; workflow_owner_id?:string|null; from_workflow_owner_id?:string|null; from_status_id: string | null; from_status_label?:string|null; from_status_category?:string|null; to_status_id: string; to_status_label?:string|null; to_status_category?:string|null; revision: number; changed_at: string }
 export interface Relationship { source_id: string; target_id: string; kind: string }
 export interface Association { project_id: string; kind: string; identity: string; path: string | null; updated_at: string }
