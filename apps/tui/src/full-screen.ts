@@ -1,4 +1,4 @@
-import type { ActionResult, AttemptReceiptPage, AttemptReceiptRecord, CreateWorkDraftInput, CycleChange, CycleCommandInput, DependencyChangeInput, Envelope, ExecutionMode, FinalResultBinding, LocalDateTimeInput, MemoryCommandInput, MountedView, RecoveryCommandInput, RevisionedStatusResponse, TuiAction, WorkspaceViewKind, WorkEditInput, WorkProjection } from "./client.js";
+import type { ActionResult, AttemptReceiptPage, AttemptReceiptRecord, BusinessScheduleDto, CreateWorkDraftInput, CycleChange, CycleCommandInput, DependencyChangeInput, Envelope, ExecutionMode, ExternalWaitAccountableDto, ExternalWaitCategoryDto, ExternalWaitOutcomeDto, ExternalWaitRoleDto, FinalResultBinding, LocalDateTimeInput, MemoryCommandInput, MountedView, RecoveryCommandInput, RevisionedStatusResponse, TuiAction, WorkspaceViewKind, WorkEditInput, WorkProjection } from "./client.js";
 import type { LineShellController } from "./line-shell.js";
 import { safeText } from "./ui/cells.js";
 import { FrameWriter, type Theme } from "./ui/screen.js";
@@ -8,6 +8,7 @@ import { paneViewport, cycleDensity, type Density } from "./ui/layout.js";
 import { editInput } from "./ui/input.js";
 import { StreamingKeyDecoder } from "./ui/keys.js";
 import { formatWorkspaceView } from "./ui/workspace-view.js";
+import { businessDateFromInput, businessDateInput, businessDateLabel } from "./scheduling.js";
 export { StreamingKeyDecoder, decodeKeys } from "./ui/keys.js";
 export type TerminalSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
 export interface FullScreenTerminal {
@@ -54,6 +55,12 @@ type ExtendedController = LineShellController & {
     endSession?: () => Promise<ActionResult<unknown>>;
     addSource?: (input: { input: string; origin: string; media_type?: string }) => Promise<ActionResult<unknown>>;
     bindFinalResult?: (work_id: string, input: { source_version_id: string; content_digest: string }) => Promise<ActionResult<FinalResultBinding>>;
+    readWorkSchedule?: (work_id: string) => Promise<Envelope<import("./client.js").WorkScheduleReadbackDto>>;
+    updateWorkSchedule?: (work_id: string, schedule_revision: number, schedule: BusinessScheduleDto) => Promise<ActionResult<import("./client.js").WorkScheduleMutationReadbackDto>>;
+    readProjectCivilTime?: () => Promise<Envelope<import("./client.js").ProjectCivilTimeReadbackDto>>;
+    readExternalWaits?: (wait_id?: string) => Promise<Envelope<import("./client.js").ExternalWaitReadbackDto>>;
+    createExternalWait?: (input: Omit<import("./client.js").ExternalWaitCreateDto, "schema_version" | "expected_project_revision" | "expected_wait_revision">) => Promise<ActionResult<import("./client.js").ExternalWaitMutationReadbackDto>>;
+    resolveExternalWait?: (input: Omit<import("./client.js").ExternalWaitResolveDto, "schema_version" | "expected_project_revision">) => Promise<ActionResult<import("./client.js").ExternalWaitMutationReadbackDto>>;
     readReceiptsForAttempt?: (work_id: string, limit?: number, offset?: number) => Promise<Envelope<AttemptReceiptPage>>;
     selectReceiptForAttempt?: (work_id: string, receipt_id: string) => void;
 };
@@ -71,6 +78,7 @@ const WORKSPACE_UI_ACTIONS = new Set<WorkspaceUiAction>([
     "edit_work", "dependency_add", "dependency_remove", "cycle_create", "cycle_board", "cycle_activate", "cycle_close", "cycle_cancel",
     "cycle_assign", "cycle_commit", "cycle_remove", "cycle_carry_over", "memory_search", "memory_show", "memory_draft", "memory_review",
     "memory_publish", "memory_reconcile", "recovery_resolve", "session_end", "source_capture", "source_search", "review_show", "bind_result",
+    "schedule_edit", "wait_create", "wait_resolve",
 ]);
 function isWorkspaceUiAction(action: UiAction): action is WorkspaceUiAction {
     return WORKSPACE_UI_ACTIONS.has(action as WorkspaceUiAction);
@@ -247,7 +255,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         syncSelection();
         const current = controller.view();
         const selected = visibleItems(current, state).find(item => item.work_id === state.selectedId);
-        const needsWork = ["edit_work", "dependency_add", "dependency_remove", "bind_result"].includes(action);
+        const needsWork = ["edit_work", "dependency_add", "dependency_remove", "bind_result", "schedule_edit", "wait_create"].includes(action);
         if (needsWork && !selected) {
             message(`${ACTION_NAMES[action]} requires selected work.`, true);
             return;
@@ -279,6 +287,49 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             });
             return;
         }
+        if (action === "schedule_edit") {
+            if (!selected || !controller.readWorkSchedule) {
+                message("Work schedule editing is unavailable in this connection.", true);
+                return;
+            }
+            const selectedWork = selected;
+            enqueue("Reading work schedule", async () => {
+                const [scheduleResult, civilResult] = await Promise.all([
+                    controller.readWorkSchedule!(selectedWork.work_id),
+                    controller.readProjectCivilTime?.(),
+                ]);
+                const currentRevision = controller.view().monitoring?.revision;
+                if (!scheduleResult.data || scheduleResult.data.work_id !== selectedWork.work_id
+                    || scheduleResult.data.project_revision !== currentRevision || scheduleResult.revision !== currentRevision
+                    || (civilResult && (civilResult.data?.project_revision !== currentRevision || civilResult.revision !== currentRevision))) {
+                    throw new Error("The schedule changed while it was being read. Refresh and open the schedule form again.");
+                }
+                const legacyDue = scheduleResult.data.legacy_due_at ? Date.parse(scheduleResult.data.legacy_due_at) : NaN;
+                const snapshot: BusinessScheduleDto = scheduleResult.data.schedule ?? {
+                    not_before: null,
+                    due: Number.isFinite(legacyDue) ? { kind: "instant", at_ms: legacyDue } : null,
+                    planned_start: null,
+                    planned_end: null,
+                };
+                const form = actionForm(action, selectedWork.work_id, selectedWork);
+                form.scheduleRevision = scheduleResult.data.schedule_revision;
+                form.scheduleSnapshot = snapshot;
+                form.civilTimezone = civilResult?.data?.setting?.timezone;
+                for (const name of ["not_before", "due", "planned_start", "planned_end"] as const) {
+                    const field = form.fields.find(candidate => candidate.name === name);
+                    if (field) {
+                        field.value = businessDateInput(snapshot[name]);
+                        field.cursor = field.value.length;
+                        field.hint = `YYYY-MM-DD${form.civilTimezone ? ` in ${form.civilTimezone}` : " in the project civil timezone"}; blank clears this optional date.`;
+                    }
+                }
+                state.modal = form;
+                const legacyNote = !scheduleResult.data.schedule && scheduleResult.data.legacy_due_at
+                    ? " Existing legacy due time is preserved unless you change or clear it." : "";
+                message(`Loaded schedule revision ${scheduleResult.data.schedule_revision}.${legacyNote}`);
+            });
+            return;
+        }
         state.modal = actionForm(action, needsWork ? selected?.work_id : undefined, selected);
     };
     const showWorkspaceData = (title: string, kind: WorkspaceViewKind, result: Envelope<unknown>): void => {
@@ -288,6 +339,8 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             result.revision,
             result.as_of,
             result.data,
+            controller.view().monitoring?.items ?? [],
+            controller.view().monitoring?.revision,
         ), offset: 0 };
     };
     const openSourcePicker = (form: FormModal, fieldName: "source_version_id", offset = 0): void => {
@@ -544,6 +597,168 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             confirm("finish", values.summary, values.summary, ["Requests proof-gated finish and close."], form.workId);
         else if (form.action === "release")
             confirm("release", values.reason, values.reason, ["Releases the current attempt."], form.workId);
+        else if (form.action === "schedule_edit") {
+            if (!form.workId || form.scheduleRevision === undefined || !form.scheduleSnapshot) {
+                form.error = "The typed schedule readback is missing. Cancel, refresh, and reopen this form.";
+                return;
+            }
+            try {
+                const schedule: BusinessScheduleDto = {
+                    not_before: businessDateFromInput(values.not_before, form.scheduleSnapshot.not_before),
+                    due: businessDateFromInput(values.due, form.scheduleSnapshot.due),
+                    planned_start: businessDateFromInput(values.planned_start, form.scheduleSnapshot.planned_start),
+                    planned_end: businessDateFromInput(values.planned_end, form.scheduleSnapshot.planned_end),
+                };
+                const dates = [
+                    ["Not before", schedule.not_before], ["Due", schedule.due],
+                    ["Planned start", schedule.planned_start], ["Planned end", schedule.planned_end],
+                ] as const;
+                const payload = { schedule_revision: form.scheduleRevision, schedule };
+                confirm("schedule_edit", payload, `Update business dates for ${form.workId}.`, [
+                    `Schedule revision: ${form.scheduleRevision}`,
+                    `Project revision: ${controller.view().monitoring?.revision ?? "unavailable"}`,
+                    ...dates.map(([label, date]) => `${label}: ${businessDateLabel(date, "none")}`),
+                    "Each blank date explicitly clears that optional field. The Rust service resolves dates using the project's civil-time rules.",
+                ], form.workId);
+            } catch (error) {
+                const messageText = error instanceof Error ? error.message : String(error);
+                const field = /not_before|due|planned_start|planned_end/u.exec(messageText)?.[0];
+                if (field) form.index = form.fields.findIndex(candidate => candidate.name === field);
+                form.error = messageText;
+            }
+        }
+        else if (form.action === "wait_create") {
+            if (!form.workId) { form.error = "Select the work item that owns this external wait."; return; }
+            if (!values.wait_id.trim()) {
+                form.index = form.fields.findIndex(field => field.name === "wait_id");
+                form.error = "Enter a stable external wait identifier.";
+                return;
+            }
+            if (!values.reason.trim()) {
+                form.index = form.fields.findIndex(field => field.name === "reason");
+                form.error = "Describe the external decision, information, access, or service needed.";
+                return;
+            }
+            const affected = [...new Set(values.affected_work_ids.split(",").map(value => value.trim()).filter(Boolean))];
+            if (!affected.length) {
+                form.index = form.fields.findIndex(field => field.name === "affected_work_ids");
+                form.error = "Name at least one affected work item so the service can block only that dependent work.";
+                return;
+            }
+            const buildAccountable = (kind: string, reference: string, displayName: string, role: string, prefix: string): ExternalWaitAccountableDto => {
+                if (kind === "role") return { kind: "role", role: role as ExternalWaitRoleDto };
+                if (kind !== "person" && kind !== "service") throw new Error("Choose person, role, or service as the accountable party.");
+                if (!reference.trim() || !displayName.trim()) throw new Error(`Enter both the ${prefix} reference and display name.`);
+                return { kind, reference: reference.trim(), display_name: displayName.trim() };
+            };
+            let followUp;
+            try {
+                followUp = businessDateFromInput(values.follow_up);
+            } catch (error) {
+                form.index = form.fields.findIndex(field => field.name === "follow_up");
+                form.error = error instanceof Error ? error.message : String(error);
+                return;
+            }
+            let accountable: ExternalWaitAccountableDto;
+            try {
+                accountable = buildAccountable(values.accountable_kind, values.accountable_reference, values.accountable_name, values.accountable_role, "accountable party");
+            } catch (error) {
+                form.index = form.fields.findIndex(field => field.name === (values.accountable_kind === "role" ? "accountable_role" : "accountable_reference"));
+                form.error = error instanceof Error ? error.message : String(error);
+                return;
+            }
+            const payload = {
+                wait_id: values.wait_id.trim(),
+                source_work_id: form.workId,
+                affected_work_ids: affected,
+                category: values.category as ExternalWaitCategoryDto,
+                reason: values.reason.trim(),
+                accountable,
+                expected_decision: values.expected_decision.trim() || null,
+                expected_output: values.expected_output.trim() || null,
+                follow_up: followUp,
+            };
+            confirm("wait_create", payload, `Record external wait ${payload.wait_id}.`, [
+                `Source work: ${payload.source_work_id}`,
+                `Affected work: ${affected.join(", ")}`,
+                `Category: ${payload.category} · accountable: ${accountable.kind === "role" ? accountable.role : `${accountable.display_name} (${accountable.reference})`}`,
+                `Follow-up: ${businessDateLabel(followUp, "none")}`,
+                "The wait remains open until an authorized, attributable resolution is recorded. Only the named affected work may be blocked.",
+            ], form.workId);
+        }
+        else if (form.action === "wait_resolve") {
+            if (!controller.readExternalWaits) { form.error = "External wait readback is unavailable in this service connection."; return; }
+            const waitId = values.wait_id.trim();
+            if (!waitId) {
+                form.index = form.fields.findIndex(field => field.name === "wait_id");
+                form.error = "Enter the exact wait ID shown in External waits.";
+                return;
+            }
+            if (!values.detail.trim()) {
+                form.index = form.fields.findIndex(field => field.name === "detail");
+                form.error = "Describe the decision or information that was actually supplied.";
+                return;
+            }
+            if (!(values.next_state === "resolved" || values.next_state === "cancelled")) {
+                form.index = form.fields.findIndex(field => field.name === "next_state");
+                form.error = "Choose resolved or cancelled.";
+                return;
+            }
+            const outcomes: ExternalWaitOutcomeDto[] = ["approved", "rejected", "decision_provided", "output_provided", "declined", "unavailable", "cancelled"];
+            if (!outcomes.includes(values.outcome as ExternalWaitOutcomeDto)) {
+                form.index = form.fields.findIndex(field => field.name === "outcome");
+                form.error = "Choose a supported outcome.";
+                return;
+            }
+            const buildAccountable = (kind: string, reference: string, displayName: string, role: string): ExternalWaitAccountableDto => {
+                if (kind === "role" && ["agent", "operator", "reviewer", "publisher"].includes(role))
+                    return { kind: "role", role: role as ExternalWaitRoleDto };
+                if (kind !== "person" && kind !== "service") throw new Error("Choose person, role, or service as the supplier type.");
+                if (!reference.trim() || !displayName.trim()) throw new Error("Enter both the supplier reference and display name.");
+                return { kind, reference: reference.trim(), display_name: displayName.trim() };
+            };
+            let suppliedBy: ExternalWaitAccountableDto;
+            try { suppliedBy = buildAccountable(values.supplied_kind, values.supplied_reference, values.supplied_name, values.supplied_role); }
+            catch (error) {
+                form.index = form.fields.findIndex(field => field.name === (values.supplied_kind === "role" ? "supplied_role" : "supplied_reference"));
+                form.error = error instanceof Error ? error.message : String(error);
+                return;
+            }
+            state.modal = null;
+            enqueue("Checking external wait revision", async () => {
+                let response: Envelope<import("./client.js").ExternalWaitReadbackDto>;
+                try { response = await controller.readExternalWaits!(waitId); }
+                catch (error) { state.modal = form; form.error = error instanceof Error ? error.message : String(error); throw error; }
+                const wait = response.data?.waits[0];
+                const currentRevision = controller.view().monitoring?.revision;
+                if (!wait || response.data?.project_revision !== currentRevision || response.revision !== currentRevision) {
+                    state.modal = form;
+                    form.error = "The wait readback is not from the current project revision. Refresh and inspect the wait again.";
+                    throw new Error(form.error);
+                }
+                if (wait.state !== "open") {
+                    state.modal = form;
+                    form.error = `External wait ${waitId} is already ${wait.state} at revision ${wait.wait_revision}.`;
+                    throw new Error(form.error);
+                }
+                const payload = {
+                    wait_id: wait.wait_id,
+                    expected_wait_revision: wait.wait_revision,
+                    next_state: values.next_state,
+                    outcome: values.outcome as ExternalWaitOutcomeDto,
+                    detail: values.detail.trim(),
+                    output_ref: values.output_ref.trim() || null,
+                    supplied_by: suppliedBy,
+                };
+                confirm("wait_resolve", payload, `${payload.next_state === "resolved" ? "Resolve" : "Cancel"} external wait ${wait.wait_id}.`, [
+                    `Wait revision: ${wait.wait_revision} · project revision: ${currentRevision}`,
+                    `Source work: ${wait.source_work_id} · affected work: ${wait.affected_work_ids.join(", ") || "none named"}`,
+                    `Outcome: ${payload.outcome} · supplied by: ${suppliedBy.kind === "role" ? suppliedBy.role : `${suppliedBy.display_name} (${suppliedBy.reference})`}`,
+                    `Detail: ${payload.detail}`,
+                    "Resolution records the external decision. It does not complete the source work or its dependents; the service recomputes their status.",
+                ]);
+            });
+        }
         else if (["cycle_board", "memory_search", "memory_show", "source_search", "review_show"].includes(form.action))
             readWorkspaceForm(form, values);
         else if (form.action === "edit_work") {
@@ -711,15 +926,35 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 if (!controller.bindFinalResult) throw new Error("Final result binding is unavailable in this connection.");
                 result = await controller.bindFinalResult(pending.workId!, pending.payload as { source_version_id: string; content_digest: string });
                 break;
+            case "schedule_edit": {
+                if (!controller.updateWorkSchedule) throw new Error("Work schedule updates are unavailable in this connection.");
+                const payload = pending.payload as { schedule_revision: number; schedule: BusinessScheduleDto };
+                result = await controller.updateWorkSchedule(pending.workId!, payload.schedule_revision, payload.schedule);
+                break;
+            }
+            case "wait_create":
+                if (!controller.createExternalWait) throw new Error("External wait creation is unavailable in this connection.");
+                result = await controller.createExternalWait(pending.payload as Parameters<NonNullable<ExtendedController["createExternalWait"]>>[0]);
+                break;
+            case "wait_resolve":
+                if (!controller.resolveExternalWait) throw new Error("External wait resolution is unavailable in this connection.");
+                result = await controller.resolveExternalWait(pending.payload as Parameters<NonNullable<ExtendedController["resolveExternalWait"]>>[0]);
+                break;
             default: throw new Error("This workspace action is read-only or unavailable.");
         }
         if (result.ok && pending.action === "bind_result") {
             const binding = result.data as FinalResultBinding;
             message(`Result bound as ${binding.binding_id} · proof revision ${binding.proof_revision}${binding.lineage_pending ? ` · source lineage pending: ${binding.lineage_pending}` : ""}`);
+        } else if (result.ok && pending.action === "schedule_edit") {
+            const readback = result.data as import("./client.js").WorkScheduleMutationReadbackDto;
+            message(`Work dates saved · schedule revision ${readback.schedule_revision} · project revision ${readback.project_revision} · operation ${result.envelope.operation_id}${readback.replayed ? " · read back from the original operation" : ""}`);
+        } else if (result.ok && (pending.action === "wait_create" || pending.action === "wait_resolve")) {
+            const readback = result.data as import("./client.js").ExternalWaitMutationReadbackDto;
+            message(`External wait ${readback.wait.wait_id} is ${readback.wait.state} · wait revision ${readback.wait.wait_revision} · project revision ${readback.project_revision} · operation ${result.envelope.operation_id}${readback.replayed ? " · read back from the original operation" : ""}`);
         } else {
             message(result.ok
                 ? `${ACTION_NAMES[pending.action]}: ${result.envelope.outcome} · revision ${result.envelope.revision ?? "unknown"}`
-                : `${ACTION_NAMES[pending.action]}: ${result.error.message}`, !result.ok);
+                : `${ACTION_NAMES[pending.action]}: ${result.error.message}${result.error.stale ? " Refresh and reopen the form to review current values before retrying." : ""}`, !result.ok);
         }
     };
     const execute = async (pending: Confirm): Promise<void> => {
@@ -832,6 +1067,43 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         if (id.startsWith("workspace:")) {
             const viewKind = id.slice("workspace:".length);
             const current = controller.view();
+            if (viewKind === "schedule") {
+                const workId = current.selected_work?.work_id;
+                if (!workId || !controller.readWorkSchedule) {
+                    message("Select work with typed schedule readback available.", true);
+                    return;
+                }
+                enqueue("Reading work dates", async () => {
+                    const [scheduleResult, civilResult] = await Promise.all([
+                        controller.readWorkSchedule!(workId), controller.readProjectCivilTime?.(),
+                    ]);
+                    const currentRevision = controller.view().monitoring?.revision;
+                    const data = scheduleResult.data;
+                    if (!data || data.work_id !== workId || scheduleResult.revision !== currentRevision
+                        || data.project_revision !== currentRevision
+                        || (civilResult && (civilResult.revision !== currentRevision || civilResult.data?.project_revision !== currentRevision))) {
+                        state.modal = { kind: "message", title: "WORK DATES STALE", text: "The schedule readback does not match the current status snapshot. Refresh and inspect it again; no values were combined across revisions.", offset: 0 };
+                        message("Work dates changed during readback; refresh and retry.", true);
+                        return;
+                    }
+                    const schedule = data.schedule;
+                    const legacyDue = data.legacy_due_at ? Date.parse(data.legacy_due_at) : NaN;
+                    const lines = [
+                        `Work ${workId}`,
+                        `Project revision ${data.project_revision} · schedule revision ${data.schedule_revision}`,
+                        `Civil timezone ${civilResult?.data?.setting?.timezone ?? "not supplied by service"}`,
+                        `Not before  ${businessDateLabel(schedule?.not_before)}`,
+                        `Due         ${businessDateLabel(schedule?.due, Number.isFinite(legacyDue) ? `${data.legacy_due_at} (legacy instant)` : "Not scheduled")}`,
+                        `Planned start  ${businessDateLabel(schedule?.planned_start)}`,
+                        `Planned end    ${businessDateLabel(schedule?.planned_end)}`,
+                        "",
+                        "Dates are optional. Local date-only values use the project civil timezone; the service owns due and overdue classification.",
+                    ];
+                    state.modal = { kind: "message", title: "WORK DATES", text: lines.join("\n"), offset: 0 };
+                    message(`Loaded typed dates at schedule revision ${data.schedule_revision}.`);
+                });
+                return;
+            }
             if (viewKind === "receipts") {
                 const work_id = current.selected_work?.work_id;
                 if (work_id) openReceiptPicker(work_id);
@@ -871,7 +1143,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 ].join("\n\n") || "No unavailable routes are registered.", offset: 0 };
                 return;
             }
-            if (["cycles", "reviews", "memory", "recovery", "dependencies", "sources", "session"].includes(viewKind)) {
+            if (["cycles", "reviews", "memory", "recovery", "dependencies", "sources", "session", "waits"].includes(viewKind)) {
                 if (!controller.readWorkspaceView) {
                     state.modal = { kind: "message", title: `${viewKind.toUpperCase()} UNAVAILABLE`, text: "This service connection does not provide this project view.", offset: 0 };
                     return;
@@ -886,6 +1158,8 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                             result.revision,
                             result.as_of,
                             result.data,
+                            controller.view().monitoring?.items ?? [],
+                            controller.view().monitoring?.revision,
                         ), offset: 0 };
                         message(`${kind} view loaded from the project service.`);
                     }

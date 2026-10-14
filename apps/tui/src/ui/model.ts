@@ -1,4 +1,4 @@
-import type { AttemptReceiptRecord, DashboardFilter, MountedView, StatusItem, TuiAction } from "../client.js";
+import type { AttemptReceiptRecord, BusinessScheduleDto, DashboardFilter, MountedView, StatusItem, TuiAction } from "../client.js";
 import type { Density } from "./layout.js";
 import type { Theme } from "./screen.js";
 export const FILTERS: readonly {
@@ -22,7 +22,8 @@ export type WorkspaceUiAction =
     | "cycle_create" | "cycle_board" | "cycle_activate" | "cycle_close" | "cycle_cancel"
     | "cycle_assign" | "cycle_commit" | "cycle_remove" | "cycle_carry_over"
     | "memory_search" | "memory_show" | "memory_draft" | "memory_review" | "memory_publish" | "memory_reconcile"
-    | "recovery_resolve" | "session_end" | "source_capture" | "source_search" | "review_show" | "bind_result";
+    | "recovery_resolve" | "session_end" | "source_capture" | "source_search" | "review_show" | "bind_result"
+    | "schedule_edit" | "wait_create" | "wait_resolve";
 export type UiAction = TuiAction | WorkspaceUiAction;
 export const ACTION_NAMES: Record<UiAction, string> = {
     create_project: "Initialize project", create_work: "Create work", claim: "Claim work", accept_start: "Start work", evidence: "Attach evidence", finish: "Finish & close", release: "Release claim",
@@ -33,6 +34,9 @@ export const ACTION_NAMES: Record<UiAction, string> = {
     memory_reconcile: "Reconcile memory publication",
     recovery_resolve: "Resolve recovery obligation", session_end: "End current session", source_capture: "Capture source", source_search: "Search sources", review_show: "Show review",
     bind_result: "Bind captured result",
+    schedule_edit: "Edit work dates",
+    wait_create: "Record external wait",
+    wait_resolve: "Resolve external wait",
 };
 export type Focus = "navigation" | "queue" | "inspector";
 export type Sort = "service" | "priority" | "title";
@@ -54,6 +58,9 @@ export type FormModal = {
     index: number;
     error?: string;
     workSnapshot?: StatusItem;
+    scheduleRevision?: number;
+    scheduleSnapshot?: BusinessScheduleDto;
+    civilTimezone?: string;
 };
 export type Modal = {
     kind: "search";
@@ -239,6 +246,8 @@ export function paletteCommands(view: MountedView, state: DashboardState): Palet
         { id: "workspace:reviews", label: "Reviews", hint: "Workspace · read only", disabled: !view.workspace_views_available?.includes("reviews") },
         { id: "workspace:sources", label: "Registered sources", hint: "Workspace · read only", disabled: !view.workspace_views_available?.includes("sources") },
         { id: "workspace:session", label: "Active session", hint: "Workspace · read only", disabled: !view.workspace_views_available?.includes("session") },
+        { id: "workspace:waits", label: "External waits", hint: "Read project wait records", disabled: !view.workspace_views_available?.includes("waits") },
+        { id: "workspace:schedule", label: "Work dates", hint: "Inspect typed dates for selected work", disabled: !view.workspace_actions_available?.includes("schedule_edit") || !state.selectedId },
         { id: "workspace:receipts", label: "Attempt receipt history / select finish evidence", hint: "Exact active attempt and fence · read only", disabled: !view.receipt_readback_available || !view.selected_work?.attempt },
         { id: "workspace:memory", label: "Published memory search", hint: "Workspace · read only", disabled: !view.workspace_views_available?.includes("memory") },
         { id: "workspace:recovery", label: "Recovery obligations", hint: "Workspace · read only", disabled: !view.workspace_views_available?.includes("recovery") },
@@ -247,6 +256,7 @@ export function paletteCommands(view: MountedView, state: DashboardState): Palet
         ...([
             "edit_work", "dependency_add", "dependency_remove", "cycle_create", "cycle_activate", "cycle_close", "cycle_cancel", "cycle_assign", "cycle_commit", "cycle_remove", "cycle_carry_over",
             "memory_search", "memory_show", "memory_draft", "memory_review", "memory_publish", "memory_reconcile", "recovery_resolve", "session_end", "source_capture", "source_search", "review_show", "bind_result",
+            "schedule_edit", "wait_create", "wait_resolve",
         ] as const).map(action => ({
             id: `workspace-action:${action}`,
             label: ACTION_NAMES[action],
@@ -256,7 +266,7 @@ export function paletteCommands(view: MountedView, state: DashboardState): Palet
                     : `Project action · confirmation required`
                 : "Unavailable in this service connection",
             disabled: !view.workspace_actions_available?.includes(action)
-                || (["edit_work", "dependency_add", "dependency_remove", "bind_result"].includes(action) && !state.selectedId)
+                || (["edit_work", "dependency_add", "dependency_remove", "bind_result", "schedule_edit", "wait_create"].includes(action) && !state.selectedId)
                 || (action === "bind_result" && !bindResultReady),
         })),
         ...(["create_work", "claim", "accept_start", "evidence", "finish", "release"] as const).map(a => {
@@ -301,6 +311,36 @@ export function actionForm(action: Exclude<UiAction, "create_project">, workId?:
                         : action === "bind_result" ? [
                             { ...field("source_version_id", "Registered result source", "Press P and select a source from this project's registered catalog.", true), readOnly: true },
                             { ...field("content_digest", "Source content digest", "Copied from the selected source catalog row; this field cannot be edited.", true), readOnly: true },
+                        ]
+                        : action === "schedule_edit" ? [
+                            field("not_before", "Not before · optional date", "YYYY-MM-DD in the project civil timezone; blank clears this date.", false),
+                            field("due", "Due · optional date", "YYYY-MM-DD in the project civil timezone; blank clears this date.", false),
+                            field("planned_start", "Planned start · optional date", "YYYY-MM-DD in the project civil timezone; blank clears this date.", false),
+                            field("planned_end", "Planned end · optional date", "YYYY-MM-DD in the project civil timezone; blank clears this date.", false),
+                        ]
+                        : action === "wait_create" ? [
+                            field("wait_id", "Wait identifier", "A unique stable identifier for this external dependency.", true, `wait-${Date.now().toString(36)}`),
+                            { ...field("category", "Category", "External decision, approval, information, access, or service dependency.", true, "decision"), choices: ["decision", "approval", "information", "access", "service", "other"] },
+                            field("reason", "What is needed", "Describe the external condition that is holding the dependent work."),
+                            field("affected_work_ids", "Affected work IDs", "Comma-separated dependent work IDs. Only these records are affected.", true),
+                            { ...field("accountable_kind", "Accountable party type", "Choose who or what is expected to respond.", true, "person"), choices: ["person", "role", "service"] },
+                            field("accountable_reference", "Accountable reference", "A stable person/service reference or leave blank for a named role.", false),
+                            field("accountable_name", "Accountable name", "Display name for a person or service.", false),
+                            { ...field("accountable_role", "Accountable role", "Used when party type is role.", true, "operator"), choices: ["agent", "operator", "reviewer", "publisher"] },
+                            field("expected_decision", "Expected decision", "Optional; do not treat time passing as a decision.", false),
+                            field("expected_output", "Expected output", "Optional description of the information or artifact needed.", false),
+                            field("follow_up", "Follow-up · optional date", "YYYY-MM-DD in the project civil timezone; blank means no follow-up date.", false),
+                        ]
+                        : action === "wait_resolve" ? [
+                            field("wait_id", "External wait ID", "Read External waits first to find the exact open wait ID."),
+                            { ...field("next_state", "Resolution state", "Resolve the wait or cancel the request.", true, "resolved"), choices: ["resolved", "cancelled"] },
+                            { ...field("outcome", "Outcome", "Record what the external party actually supplied.", true, "decision_provided"), choices: ["approved", "rejected", "decision_provided", "output_provided", "declined", "unavailable", "cancelled"] },
+                            field("detail", "Resolution detail", "Describe the attributable decision or information received."),
+                            field("output_ref", "Output reference", "Optional reference to the supplied output.", false),
+                            { ...field("supplied_kind", "Supplied by type", "Who or what provided the response.", true, "person"), choices: ["person", "role", "service"] },
+                            field("supplied_reference", "Supplier reference", "Stable person/service reference or leave blank for a named role.", false),
+                            field("supplied_name", "Supplier name", "Display name for a person or service.", false),
+                            { ...field("supplied_role", "Supplier role", "Used when provider type is role.", true, "operator"), choices: ["agent", "operator", "reviewer", "publisher"] },
                         ]
                         : action === "dependency_add" || action === "dependency_remove" ? [
                         field("prerequisite_id", "Prerequisite work ID", "This item must close before the dependent work.", true),
