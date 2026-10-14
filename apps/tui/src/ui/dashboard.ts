@@ -202,7 +202,17 @@ export function detailLines(item: StatusItem | undefined, view: MountedView, tab
         if (item.parent_id)
             add(`Parent    ${item.parent_id}`, "muted");
         if (item.due_at)
-            add(`Due       ${item.due_at}`, "warn");
+            add(`Legacy due value  ${item.due_at}`, "muted");
+        add("");
+        add("SERVER SCHEDULING FACTS", "heading");
+        if (item.due_today === undefined) add("Due today  unavailable in this service snapshot", "muted");
+        else add(`Due today  ${item.due_today ? "yes" : "no"} · service decision`, item.due_today ? "warn" : "muted");
+        if (item.overdue === undefined) add("Overdue  unavailable in this service snapshot", "muted");
+        else add(`Overdue  ${item.overdue ? "yes" : "no"} · service decision`, item.overdue ? "danger" : "muted");
+        if (item.blocking_external_wait_ids === undefined) add("Blocking waits  unavailable in this service snapshot", "muted");
+        else add(`Blocking waits  ${item.blocking_external_wait_ids.length ? item.blocking_external_wait_ids.join(", ") : "none"}`, item.blocking_external_wait_ids.length ? "warn" : "muted");
+        if (item.follow_up_due_wait_ids === undefined) add("Follow-up due  unavailable in this service snapshot", "muted");
+        else add(`Follow-up due  ${item.follow_up_due_wait_ids.length ? item.follow_up_due_wait_ids.join(", ") : "none"}`, item.follow_up_due_wait_ids.length ? "warn" : "muted");
         add("");
         if (!compact) { add("NEXT ACTION", "heading");
             add(item.next_action ? label(item.next_action) : "No next action supplied.", "accent"); }

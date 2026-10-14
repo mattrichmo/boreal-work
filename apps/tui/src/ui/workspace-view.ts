@@ -1,4 +1,6 @@
-import type { AttemptReceiptRecord, WorkspaceViewKind } from "../client.js";
+import type { AttemptReceiptRecord, BusinessDateDto, ExternalWaitAccountableDto, StatusItem, WorkspaceViewKind } from "../client.js";
+import { accountableLabel, businessDateLabel, timestampLabel } from "../scheduling.js";
+import { safeText } from "./cells.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -224,6 +226,35 @@ function sourceLines(data: JsonObject): string[] {
     return lines;
 }
 
+function intakeLines(data: JsonObject): string[] {
+    const items = rows(data.items);
+    const total = typeof data.total === "number" ? data.total : undefined;
+    const offset = typeof data.offset === "number" ? data.offset : 0;
+    const limit = typeof data.limit === "number" ? data.limit : items.length;
+    const hasMore = data.has_more === true;
+    const lines = [
+        `${items.length} shown of ${total ?? "unknown"} · offset ${offset} · page size ${limit}`,
+        ...(hasMore ? [`More available · open Intake page at offset ${offset + items.length}.`] : []),
+        "",
+    ];
+    if (!items.length) return [...lines, "No intake items were returned for this page."];
+    for (const [index, raw] of items.entries()) {
+        const item = object(raw);
+        if (!item) {
+            lines.push(`${index + 1}. A damaged intake row was omitted by the service.`, "");
+            continue;
+        }
+        const intakeId = text(item.intake_id, "Intake ID unavailable");
+        lines.push(`${intakeId} · ${text(item.kind)} · ${text(item.lifecycle)}`);
+        lines.push(`  Bucket ${text(item.bucket_id)} · content revision ${text(item.content_revision)} · captured ${text(item.captured_at)}`);
+        if (typeof item.revisit_at_utc_ms === "number") lines.push(`  Revisit ${time(item.revisit_at_utc_ms)}`);
+        const content = typeof item.content === "string" ? safeText(item.content) : "Content unavailable.";
+        const preview = content.length > 512 ? `${content.slice(0, 512)}… [truncated]` : content;
+        lines.push(`  ${preview.replaceAll("\n", "\n  ")}`, "");
+    }
+    return lines;
+}
+
 function sessionLines(data: JsonObject): string[] {
     return [
         `Session ${text(data.session_id)}`,
@@ -233,6 +264,65 @@ function sessionLines(data: JsonObject): string[] {
         `Ended ${text(data.ended_at, "Still active or not supplied")}`,
         `Registration operation ${text(data.registration_operation_id)}`,
     ];
+}
+
+function externalWaitLines(data: JsonObject, statusItems: readonly StatusItem[], serviceRevision: number | null, statusRevision?: number): string[] {
+    const readback = object(data.readback) ?? data;
+    const waits = rows(readback.waits);
+    const projectRevision = typeof readback.project_revision === "number" ? readback.project_revision : undefined;
+    const total = typeof readback.total === "number" ? readback.total : waits.length;
+    const offset = typeof readback.offset === "number" ? readback.offset : 0;
+    const limit = typeof readback.limit === "number" ? readback.limit : Math.max(1, waits.length);
+    const hasMore = typeof readback.has_more === "boolean" ? readback.has_more : waits.length < total;
+    const lines = [`Showing ${waits.length} of ${total} external wait${total === 1 ? "" : "s"} · page offset ${offset} · limit ${limit}.`, ""];
+  const readbackMatchesEnvelope = projectRevision !== undefined && serviceRevision === projectRevision;
+  const statusMatches = readbackMatchesEnvelope && statusRevision === projectRevision;
+    if (projectRevision === undefined) lines.push("Project revision unavailable; affected-work status cannot be compared.", "");
+  else if (!readbackMatchesEnvelope) lines.push(`Wait readback revision ${projectRevision} does not match the service envelope revision ${serviceRevision ?? "unavailable"}; refresh before comparing blocked work.`, "");
+  else if (statusRevision !== projectRevision) lines.push(`Wait readback revision ${projectRevision} does not match the loaded status revision ${statusRevision ?? "unavailable"}; refresh before comparing blocked work.`, "");
+    if (!waits.length) return [...lines, "No external waits were returned."];
+    const displayWaits = waits.slice(0, Math.min(100, limit));
+    for (const [index, raw] of displayWaits.entries()) {
+        const wait = object(raw);
+        if (!wait) {
+            lines.push(`${index + 1}. A malformed external-wait row was omitted by the service.`, "");
+            continue;
+        }
+        const affected = rows(wait.affected_work_ids).filter((value): value is string => typeof value === "string");
+        lines.push(`${text(wait.wait_id, "Wait identifier unavailable")} · ${text(wait.state, "State unavailable")} · revision ${text(wait.wait_revision)}`);
+        lines.push(`  ${text(wait.category, "Category unavailable")} · ${text(wait.reason, "Reason unavailable")}`);
+        lines.push(`  Source work ${text(wait.source_work_id)} · accountable ${accountableLabel(object(wait.accountable) as unknown as ExternalWaitAccountableDto)}`);
+        lines.push(`  Follow-up ${businessDateLabel(object(wait.follow_up) as unknown as BusinessDateDto)} · expected decision ${text(wait.expected_decision, "none")}`);
+        lines.push(`  Expected output ${text(wait.expected_output, "none")}`);
+        lines.push(`  Affected work ${affected.length ? affected.join(", ") : "none named"}`);
+        for (const workId of affected) {
+            if (!statusMatches) {
+                lines.push(`    ${workId} · blocked status unavailable for this revision`);
+                continue;
+            }
+            const item = statusItems.find(candidate => candidate.work_id === workId);
+            if (!item) {
+                lines.push(`    ${workId} · not present in the loaded status page`);
+                continue;
+            }
+            if (item.blocking_external_wait_ids === undefined) {
+                lines.push(`    ${workId} · ${item.display_status ?? item.status} · external-wait status unavailable`);
+            } else if (item.blocking_external_wait_ids.includes(String(wait.wait_id))) {
+                lines.push(`    ${workId} · ${item.display_status ?? item.status} · service reports this wait is blocking`);
+            } else {
+                lines.push(`    ${workId} · ${item.display_status ?? item.status} · service does not report this wait as currently blocking`);
+            }
+            if (item.follow_up_due_wait_ids?.includes(String(wait.wait_id)))
+                lines.push(`      Follow-up is due according to the service.`);
+        }
+        if (typeof wait.created_by === "string") lines.push(`  Created by ${wait.created_by} · ${timestampLabel(typeof wait.created_at_ms === "number" ? wait.created_at_ms : undefined)}`);
+        const resolution = object(wait.resolution);
+        if (resolution) lines.push(`  Resolution ${text(resolution.outcome)} · ${text(resolution.detail)} · supplied by ${accountableLabel(object(resolution.supplied_by) as unknown as ExternalWaitAccountableDto)} · recorded by ${text(resolution.recorded_by)}`);
+        lines.push("");
+    }
+    if (hasMore)
+        lines.push(`More waits are available from offset ${offset + waits.length}.`);
+    return lines;
 }
 
 function parsedObject(value: string): JsonObject | undefined {
@@ -287,6 +377,8 @@ export function formatWorkspaceView(
     revision: number | null,
     asOf: string | undefined,
     value: unknown,
+    statusItems: readonly StatusItem[] = [],
+    statusRevision?: number,
 ): string {
     const data = object(value);
     const header = [`Project ${projectId}`, `Service revision ${revision ?? "unavailable"}`, `Snapshot ${asOf ?? "time unavailable"}`, ""];
@@ -294,11 +386,13 @@ export function formatWorkspaceView(
     if (typeof data.project_id === "string" && data.project_id !== projectId)
         return [...header, "The response project does not match this mounted project.", "The response was not displayed."].join("\n");
     const content = kind === "cycles" ? cycleLines(data)
+        : kind === "intake" ? intakeLines(data)
         : kind === "reviews" ? reviewLines(data)
             : kind === "memory" ? memoryLines(data)
                 : kind === "recovery" ? recoveryLines(data)
                     : kind === "dependencies" ? dependencyLines(data)
                         : kind === "sources" ? sourceLines(data)
-                            : sessionLines(data);
+                            : kind === "waits" ? externalWaitLines(data, statusItems, revision, statusRevision)
+                                : sessionLines(data);
     return [...header, ...content].join("\n");
 }

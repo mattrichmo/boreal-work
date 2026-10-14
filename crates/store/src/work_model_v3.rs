@@ -7,8 +7,8 @@
 //! intake records.
 
 use super::{
-    json_object, AuditEventRecord, MutationResult, OperationOutcome, OperationRecord, SqliteStore,
-    StatusRecordDiagnostic, StoreError, SQLITE_ROW,
+    finish_transaction, json_object, AuditEventRecord, MutationResult, OperationOutcome,
+    OperationRecord, SqliteStore, StatusRecordDiagnostic, StoreError, SQLITE_ROW,
 };
 use boreal_domain::work_model_v3::{
     BusinessDate, BusinessSchedule, DirectDependency, ExecutionMode, ExternalWait,
@@ -126,6 +126,16 @@ pub struct ExternalWaitV1Input {
 }
 
 pub type ExternalWaitV1Record = ExternalWait;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalWaitPageV1Snapshot {
+    pub project_revision: u64,
+    pub total: u64,
+    pub offset: u64,
+    pub limit: u64,
+    pub has_more: bool,
+    pub waits: Vec<ExternalWaitV1Record>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CycleSeriesV3Input {
@@ -257,6 +267,15 @@ pub struct IntakeItemV3Record {
     pub captured_at: String,
     pub updated_at: String,
     pub revisit_at_utc_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntakePageV3Snapshot {
+    pub project_revision: u64,
+    pub total: u64,
+    pub offset: u64,
+    pub limit: u64,
+    pub items: Vec<IntakeItemV3Record>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1559,6 +1578,85 @@ impl SqliteStore {
         Ok(waits)
     }
 
+    /// Read a bounded page of current waits and the project revision from one
+    /// SQLite snapshot so the client can continue paging a stable revision.
+    pub fn external_wait_page_v1(
+        &self,
+        project_id: &str,
+        limit: u64,
+        offset: u64,
+        expected_project_revision: Option<u64>,
+    ) -> Result<ExternalWaitPageV1Snapshot, StoreError> {
+        if !(1..=100).contains(&limit) {
+            return Err(StoreError::Invalid(
+                "external wait page limit must be 1..=100".into(),
+            ));
+        }
+        self.execute_batch("BEGIN")?;
+        let result = (|| {
+            let project_revision = self.project_revision(project_id)?.0;
+            if let Some(expected) = expected_project_revision {
+                if expected != project_revision {
+                    return Err(StoreError::Conflict(format!(
+                        "stale external-wait list revision: expected {expected}, actual {project_revision}"
+                    )));
+                }
+            }
+            let mut count = self.prepare(
+                "SELECT COUNT(*) FROM (
+                   SELECT wait_id FROM external_wait_v1
+                   WHERE project_id = ?1 GROUP BY wait_id
+                 )",
+            )?;
+            count.bind_text(1, project_id)?;
+            count.step()?;
+            let total = count.column_u64(0)?;
+            let mut rows = self.prepare(
+                "SELECT wait.project_id, wait.wait_id, wait.wait_revision,
+                        wait.payload_json
+                 FROM external_wait_v1 wait
+                 JOIN (
+                   SELECT project_id, wait_id, MAX(wait_revision) AS wait_revision
+                   FROM external_wait_v1 WHERE project_id = ?1 GROUP BY project_id, wait_id
+                 ) latest USING (project_id, wait_id, wait_revision)
+                 ORDER BY wait.wait_id LIMIT ?2 OFFSET ?3",
+            )?;
+            rows.bind_text(1, project_id)?;
+            rows.bind_i64(2, limit)?;
+            rows.bind_i64(3, offset)?;
+            let work_nodes = self.work_nodes_domain_v3(project_id)?;
+            let dependencies = self.work_dependencies_domain_v3(project_id)?;
+            let mut waits = Vec::new();
+            while rows.step()? == SQLITE_ROW {
+                let project = rows.column_text(0)?;
+                let wait_id = rows.column_text(1)?;
+                let revision = rows.column_u64(2)?;
+                let payload = rows.column_text(3)?;
+                let wait = decode_external_wait(&project, &wait_id, revision, &payload)?;
+                let persisted_scope = self.external_wait_scope_v1(&project, &wait_id, revision)?;
+                if wait.affected_work_ids != persisted_scope {
+                    return Err(StoreError::Corrupt(format!(
+                        "external wait {wait_id} payload and immutable scope edges disagree"
+                    )));
+                }
+                wait.validate(&work_nodes, &dependencies).map_err(|error| {
+                    StoreError::Corrupt(format!("invalid external wait {wait_id}: {error}"))
+                })?;
+                waits.push(wait);
+            }
+            let has_more = offset.saturating_add(waits.len() as u64) < total;
+            Ok(ExternalWaitPageV1Snapshot {
+                project_revision,
+                total,
+                offset,
+                limit,
+                has_more,
+                waits,
+            })
+        })();
+        finish_transaction(self, result)
+    }
+
     /// Append a typed external-wait revision and its immutable scope edges.
     /// The wait's state is re-read under the same transaction before a close;
     /// time passage alone never writes a state transition.
@@ -2313,6 +2411,64 @@ impl SqliteStore {
             });
         }
         Ok(rows)
+    }
+
+    /// Read one bounded intake page and its project revision from a single
+    /// SQLite snapshot so clients can page without combining revisions.
+    pub fn intake_page_snapshot_v3(
+        &self,
+        project_id: &str,
+        limit: u64,
+        offset: u64,
+    ) -> Result<IntakePageV3Snapshot, StoreError> {
+        if !(1..=100).contains(&limit) {
+            return Err(StoreError::Invalid(
+                "intake page limit must be 1..=100".into(),
+            ));
+        }
+        self.execute_batch("BEGIN")?;
+        let result = (|| {
+            let project_revision = self.project_revision(project_id)?.0;
+            let mut count =
+                self.prepare("SELECT COUNT(*) FROM intake_item_v3 WHERE project_id=?1")?;
+            count.bind_text(1, project_id)?;
+            count.step()?;
+            let total = count.column_u64(0)?;
+            let mut rows = self.prepare(
+                "SELECT project_id, intake_id, bucket_id, kind, lifecycle, content,
+                        content_revision, content_digest, captured_at, updated_at,
+                        revisit_at_utc_ms
+                 FROM intake_item_v3 WHERE project_id = ?1
+                 ORDER BY captured_at, intake_id LIMIT ?2 OFFSET ?3",
+            )?;
+            rows.bind_text(1, project_id)?;
+            rows.bind_i64(2, limit)?;
+            rows.bind_i64(3, offset)?;
+            let mut items = Vec::new();
+            while rows.step()? == SQLITE_ROW {
+                items.push(IntakeItemV3Record {
+                    project_id: rows.column_text(0)?,
+                    intake_id: rows.column_text(1)?,
+                    bucket_id: rows.column_text(2)?,
+                    kind: rows.column_text(3)?,
+                    lifecycle: rows.column_text(4)?,
+                    content: rows.column_text(5)?,
+                    content_revision: rows.column_u64(6)?,
+                    content_digest: rows.column_text(7)?,
+                    captured_at: rows.column_text(8)?,
+                    updated_at: rows.column_text(9)?,
+                    revisit_at_utc_ms: rows.column_optional_signed_i64(10)?,
+                });
+            }
+            Ok(IntakePageV3Snapshot {
+                project_revision,
+                total,
+                offset,
+                limit,
+                items,
+            })
+        })();
+        finish_transaction(self, result)
     }
 
     pub fn intake_item_v3(

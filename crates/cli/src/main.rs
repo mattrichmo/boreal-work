@@ -35,10 +35,13 @@ use boreal_protocol::{
         DeliverableCriterionV2Dto, DeliverableRequirementV2Dto, DeliverableTypeDto,
         ExternalWaitAccountableDto, ExternalWaitCategoryDto, ExternalWaitCreateDto,
         ExternalWaitDto, ExternalWaitMutationReadbackDto, ExternalWaitOutcomeDto,
-        ExternalWaitReadbackDto, ExternalWaitResolutionDto, ExternalWaitResolveDto,
-        ExternalWaitRoleDto, ExternalWaitStateDto, FoldPolicyDto, GapPolicyDto, GuidanceContextDto,
-        GuidanceProvenanceDto, GuidanceStatusDto, InputArtifactRoleV2Dto, InputArtifactScopeV2Dto,
-        LocalDateTimeDto, NextActionDto, NextReasonDto, NextStatusDto,
+        ExternalWaitListReadbackDto, ExternalWaitReadbackDto, ExternalWaitResolutionDto,
+        ExternalWaitResolveDto, ExternalWaitRoleDto, ExternalWaitStateDto, FoldPolicyDto,
+        GapPolicyDto, GuidanceContextDto,
+        GuidanceOperatorRequestDto, GuidanceOperatorRequestKindDto, GuidanceProvenanceDto,
+        GuidanceStatusDto, GuidanceTransportContextDto, GuidanceTransportDto,
+        InputArtifactRoleV2Dto,
+        InputArtifactScopeV2Dto, LocalDateTimeDto, NextActionDto, NextReasonDto, NextStatusDto,
         ProjectCivilTimeMutationReadbackDto, ProjectCivilTimeReadbackDto,
         ProjectCivilTimeSettingDto, ProjectCivilTimeUpdateDto, ReceiptDto, ReceiptSubjectDto,
         RequirementDto, SubjectDto, WorkScheduleMutationReadbackDto, WorkScheduleReadbackDto,
@@ -49,6 +52,7 @@ use boreal_protocol::{
         EXTERNAL_WAIT_READBACK_SCHEMA_VERSION, EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
         PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION, PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
         WORK_SCHEDULE_READBACK_SCHEMA_VERSION, WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+        EXTERNAL_WAIT_LIST_READBACK_SCHEMA_VERSION,
     },
     schema, ApplicationOutcome, DetailReference, Envelope, ErrorCode, ProtocolError,
     TransportOutcome, API_VERSION,
@@ -219,7 +223,7 @@ Usage:
   bwrk work schedule show --project PROJECT WORK_ID [--socket PATH --json]
   bwrk wait create --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
   bwrk wait resolve --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
-  bwrk wait list --project PROJECT [--socket PATH --json]
+  bwrk wait list --project PROJECT [--limit N] [--offset N] [--expected-revision N] [--socket PATH --json]
   bwrk wait show --project PROJECT WAIT_ID [--socket PATH --json]
   bwrk gate policy publish --project PROJECT --gate GATE_ID --input PATH --expected-revision N --yes [--socket PATH] [--json]
   bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]
@@ -235,6 +239,10 @@ struct CliOptions {
     extra: std::collections::BTreeMap<String, Vec<String>>,
     db: String,
     socket: Option<String>,
+    #[serde(skip)]
+    transport: Option<GuidanceTransportDto>,
+    #[serde(skip)]
+    transport_context: Option<GuidanceTransportContextDto>,
     project: Option<String>,
     actor: String,
     actor_explicit: bool,
@@ -298,6 +306,8 @@ impl Default for CliOptions {
             extra: Default::default(),
             db: ".boreal/boreal.sqlite".to_owned(),
             socket: None,
+            transport: None,
+            transport_context: None,
             project: None,
             actor: DEFAULT_ACTOR.to_owned(),
             actor_explicit: false,
@@ -791,6 +801,17 @@ fn run_with_operation_at(
     working_directory: Option<&Path>,
 ) -> Result<CliResult, CliError> {
     let mut parsed = parse(args)?;
+    if parsed.options.socket.is_none()
+        && parsed.options.transport.is_none()
+        && parsed.options.transport_context.is_none()
+    {
+        parsed.options.transport = Some(GuidanceTransportDto::DirectCli);
+        parsed.options.transport_context = Some(GuidanceTransportContextDto {
+            endpoint_id: "direct-cli".to_owned(),
+            request_id: operation.to_owned(),
+            operation_id: operation.to_owned(),
+        });
+    }
     let mut local_project_root = None;
     // An unavailable route is a registry result, not a project operation.
     // Resolve it before local project context so discovery never opens or
@@ -1890,6 +1911,8 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         extra: Default::default(),
         db: ".boreal/boreal.sqlite".to_owned(),
         socket: None,
+        transport: None,
+        transport_context: None,
         project: None,
         actor: DEFAULT_ACTOR.to_owned(),
         actor_explicit: false,
@@ -6788,13 +6811,12 @@ fn guide_for_work(
     })?;
     let revision = revision.0;
     let display_status = status_name(item.status3_display_status()).to_owned();
-    let state = display_status.clone();
     let attempt_id = item
         .attempt
         .as_ref()
         .map(|attempt| attempt.attempt_id.to_string());
     let fence = item.attempt.as_ref().map(|attempt| attempt.fence.get());
-    let reason_codes = item
+    let mut reason_codes = item
         .decision
         .reason_codes
         .iter()
@@ -6802,9 +6824,116 @@ fn guide_for_work(
         .collect::<Vec<_>>();
     let selected_descriptor = boreal_application::guided_action_descriptor(&item);
     let selected = selected_descriptor.map(|descriptor| descriptor.action);
+    let operator_request = if selected == Some(boreal_domain::actions::ActionKind::Claim) {
+        let sources = store
+            .list_source_versions(project.as_str(), 1, 0)
+            .map_err(map_store_error)?;
+        let current_revision = store
+            .project_revision(project.as_str())
+            .map_err(map_store_error)?;
+        if current_revision.0 != revision {
+            return Err(CliError::with(
+                ErrorCode::GuidanceUnavailable,
+                ApplicationOutcome::Rejected,
+                "project changed while preparing source guidance; refresh agent guide",
+            ));
+        }
+        if sources.is_empty() {
+            Some(GuidanceOperatorRequestDto {
+                schema_version: "boreal.guidance_operator_request.v1".to_owned(),
+                kind: GuidanceOperatorRequestKindDto::CaptureProjectSource,
+                required_role:
+                    boreal_protocol::models::AgentActionRoleDto::Operator,
+                project_id: project.as_str().to_owned(),
+                work_id: work_id.to_owned(),
+                expected_project_revision: revision,
+                required_inputs: vec![
+                    boreal_protocol::models::AgentActionInputDto {
+                        kind: "source_version".to_owned(),
+                        value_type:
+                            boreal_protocol::models::AgentActionInputValueTypeDto::SourceVersion,
+                    },
+                    boreal_protocol::models::AgentActionInputDto {
+                        kind: "config_identity".to_owned(),
+                        value_type:
+                            boreal_protocol::models::AgentActionInputValueTypeDto::ConfigIdentity,
+                    },
+                ],
+                instruction: "An operator must capture and register a project source, then provide its exact source version and a meaningful configuration identity before this work can be claimed.".to_owned(),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if operator_request.is_some() {
+        reason_codes.push("needs_operator_input".to_owned());
+        reason_codes.sort();
+        reason_codes.dedup();
+    }
+    let state = if operator_request.is_some() {
+        "needs_operator".to_owned()
+    } else {
+        display_status.clone()
+    };
     let action_descriptor = selected_descriptor.map(|descriptor| {
         use boreal_domain::actions::ActionInputKind;
 
+        let mut required_inputs = descriptor
+            .required_inputs
+            .iter()
+            .map(|input| {
+                let value_type = match input {
+                    ActionInputKind::ExpectedProjectRevision
+                    | ActionInputKind::ExpectedEntityRevision
+                    | ActionInputKind::ExpectedProofRevision
+                    | ActionInputKind::Fence => {
+                        boreal_protocol::models::AgentActionInputValueTypeDto::UnsignedInteger
+                    }
+                    ActionInputKind::AttemptId
+                    | ActionInputKind::SessionId
+                    | ActionInputKind::OperationId => {
+                        boreal_protocol::models::AgentActionInputValueTypeDto::Identifier
+                    }
+                    ActionInputKind::Confirmation => {
+                        boreal_protocol::models::AgentActionInputValueTypeDto::Boolean
+                    }
+                    ActionInputKind::Reason
+                    | ActionInputKind::Comment
+                    | ActionInputKind::Summary => {
+                        boreal_protocol::models::AgentActionInputValueTypeDto::Text
+                    }
+                    ActionInputKind::Evidence => {
+                        boreal_protocol::models::AgentActionInputValueTypeDto::EvidencePayload
+                    }
+                    ActionInputKind::ReviewDecision => {
+                        boreal_protocol::models::AgentActionInputValueTypeDto::ReviewDecision
+                    }
+                    ActionInputKind::RecoveryDisposition => {
+                        boreal_protocol::models::AgentActionInputValueTypeDto::RecoveryDisposition
+                    }
+                };
+                boreal_protocol::models::AgentActionInputDto {
+                    kind: action_input_name(*input).to_owned(),
+                    value_type,
+                }
+            })
+            .collect::<Vec<_>>();
+        if descriptor.action == boreal_domain::actions::ActionKind::Claim {
+            required_inputs.extend([
+                boreal_protocol::models::AgentActionInputDto {
+                    kind: "source_version".to_owned(),
+                    value_type:
+                        boreal_protocol::models::AgentActionInputValueTypeDto::SourceVersion,
+                },
+                boreal_protocol::models::AgentActionInputDto {
+                    kind: "config_identity".to_owned(),
+                    value_type:
+                        boreal_protocol::models::AgentActionInputValueTypeDto::ConfigIdentity,
+                },
+            ]);
+        }
         boreal_protocol::models::AgentActionDescriptorDto {
             schema_version: "boreal.agent_action_descriptor.v1".to_owned(),
             action: action_kind_name(descriptor.action).to_owned(),
@@ -6815,70 +6944,42 @@ fn guide_for_work(
             },
             expected_project_revision: descriptor.expected_project_revision.0,
             expected_entity_revision: descriptor.expected_entity_revision.get(),
-            expected_proof_revision: descriptor.expected_proof_revision.map(|revision| revision.get()),
-            attempt: descriptor
-                .attempt
-                .as_ref()
-                .map(|attempt| boreal_protocol::models::AgentActionAttemptDto {
+            expected_proof_revision: descriptor
+                .expected_proof_revision
+                .map(|revision| revision.get()),
+            attempt: descriptor.attempt.as_ref().map(|attempt| {
+                boreal_protocol::models::AgentActionAttemptDto {
                     attempt_id: attempt.attempt_id.as_str().to_owned(),
                     fence: attempt.fence.get(),
-                }),
+                }
+            }),
             required_roles: descriptor
                 .required_roles
                 .iter()
                 .map(|role| match role {
-                    boreal_domain::ActorRole::Agent => boreal_protocol::models::AgentActionRoleDto::Agent,
-                    boreal_domain::ActorRole::Reviewer => boreal_protocol::models::AgentActionRoleDto::Reviewer,
-                    boreal_domain::ActorRole::Operator => boreal_protocol::models::AgentActionRoleDto::Operator,
-                    boreal_domain::ActorRole::Publisher => boreal_protocol::models::AgentActionRoleDto::Publisher,
-                })
-                .collect(),
-            required_inputs: descriptor
-                .required_inputs
-                .iter()
-                .map(|input| {
-                    let value_type = match input {
-                        ActionInputKind::ExpectedProjectRevision
-                        | ActionInputKind::ExpectedEntityRevision
-                        | ActionInputKind::ExpectedProofRevision
-                        | ActionInputKind::Fence => {
-                            boreal_protocol::models::AgentActionInputValueTypeDto::UnsignedInteger
-                        }
-                        ActionInputKind::AttemptId
-                        | ActionInputKind::SessionId
-                        | ActionInputKind::OperationId => {
-                            boreal_protocol::models::AgentActionInputValueTypeDto::Identifier
-                        }
-                        ActionInputKind::Confirmation => {
-                            boreal_protocol::models::AgentActionInputValueTypeDto::Boolean
-                        }
-                        ActionInputKind::Reason
-                        | ActionInputKind::Comment
-                        | ActionInputKind::Summary => {
-                            boreal_protocol::models::AgentActionInputValueTypeDto::Text
-                        }
-                        ActionInputKind::Evidence => {
-                            boreal_protocol::models::AgentActionInputValueTypeDto::EvidencePayload
-                        }
-                        ActionInputKind::ReviewDecision => {
-                            boreal_protocol::models::AgentActionInputValueTypeDto::ReviewDecision
-                        }
-                        ActionInputKind::RecoveryDisposition => {
-                            boreal_protocol::models::AgentActionInputValueTypeDto::RecoveryDisposition
-                        }
-                    };
-                    boreal_protocol::models::AgentActionInputDto {
-                        kind: action_input_name(*input).to_owned(),
-                        value_type,
+                    boreal_domain::ActorRole::Agent => {
+                        boreal_protocol::models::AgentActionRoleDto::Agent
+                    }
+                    boreal_domain::ActorRole::Reviewer => {
+                        boreal_protocol::models::AgentActionRoleDto::Reviewer
+                    }
+                    boreal_domain::ActorRole::Operator => {
+                        boreal_protocol::models::AgentActionRoleDto::Operator
+                    }
+                    boreal_domain::ActorRole::Publisher => {
+                        boreal_protocol::models::AgentActionRoleDto::Publisher
                     }
                 })
                 .collect(),
+            required_inputs,
             confirmation: descriptor.confirmation.map(str::to_owned),
             read_only: descriptor.read_only,
             recovery: descriptor.recovery,
         }
     });
-    let next_action = if let Some(kind) = selected {
+    let next_action = if operator_request.is_some() {
+        None
+    } else if let Some(kind) = selected {
         if kind == boreal_domain::actions::ActionKind::Claim {
             Some(start_action(
                 &parsed.options,
@@ -7003,6 +7104,13 @@ fn guide_for_work(
             harness_id: Some(parsed.options.harness.clone()),
             session_id: Some(parsed.options.session.clone()),
             project_revision: revision,
+            transport: Some(
+                parsed
+                    .options
+                    .transport
+                    .unwrap_or(GuidanceTransportDto::DirectCli),
+            ),
+            transport_context: parsed.options.transport_context.clone(),
         },
         status: GuidanceStatusDto {
             state,
@@ -7010,7 +7118,11 @@ fn guide_for_work(
             work_id: Some(work_id.to_owned()),
             attempt_id,
             fence,
-            summary: "Follow the current bounded action and its required obligations.".to_owned(),
+            summary: if operator_request.is_some() {
+                "Operator input is required before an agent can safely claim this work.".to_owned()
+            } else {
+                "Follow the current bounded action and its required obligations.".to_owned()
+            },
         },
         requirements: item
             .gates
@@ -7050,6 +7162,7 @@ fn guide_for_work(
             )
             .collect(),
         next_action,
+        operator_request,
         action_descriptor,
         provenance: GuidanceProvenanceDto {
             registry_version: "directives.v1".to_owned(),
@@ -7152,6 +7265,13 @@ fn guide_idle(
             harness_id: Some(parsed.options.harness.clone()),
             session_id: Some(parsed.options.session.clone()),
             project_revision: revision,
+            transport: Some(
+                parsed
+                    .options
+                    .transport
+                    .unwrap_or(GuidanceTransportDto::DirectCli),
+            ),
+            transport_context: parsed.options.transport_context.clone(),
         },
         status: GuidanceStatusDto {
             state: mode.to_owned(),
@@ -7182,6 +7302,7 @@ fn guide_idle(
             })
             .collect(),
         next_action: None,
+        operator_request: None,
         action_descriptor: None,
         provenance: GuidanceProvenanceDto {
             registry_version: "directives.v1".to_owned(),
@@ -7208,40 +7329,49 @@ fn next_from_guide(
     let next = AgentNextDto {
         kind: "agent_next".to_owned(),
         next_schema_version: schema::NEXT.to_owned(),
-        mode: guide.context.mode,
-        selection: if guide.next_action.is_some() {
+        mode: guide.context.mode.clone(),
+        selection: if guide.operator_request.is_some() {
+            "operator_input"
+        } else if guide.next_action.is_some() {
             "guided_action"
         } else {
             "none"
         }
         .to_owned(),
         status: NextStatusDto {
-            display_status: guide.status.display_status,
+            display_status: guide.status.display_status.clone(),
             work_id: guide.status.work_id.clone(),
             reason_codes: guide.provenance.gap_codes.clone(),
-            claimable_for_actor: guide.status.state == "ready",
+            claimable_for_actor: guide.operator_request.is_none() && guide.status.state == "ready",
         },
         reason: NextReasonDto {
-            code: guide
-                .provenance
-                .gap_codes
-                .first()
-                .cloned()
-                .unwrap_or_else(|| {
+            code: if guide.operator_request.is_some() {
+                "needs_operator_input".to_owned()
+            } else {
+                guide.provenance.gap_codes.first().cloned().unwrap_or_else(|| {
                     if guide.next_action.is_some() {
                         "trusted_action_selected".to_owned()
                     } else {
                         "no_safe_action".to_owned()
                     }
-                }),
-            message: guide.status.summary,
-            selection_key: guide.selection_key,
+                })
+            },
+            message: guide
+                .operator_request
+                .as_ref()
+                .map(|request| request.instruction.clone())
+                .unwrap_or_else(|| guide.status.summary.clone()),
+            selection_key: guide.selection_key.clone(),
         },
-        next_action: guide.next_action,
-        action_descriptor: guide.action_descriptor,
+        next_action: guide.next_action.clone(),
+        operator_request: guide.operator_request.clone(),
+        action_descriptor: guide.action_descriptor.clone(),
+        context: Some(guide.context),
+        provenance: Some(guide.provenance),
         context_refs: guide
             .status
             .work_id
+            .clone()
             .map(|id| {
                 vec![ContextRefDto {
                     reference_type: "work".to_owned(),
@@ -7816,7 +7946,13 @@ fn scheduling_route(
                 })?)?;
             external_wait_resolve(&project, &actor, &session, operation, request, app, store)
         }
-        ["wait", "list"] => external_wait_read(&project, None, store),
+        ["wait", "list"] => external_wait_page_read(
+            &project,
+            parsed.options.limit.unwrap_or(50),
+            parsed.options.offset.unwrap_or(0),
+            parsed.options.expected_revision,
+            store,
+        ),
         ["wait", "show"] => {
             let index = usize::from(parsed.options.project.is_none());
             let wait_id = parsed
@@ -8536,6 +8672,28 @@ fn external_wait_read(
         waits: waits.iter().map(external_wait_dto).collect(),
     };
     scheduling_read_cli_result("external_wait_readback_v1", readback, revision)
+}
+
+fn external_wait_page_read(
+    project: &str,
+    limit: u64,
+    offset: u64,
+    expected_project_revision: Option<u64>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let page = store
+        .external_wait_page_v1(project, limit, offset, expected_project_revision)
+        .map_err(map_store_error)?;
+    let readback = ExternalWaitListReadbackDto {
+        schema_version: EXTERNAL_WAIT_LIST_READBACK_SCHEMA_VERSION.to_owned(),
+        project_revision: page.project_revision,
+        total: page.total,
+        offset: page.offset,
+        limit: page.limit,
+        has_more: page.has_more,
+        waits: page.waits.iter().map(external_wait_dto).collect(),
+    };
+    scheduling_read_cli_result("external_wait_list_v1", readback, page.project_revision)
 }
 
 fn schedule_from_update_dto(dto: BusinessScheduleUpdateDto) -> Result<BusinessSchedule, CliError> {
@@ -12862,6 +13020,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn agent_next_preserves_guidance_context_and_provenance() {
+        let envelope: Envelope<Value> = serde_json::from_str(include_str!(
+            "../../../project/spec/protocol/guide-dto.json"
+        ))
+        .expect("guidance fixture decodes");
+        let guide: AgentGuideDto =
+            serde_json::from_value(envelope.data.expect("guidance fixture has data"))
+                .expect("guidance data decodes");
+        let expected_context = guide.context.clone();
+        let expected_provenance = guide.provenance.clone();
+        let parsed = ParsedCommand {
+            path: vec!["agent".to_owned(), "next".to_owned()],
+            options: CliOptions {
+                work: Some("work_task_b".to_owned()),
+                ..CliOptions::default()
+            },
+        };
+
+        let result = next_from_guide(&parsed, Some(43), guide).expect("next DTO builds");
+        let next: AgentNextDto = serde_json::from_value(result.data.expect("next DTO has data"))
+            .expect("next DTO decodes");
+
+        assert_eq!(next.context, Some(expected_context));
+        assert_eq!(next.provenance, Some(expected_provenance));
+    }
+
+    #[test]
     fn session_registration_digest_is_stable_and_revision_bound() {
         let project = ProjectId::new("session-project");
         let session = SessionId::new("session-one");
@@ -14140,7 +14325,7 @@ mod tests {
     }
 
     #[test]
-    fn next_without_source_context_guides_to_source_list_without_starting_work() {
+    fn next_without_registered_sources_requests_operator_input_without_agent_action() {
         let path = project_db_path("next-missing-source-context");
         let db = path.to_string_lossy().to_string();
         cleanup_project_db(&path);
@@ -14171,16 +14356,23 @@ mod tests {
         ]))
         .expect("next remains available without source context");
         let data = next.data.expect("next data");
-        let action = &data["next_action"];
-        assert_eq!(
-            action["title"],
-            "Select source and configuration before starting"
-        );
-        assert!(action["instruction"]
-            .as_str()
-            .is_some_and(|instruction| instruction.contains("--config-identity")));
-        assert_eq!(action["safe_argv"][1], "source");
-        assert_eq!(action["safe_argv"][2], "list");
+        assert_eq!(data["selection"], "operator_input");
+        assert_eq!(data["reason"]["code"], "needs_operator_input");
+        assert_eq!(data["status"]["claimable_for_actor"], false);
+        assert!(data["next_action"].is_null());
+        let request = &data["operator_request"];
+        assert_eq!(request["kind"], "capture_project_source");
+        assert_eq!(request["required_role"], "operator");
+        assert_eq!(request["project_id"], "p");
+        assert_eq!(request["work_id"], "ready-work");
+        assert_eq!(request["expected_project_revision"], next.revision.unwrap());
+        assert_eq!(request["required_inputs"][0]["kind"], "source_version");
+        assert_eq!(request["required_inputs"][1]["kind"], "config_identity");
+        let context: AgentNextDto = serde_json::from_value(data.clone())
+            .expect("next DTO includes typed operator and transport context");
+        let transport = context.context.unwrap().transport_context.unwrap();
+        assert_eq!(transport.endpoint_id, "direct-cli");
+        assert_eq!(transport.request_id, transport.operation_id);
         assert!(SqliteStore::open(&path, PRODUCTION_SCHEMA)
             .expect("database opens")
             .current_attempt_for_work("p", "ready-work")

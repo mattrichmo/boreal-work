@@ -101,3 +101,148 @@ outside the required release.
 Historical Global audit results (including Node 20 and prior PTY/socket
 checks) remain historical evidence. S00-T90 must qualify the combined exact
 tree and record platform skips/unsupported results honestly.
+
+## Requalification update — 2026-10-14
+
+The exact-head inventory above is historical. Requalification on 2026-10-14 found
+`origin/main` at `b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e`; local `main` is one
+commit ahead at `61828ecf7a9ef2368658d877b6b95e5613a2307c` with the workflow fixture
+revision correction. The isolated `codex/v4-roadmap-continuation` integration
+branch is based on that remote head and currently contains source through
+`ef89994fc8afa05c1f6286a70b740fbd8a232355`. The local main commit has not been
+pushed. GitHub currently reports no open issues or pull requests.
+
+The current integration branch now includes the F1 local guidance/onboarding
+change, S07-T03 provenance inspector, S13 typed scheduling/external-wait TUI,
+and the workflow fixture revision correction. Contract validation, workflow
+package validation, skill package validation, machine-update focused tests,
+Global TUI checks, and project TUI typecheck plus all 106 tests pass. These are
+source checks, not sprint acceptance. The TUI displays at most 100 external
+waits and marks the view partial because the service readback still loads and
+returns the full unbounded list.
+
+S02 already contains supported Node preflight and target-matrix/host-smoke
+scaffolding; exact target execution and S02-T90 remain unqualified. S03 still
+needs paired package/Global backup and migration-failure recovery with the T06
+fault matrix. Remaining work includes S05–S07 daily/Inbox/CLI parity and the
+held interactive snapshot privacy change, S08 Intake receipts, S09 Global Send,
+S10 scale qualification, S11 release journeys/handover, S12-T05/T06, and
+S13-T01/T03/T90. J1–J13 and sprint T90 gates remain unrun/unaccepted; no
+release candidate has been assembled, installed, or published.
+
+The installed local `bwrk` remains 0.2.0 at build
+`6ab1c078150993936d5d381822e7774d9e5cfade` and reports SQLite 3.43.2, below
+the declared 3.51.3 floor. Runtime project revision 99 integrity checks pass.
+The S00-T01/T04 expired-review sessions still require harness confirmation
+that their workers stopped before supported recovery; the user cannot confirm
+yet. No runtime session or installation state was changed.
+
+S08 restore identity and immutable Intake receipt source is present, and a
+limited T05 qualification record exists; the combined S08-T90 acceptance is
+still absent. S09 Global Send has no application/CLI implementation and is
+blocked on S07-T90 and S08-T90. At the earlier source snapshot, S12-T05 had
+typed source routes but inconsistent callable-contract fixtures; see the
+continuation update below for the reconciliation. T05 and T90 acceptance
+evidence remain absent. S12-T06 also waits on accepted S12-T05 and S02-T90.
+S10-T01 must wait for S07-T90.
+
+## Continuation update — 2026-10-14
+
+The integration branch advanced through `d0fccd3f42799b3760238591b430803697df0ea8`
+(`Reconcile S12 T05 typed contract fixtures`). This bounded change edits only
+the callable CLI contract rows for source/Intake and typed output inspection,
+plus the general-work and artifact-acceptance fixtures. It distinguishes
+implemented typed artifact-result binding/computed inspection from generic
+artifact submission and generic human deliverable decisions, which remain
+unavailable. The contract validator, workflow-package validator and
+`git diff --check` passed on the agent's committed tree. No S12-T05 journey or
+T90 acceptance is claimed.
+
+A subsequent read-only S05–S07 source audit found substantial existing daily,
+Inbox and provenance implementation, but no S05/S06/S07 T90 evidence. Concrete
+remaining source gaps include S06 raw-v1 identity/text/time import and
+idempotency/loss-conflict reporting; bulk triage does not yet validate or
+apply `due_at` and `follow_up_at`; collision resistance of new Global IDs is
+not established; and capture-witness physical backup/restore evidence is
+absent. S07 still lacks distinct Personal/current-project/all-inboxes scope,
+the required archive wording, a CLI bulk-triage route, Global-versus-project
+authority-first route guidance, and accurate Global help/install documentation.
+S07 T02 also lacks its small-terminal/offline qualification record. These are
+source observations, not acceptance results.
+
+Do not take the audited S06/S07 shared files while their active whole-file
+grants remain recorded. Their sprint dependencies also remain open: S06 needs
+S03-T90 and S05-T90; S07 needs S06-T90. S09, S10 and S11 remain downstream of
+those gates. The user cannot yet confirm that the two named S00 review workers
+stopped, so their session recovery and any dependent runtime mutation remain
+untouched. No canonical database or installation state was changed.
+
+## Dependency and acceptance audit — 2026-10-14
+
+Three additional read-only Luna Extra High audits checked the exact V4 source
+and checked-in evidence at `d0fccd3f` (tree `1589ab5a`; the documentation-only
+coordinator commit `5690184e` followed). The branch was subsequently rebased
+onto local `main` at `61828ecf`; the equivalent contract source commit is now
+`38024aa4` with the same tree hash. The audits did not access canonical
+runtime state or change source.
+
+- **S00–S03:** The checked-in S00 qualification report is for `93faf2ad`, not
+  this candidate. S00-T90 is unaccepted. S01 and S02 require S00-T90; S03
+  requires S01-T90 and S02-T90. No S01–S03 source task is graph-ready from the
+  available evidence. S02 attempt 5 is only a focused macOS ARM64 rerun on
+  older source `32e46d19`; full current-head, macOS x86-64 and Linux x86-64
+  acceptance remain absent. No S03 validation evidence exists; paired
+  package/Global recovery and its fault matrix remain open. Do not reassign
+  S00-T01/T04 recovery without the requested worker-stop confirmation.
+- **S04–S05:** S04's checked-in T90 report is a non-closure handoff for older
+  `ae93ae57`; current S04-owned files have changed through `d0fccd3f`. There is
+  no current-source S04-T90 receipt and no S05 validation report. S04 requires
+  accepted S00/S01 leaves; S05 T90 requires S04-T90 plus S05 leaves (and
+  S05-T05 also requires S12-T01). Existing test definitions do not constitute
+  current-head execution results. On the current source, `cargo test -p
+  boreal-cli` had one failure out of 156 unit tests in
+  `daily_filter_uses_the_public_global_service_socket_route`; that test passed
+  alone, and the full CLI suite passed with `--test-threads=1`. The failing
+  daily route test and a parallel physical-backup test both mutate
+  `BOREAL_GLOBAL_ROOT`, pointing to a process-environment race. The Global CLI
+  file is under a recorded S06 grant, so I did not change either test.
+- **S12:** The T05 contract reconciliation is committed, but no accepted
+  T01–T04 handoffs, T05 execution handoff, or BW-S12 validation directory is
+  checked in. The exact-source `cargo test -p boreal-cli -- --test-threads=1`
+  run passed, including the source/Intake readback, artifact-result binding
+  and close-readiness service tests. The minimal non-CLI journeys, accepted
+  prerequisite handoffs and T05/T90 records are still missing. T06 also
+  requires S02-T90, which is unaccepted. Do not edit its shared CLI/store
+  routes until the recorded steward/leaf grants are reconciled.
+
+The checked-in files do not establish current task/attempt status or live
+write-grant expiry. The project workflow resolver is unavailable in this
+checkout because it has no root `boreal.yaml`; therefore no runtime readiness
+or source-leaf acceptance is inferred from these audits. The next safe
+coordinator action is to obtain the required S00 worker-stop confirmation and
+then use the supported project workflow to read/reconcile task status and
+grants before recovery or further leaf dispatch. The user has not yet been
+able to provide that confirmation.
+
+## Sync and test follow-up — 2026-10-14
+
+Fetched `origin/main`; it remains `b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e`.
+The continuation branch was rebased onto local `main` commit
+`61828ecf7a9ef2368658d877b6b95e5613a2307c`, which contains the workflow-fixture
+correction already cherry-picked by the continuation branch; Git skipped that
+duplicate patch. Contract source tree identity is unchanged by the rebase.
+At the prepublication check, `gh` returned no open pull requests and no open
+issues. The continuation branch was then pushed and opened as draft PR
+[#23](https://github.com/mattrichmo/boreal-work/pull/23); it has not been
+merged. The PR describes the source and validation evidence and lists the
+unaccepted V4 gates. Keep it in draft until the required S00 confirmation,
+supported task/grant reconciliation and successor acceptance gates are
+complete.
+
+The exact-source full CLI package suite passed with
+`cargo test -p boreal-cli -- --test-threads=1`. A default parallel run failed
+once in the daily Global service route test (155/156 unit tests passed); that
+test passed alone. The daily route and physical-backup tests both mutate
+process-global `BOREAL_GLOBAL_ROOT`, which is the likely test race. Repair is
+held because `crates/cli/src/global_commands.rs` remains under the recorded S06
+whole-file grant. No canonical runtime or installation state was touched.

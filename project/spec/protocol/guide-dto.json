@@ -16,7 +16,13 @@
       "actor_id": "agent_alice",
       "harness_id": "luna",
       "session_id": "session_local_agent_01",
-      "project_revision": 43
+      "project_revision": 43,
+      "transport": "unix_socket_service",
+      "transport_context": {
+        "endpoint_id": "service:sha256:fixture-endpoint",
+        "request_id": "op_guide_01J8V2GUIDE00000000000001",
+        "operation_id": "op_guide_01J8V2GUIDE00000000000001"
+      }
     },
     "status": {
       "state": "active_attempt",

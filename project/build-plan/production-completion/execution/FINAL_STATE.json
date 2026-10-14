@@ -1,9 +1,9 @@
 {
   "schema": "boreal.final-production-execution/1",
   "plan": "project/build-plan/production-completion/FINAL_PRODUCTION_PLAN.md",
-  "date": "2026-09-26",
+  "date": "2026-10-14",
   "baseline_commit": "dcfae1196e2732bec3228169ee28044a54f9493c",
-  "overall_state": "planned",
+  "overall_state": "in_progress",
   "source_investigation": "completed_by_coordinator_and_three_agents",
   "plan_review": "three_agent_review_completed_and_amendments_integrated",
   "first_integration_contract": "fenced_final_result_capture_and_binding_before_verification",
@@ -48,7 +48,8 @@
     "F7": {
       "title": "Final qualification and repair loop",
       "owner": "coordinator_and_agents",
-      "state": "ready",
+      "state": "blocked",
+      "blocked_on": "F1-F6 integration",
       "entry_requires": [
         "F1",
         "F2",
@@ -62,7 +63,8 @@
     "F8": {
       "title": "Activation and supported release delivery",
       "owner": "coordinator",
-      "state": "ready",
+      "state": "blocked",
+      "blocked_on": "native_artifact_qualified",
       "entry_requires": [
         "native_artifact_qualified"
       ],
@@ -166,31 +168,6 @@
       ]
     },
     {
-      "package": "F6 / BW-S02 and BW-S03 package/update recovery",
-      "owner": "Luna Extra High agent /root/s02_s03_update",
-      "model": "GPT-6 Luna Extra High",
-      "worktree": "/Users/cybertron/.codex/worktrees/v4-s03-update-current/boreal-work",
-      "source_commit": "2fa9bf3ed717ae9f917688b6a6b0fb944a6c5b65",
-      "exclusive_paths": [
-        "crates/cli/src/update.rs",
-        "crates/cli/src/machine_update.rs",
-        "crates/cli/tests focused update tests",
-        "scripts/release/**",
-        "scripts/validation/**",
-        ".github/workflows/release.yml",
-        "docs/INSTALL.md"
-      ],
-      "journeys": [
-        "J8",
-        "J10",
-        "J11",
-        "J12",
-        "J13",
-        "BW-S02-T90",
-        "BW-S03-T90"
-      ]
-    },
-    {
       "package": "F5 / F7 integration",
       "owner": "Coordinator",
       "model": "GPT-6 Luna Extra High",
@@ -215,28 +192,28 @@
     "crates/store/src/completion.rs": "F2 / Agent A",
     "crates/store/src/acceptance.rs": "F2 / Luna Extra High agent /root/f2_binding, final-result binding sections",
     "crates/store/src/recovery.rs": "F2 / Agent A",
-    "crates/application/src/hierarchy.rs": "F3/F5 coordinator; container disposition application route integrated at 0a585b5a",
+    "crates/application/src/hierarchy.rs": "F3/F5 coordinator; intake list/disposition/promotion sections integrated at db5ee5fe; container disposition application route integrated at 0a585b5a",
     "crates/application/src/planning_v3.rs": "F3 / Agent B",
     "crates/application/src/cycle_runtime.rs": "F3 / Agent B",
     "crates/application/src/intake.rs": "F3 / Agent B",
     "crates/application/src/knowledge.rs": "F3 / Agent B",
-    "crates/store/src/work_model_v3.rs": "F3 coordinator; container disposition readback helper integrated at 2fa9bf3e",
+    "crates/store/src/work_model_v3.rs": "F3 coordinator; intake list/disposition/promotion sections integrated at db5ee5fe; container disposition readback helper integrated at 2fa9bf3e",
     "crates/store/src/cycle_commands.rs": "F3 / Agent B",
     "crates/store/src/knowledge.rs": "F3 / Agent B",
     "crates/store/src/memory.rs": "F3 / Agent B",
     "crates/source/": "F3 / Agent B",
     "crates/memory/": "F3 / Agent B",
-    "apps/tui/src/": "F4 / Agent C",
+    "apps/tui/src/": "F4 / coordinator after BW-S13-T02 integration at ef89994; intake dashboard flow integrated at db5ee5fe",
     "crates/cli/src/main.rs": "F5 coordinator",
-    "crates/cli/src/service.rs": "F5 / Coordinator",
-    "crates/cli/src/command_registry.rs": "F5 coordinator except the BW-S06 capture command entry leased to /root/s06_capture_origin",
+    "crates/cli/src/service.rs": "F5 / Coordinator; intake list/disposition/promotion sections integrated at db5ee5fe",
+    "crates/cli/src/command_registry.rs": "F5 coordinator except the BW-S06 capture command entry leased to /root/s06_capture_origin; intake-list row integrated at db5ee5fe",
     "crates/cli/src/setup.rs": "F5 / Coordinator",
     "crates/store/src/lib.rs": "F5 coordinator; backup/restore artifact bundle seam integrated at bd9c5ec2",
     "crates/application/src/lib.rs": "F5 / Coordinator",
     "crates/protocol/src/lib.rs": "F5 / Coordinator",
     "workspace manifests and schema wiring": "F5 / Coordinator",
     "project/build-plan/production-completion/execution/FINAL_STATE.json": "Coordinator",
-    "crates/protocol/src/models.rs": "F5 coordinator",
+    "crates/protocol/src/models.rs": "F5 coordinator; intake DTO constants/models integrated at db5ee5fe",
     "crates/store/src/final_result.rs": "F2 / Luna Extra High agent /root/f2_binding",
     "crates/application/src/global_capture.rs": "BW-S06 / Luna Extra High agent /root/s06_capture_origin",
     "crates/domain/src/global_manager.rs": "BW-S06 / Luna Extra High agent /root/s06_capture_origin",
@@ -273,10 +250,10 @@
     "release_url": null,
     "channel_verification": "not_run"
   },
-  "note": "Integrated the versioned guidance action descriptors, Global TUI inbox hardening, bounded backup artifact continuity, F2 summary/review readbacks, mixed-revision context guard, release preparation, revision-bound container disposition CLI/service route, the missing store export needed by hierarchy callers, and strict candidate assembly plus machine-update rollback hardening. Focused machine-update, authority, release-assembly, shell, YAML, formatting and diff checks passed in the worker lane; target package smoke and full qualification remain unrun. A pre-migration Global database backup/readback seam is still required to prove paired package/Global recovery. Final-result binding and Global capture provenance remain active; BW-S13-T01 dates/waits has started on source 87c05ed5. F1 onboarding, remaining F3/F4 paths, S08/S09 intake receipts and Global Send, S10 scale qualification, S11 handover, S12-T05/T06, S13 TUI/reference workflow parity, T90 sprint gates, integrated qualification, safe installation activation, and release delivery remain open. No final qualification, installation activation, or release claim is implied. The S06 capture/provenance implementation and the S07 Personal Inbox status filter are now integrated; the combined Global TUI suite passes (97/97), while sprint-level acceptance and the remaining S07 lanes are still open.",
-  "current_source_commit": "990b109a",
+  "note": "Current integration source includes the PR #22 baseline, workflow finish-recipe grammar and fixture-revision fixes, integrated F1 local guidance/onboarding, S07-T03 Global provenance inspection, and S13 typed scheduling/external-wait TUI. The S12-T05 callable contract and workflow fixtures were reconciled on source tree 1589ab5a (current rebased commit 38024aa4); focused contract and workflow-package validators pass, along with prior skill-package validation, machine-update tests, and TUI checks. The full boreal-cli package suite passes serially; its default parallel run exposed a likely BOREAL_GLOBAL_ROOT test race recorded below. S13-T02 source is integrated, but its wait readback consumes an unbounded service list and S13-T90 acceptance remains open. The checked-in S00 qualification is stale; S00-T90 is unaccepted, so S01/S02 and then S03 are not graph-ready from available evidence. S02 attempt 5 is a focused macOS ARM64 rerun on older source only; current-head and cross-target acceptance are absent. No S03 validation evidence exists, including paired package/Global recovery and the fault matrix. S04's checked-in T90 report is a non-closure handoff for older source; no current-source S04-T90 receipt or S05 validation report exists. S05–S07 source has substantial implementation, but sprint acceptance remains absent; audited gaps include S06 raw v1 import and scheduling fields in bulk triage, S07 separate inbox scopes, CLI bulk triage, authority-first skill routing and accurate discovery/install documentation. Some of these paths remain under active S06 grants. S08 restore identity and Intake receipt code exists with limited T05 evidence, but S08-T90 remains open. S09 Global Send is not implemented and depends on S07-T90 plus S08-T90. S12-T05 route/fixture disagreement is corrected, but T01-T04 handoffs, non-CLI T05 journey/handoff evidence and T90 are absent; T06 also waits on S02-T90. S10-T01 waits on S07-T90. Remaining source/gate work includes S02/S03 paired package/Global migration recovery, S05–S07 daily/Inbox/CLI parity and snapshot privacy, S10 scale qualification, S11 release journeys/handover, and S13-T01/T03/T90. Integrated qualification, installation activation and release delivery have not occurred. S00-T01/T04 worker-stop confirmation is unavailable, so their expiry recovery and dependent runtime actions remain untouched. The installed 0.2.0 binary is not current source and uses SQLite 3.43.2 below the declared 3.51.3 floor; do not activate a candidate until qualification and binding review are complete.",
+  "current_source_commit": "38024aa4887f9a463e99487f77a8aeeafb54ee9b",
   "environment_inventory": {
-    "checked_date": "2026-10-13",
+    "checked_date": "2026-10-14",
     "native_platform": "macOS ARM64",
     "codex_cli_available": true,
     "claude_cli_available": true,
@@ -284,13 +261,14 @@
     "git_remote": "github.com/mattrichmo/boreal-work",
     "actual_installation_and_project_binding": {
       "status": "identified_read_only",
-      "binary": "/Users/cybertron/.local/bin/bwrk (0.2.0)",
+      "binary": "/Users/cybertron/.local/bin/bwrk (0.2.0; build 6ab1c078150993936d5d381822e7774d9e5cfade)",
       "project_root": "/Users/cybertron/Code/boreal-work",
       "project_id": "boreal-work",
       "database": "/Users/cybertron/Code/boreal-work/.boreal/boreal.sqlite",
-      "read_only_doctor": "schema 3, revision 99, quick_check ok, no foreign-key violations",
+      "read_only_doctor": "schema 3, revision 99, quick_check ok, no foreign-key violations; SQLite 3.43.2 below declared 3.51.3 floor, floor enforcement false",
       "preservation": "no live binding, database, service, or installation changes made",
-      "runtime_process_inventory": "no bwrk/boreal service process visible at inspection; preserve existing runtime lock metadata file until qualified activation preflight"
+      "runtime_process_inventory": "no bwrk/boreal service process visible at inspection; preserve existing runtime lock metadata file until qualified activation preflight",
+      "session_recovery_status": "S00-T01 and S00-T04 remain active with ended_at null and expired-review reasons; worker-stop confirmation unavailable; no recovery action taken"
     }
   },
   "execution_events": [
@@ -407,6 +385,114 @@
       "event": "S06_capture_provenance_and_personal_inbox_status_integrated",
       "source_commit": "990b109a",
       "summary": "Integrated schema-3 Personal Inbox status and explicit capture-origin witness, legacy migration without fabricated origins, schema-3 metadata round-trip, and status-based Global TUI Inbox filtering. The combined Global TUI typecheck and all 97 tests pass. S06-T90/S07-T90 acceptance remains open."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "post_pr22_baseline_reconciled",
+      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
+      "summary": "Coordinator reconciled the execution ledger from recorded source 990b109a to clean main after PR #22. Read-only audits found no open GitHub issues or PRs. The installed bwrk remains 0.2.0 at build 6ab1c078150993936d5d381822e7774d9e5cfade with SQLite 3.43.2 below the declared 3.51.3 floor; runtime project revision 99 has integrity checks passing, but S00-T01/T04 retain active expired-review attempts whose workers are not confirmed stopped. No lifecycle state or installation was changed. All J1-J13 and sprint qualification remain unrun/unaccepted at this exact source."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "F4_typed_scheduling_ui_dispatched",
+      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
+      "summary": "Dispatched a bounded project-TUI implementation lane for typed dates, external waits, and the existing service-backed scheduling routes. The lane owns only apps/tui source and tests; route/service contracts and runtime records are read-only. This is implementation progress, not BW-S13-T02 or T90 acceptance."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S07_T03_bounded_test_paths_and_F4_TUI_contract_dispatched",
+      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
+      "summary": "Granted the S07-T03 worker only the focused model-view and client-recovery test files in addition to its three UI modules. Dispatched the F4 schedule/wait UI against existing typed service routes; no shared Rust, CLI, protocol, plan-state, or runtime path is included. These are source assignments only; dependent sprint gates remain unaccepted."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "F1_finish_recipe_cli_grammar_reconciled",
+      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
+      "summary": "Coordinator corrected the packaged finish workflow bind-result example to use the supported --expected-revision and --operation-id options, then recomputed the shared workflow asset identity. The full workflow-package validator passes on the integrated candidate state."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "F1_local_guidance_integrated_with_workflow_package",
+      "source_commit": "adb2a33044a3f9167ef64159505c2450b09ca198",
+      "summary": "Integrated Luna XHigh F1 local route/claim/finish guidance and role-specific onboarding changes from d37ed447. Updated all three local adapter package versions to 1.3.0 and recalculated the shared workflow package identity to sha256:dd3b13120c1ee9b4b0d7e33ed08d0ce3e5e7e60d858d844a12385b7f62412c31. Workflow validator, skill package validator, and diff check pass. F1 journey and sprint acceptance remain unrun; project/spec/validate_contracts.py also has a separate existing workflow-manifest fixture revision mismatch."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "F6_package_update_hardening_reconciled_on_current_main",
+      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
+      "summary": "A Luna XHigh focused comparison found the S02 release-candidate assembly, target smoke, machine-update authority, and rollback-recovery changes from the older F6 branch already present with identical file contents on current main. No branch cherry-pick is needed. S02 closeout remains unverified. S03-T03 paired package/Global rollback and S03-T06 fault injection remain missing; old branch files are stale and were not merged."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S07_T03_capture_provenance_inspector_integrated",
+      "source_commit": "6362a66d7a3c2cb7611309eee4e31f71757092c0",
+      "summary": "Integrated Luna XHigh commit c4ea8cf20e2d411f57ecccadc790cc9fda4d19c5. The Global TUI now loads and verifies original capture witnesses on demand, with bounded history lookup and explicit missing/tampered outcomes. Combined Global TUI typecheck and test suite pass (103/103). S07-T90 acceptance remains open. The handoff identified that the application snapshot still transmits capture_witnesses; a focused change was held because crates/application/src/global_manager.rs remains under the S06 whole-file lease."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S07_T03_interactive_snapshot_privacy_change_held",
+      "source_commit": "6362a66d7a3c2cb7611309eee4e31f71757092c0",
+      "summary": "The proposed change to omit capture_witnesses from interactive Global snapshots was drafted and its focused application regression passed, but both edits were reverted before commit after confirming an active S06 whole-file write grant on crates/application/src/global_manager.rs. No snapshot behavior changed; reconcile that lease before retrying."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "workflow_fixture_revision_fix_integrated",
+      "source_commit": "2899b741b188bc22b52e03cb41c5310f3fc63137",
+      "summary": "Aligned project/spec/workflows/manifest.json fixture_version with the root and fixture revision. The full project contract validator now passes: 8 protocol envelopes, 11 guidance fixtures, 11 workflow assets, transition vectors, clock/dependency cases, conformance mappings and SQLite schema."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "BW_S13_T02_scheduling_tui_integrated",
+      "source_commit": "ef89994fc8afa05c1f6286a70b740fbd8a232355",
+      "summary": "Integrated the typed date scheduling and external-wait TUI. Typecheck and all 106 TUI tests pass on the integrated tree. The wait readback route still returns the unbounded full list, so the TUI labels its 100-item display partial; BW-S13-T02/T90 acceptance remains open."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S11_entry_dependency_reconciled",
+      "source_commit": "ef89994fc8afa05c1f6286a70b740fbd8a232355",
+      "summary": "Corrected BW-S11/SPRINT.md entry text to include BW-S13-T90, matching the sprint task table and master plan. S11 remains blocked until S09, S10, S12, and S13 sprint acceptance is recorded."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S12_T05_callable_contract_reconciled",
+      "source_commit": "d0fccd3f42799b3760238591b430803697df0ea8",
+      "summary": "Reconciled only the granted CLI contract rows and general-work/artifact-acceptance workflow fixtures. Typed artifact-result binding and computed inspection are recorded as callable; generic artifact submission and generic human deliverable-decision routes remain unavailable. Contract and workflow-package validators pass. This is source-contract progress only; no T05 journey or T90 acceptance evidence was recorded."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "V4_dependency_audits_reconciled",
+      "source_commit": "d0fccd3f42799b3760238591b430803697df0ea8",
+      "summary": "Three read-only Luna XHigh audits reconciled S00-S05 and S12 predecessor/gate evidence. S00-T90 is unaccepted; S01/S02/S03 are not graph-ready from checked-in evidence; S04 and S02 qualification artifacts are stale for this source; S05 and S12 handoff/T90 evidence is absent. No runtime status or active grants were inferred or mutated. The requested worker-stop confirmation remains unavailable."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "boreal_cli_serial_suite_pass_parallel_environment_race_observed",
+      "source_commit": "d0fccd3f42799b3760238591b430803697df0ea8",
+      "summary": "The default parallel `cargo test -p boreal-cli` run had 155/156 unit tests pass; daily_filter_uses_the_public_global_service_socket_route failed with an empty result. The test passes alone, and the full CLI suite passes with `-- --test-threads=1`. Two parallel tests mutate BOREAL_GLOBAL_ROOT, which points to an environment race. No test files were edited because the Global CLI module remains under a recorded S06 whole-file grant."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "V4_continuation_draft_pr_opened",
+      "source_commit": "38024aa4887f9a463e99487f77a8aeeafb54ee9b",
+      "summary": "Pushed the rebased codex/v4-roadmap-continuation branch and opened draft PR #23. The PR keeps the V4 source progress reviewable but makes no sprint-acceptance or release claim. It remains draft pending the S00 worker-stop confirmation, supported task/grant reconciliation and successor acceptance gates."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "production_phase_gates_reconciled",
+      "source_commit": "2e04e4c1cf9569a377c1c8e853ea6b1c2bac689b",
+      "summary": "Read-only package audits confirmed F1-F6 remain in progress with empty evidence and all J1-J13 unrun. F7 is blocked on F1-F6 integration; F8 is blocked on native artifact qualification. No qualification, activation, release, or runtime lifecycle state was asserted."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "F3_F4_intake_service_dashboard_dispatched",
+      "source_commit": "2e04e4c1cf9569a377c1c8e853ea6b1c2bac689b",
+      "summary": "Delegated the typed paged intake list, lifecycle update/promotion routes, and dashboard intake flow to a Luna Extra High agent with scoped shared-file leases. F1 and S06 areas remain excluded. This is implementation work only; J7/J9 and sprint acceptance remain open."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "v4_guidance_intake_and_wait_paging_integrated",
+      "source_commit": "db5ee5fec8f103881164715d1fee4d7c02999577",
+      "summary": "Integrated direct/service guidance transport context and typed operator input for empty source banks; paged intake disposition/promotion with provenance in the service and dashboard; and bounded, revision-pinned external-wait pages across CLI, service, and TUI. The serial boreal-cli suite, all 109 TUI tests, and workflow package validator/self-tests pass. F1-F6 remain in progress with empty evidence, J1-J13 remain unrun, and F7/F8 remain blocked; no sprint acceptance or release claim is made."
     }
   ]
 }

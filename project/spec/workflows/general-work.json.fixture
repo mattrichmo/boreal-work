@@ -64,7 +64,7 @@
   "contract_only_schemas": {
     "callable": false,
     "status": "frozen_contract_not_callable",
-    "reason": "BW-S12-T01 freezes additive typed payloads; the owning planning, execution, and knowledge tasks must implement callable operations before these schemas are advertised as available.",
+    "reason": "BW-S12-T01 freezes additive generic payload shapes, but those schemas are not public callable routes. The owning tasks provide narrower callable use cases such as typed artifact-result binding; do not advertise generic submission or human-decision routes as available from these fixture schemas.",
     "deliverable_requirement": {
       "schema_version": "boreal.deliverable_requirement.v1",
       "requirement_key": "final_brief",
@@ -161,9 +161,22 @@
     },
     "output_submission_and_inspection": {
       "status": "unavailable",
-      "reason": "No public general-work artifact submission or typed output-inspection route is registered.",
+      "reason": "The generic T01 artifact_submission and standalone artifact_inspection routes are not callable. The narrower T03 typed artifact-result binding route is callable and computes output inspection facts; it does not make generic submission or deliverable-human-decision schemas callable.",
       "schema_status": "frozen_contract_not_callable"
+    },
+    "typed_output_inspection_result_binding": {
+      "status": "implemented",
+      "routes": ["artifact result bind", "artifact result attempt", "artifact result operation"],
+      "direct_cli": true,
+      "service_dispatch": true,
+      "request_schema": "boreal.artifact_result_bind.v1",
+      "bind_readback_schema": "boreal.artifact_result_bind_readback.v1",
+      "readback_schema": "boreal.artifact_result_readback.v1",
+      "identity_authority": "project_actor_session_operation_trusted_time_from_authenticated_envelope_or_server",
+      "inspection_authority": "application_revalidates_exact_source_versions_and_computes_output_inspection_facts",
+      "generic_artifact_submission": "unavailable",
+      "generic_human_deliverable_decision": "unavailable"
     }
   },
-  "contract_status": "implemented_fields_are_limited_to_the_callable_create_edit_and_claim_routes"
+  "contract_status": "implemented_fields_cover_callable_create_edit_claim_and_typed_artifact_result_routes_only"
 }

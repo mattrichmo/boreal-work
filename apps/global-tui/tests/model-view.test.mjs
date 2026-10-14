@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { GlobalController, isOverdue } from "../dist/model.js";
 import { render, ROUTE_MENU } from "../dist/view.js"
 
@@ -81,6 +82,32 @@ test("inspector can take over a narrow screen on focus",async()=>{
 });
 test("history route shows retained status transitions",async()=>{
  const {client,snapshot}=fixture();snapshot.status_history=[{item_id:"item25",from_status_id:"s1",to_status_id:"s7",revision:4,changed_at:"2026-09-29T14:00:00Z"}];const c=new GlobalController(client);await c.refresh();c.setScope("life");c.setRoute("history");c.selectId("item25");const screen=render(c,100,20);assert.match(screen,/s1 → s7/);assert.match(screen,/Sep 29, 2026/);
+});
+test("capture provenance stays compact in rows and loads its verified witness through bounded history on demand",async()=>{
+ const {snapshot}=fixture();const text="Captured note with preserved whitespace.\nSecond line.";const digest=`sha256:${createHash("sha256").update(text,"utf8").digest("hex")}`;
+ const captured={...snapshot.items[0],id:"captured-item",project_id:null,status_id:"personal-inbox",title:text,capture_origin:{digest,source_ref:"legacy:raw-7"}};snapshot.items.push(captured);snapshot.capture_witnesses=[{item_id:captured.id,revision:7,captured_at:"2026-10-01T12:00:00Z",text,digest,source_ref:"legacy:raw-7"}];
+ let itemDetailCalls=0,entityHistoryCalls=0,operationCalls=0;
+ const client={snapshot:async()=>serverSnapshot(snapshot),execute:async(command,payload)=>{assert.equal(command,"task show");assert.equal(payload.item_id,captured.id);itemDetailCalls++;return structuredClone(captured);},history:async(options={})=>{
+   if(options.entityId){entityHistoryCalls++;assert.equal(options.entityId,captured.id);assert.equal(options.limit,200);assert.equal(options.offset,0);return{events:[{operation_id:"capture-op",revision:7,command:"todo add",entity_kind:"todo",entity_id:captured.id,title:captured.title,summary:"Created captured item",created_at:"2026-10-01T12:00:00Z"}],current_revision:7,total:1,limit:200,offset:0,has_more:false,next_offset:null};}
+   return{events:[],current_revision:7,total:0,limit:50,offset:0,has_more:false,next_offset:null};
+ },operationShow:async(id)=>{operationCalls++;assert.equal(id,"capture-op");return{operation_id:id,request_digest:"request-digest",revision:7,created_at:"2026-10-01T12:00:00Z",result:{...captured,capture_witness:{item_id:captured.id,revision:7,captured_at:"2026-10-01T12:00:00Z",text,digest,source_ref:"legacy:raw-7"}}};}};
+ const c=new GlobalController(client);await c.refresh();assert.equal(Object.hasOwn(c.snapshot,"capture_witnesses"),false);c.setRoute("inbox");c.selectId(captured.id);
+ assert.match(render(c,100,20),/captured/);assert.equal(itemDetailCalls,0);assert.equal(entityHistoryCalls,0);assert.equal(operationCalls,0);assert.equal(c.captureInspectionFor(c.selectedItem).status,"not_loaded");
+ c.focus="inspector";assert.match(render(c,90,30),/Digest: sha256:/);assert.match(render(c,90,30),/not loaded/);
+ await c.loadSelectedDetail();assert.equal(itemDetailCalls,1);assert.equal(entityHistoryCalls,1);assert.equal(operationCalls,1);assert.equal(c.captureInspectionFor(c.selectedItem).status,"available");
+ const screen=render(c,90,40);assert.match(screen,/Capture provenance/);assert.match(screen,new RegExp(digest));assert.match(screen,/Source reference: legacy:raw-7/);assert.match(screen,/Original capture text:/);assert.match(screen,/Captured note with preserved whitespace/);assert.match(screen,/Second line/);
+});
+test("capture provenance keeps its digest visible when original history is missing or beyond the bound",async()=>{
+ const {snapshot}=fixture();const text="Imported capture";const digest=`sha256:${createHash("sha256").update(text,"utf8").digest("hex")}`;const captured={...snapshot.items[0],id:"old-capture",title:text,capture_origin:{digest,source_ref:null}};snapshot.items.push(captured);
+ let beyondBound=false;const client={snapshot:async()=>serverSnapshot(snapshot),execute:async()=>structuredClone(captured),history:async options=>options.entityId?{events:beyondBound?Array.from({length:200},(_,index)=>({operation_id:`update-${index}`,revision:300-index,command:"todo move",entity_kind:"todo",entity_id:captured.id,title:captured.title,summary:"Updated captured item",created_at:"2026-10-01T12:00:00Z"})):[],current_revision:400,total:beyondBound?250:0,limit:200,offset:0,has_more:beyondBound,next_offset:beyondBound?200:null}:{events:[],current_revision:9,total:0,limit:50,offset:0,has_more:false,next_offset:null}};
+ const c=new GlobalController(client);await c.refresh();c.setRoute("list");c.selectId(captured.id);c.focus="inspector";await c.loadSelectedDetail();let screen=render(c,90,30);assert.match(screen,new RegExp(digest));assert.match(screen,/No retained capture operation was found/);
+ beyondBound=true;const c2=new GlobalController(client);await c2.refresh();c2.setRoute("list");c2.selectId(captured.id);c2.focus="inspector";await c2.loadSelectedDetail();screen=render(c2,90,30);assert.match(screen,new RegExp(digest));assert.match(screen,/newest 200 retained item history events/);
+});
+test("capture witness whose text does not match its immutable digest is not displayed",async()=>{
+ const {snapshot}=fixture();const text="original capture";const digest=`sha256:${createHash("sha256").update(text,"utf8").digest("hex")}`;const captured={...snapshot.items[0],id:"tampered-capture",title:text,capture_origin:{digest}};snapshot.items.push(captured);
+ const event={operation_id:"capture-op",revision:7,command:"todo add",entity_kind:"todo",entity_id:captured.id,title:text,summary:"Created captured item",created_at:"2026-10-01T12:00:00Z"};
+ const client={snapshot:async()=>serverSnapshot(snapshot),execute:async()=>structuredClone(captured),history:async options=>options.entityId?{events:[event],current_revision:7,total:1,limit:200,offset:0,has_more:false,next_offset:null}:{events:[],current_revision:7,total:0,limit:50,offset:0,has_more:false,next_offset:null},operationShow:async()=>({operation_id:"capture-op",revision:7,request_digest:"request",created_at:"now",result:{id:captured.id,capture_witness:{item_id:captured.id,revision:7,captured_at:"2026-10-01T12:00:00Z",text:"tampered witness",digest,source_ref:null}}})};
+ const c=new GlobalController(client);await c.refresh();c.setRoute("list");c.selectId(captured.id);c.focus="inspector";await c.loadSelectedDetail();assert.equal(c.captureInspectionFor(c.selectedItem).status,"unavailable");const screen=render(c,90,30);assert.match(screen,new RegExp(digest));assert.match(screen,/no witness matching this item and origin digest/);assert.doesNotMatch(screen,/tampered witness/);
 });
 test("all record routes preserve a deep selection across 50+ rows",async()=>{
  const {snapshot}=fixture();

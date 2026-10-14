@@ -190,6 +190,12 @@ export interface StatusItem {
   priority?: number;
   dispatch_policy?: DispatchPolicy | string;
   due_at?: string | null;
+  /** Civil-time classification supplied by Rust's canonical status decision. */
+  due_today?: boolean;
+  overdue?: boolean;
+  /** Open waits supplied by the same canonical status decision. */
+  blocking_external_wait_ids?: string[];
+  follow_up_due_wait_ids?: string[];
   dependencies?: DependencySummary[];
   activity?: ActivitySummary[];
   gates?: { open: GateItem[]; satisfied: GateItem[] };
@@ -635,6 +641,138 @@ export interface WorkProjection {
   planning_diagnostic?: string | null;
 }
 
+export type BusinessDateDto =
+  | { kind: "instant"; at_ms: number }
+  | { kind: "local_date"; year: number; month: number; day: number }
+  | { kind: "resolved_local"; nominal_local: LocalDateTimeInput; utc_instant_ms: number; utc_offset_minutes: number; timezone: string; tzdb_identity: string; gap_policy: "next_valid"; fold_policy: "earlier_offset" | "later_offset" };
+
+export interface BusinessScheduleDto {
+  not_before: BusinessDateDto | null;
+  due: BusinessDateDto | null;
+  planned_start: BusinessDateDto | null;
+  planned_end: BusinessDateDto | null;
+}
+
+export interface WorkScheduleReadbackDto {
+  schema_version: "boreal.work_schedule_readback.v1";
+  project_revision: number;
+  work_id: string;
+  schedule_revision: number;
+  schedule: BusinessScheduleDto | null;
+  legacy_due_at: string | null;
+}
+
+export interface WorkScheduleMutationReadbackDto {
+  schema_version: "boreal.work_schedule_readback.v1";
+  operation_id: string;
+  replayed: boolean;
+  project_revision: number;
+  work_id: string;
+  schedule_revision: number;
+  schedule: BusinessScheduleDto;
+}
+
+export type ExternalWaitCategoryDto = "decision" | "approval" | "information" | "access" | "service" | "other";
+export type ExternalWaitStateDto = "open" | "resolved" | "cancelled";
+export type ExternalWaitOutcomeDto = "approved" | "rejected" | "decision_provided" | "output_provided" | "declined" | "unavailable" | "cancelled";
+export type ExternalWaitRoleDto = "agent" | "operator" | "reviewer" | "publisher";
+export type ExternalWaitAccountableDto =
+  | { kind: "person"; reference: string; display_name: string }
+  | { kind: "role"; role: ExternalWaitRoleDto }
+  | { kind: "service"; reference: string; display_name: string };
+
+export interface ExternalWaitResolutionDto {
+  outcome: ExternalWaitOutcomeDto;
+  detail: string;
+  output_ref: string | null;
+  supplied_by: ExternalWaitAccountableDto;
+  recorded_by: string;
+  recorded_as: ExternalWaitRoleDto;
+  recorded_at_ms: number;
+}
+
+export interface ExternalWaitDto {
+  wait_id: string;
+  source_work_id: string;
+  affected_work_ids: string[];
+  category: ExternalWaitCategoryDto;
+  reason: string;
+  accountable: ExternalWaitAccountableDto;
+  expected_decision: string | null;
+  expected_output: string | null;
+  follow_up: BusinessDateDto | null;
+  civil_time_setting_revision: number | null;
+  wait_revision: number;
+  state: ExternalWaitStateDto;
+  created_by: string;
+  created_at_ms: number;
+  resolution: ExternalWaitResolutionDto | null;
+}
+
+export interface ExternalWaitReadbackDto {
+  schema_version: "boreal.external_wait_readback.v1";
+  project_revision: number;
+  waits: ExternalWaitDto[];
+}
+
+export interface ExternalWaitListReadbackDto {
+  schema_version: "boreal.external_wait_list_readback.v1";
+  project_revision: number;
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  waits: ExternalWaitDto[];
+}
+
+export interface ExternalWaitMutationReadbackDto {
+  schema_version: "boreal.external_wait_readback.v1";
+  operation_id: string;
+  replayed: boolean;
+  project_revision: number;
+  wait: ExternalWaitDto;
+}
+
+export interface WorkScheduleUpdateDto {
+  schema_version: "boreal.work_schedule_update.v1";
+  expected_project_revision: number;
+  expected_schedule_revision: number;
+  schedule: BusinessScheduleDto;
+}
+
+export interface ExternalWaitCreateDto {
+  schema_version: "boreal.external_wait_create.v1";
+  expected_project_revision: number;
+  expected_wait_revision: 0;
+  wait_id: string;
+  source_work_id: string;
+  affected_work_ids: string[];
+  category: ExternalWaitCategoryDto;
+  reason: string;
+  accountable: ExternalWaitAccountableDto;
+  expected_decision: string | null;
+  expected_output: string | null;
+  follow_up: BusinessDateDto | null;
+}
+
+export interface ExternalWaitResolveDto {
+  schema_version: "boreal.external_wait_resolve.v1";
+  expected_project_revision: number;
+  expected_wait_revision: number;
+  wait_id: string;
+  next_state: "resolved" | "cancelled";
+  outcome: ExternalWaitOutcomeDto;
+  detail: string;
+  output_ref: string | null;
+  supplied_by: ExternalWaitAccountableDto;
+}
+
+export interface ProjectCivilTimeReadbackDto {
+  schema_version: "boreal.project_civil_time_readback.v1";
+  project_revision: number;
+  setting: { setting_revision: number; timezone: string; tzdb_identity: string; changed_by: string; changed_at_ms: number } | null;
+}
+
 export interface DependencyChangeInput {
   project_id: string;
   prerequisite_id: string;
@@ -688,6 +826,67 @@ export interface SourceListReadback {
   catalog_root: string;
 }
 
+export type IntakeLifecycleDto = "captured" | "triaged" | "deferred" | "resolved" | "archived";
+export type IntakePromotionTargetKindDto = "draft_work" | "source_version" | "memory_draft";
+export interface IntakeListItemDto {
+  project_id: string;
+  intake_id: string;
+  bucket_id: string;
+  kind: string;
+  lifecycle: IntakeLifecycleDto;
+  content: string;
+  content_revision: number;
+  content_digest: string;
+  captured_at: string;
+  updated_at: string;
+  revisit_at_utc_ms: number | null;
+}
+export interface IntakeListReadbackDto {
+  schema_version: "boreal.intake_list_readback.v1";
+  project_id: string;
+  project_revision: number;
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  items: IntakeListItemDto[];
+}
+export interface IntakeDispositionDto {
+  schema_version: "boreal.intake_disposition.v1";
+  expected_project_revision: number;
+  expected_content_revision: number;
+  intake_id: string;
+  lifecycle: Exclude<IntakeLifecycleDto, "captured">;
+  revisit_at_utc_ms: number | null;
+}
+export interface IntakeDispositionReadbackDto {
+  schema_version: "boreal.intake_disposition_readback.v1";
+  project_id: string;
+  intake_id: string;
+  lifecycle: IntakeLifecycleDto;
+  content_revision: number;
+  revisit_at_utc_ms: number | null;
+  replayed: boolean;
+}
+export interface IntakePromoteDto {
+  schema_version: "boreal.intake_promote.v1";
+  expected_project_revision: number;
+  expected_content_revision: number;
+  intake_id: string;
+  target_kind: IntakePromotionTargetKindDto;
+  target_id: string;
+}
+export interface IntakePromoteReadbackDto {
+  schema_version: "boreal.intake_promote_readback.v1";
+  project_id: string;
+  intake_id: string;
+  promotion_id: string;
+  target_kind: IntakePromotionTargetKindDto;
+  target_id: string;
+  content_revision: number;
+  replayed: boolean;
+}
+
 export type MemoryCitationInput = { source_version_id: string; location: string };
 export type MemoryOperationInput =
   | { kind: "draft"; draft_id: string; entry_id: string; title: string; body: string; citations: MemoryCitationInput[] }
@@ -725,7 +924,8 @@ export interface CompletionCommandInput {
 export type WorkspaceAction =
   | "work_edit" | "dependency_add" | "dependency_remove" | "cycle_change"
   | "memory_command" | "recovery_command" | "completion" | "session_end" | "bind_final_result"
-  | "source_add";
+  | "source_add" | "work_schedule_update" | "external_wait_create" | "external_wait_resolve"
+  | "intake_disposition" | "intake_promote";
 export type MutationAction = TuiAction | WorkspaceAction;
 
 export interface VersionedServiceApi extends StatusReader {
@@ -746,6 +946,16 @@ export interface VersionedServiceApi extends StatusReader {
   readReceipt?(project_id: string, work_id: string, attempt_id: string, fence: number): Promise<Envelope<ReceiptReadback>>;
   /** Optional read-only workspace projections served by the versioned Rust API. */
   readWorkspaceView?(kind: WorkspaceViewKind, project_id: string): Promise<Envelope<unknown>>;
+  readWorkSchedule?(project_id: string, work_id: string): Promise<Envelope<WorkScheduleReadbackDto>>;
+  updateWorkSchedule?(request: RequestEnvelope<{ project_id: string; work_id: string; schedule_update: WorkScheduleUpdateDto }>): Promise<Envelope<WorkScheduleMutationReadbackDto>>;
+  readIntake?(project_id: string, limit?: number, offset?: number): Promise<Envelope<IntakeListReadbackDto>>;
+  updateIntakeDisposition?(request: RequestEnvelope<{ project_id: string; disposition: IntakeDispositionDto }>): Promise<Envelope<IntakeDispositionReadbackDto>>;
+  promoteIntake?(request: RequestEnvelope<{ project_id: string; promotion: IntakePromoteDto }>): Promise<Envelope<IntakePromoteReadbackDto>>;
+  readExternalWaits?(project_id: string, wait_id?: string): Promise<Envelope<ExternalWaitReadbackDto>>;
+  readExternalWaitPage?(project_id: string, limit?: number, offset?: number, expected_project_revision?: number): Promise<Envelope<ExternalWaitListReadbackDto>>;
+  createExternalWait?(request: RequestEnvelope<{ project_id: string; wait_create: ExternalWaitCreateDto }>): Promise<Envelope<ExternalWaitMutationReadbackDto>>;
+  resolveExternalWait?(request: RequestEnvelope<{ project_id: string; wait_resolve: ExternalWaitResolveDto }>): Promise<Envelope<ExternalWaitMutationReadbackDto>>;
+  readProjectCivilTime?(project_id: string): Promise<Envelope<ProjectCivilTimeReadbackDto>>;
   editWork?(request: RequestEnvelope<WorkEditInput>): Promise<Envelope<unknown>>;
   readWork?(project_id: string, work_id: string): Promise<Envelope<WorkProjection>>;
   addDependency?(request: RequestEnvelope<DependencyChangeInput>): Promise<Envelope<unknown>>;
@@ -764,7 +974,7 @@ export interface VersionedServiceApi extends StatusReader {
   captureSource?(request: RequestEnvelope<{ project_id: string; input: string; origin: string; media_type?: string; expected_revision: number }>): Promise<Envelope<unknown>>;
 }
 
-export type WorkspaceViewKind = "cycles" | "reviews" | "memory" | "recovery" | "dependencies" | "sources" | "session";
+export type WorkspaceViewKind = "cycles" | "reviews" | "memory" | "recovery" | "dependencies" | "sources" | "session" | "waits" | "intake";
 
 export type TuiAction =
   | "create_project" | "create_work" | "claim" | "accept_start"
@@ -805,11 +1015,12 @@ export const DASHBOARD_CAPABILITIES: readonly DashboardCapability[] = [
   { route: "work.edit", label: "Edit work", status: "unavailable", reason: "This action is not available in this connection", owner: "planning/application" },
   { route: "dependency.add/remove/tree", label: "Dependencies", status: "unavailable", reason: "Use the project command line to inspect or edit dependencies", owner: "planning/application" },
   { route: "cycle.create/activate/board", label: "Cycle changes and boards", status: "unavailable", reason: "Cycle lists are available here; use the project command line to create, change, or open a cycle board", owner: "hierarchy/application" },
-  { route: "intake.list/promote", label: "Intake", status: "unavailable", reason: "Use the project command line for this workflow", owner: "knowledge/application" },
+  { route: "intake.list/promote/disposition", label: "Intake", status: "unavailable", reason: "Typed intake routes are not available in this connection", owner: "knowledge/application" },
   { route: "source.list/search/capture", label: "Sources", status: "unavailable", reason: "Source routes are not available in this connection", owner: "source/application" },
   { route: "evidence.bind_final_result/receipts_for_attempt", label: "Result binding and attempt receipts", status: "unavailable", reason: "Typed result binding and receipt history routes are not available in this connection", owner: "evidence/service" },
   { route: "memory.publish", label: "Published memory changes", status: "unavailable", reason: "Memory search is available here; use the project command line to draft, review, publish, or reconcile memory", owner: "memory/application" },
   { route: "session.end/recover", label: "Session recovery resolution", status: "unavailable", reason: "Recovery obligations are visible here; use the project command line to resolve an obligation or end a session", owner: "runtime/service" },
+  { route: "work.schedule/wait.read/create/resolve", label: "Work dates and external waits", status: "unavailable", reason: "Date and external-wait operations are not available in this connection", owner: "scheduling/application" },
   { route: "activity.history", label: "Activity history", status: "unavailable", reason: "Use the project command line for this workflow", owner: "protocol/service" },
 ];
 
@@ -821,6 +1032,8 @@ function dashboardCapabilities(service: VersionedServiceApi): DashboardCapabilit
         ? !!service.addDependency && !!service.removeDependency && !!service.readDependencyGraph
         : capability.route === "cycle.create/activate/board"
           ? !!service.changeCycle && !!service.readCycle
+          : capability.route === "intake.list/promote/disposition"
+            ? !!service.readIntake && !!service.promoteIntake && !!service.updateIntakeDisposition
           : capability.route === "source.list/search/capture"
             ? !!service.readSources && !!service.searchSources && !!service.captureSource
             : capability.route === "evidence.bind_final_result/receipts_for_attempt"
@@ -829,6 +1042,8 @@ function dashboardCapabilities(service: VersionedServiceApi): DashboardCapabilit
                 ? !!service.memoryCommand
                 : capability.route === "session.end/recover"
                   ? !!service.endSession && !!service.recoveryCommand
+                    : capability.route === "work.schedule/wait.read/create/resolve"
+                      ? !!service.readWorkSchedule && !!service.updateWorkSchedule && !!service.readExternalWaits && !!service.readExternalWaitPage && !!service.createExternalWait && !!service.resolveExternalWait
                   : false;
     return available
       ? { ...capability, status: "available", reason: "Typed service routes are available in this connection." }
@@ -1249,6 +1464,15 @@ function normalizeStatusItem(value: unknown): StatusItem {
   if (nextStatusChange !== undefined && nextStatusChange !== null && typeof nextStatusChange !== "string") {
     throw new ProtocolEnvelopeError("status item next_status_change_at must be a string or null");
   }
+  for (const field of ["due_today", "overdue"] as const) {
+    if (value[field] !== undefined && typeof value[field] !== "boolean")
+      throw new ProtocolEnvelopeError(`status item ${field} must be a boolean when supplied`);
+  }
+  for (const field of ["blocking_external_wait_ids", "follow_up_due_wait_ids"] as const) {
+    const waitIds = value[field];
+    if (waitIds !== undefined && (!Array.isArray(waitIds) || !waitIds.every((id: unknown) => typeof id === "string")))
+      throw new ProtocolEnvelopeError(`status item ${field} must be an array of identifiers when supplied`);
+  }
   const priority = value.priority === undefined ? undefined : asNumber(value.priority, "priority");
   const rawExecutionMode = value.execution_mode;
   if (rawExecutionMode !== undefined && rawExecutionMode !== null && !["direct", "container"].includes(String(rawExecutionMode)))
@@ -1280,6 +1504,10 @@ function normalizeStatusItem(value: unknown): StatusItem {
     priority,
     dispatch_policy: typeof value.dispatch_policy === "string" ? value.dispatch_policy : undefined,
     due_at: typeof value.due_at === "string" || value.due_at === null ? value.due_at : undefined,
+    due_today: typeof value.due_today === "boolean" ? value.due_today : undefined,
+    overdue: typeof value.overdue === "boolean" ? value.overdue : undefined,
+    blocking_external_wait_ids: Array.isArray(value.blocking_external_wait_ids) ? value.blocking_external_wait_ids as string[] : undefined,
+    follow_up_due_wait_ids: Array.isArray(value.follow_up_due_wait_ids) ? value.follow_up_due_wait_ids as string[] : undefined,
     dependencies,
     activity: normalizeActivity(value.activity),
     gates: normalizedGates,
@@ -1362,6 +1590,253 @@ function normalizeFinalResultBinding(value: unknown): FinalResultBinding {
     throw new ProtocolEnvelopeError("final result binding lineage_pending must be a string or null");
   if (typeof value.replayed !== "boolean") throw new ProtocolEnvelopeError("final result binding replayed must be boolean");
   return value as unknown as FinalResultBinding;
+}
+
+function record(value: unknown, name: string): Record<string, unknown> {
+  if (!isObject(value) || Array.isArray(value)) throw new ProtocolEnvelopeError(`${name} must be an object`);
+  return value;
+}
+
+function requiredNullableString(value: unknown, name: string): string | null {
+  if (value !== null && typeof value !== "string") throw new ProtocolEnvelopeError(`${name} must be a string or null`);
+  return value as string | null;
+}
+
+function validCalendarDate(year: number, month: number, day: number): boolean {
+  if (!Number.isInteger(year) || year < -2147483648 || year > 2147483647 || !Number.isInteger(month) || !Number.isInteger(day))
+    return false;
+  const daysInMonth = [31, ((year % 4 === 0 && year % 100 !== 0) || year % 400 === 0) ? 29 : 28,
+    31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return daysInMonth !== undefined && day >= 1 && day <= daysInMonth;
+}
+
+function normalizeBusinessDate(value: unknown, name: string): BusinessDateDto {
+  const date = record(value, name);
+  if (date.kind === "instant" && Number.isSafeInteger(date.at_ms) && Number(date.at_ms) >= 0)
+    return { kind: "instant", at_ms: Number(date.at_ms) };
+  if (date.kind === "local_date") {
+    const { year, month, day } = date;
+    if (typeof year === "number" && typeof month === "number" && typeof day === "number" && validCalendarDate(year, month, day))
+      return { kind: "local_date", year, month, day };
+  }
+  if (date.kind === "resolved_local") {
+    const local = record(date.nominal_local, `${name}.nominal_local`);
+    const numbers = [local.year, local.month, local.day, local.hour, local.minute, local.second];
+    const validNumbers = numbers.every(number => typeof number === "number" && Number.isInteger(number));
+    if (validNumbers && validCalendarDate(Number(local.year), Number(local.month), Number(local.day))
+      && Number(local.hour) >= 0 && Number(local.hour) <= 23
+      && Number(local.minute) >= 0 && Number(local.minute) <= 59 && Number(local.second) >= 0 && Number(local.second) <= 59
+      && Number.isSafeInteger(date.utc_instant_ms) && Number(date.utc_instant_ms) >= 0
+      && Number.isInteger(date.utc_offset_minutes) && typeof date.timezone === "string" && typeof date.tzdb_identity === "string"
+      && date.gap_policy === "next_valid" && ["earlier_offset", "later_offset"].includes(String(date.fold_policy))) {
+      return { kind: "resolved_local", nominal_local: {
+        year: Number(local.year), month: Number(local.month), day: Number(local.day), hour: Number(local.hour),
+        minute: Number(local.minute), second: Number(local.second),
+      }, utc_instant_ms: Number(date.utc_instant_ms), utc_offset_minutes: Number(date.utc_offset_minutes),
+      timezone: date.timezone, tzdb_identity: date.tzdb_identity, gap_policy: "next_valid",
+      fold_policy: date.fold_policy as "earlier_offset" | "later_offset" };
+    }
+  }
+  throw new ProtocolEnvelopeError(`${name} is not a supported typed business date`);
+}
+
+function normalizeBusinessSchedule(value: unknown, name: string): BusinessScheduleDto {
+  const schedule = record(value, name);
+  const fields = ["not_before", "due", "planned_start", "planned_end"] as const;
+  const result = {} as BusinessScheduleDto;
+  for (const field of fields) {
+    if (!(field in schedule)) throw new ProtocolEnvelopeError(`${name}.${field} is missing; null is required to clear a date`);
+    result[field] = schedule[field] === null ? null : normalizeBusinessDate(schedule[field], `${name}.${field}`);
+  }
+  return result;
+}
+
+function normalizeScheduleReadback(value: unknown): WorkScheduleReadbackDto | WorkScheduleMutationReadbackDto {
+  const data = record(value, "work schedule readback");
+  if (data.schema_version !== "boreal.work_schedule_readback.v1" || !Number.isSafeInteger(data.project_revision)
+    || typeof data.work_id !== "string" || !Number.isSafeInteger(data.schedule_revision))
+    throw new ProtocolEnvelopeError("work schedule readback has invalid identity or revisions");
+  if ("operation_id" in data) {
+    if (typeof data.operation_id !== "string" || typeof data.replayed !== "boolean" || data.schedule === null)
+      throw new ProtocolEnvelopeError("work schedule mutation readback is incomplete");
+    return { schema_version: "boreal.work_schedule_readback.v1", operation_id: data.operation_id, replayed: data.replayed,
+      project_revision: Number(data.project_revision), work_id: data.work_id, schedule_revision: Number(data.schedule_revision),
+      schedule: normalizeBusinessSchedule(data.schedule, "work schedule readback.schedule") };
+  }
+  if (data.legacy_due_at !== null && typeof data.legacy_due_at !== "string")
+    throw new ProtocolEnvelopeError("work schedule legacy_due_at must be a string or null");
+  return { schema_version: "boreal.work_schedule_readback.v1", project_revision: Number(data.project_revision),
+    work_id: data.work_id, schedule_revision: Number(data.schedule_revision),
+    schedule: data.schedule === null ? null : normalizeBusinessSchedule(data.schedule, "work schedule readback.schedule"),
+    legacy_due_at: data.legacy_due_at as string | null };
+}
+
+function normalizeAccountable(value: unknown, name: string): ExternalWaitAccountableDto {
+  const accountable = record(value, name);
+  if (accountable.kind === "role" && ["agent", "operator", "reviewer", "publisher"].includes(String(accountable.role)))
+    return { kind: "role", role: accountable.role as ExternalWaitRoleDto };
+  if ((accountable.kind === "person" || accountable.kind === "service")
+    && typeof accountable.reference === "string" && typeof accountable.display_name === "string")
+    return { kind: accountable.kind, reference: accountable.reference, display_name: accountable.display_name };
+  throw new ProtocolEnvelopeError(`${name} is not a supported accountable identity`);
+}
+
+function normalizeExternalWait(value: unknown, name: string): ExternalWaitDto {
+  const wait = record(value, name);
+  const categories: ExternalWaitCategoryDto[] = ["decision", "approval", "information", "access", "service", "other"];
+  const states: ExternalWaitStateDto[] = ["open", "resolved", "cancelled"];
+  if (typeof wait.wait_id !== "string" || typeof wait.source_work_id !== "string"
+    || !Array.isArray(wait.affected_work_ids) || !wait.affected_work_ids.every(id => typeof id === "string")
+    || !categories.includes(wait.category as ExternalWaitCategoryDto) || typeof wait.reason !== "string"
+    || !states.includes(wait.state as ExternalWaitStateDto) || !Number.isSafeInteger(wait.wait_revision)
+    || typeof wait.created_by !== "string" || !Number.isSafeInteger(wait.created_at_ms))
+    throw new ProtocolEnvelopeError(`${name} has invalid identity, state, or revision fields`);
+  const resolution = wait.resolution === null ? null : (() => {
+    const raw = record(wait.resolution, `${name}.resolution`);
+    const outcomes: ExternalWaitOutcomeDto[] = ["approved", "rejected", "decision_provided", "output_provided", "declined", "unavailable", "cancelled"];
+    if (!outcomes.includes(raw.outcome as ExternalWaitOutcomeDto) || typeof raw.detail !== "string"
+      || !Number.isSafeInteger(raw.recorded_at_ms) || typeof raw.recorded_by !== "string"
+      || !["agent", "operator", "reviewer", "publisher"].includes(String(raw.recorded_as)))
+      throw new ProtocolEnvelopeError(`${name}.resolution is malformed`);
+    return { outcome: raw.outcome as ExternalWaitOutcomeDto, detail: raw.detail,
+      output_ref: requiredNullableString(raw.output_ref, `${name}.resolution.output_ref`),
+      supplied_by: normalizeAccountable(raw.supplied_by, `${name}.resolution.supplied_by`),
+      recorded_by: raw.recorded_by, recorded_as: raw.recorded_as as ExternalWaitRoleDto, recorded_at_ms: Number(raw.recorded_at_ms) };
+  })();
+  const settingRevision = wait.civil_time_setting_revision;
+  if (settingRevision !== null && !Number.isSafeInteger(settingRevision))
+    throw new ProtocolEnvelopeError(`${name}.civil_time_setting_revision is invalid`);
+  return { wait_id: wait.wait_id, source_work_id: wait.source_work_id, affected_work_ids: wait.affected_work_ids as string[],
+    category: wait.category as ExternalWaitCategoryDto, reason: wait.reason,
+    accountable: normalizeAccountable(wait.accountable, `${name}.accountable`),
+    expected_decision: requiredNullableString(wait.expected_decision, `${name}.expected_decision`),
+    expected_output: requiredNullableString(wait.expected_output, `${name}.expected_output`),
+    follow_up: wait.follow_up === null ? null : normalizeBusinessDate(wait.follow_up, `${name}.follow_up`),
+    civil_time_setting_revision: settingRevision as number | null, wait_revision: Number(wait.wait_revision),
+    state: wait.state as ExternalWaitStateDto, created_by: wait.created_by, created_at_ms: Number(wait.created_at_ms), resolution };
+}
+
+function normalizeWaitReadback(value: unknown): ExternalWaitReadbackDto | ExternalWaitMutationReadbackDto {
+  const data = record(value, "external wait readback");
+  if (data.schema_version !== "boreal.external_wait_readback.v1" || !Number.isSafeInteger(data.project_revision))
+    throw new ProtocolEnvelopeError("external wait readback has invalid schema or project revision");
+  if ("wait" in data) {
+    if (typeof data.operation_id !== "string" || typeof data.replayed !== "boolean")
+      throw new ProtocolEnvelopeError("external wait mutation readback is incomplete");
+    return { schema_version: "boreal.external_wait_readback.v1", operation_id: data.operation_id, replayed: data.replayed,
+      project_revision: Number(data.project_revision), wait: normalizeExternalWait(data.wait, "external wait mutation readback.wait") };
+  }
+  if (!Array.isArray(data.waits)) throw new ProtocolEnvelopeError("external wait list must contain waits");
+  return { schema_version: "boreal.external_wait_readback.v1", project_revision: Number(data.project_revision),
+    waits: data.waits.map((wait, index) => normalizeExternalWait(wait, `external wait readback.waits[${index}]`)) };
+}
+
+function normalizeWaitListReadback(value: unknown): ExternalWaitListReadbackDto {
+  const data = record(value, "external wait list readback");
+  if (data.schema_version !== "boreal.external_wait_list_readback.v1"
+    || !Number.isSafeInteger(data.project_revision) || (data.project_revision as number) < 0
+    || !Number.isSafeInteger(data.total) || (data.total as number) < 0
+    || !Number.isSafeInteger(data.offset) || (data.offset as number) < 0
+    || !Number.isSafeInteger(data.limit) || (data.limit as number) < 1 || (data.limit as number) > MAX_INLINE_ITEMS
+    || typeof data.has_more !== "boolean" || !Array.isArray(data.waits)
+    || data.waits.length > (data.limit as number)
+    || (data.waits.length > 0 && (data.offset as number) + data.waits.length > (data.total as number))
+    || data.has_more !== ((data.offset as number) + data.waits.length < (data.total as number)))
+    throw new ProtocolEnvelopeError("external wait list page has invalid schema, bounds, or pagination metadata");
+  return {
+    schema_version: "boreal.external_wait_list_readback.v1",
+    project_revision: Number(data.project_revision), total: Number(data.total),
+    offset: Number(data.offset), limit: Number(data.limit), has_more: data.has_more,
+    waits: data.waits.map((wait, index) => normalizeExternalWait(wait, `external wait list readback.waits[${index}]`)),
+  };
+}
+
+function normalizeCivilTimeReadback(value: unknown): ProjectCivilTimeReadbackDto {
+  const data = record(value, "project civil-time readback");
+  if (data.schema_version !== "boreal.project_civil_time_readback.v1" || !Number.isSafeInteger(data.project_revision))
+    throw new ProtocolEnvelopeError("project civil-time readback has invalid schema or revision");
+  if (data.setting === null) return { schema_version: "boreal.project_civil_time_readback.v1", project_revision: Number(data.project_revision), setting: null };
+  const setting = record(data.setting, "project civil-time readback.setting");
+  if (!Number.isSafeInteger(setting.setting_revision) || typeof setting.timezone !== "string"
+    || typeof setting.tzdb_identity !== "string" || typeof setting.changed_by !== "string"
+    || !Number.isSafeInteger(setting.changed_at_ms))
+    throw new ProtocolEnvelopeError("project civil-time setting is malformed");
+  return { schema_version: "boreal.project_civil_time_readback.v1", project_revision: Number(data.project_revision),
+    setting: { setting_revision: Number(setting.setting_revision), timezone: setting.timezone,
+      tzdb_identity: setting.tzdb_identity, changed_by: setting.changed_by, changed_at_ms: Number(setting.changed_at_ms) } };
+}
+
+function normalizeIntakeListReadback(value: unknown): IntakeListReadbackDto {
+  const data = record(value, "intake list readback");
+  if (data.schema_version !== "boreal.intake_list_readback.v1"
+    || typeof data.project_id !== "string"
+    || !Number.isSafeInteger(data.project_revision) || (data.project_revision as number) < 0
+    || !Number.isSafeInteger(data.total) || (data.total as number) < 0
+    || !Number.isSafeInteger(data.offset) || (data.offset as number) < 0
+    || !Number.isSafeInteger(data.limit) || (data.limit as number) < 1 || (data.limit as number) > 100
+    || typeof data.has_more !== "boolean" || !Array.isArray(data.items))
+    throw new ProtocolEnvelopeError("intake list readback has invalid pagination or project fields");
+  const items = data.items.map((raw): IntakeListItemDto => {
+    const item = record(raw, "intake list item");
+    for (const field of ["project_id", "intake_id", "bucket_id", "kind", "content", "content_digest", "captured_at", "updated_at"] as const)
+      requiredString(item[field], `intake_list.${field}`);
+    if (item.project_id !== data.project_id) throw new ProtocolEnvelopeError("intake list contains an item from another project");
+    if (!Number.isSafeInteger(item.content_revision) || (item.content_revision as number) < 1)
+      throw new ProtocolEnvelopeError("intake list item content revision is invalid");
+    if (!["captured", "triaged", "deferred", "resolved", "archived"].includes(String(item.lifecycle)))
+      throw new ProtocolEnvelopeError("intake list item lifecycle is invalid");
+    if (item.revisit_at_utc_ms !== null && item.revisit_at_utc_ms !== undefined
+      && (!Number.isSafeInteger(item.revisit_at_utc_ms) || (item.revisit_at_utc_ms as number) < 0))
+      throw new ProtocolEnvelopeError("intake list item revisit time is invalid");
+    return { project_id: item.project_id as string, intake_id: item.intake_id as string,
+      bucket_id: item.bucket_id as string, kind: item.kind as string, lifecycle: item.lifecycle as IntakeLifecycleDto,
+      content: item.content as string, content_revision: item.content_revision as number,
+      content_digest: item.content_digest as string, captured_at: item.captured_at as string,
+      updated_at: item.updated_at as string, revisit_at_utc_ms: (item.revisit_at_utc_ms ?? null) as number | null };
+  });
+  if (items.length > (data.limit as number))
+    throw new ProtocolEnvelopeError("intake list page exceeds its requested limit");
+  return { schema_version: data.schema_version, project_id: data.project_id as string,
+    project_revision: data.project_revision as number, total: data.total as number,
+    offset: data.offset as number, limit: data.limit as number, has_more: data.has_more, items };
+}
+
+function normalizeIntakeDispositionReadback(value: unknown): IntakeDispositionReadbackDto {
+  const data = record(value, "intake disposition readback");
+  if (data.schema_version !== "boreal.intake_disposition_readback.v1"
+    || typeof data.project_id !== "string" || typeof data.intake_id !== "string"
+    || !["captured", "triaged", "deferred", "resolved", "archived"].includes(String(data.lifecycle))
+    || !Number.isSafeInteger(data.content_revision) || (data.content_revision as number) < 1
+    || (data.revisit_at_utc_ms !== null && data.revisit_at_utc_ms !== undefined
+      && (!Number.isSafeInteger(data.revisit_at_utc_ms) || (data.revisit_at_utc_ms as number) < 0))
+    || typeof data.replayed !== "boolean")
+    throw new ProtocolEnvelopeError("intake disposition readback is malformed");
+  return { schema_version: data.schema_version, project_id: data.project_id as string,
+    intake_id: data.intake_id as string, lifecycle: data.lifecycle as IntakeLifecycleDto,
+    content_revision: data.content_revision as number,
+    revisit_at_utc_ms: (data.revisit_at_utc_ms ?? null) as number | null, replayed: data.replayed };
+}
+
+function normalizeIntakePromoteReadback(value: unknown): IntakePromoteReadbackDto {
+  const data = record(value, "intake promotion readback");
+  if (data.schema_version !== "boreal.intake_promote_readback.v1"
+    || typeof data.project_id !== "string" || typeof data.intake_id !== "string"
+    || typeof data.promotion_id !== "string" || typeof data.target_id !== "string"
+    || !["draft_work", "source_version", "memory_draft"].includes(String(data.target_kind))
+    || !Number.isSafeInteger(data.content_revision) || (data.content_revision as number) < 1
+    || typeof data.replayed !== "boolean")
+    throw new ProtocolEnvelopeError("intake promotion readback is malformed");
+  return { schema_version: data.schema_version, project_id: data.project_id as string,
+    intake_id: data.intake_id as string, promotion_id: data.promotion_id as string,
+    target_kind: data.target_kind as IntakePromotionTargetKindDto, target_id: data.target_id as string,
+    content_revision: data.content_revision as number, replayed: data.replayed };
+}
+
+function unwrapReadback<T>(response: Envelope<unknown>, normalize: (value: unknown) => T): Envelope<T> {
+  if (response.outcome !== "changed" && response.outcome !== "unchanged") return response as Envelope<T>;
+  const data = record(response.data, "scheduling response");
+  if (!("readback" in data)) throw new ProtocolEnvelopeError("scheduling response omitted its typed readback");
+  return { ...response, data: normalize(data.readback) };
 }
 
 function normalizeDiagnostics(value: unknown): StatusDiagnostic[] {
@@ -1643,6 +2118,81 @@ export class VersionedServiceClient implements VersionedServiceApi {
     return this.call("work_show", requestEnvelope(operationId(), { project_id, work_id }, null));
   }
 
+  async readWorkSchedule(project_id: string, work_id: string): Promise<Envelope<WorkScheduleReadbackDto>> {
+    this.assertProject(project_id, "work schedule readback");
+    requiredString(work_id, "work_schedule_readback.work_id");
+    const response = await this.call("work_schedule_readback_v1", requestEnvelope(operationId(), {
+      project_id, work_id,
+    }, null));
+    return unwrapReadback(response, normalizeScheduleReadback) as Envelope<WorkScheduleReadbackDto>;
+  }
+
+  async updateWorkSchedule(request: RequestEnvelope<{ project_id: string; work_id: string; schedule_update: WorkScheduleUpdateDto }>): Promise<Envelope<WorkScheduleMutationReadbackDto>> {
+    const input = request.data;
+    this.assertProject(input.project_id, "work schedule update");
+    requiredString(input.work_id, "work_schedule_update.work_id");
+    if (input.schedule_update.schema_version !== "boreal.work_schedule_update.v1"
+      || !Number.isSafeInteger(input.schedule_update.expected_project_revision)
+      || !Number.isSafeInteger(input.schedule_update.expected_schedule_revision))
+      throw new ProtocolEnvelopeError("work schedule update has invalid schema or revision preconditions");
+    const response = await this.call("work_schedule_update_v1", requestEnvelope(request.operation_id, input,
+      input.schedule_update.expected_project_revision), true);
+    return unwrapReadback(response, normalizeScheduleReadback) as Envelope<WorkScheduleMutationReadbackDto>;
+  }
+
+  async readExternalWaits(project_id: string, wait_id?: string): Promise<Envelope<ExternalWaitReadbackDto>> {
+    this.assertProject(project_id, "external wait readback");
+    if (wait_id !== undefined) requiredString(wait_id, "external_wait_readback.wait_id");
+    const response = await this.call("external_wait_readback_v1", requestEnvelope(operationId(), {
+      project_id, ...(wait_id ? { wait_id } : {}),
+    }, null));
+    return unwrapReadback(response, normalizeWaitReadback) as Envelope<ExternalWaitReadbackDto>;
+  }
+
+  async readExternalWaitPage(project_id: string, limit = 50, offset = 0, expected_project_revision?: number): Promise<Envelope<ExternalWaitListReadbackDto>> {
+    this.assertProject(project_id, "external wait list");
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_INLINE_ITEMS || !Number.isInteger(offset) || offset < 0
+      || (expected_project_revision !== undefined && (!Number.isSafeInteger(expected_project_revision) || expected_project_revision < 0)))
+      throw new ProtocolEnvelopeError("external wait list requires a page limit of 1..100 and a non-negative offset");
+    const response = await this.call("external_wait_list_v1", requestEnvelope(operationId(), {
+      project_id,
+      command: "external_wait_list_v1",
+      wait_list: { schema_version: "boreal.external_wait_list.v1", limit, offset,
+        ...(expected_project_revision !== undefined ? { expected_project_revision } : {}) },
+    }, null));
+    return unwrapReadback(response, normalizeWaitListReadback) as Envelope<ExternalWaitListReadbackDto>;
+  }
+
+  async createExternalWait(request: RequestEnvelope<{ project_id: string; wait_create: ExternalWaitCreateDto }>): Promise<Envelope<ExternalWaitMutationReadbackDto>> {
+    const input = request.data;
+    this.assertProject(input.project_id, "external wait create");
+    if (input.wait_create.schema_version !== "boreal.external_wait_create.v1"
+      || input.wait_create.expected_wait_revision !== 0
+      || !Number.isSafeInteger(input.wait_create.expected_project_revision))
+      throw new ProtocolEnvelopeError("external wait create has invalid schema or revision preconditions");
+    const response = await this.call("external_wait_create_v1", requestEnvelope(request.operation_id, input,
+      input.wait_create.expected_project_revision), true);
+    return unwrapReadback(response, normalizeWaitReadback) as Envelope<ExternalWaitMutationReadbackDto>;
+  }
+
+  async resolveExternalWait(request: RequestEnvelope<{ project_id: string; wait_resolve: ExternalWaitResolveDto }>): Promise<Envelope<ExternalWaitMutationReadbackDto>> {
+    const input = request.data;
+    this.assertProject(input.project_id, "external wait resolution");
+    if (input.wait_resolve.schema_version !== "boreal.external_wait_resolve.v1"
+      || !Number.isSafeInteger(input.wait_resolve.expected_project_revision)
+      || !Number.isSafeInteger(input.wait_resolve.expected_wait_revision))
+      throw new ProtocolEnvelopeError("external wait resolution has invalid schema or revision preconditions");
+    const response = await this.call("external_wait_resolve_v1", requestEnvelope(request.operation_id, input,
+      input.wait_resolve.expected_project_revision), true);
+    return unwrapReadback(response, normalizeWaitReadback) as Envelope<ExternalWaitMutationReadbackDto>;
+  }
+
+  async readProjectCivilTime(project_id: string): Promise<Envelope<ProjectCivilTimeReadbackDto>> {
+    this.assertProject(project_id, "project civil-time readback");
+    const response = await this.call("project_civil_time_readback_v1", requestEnvelope(operationId(), { project_id }, null));
+    return unwrapReadback(response, normalizeCivilTimeReadback) as Envelope<ProjectCivilTimeReadbackDto>;
+  }
+
   readReceiptsForAttempt(project_id: string, work_id: string, attempt_id: string, fence: number, limit = 50, offset = 0): Promise<Envelope<AttemptReceiptPage>> {
     this.assertProject(project_id, "attempt receipt history");
     requiredString(work_id, "receipts_for_attempt.work_id");
@@ -1676,12 +2226,58 @@ export class VersionedServiceClient implements VersionedServiceApi {
     return { ...response, data: normalizeFinalResultBinding(response.data) };
   }
 
+  async readIntake(project_id: string, limit = 50, offset = 0): Promise<Envelope<IntakeListReadbackDto>> {
+    this.assertProject(project_id, "intake list");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0)
+      throw new ProtocolEnvelopeError("intake list requires a page limit of 1..100 and a non-negative offset");
+    const response = await this.call("intake_list_v1", requestEnvelope(operationId(), {
+      project_id,
+      intake_list: { schema_version: "boreal.intake_list.v1", limit, offset },
+    }, null));
+    return unwrapReadback(response, normalizeIntakeListReadback) as Envelope<IntakeListReadbackDto>;
+  }
+
+  async updateIntakeDisposition(request: RequestEnvelope<{ project_id: string; disposition: IntakeDispositionDto }>): Promise<Envelope<IntakeDispositionReadbackDto>> {
+    const input = request.data;
+    this.assertProject(input.project_id, "intake disposition");
+    const dto = input.disposition;
+    requiredString(dto.intake_id, "intake_disposition.intake_id");
+    if (dto.schema_version !== "boreal.intake_disposition.v1"
+      || !Number.isSafeInteger(dto.expected_project_revision) || dto.expected_project_revision < 0
+      || !Number.isSafeInteger(dto.expected_content_revision) || dto.expected_content_revision < 1
+      || !["triaged", "deferred", "resolved", "archived"].includes(dto.lifecycle)
+      || (dto.revisit_at_utc_ms !== null && (!Number.isSafeInteger(dto.revisit_at_utc_ms) || dto.revisit_at_utc_ms < 0))
+      || (dto.lifecycle === "deferred" && dto.revisit_at_utc_ms === null))
+      throw new ProtocolEnvelopeError("intake disposition has invalid schema, state or revision preconditions");
+    const response = await this.call("intake_disposition_v1", requestEnvelope(request.operation_id, input,
+      dto.expected_project_revision), true);
+    return unwrapReadback(response, normalizeIntakeDispositionReadback) as Envelope<IntakeDispositionReadbackDto>;
+  }
+
+  async promoteIntake(request: RequestEnvelope<{ project_id: string; promotion: IntakePromoteDto }>): Promise<Envelope<IntakePromoteReadbackDto>> {
+    const input = request.data;
+    this.assertProject(input.project_id, "intake promotion");
+    const dto = input.promotion;
+    requiredString(dto.intake_id, "intake_promote.intake_id");
+    requiredString(dto.target_id, "intake_promote.target_id");
+    if (dto.schema_version !== "boreal.intake_promote.v1"
+      || !Number.isSafeInteger(dto.expected_project_revision) || dto.expected_project_revision < 0
+      || !Number.isSafeInteger(dto.expected_content_revision) || dto.expected_content_revision < 1
+      || !["draft_work", "source_version", "memory_draft"].includes(dto.target_kind))
+      throw new ProtocolEnvelopeError("intake promotion has invalid schema, target or revision preconditions");
+    const response = await this.call("intake_promote_v1", requestEnvelope(request.operation_id, input,
+      dto.expected_project_revision), true);
+    return unwrapReadback(response, normalizeIntakePromoteReadback) as Envelope<IntakePromoteReadbackDto>;
+  }
+
   readWorkspaceView(kind: WorkspaceViewKind, project_id: string): Promise<Envelope<unknown>> {
     requiredString(project_id, "workspace_view.project_id");
     if (this.project_id && project_id !== this.project_id) {
       throw new ProtocolEnvelopeError("workspace view belongs to a different mounted project");
     }
     switch (kind) {
+      case "intake":
+        return this.readIntake(project_id, 50, 0);
       case "cycles":
         return this.readCycle(project_id, "list", undefined, 100, 0);
       case "reviews":
@@ -1700,6 +2296,8 @@ export class VersionedServiceClient implements VersionedServiceApi {
         return this.readSources(project_id, 100, 0);
       case "session":
         return this.readSession(project_id);
+      case "waits":
+        return this.readExternalWaitPage(project_id, 50, 0);
     }
   }
 
@@ -2360,6 +2958,10 @@ export class TuiWorkflowController {
 
   async readWorkspaceView(kind: WorkspaceViewKind): Promise<Envelope<unknown>> {
     if (!this.mounted) throw new ProtocolEnvelopeError("workspace views require a mounted project context");
+    if (kind === "waits" && this.service.readExternalWaitPage) {
+      const response = await this.readExternalWaitPage(50, 0);
+      return response;
+    }
     if (!this.service.readWorkspaceView) throw new ProtocolEnvelopeError("this service connection does not provide workspace views");
     const response = await this.service.readWorkspaceView(kind, this.context.project_id);
     if (response.outcome !== "changed" && response.outcome !== "unchanged") {
@@ -2396,6 +2998,21 @@ export class TuiWorkflowController {
     return response;
   }
 
+  async readIntake(limit = 50, offset = 0): Promise<Envelope<IntakeListReadbackDto>> {
+    if (!this.mounted || !this.service.readIntake) throw new ProtocolEnvelopeError("intake list is unavailable in this connection");
+    const response = await this.readWorkspace("intake list", () => this.service.readIntake!(this.context.project_id, limit, offset));
+    const data = response.data;
+    if (!data || data.schema_version !== "boreal.intake_list_readback.v1"
+      || data.project_id !== this.context.project_id || !Number.isSafeInteger(data.project_revision)
+      || !Number.isSafeInteger(data.total) || !Number.isSafeInteger(data.offset) || !Number.isSafeInteger(data.limit)
+      || typeof data.has_more !== "boolean" || !Array.isArray(data.items)
+      || data.items.some(item => !item || item.project_id !== this.context.project_id
+        || typeof item.intake_id !== "string" || !item.intake_id.trim()
+        || !Number.isSafeInteger(item.content_revision) || item.content_revision < 1))
+      throw new ProtocolEnvelopeError("intake list response is malformed or belongs to a different project");
+    return response;
+  }
+
   async readWork(work_id: string): Promise<Envelope<WorkProjection>> {
     if (!this.mounted || !this.service.readWork) throw new ProtocolEnvelopeError("work detail is unavailable in this connection");
     const response = await this.readWorkspace("work detail", () => this.service.readWork!(this.context.project_id, work_id));
@@ -2414,6 +3031,40 @@ export class TuiWorkflowController {
       || (data.planning_diagnostic !== undefined && data.planning_diagnostic !== null && typeof data.planning_diagnostic !== "string"))
       throw new ProtocolEnvelopeError("work detail response is malformed or belongs to a different work item");
     return response;
+  }
+
+  async readWorkSchedule(work_id: string): Promise<Envelope<WorkScheduleReadbackDto>> {
+    if (!this.mounted || !this.service.readWorkSchedule) throw new ProtocolEnvelopeError("work schedule reads are unavailable in this connection");
+    const response = await this.readWorkspace("work schedule", () => this.service.readWorkSchedule!(this.context.project_id, work_id));
+    if (!response.data || response.data.work_id !== work_id || !Number.isSafeInteger(response.data.schedule_revision))
+      throw new ProtocolEnvelopeError("work schedule readback does not match the selected work item");
+    return response;
+  }
+
+  async readExternalWaits(wait_id?: string): Promise<Envelope<ExternalWaitReadbackDto>> {
+    if (!this.mounted || !this.service.readExternalWaits) throw new ProtocolEnvelopeError("external wait reads are unavailable in this connection");
+    const response = await this.readWorkspace("external waits", () => this.service.readExternalWaits!(this.context.project_id, wait_id));
+    if (!response.data || (wait_id !== undefined && (response.data.waits.length !== 1 || response.data.waits[0]?.wait_id !== wait_id)))
+      throw new ProtocolEnvelopeError("external wait readback did not match the requested wait");
+    return response;
+  }
+
+  async readExternalWaitPage(limit = 50, offset = 0, expected_project_revision?: number): Promise<Envelope<ExternalWaitListReadbackDto>> {
+    if (!this.mounted || !this.service.readExternalWaitPage) throw new ProtocolEnvelopeError("external wait pages are unavailable in this connection");
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_INLINE_ITEMS || !Number.isInteger(offset) || offset < 0
+      || (expected_project_revision !== undefined && (!Number.isSafeInteger(expected_project_revision) || expected_project_revision < 0)))
+      throw new ProtocolEnvelopeError("external wait list requires a page limit of 1..100 and a non-negative offset");
+    const response = await this.readWorkspace("external waits", () => this.service.readExternalWaitPage!(this.context.project_id, limit, offset, expected_project_revision));
+    if (!response.data || response.data.waits.length > limit || response.data.limit !== limit || response.data.offset !== offset
+      || response.revision !== response.data.project_revision
+      || (expected_project_revision !== undefined && response.data.project_revision !== expected_project_revision))
+      throw new ProtocolEnvelopeError("external wait page does not match its request or project revision");
+    return response;
+  }
+
+  async readProjectCivilTime(): Promise<Envelope<ProjectCivilTimeReadbackDto>> {
+    if (!this.mounted || !this.service.readProjectCivilTime) throw new ProtocolEnvelopeError("project civil-time settings are unavailable in this connection");
+    return this.readWorkspace("project civil time", () => this.service.readProjectCivilTime!(this.context.project_id));
   }
 
   async readWorkPage(limit = 100, offset = 0): Promise<Envelope<RevisionedStatusResponse>> {
@@ -2528,6 +3179,73 @@ export class TuiWorkflowController {
       ...(input.dispatch_policy !== undefined ? { dispatch_policy: input.dispatch_policy } : {}),
       ...(input.execution_mode !== undefined ? { execution_mode: input.execution_mode } : {}),
       ...(input.clear_parent ? { clear_parent: true } : {}),
+    }, revision)));
+  }
+
+  async updateIntakeDisposition(input: {
+    intake_id: string;
+    expected_content_revision: number;
+    lifecycle: Exclude<IntakeLifecycleDto, "captured">;
+    revisit_at_utc_ms: number | null;
+  }): Promise<ActionResult<IntakeDispositionReadbackDto>> {
+    const service = this.requireWorkspaceService("updateIntakeDisposition", "intake disposition");
+    requiredString(input.intake_id, "intake_disposition.intake_id");
+    if (!Number.isSafeInteger(input.expected_content_revision) || input.expected_content_revision < 1)
+      throw new ProtocolEnvelopeError("intake disposition requires the current content revision");
+    if (input.lifecycle === "deferred" && input.revisit_at_utc_ms === null)
+      throw new ProtocolEnvelopeError("deferred intake items require a revisit timestamp");
+    return this.mutateWorkspace("intake_disposition", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id,
+      disposition: { schema_version: "boreal.intake_disposition.v1", expected_project_revision: revision,
+        expected_content_revision: input.expected_content_revision, intake_id: input.intake_id,
+        lifecycle: input.lifecycle, revisit_at_utc_ms: input.revisit_at_utc_ms },
+    }, revision)));
+  }
+
+  async promoteIntake(input: {
+    intake_id: string;
+    expected_content_revision: number;
+    target_kind: IntakePromotionTargetKindDto;
+    target_id: string;
+  }): Promise<ActionResult<IntakePromoteReadbackDto>> {
+    const service = this.requireWorkspaceService("promoteIntake", "intake promotion");
+    requiredString(input.intake_id, "intake_promote.intake_id");
+    requiredString(input.target_id, "intake_promote.target_id");
+    if (!Number.isSafeInteger(input.expected_content_revision) || input.expected_content_revision < 1)
+      throw new ProtocolEnvelopeError("intake promotion requires the current content revision");
+    return this.mutateWorkspace("intake_promote", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id,
+      promotion: { schema_version: "boreal.intake_promote.v1", expected_project_revision: revision,
+        expected_content_revision: input.expected_content_revision, intake_id: input.intake_id,
+        target_kind: input.target_kind, target_id: input.target_id },
+    }, revision)));
+  }
+
+  async updateWorkSchedule(work_id: string, schedule_revision: number, schedule: BusinessScheduleDto): Promise<ActionResult<WorkScheduleMutationReadbackDto>> {
+    const service = this.requireWorkspaceService("updateWorkSchedule", "work schedule updates");
+    requiredString(work_id, "work_schedule_update.work_id");
+    if (!Number.isSafeInteger(schedule_revision) || schedule_revision < 0)
+      throw new ProtocolEnvelopeError("work_schedule_update.expected_schedule_revision must be a non-negative integer");
+    return this.mutateWorkspace("work_schedule_update", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id, work_id,
+      schedule_update: { schema_version: "boreal.work_schedule_update.v1", expected_project_revision: revision,
+        expected_schedule_revision: schedule_revision, schedule },
+    }, revision)));
+  }
+
+  async createExternalWait(input: Omit<ExternalWaitCreateDto, "schema_version" | "expected_project_revision" | "expected_wait_revision">): Promise<ActionResult<ExternalWaitMutationReadbackDto>> {
+    const service = this.requireWorkspaceService("createExternalWait", "external wait creation");
+    return this.mutateWorkspace("external_wait_create", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id,
+      wait_create: { ...input, schema_version: "boreal.external_wait_create.v1", expected_project_revision: revision, expected_wait_revision: 0 },
+    }, revision)));
+  }
+
+  async resolveExternalWait(input: Omit<ExternalWaitResolveDto, "schema_version" | "expected_project_revision">): Promise<ActionResult<ExternalWaitMutationReadbackDto>> {
+    const service = this.requireWorkspaceService("resolveExternalWait", "external wait resolution");
+    return this.mutateWorkspace("external_wait_resolve", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id,
+      wait_resolve: { ...input, schema_version: "boreal.external_wait_resolve.v1", expected_project_revision: revision },
     }, revision)));
   }
 
@@ -2751,8 +3469,19 @@ export class TuiWorkflowController {
         ...(this.service.searchSources ? ["source_search"] : []),
         ...(this.service.readReview ? ["review_show"] : []),
         ...(this.service.bindFinalResult && this.service.readSources ? ["bind_result"] : []),
+        ...(this.service.readWorkSchedule && this.service.updateWorkSchedule ? ["schedule_edit"] : []),
+        ...(this.service.createExternalWait ? ["wait_create"] : []),
+        ...(this.service.readExternalWaits && this.service.resolveExternalWait ? ["wait_resolve"] : []),
+        ...(this.service.readExternalWaitPage ? ["wait_page"] : []),
+        ...(this.service.readIntake ? ["intake_page"] : []),
+        ...(this.service.updateIntakeDisposition ? ["intake_disposition"] : []),
+        ...(this.service.promoteIntake ? ["intake_promote"] : []),
       ],
-      workspace_views_available: this.service.readWorkspaceView ? ["cycles", "reviews", "memory", "recovery", "dependencies", "sources", "session"] : [],
+      workspace_views_available: [
+        ...(this.service.readWorkspaceView ? ["cycles", "reviews", "memory", "recovery", "dependencies", "sources", "session"] : []),
+        ...(this.service.readExternalWaitPage ? ["waits"] : []),
+        ...(this.service.readIntake ? ["intake"] : []),
+      ],
     };
   }
 

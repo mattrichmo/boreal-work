@@ -93,6 +93,17 @@ pub struct IntakeItemsView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntakePageView {
+    pub project_id: ProjectId,
+    pub revision: u64,
+    pub total: u64,
+    pub offset: u64,
+    pub limit: u64,
+    pub has_more: bool,
+    pub items: Vec<IntakeItemV3Record>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkPlanningContractView {
     pub project_id: ProjectId,
     pub work_id: String,
@@ -858,6 +869,32 @@ impl WorkApplication<'_> {
             project_id: project_id.clone(),
             revision,
             items,
+        })
+    }
+
+    pub fn intake_page_v3(
+        &self,
+        project_id: &ProjectId,
+        limit: u64,
+        offset: u64,
+    ) -> Result<IntakePageView, ApplicationError> {
+        if !self.store_ref().work_model_v3_enabled()? {
+            return Err(ApplicationError::Invalid(
+                "intake requires work-model/3 to be enabled".to_owned(),
+            ));
+        }
+        let snapshot =
+            self.store_ref()
+                .intake_page_snapshot_v3(project_id.as_str(), limit, offset)?;
+        let returned = snapshot.items.len() as u64;
+        Ok(IntakePageView {
+            project_id: project_id.clone(),
+            revision: snapshot.project_revision,
+            total: snapshot.total,
+            offset: snapshot.offset,
+            limit: snapshot.limit,
+            has_more: offset.saturating_add(returned) < snapshot.total,
+            items: snapshot.items,
         })
     }
 

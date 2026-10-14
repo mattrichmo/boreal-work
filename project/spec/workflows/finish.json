@@ -16,7 +16,7 @@
     "bwrk agent guide --project <project_id> --work <work_id> --json",
     "bwrk work show <project_id> <work_id> --json",
     "bwrk source add <project_id> --input <result_path> --origin <origin> --media-type <media_type> --expected-revision <revision> --session <session_id> --json",
-    "bwrk evidence bind-result --project <project_id> --work <work_id> --attempt <attempt_id> --fence <fence> --source-version <source_version_id> --content-digest <content_digest> --expected-entity-revision <entity_revision> --expected-proof-revision <proof_revision> --operation <operation_id> --actor <actor_id> --session <session_id> --json",
+    "bwrk evidence bind-result --project <project_id> --work <work_id> --attempt <attempt_id> --fence <fence> --source-version <source_version_id> --content-digest <content_digest> --expected-revision <revision> --expected-entity-revision <entity_revision> --expected-proof-revision <proof_revision> --operation-id <operation_id> --actor <actor_id> --session <session_id> --json",
     "bwrk evidence run --project <project_id> --work <work_id> --gate <gate_id> --attempt <attempt_id> --fence <fence> --json",
     "bwrk agent finish <work_id> --close --project <project_id> --attempt <attempt_id> --fence <fence> --receipt <receipt_path> --summary <summary_path> --expected-revision <revision> --session <session_id> --json",
     "bwrk operation show <project_id> <operation_id> --json",

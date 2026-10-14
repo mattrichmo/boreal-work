@@ -588,6 +588,26 @@ impl<'a> KnowledgeParityApplication<'a> {
         promotion: &IntakePromotion,
         now: &str,
     ) -> Result<crate::OperationResult<()>, ApplicationError> {
+        // A promotion retry must reach the store's replay-first transaction
+        // even when the current intake item has since changed. The service
+        // adapter restores the original digest from this immutable record;
+        // the store then checks the complete operation identity and payload.
+        if self
+            .store
+            .intake_promotions_v3(
+                scope.project_id.as_str(),
+                promotion.intake_id.as_str(),
+            )?
+            .iter()
+            .any(|record| record.operation_id == operation_id)
+        {
+            return crate::WorkApplication::new(self.store).promote_intake_v3(
+                scope,
+                operation_id,
+                promotion,
+                now,
+            );
+        }
         let planned = self.plan_current_intake_promotion(scope, operation_id, promotion)?;
         match promotion.target_kind {
             boreal_domain::work_model_v3::PromotionTargetKind::DraftWork => {

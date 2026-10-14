@@ -99,6 +99,31 @@ test("client exposes pollable linked-detail jobs and note backlinks", async t =>
   assert.deepEqual(commands, ["linked page", "linked job show", "note show"]);
 });
 
+test("snapshot keeps capture witnesses out of routine state and operation show reads a witness on demand", async t => {
+  const requests = [];
+  const service = await fakeService(request => {
+    requests.push(request.payload);
+    const response = validResponse(request);
+    if (request.payload.command === "snapshot") response.payload.data = {
+      schema_version: 3, revision: 7, projects: [], items: [], notes: [], statuses: [],
+      relationships: [], associations: [], capture_witnesses: [{ item_id: "item-1", text: "private capture text" }],
+    };
+    else if (request.payload.command === "operation show") response.payload.data = {
+      operation_id: "capture-op", request_digest: "digest", revision: 7, created_at: "now",
+      result: { id: "item-1", capture_witness: { item_id: "item-1", revision: 7, captured_at: "now", text: "private capture text", digest: "sha256:abc", source_ref: null } },
+    };
+    return response;
+  });
+  t.after(service.close);
+  const client = new GlobalServiceClient(service.socketPath);
+  const snapshot = await client.snapshot();
+  assert.equal(Object.hasOwn(snapshot, "capture_witnesses"), false);
+  const operation = await client.operationShow("capture-op");
+  assert.equal(operation.result.capture_witness.text, "private capture text");
+  assert.equal(requests[1].command, "operation show");
+  assert.deepEqual(requests[1].payload, { operation_id: "capture-op" });
+});
+
 test("malformed post-delivery envelopes freeze mutations with the original operation id", async t => {
   const brokenResponses = [
     ["outer correlation", request => ({ ...validResponse(request), request_id: "wrong-id" })],
