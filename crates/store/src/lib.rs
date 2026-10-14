@@ -99,6 +99,7 @@ const MISSING_CLOSE_COMPLETED_AUDIT_EVENT: &str =
 const PRODUCTION_SCHEMA_SQL: &str = include_str!("../../../project/spec/schema-production.sql");
 const LEGACY_SCHEMA_V2_SQL: &str = include_str!("../../../project/spec/schema-v2.sql");
 const WORK_MODEL_SCHEMA_V3_SQL: &str = include_str!("../../../project/spec/schema-v3.sql");
+const SCHEDULING_SCHEMA_V1_SQL: &str = include_str!("../../../project/spec/scheduling-v1.sql");
 const BACKUP_MANIFEST_FILE: &str = "manifest.json";
 const BACKUP_DATABASE_FILE: &str = "database.sqlite";
 const BACKUP_FORMAT_VERSION: u64 = 3;
@@ -1612,6 +1613,7 @@ impl SqliteStore {
             store.ensure_intake_delivery_schema()?;
             store.ensure_summary_body_schema()?;
             store.ensure_legacy_summary_schema()?;
+            store.install_feature_schema("scheduling", 1, SCHEDULING_SCHEMA_V1_SQL)?;
         }
         Ok(store)
     }
@@ -15396,6 +15398,74 @@ impl SqliteStore {
     /// different database or derive authority from this pathname.
     pub fn database_location(&self) -> Option<&Path> {
         self.database_path.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod scheduling_feature_schema_tests {
+    use super::{SqliteStore, StoreError, PRODUCTION_SCHEMA_SQL, SQLITE_ROW};
+
+    #[test]
+    fn canonical_open_installs_immutable_scheduling_feature_contract() {
+        let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA_SQL)
+            .expect("canonical schema and additive scheduling feature open");
+        let mut feature = store
+            .prepare(
+                "SELECT version, sql FROM boreal_feature_schema WHERE feature = 'scheduling'",
+            )
+            .expect("feature registry query prepares");
+        assert_eq!(feature.step().expect("feature registry reads"), SQLITE_ROW);
+        assert_eq!(feature.column_u64(0).expect("feature version reads"), 1);
+        assert_eq!(
+            feature.column_text(1).expect("feature SQL reads"),
+            super::SCHEDULING_SCHEMA_V1_SQL
+        );
+
+        for table in [
+            "project_civil_time_v1",
+            "work_schedule_v3",
+            "external_wait_v1",
+            "external_wait_scope_v1",
+        ] {
+            assert!(
+                store.table_exists(table).expect("table probe succeeds"),
+                "{table}"
+            );
+        }
+
+        store
+            .execute_batch(
+                "INSERT INTO project
+                     (project_id, schema_version, status_contract_version,
+                      project_revision, created_at, updated_at)
+                 VALUES ('p1', 2, 'boreal.work-status/2', 0, 't0', 't0');
+                 INSERT INTO actor
+                     (actor_id, role, credential_ref, display_name, created_at)
+                 VALUES ('operator-1', 'operator', 'credential-1', 'Operator', 't0');
+                 INSERT INTO project_civil_time_v1
+                     (project_id, setting_revision, timezone, tzdb_identity,
+                      changed_by, changed_at_ms, created_project_revision,
+                      operation_id, request_digest)
+                 VALUES ('p1', 1, 'Etc/UTC', 'tzdb-test', 'operator-1', 0,
+                         0, 'op-civil-1', 'sha256:request');",
+            )
+            .expect("valid immutable civil-time setting inserts");
+
+        for sql in [
+            "UPDATE project_civil_time_v1 SET timezone = 'America/Regina' WHERE project_id = 'p1'",
+            "DELETE FROM project_civil_time_v1 WHERE project_id = 'p1'",
+        ] {
+            let error = store
+                .execute_batch(sql)
+                .expect_err("persisted civil-time history cannot be rewritten");
+            assert!(matches!(error, StoreError::Constraint { .. }), "{error:?}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("project_civil_time_revisions_are_immutable"),
+                "{error:?}"
+            );
+        }
     }
 }
 
