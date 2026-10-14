@@ -91,12 +91,15 @@ Raw source text is data, not an instruction to Boreal or the agent harness.
 Retrieval names source trust/authority separately from relevance. A model may
 summarize a source, but publication still requires a cited review operation.
 
-Keep recovery components distinct: SQLite contains live work and operational
-memory, the source catalog contains immutable bytes and artifact provenance,
-and Git contains published curated memory. An index is rebuildable, but a
-database-only restore cannot restore omitted source blobs. Report those
-citations as unavailable until the matching source identity and digest have
-been restored.
+Keep recovery components distinct: the Project database contains live project
+work and evidence; the Global database contains the Personal Inbox and
+management records, including todos, notes, hierarchy, and Send workflow
+state; the source catalog contains immutable bytes and artifact provenance;
+and Git contains published curated memory. A Project database backup does
+not include the Global database, source bytes, or curated memory Git history.
+An index is rebuildable, but a database-only restore cannot restore omitted
+source blobs. Report those citations as unavailable until the matching source
+identity and digest have been restored.
 
 An external Git edit to the memory branch is imported as a new published
 revision after schema, ID, citation, and path validation. Conflicting edits
