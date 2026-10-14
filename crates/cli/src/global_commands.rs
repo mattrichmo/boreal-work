@@ -248,6 +248,7 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
                 title().or_else(|| positional(0)),
                 "global todo add requires --title"
             )?);
+            let capture_title = payload["title"].clone();
             if let Some(project) = parsed.options.project.clone() {
                 payload["project_id"] = json!(project);
             }
@@ -268,6 +269,25 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
             }
             if let Some(labels) = value("labels") {
                 payload["labels"] = parse_labels(&labels)?;
+            }
+            let explicit_capture = parsed.options.project.is_none()
+                && description().is_none()
+                && value("parent").is_none()
+                && parsed.options.priority.is_none()
+                && value("due-at").is_none()
+                && value("due").is_none()
+                && value("follow-up-at").is_none()
+                && value("labels").is_none();
+            if value("source-ref").is_some() && !explicit_capture {
+                return Err(CliError::invalid(
+                    "global todo --source-ref requires an unstructured personal capture",
+                ));
+            }
+            if explicit_capture {
+                payload["capture_text"] = capture_title;
+                if let Some(source_ref) = value("source-ref") {
+                    payload["source_ref"] = json!(source_ref);
+                }
             }
             "todo add".to_owned()
         }
@@ -2661,6 +2681,34 @@ fn linked_workspace_detail(
 #[cfg(test)]
 mod daily_filter_tests {
     use super::*;
+
+    #[test]
+    fn todo_add_marks_only_unstructured_personal_capture() {
+        let mut options = CliOptions::default();
+        options
+            .extra
+            .insert("--title".to_owned(), vec!["  Café\n".to_owned()]);
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "todo".to_owned(), "add".to_owned()],
+            options,
+        };
+        let (command, payload) = build_command(&parsed).unwrap();
+        assert_eq!(command, "todo add");
+        assert_eq!(payload["capture_text"], "  Café\n");
+
+        let mut options = CliOptions::default();
+        options
+            .extra
+            .insert("--title".to_owned(), vec!["Project task".to_owned()]);
+        options.project = Some("project-1".to_owned());
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "todo".to_owned(), "add".to_owned()],
+            options,
+        };
+        let (_, payload) = build_command(&parsed).unwrap();
+        assert_eq!(payload["project_id"], "project-1");
+        assert!(payload.get("capture_text").is_none());
+    }
 
     fn seed_daily_items(app: &GlobalManagerApplication) -> String {
         let project_id = "daily-filter-project";

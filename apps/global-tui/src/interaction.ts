@@ -214,9 +214,9 @@ export async function runInteractive(controller: GlobalController, terminal: Key
             { key: "labels", label: "Labels", value: "", hint: "Separate labels with commas" }
           );
           const formState=inputForm(detail ? `New ${kind} · details` : `Quick capture · ${projectId ? controller.snapshot?.projects.find(p=>p.id===projectId)?.name ?? "selected project" : "Personal inbox"}`, fields, async v => {
-            const command = kind === "task" ? "todo add" : `${kind} add`;
+            const command = kind === "task" ? (detail ? "task add" : "todo add") : `${kind} add`;
             const destination = detail ? String(v.destination ?? projectId ?? "") || null : projectId;
-            await writeMutation(command, { project_id: destination, parent_id: detail ? (v.parent_id || null) : (parent?.id ?? null), title: v.title, ...(detail ? { description: v.description, status_id: v.status_id || undefined, ...(v.priority === null || v.priority === "" ? {} : { priority: v.priority }), due_at: v.due_at || null, follow_up_at: v.follow_up_at || null, labels: parseLabels(String(v.labels)) } : {}) }); modal = undefined;
+            await writeMutation(command, { project_id: destination, parent_id: detail ? (v.parent_id || null) : (parent?.id ?? null), title: v.title, ...(!detail && kind === "task" ? { capture_text: v.title } : {}), ...(detail ? { description: v.description, status_id: v.status_id || undefined, ...(v.priority === null || v.priority === "" ? {} : { priority: v.priority }), due_at: v.due_at || null, follow_up_at: v.follow_up_at || null, labels: parseLabels(String(v.labels)) } : {}) }); modal = undefined;
           });
           if(detail)ownerChoiceLoaders.set(formState,async owner=>{
             const parentRows=await controller.completeChoices<Item>("items",owner);

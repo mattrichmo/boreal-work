@@ -132,7 +132,7 @@ test("keyboard flow creates a project, custom status, task, completes and reopen
   await wait(()=>!!listener);
   key("2");key("n");key("New business\u0013");await wait(()=>controller.snapshot?.projects.length===1);
   key("\r");key("7");key("s");key("review\tReview\t\u001b[C\u0013");await wait(()=>controller.snapshot?.statuses.some(s=>s.status_id==="review"));
-  key("3");key("n");key("Prepare launch\r");await wait(()=>controller.snapshot?.items.length===2);
+  key("3");key("N");await wait(()=>output.includes("New task · details"));key("Prepare launch");key("\u0013");await wait(()=>controller.snapshot?.items.length===2);
   key("/");key("launch\r");await wait(()=>controller.searchQuery==="launch");
   await new Promise(resolve=>setImmediate(resolve)); // Let the asynchronous form save close before sending the next key.
   assert.equal(controller.items.length,1);assert.match(render(controller),/Filter: launch/);assert.match(render(controller),/Prepare launch/);assert.doesNotMatch(render(controller),/Review taxes/);
@@ -140,7 +140,7 @@ test("keyboard flow creates a project, custom status, task, completes and reopen
   key("c");await wait(()=>controller.snapshot?.items[0]?.status_id==="done");
   key("o");await wait(()=>controller.snapshot?.items[0]?.status_id==="todo");
   key("q");await running;
-  assert.deepEqual(commands.map(x=>x.command),["project add","workflow status add","todo add","todo complete","todo reopen"]);
+  assert.deepEqual(commands.map(x=>x.command),["project add","workflow status add","task add","todo complete","todo reopen"]);
   assert.equal(raw,false);assert.match(output,/\u001b\[\?1049l/);
 });
 

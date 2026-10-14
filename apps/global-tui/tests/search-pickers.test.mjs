@@ -245,7 +245,7 @@ test('detailed item form searches and selects project, parent, and status choice
   await h.key('Created from complete choices');
   await h.key('\x13');
   await waitFor(() => writes.length === 1, 'detailed item mutation did not submit');
-  assert.equal(writes[0].command, 'todo add');
+  assert.equal(writes[0].command, 'task add');
   assert.equal(writes[0].payload.project_id, 'p101');
   assert.equal(writes[0].payload.parent_id, 'p101-item-101');
   assert.equal(writes[0].payload.status_id, 'p101-status-101');

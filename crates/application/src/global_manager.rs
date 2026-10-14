@@ -1,12 +1,15 @@
 //! Application boundary for the installation-wide global manager.
 
 use crate::{canonical_request_digest, GlobalCivilTimeContext};
-use boreal_domain::global_manager::{ManagementItemKind, StatusCategory};
+use boreal_domain::global_manager::{ManagementItemKind, StatusCategory, PERSONAL_INBOX_STATUS_ID};
 use boreal_store::global_manager::GlobalManagerStore;
 use boreal_store::StoreError;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[path = "global_capture.rs"]
+mod global_capture;
 
 static GLOBAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 const GLOBAL_PATH_MAX_BYTES: usize = 4096;
@@ -84,7 +87,10 @@ fn validate_global_import_bundle(snapshot: &Value, limit: usize) -> Result<(), S
             "import revision history must be arrays".into(),
         ));
     }
-    if snapshot.get("schema_version").and_then(Value::as_u64) != Some(2) {
+    if !matches!(
+        snapshot.get("schema_version").and_then(Value::as_u64),
+        Some(2 | 3)
+    ) {
         return Err(StoreError::Invalid(
             "unsupported global backup schema version".into(),
         ));
@@ -463,7 +469,7 @@ impl GlobalManagerApplication {
         };
         match command {
             "snapshot" => {
-                state["schema_version"] = serde_json::json!(2);
+                state["schema_version"] = serde_json::json!(3);
                 state["revision"] = serde_json::json!(revision);
                 let mut attention_sample_ids = arr(&state, "projects")
                     .iter()
@@ -923,7 +929,7 @@ impl GlobalManagerApplication {
 
     fn logical_export(&self, size_limit: usize) -> Result<Value, GlobalManagerError> {
         let (mut state, revision, history) = self.store.export_bundle()?;
-        state["schema_version"] = json!(2);
+        state["schema_version"] = json!(3);
         state["revision"] = json!(revision);
         state["revision_history"] = json!(history);
         validate_global_import_bundle(&state, size_limit)
@@ -952,7 +958,7 @@ impl GlobalManagerApplication {
                 "created_at": now(),
             }));
         }
-        replacement["schema_version"] = json!(2);
+        replacement["schema_version"] = json!(3);
         replacement["revision"] = json!(next_revision);
         replacement["revision_history"] = json!(history);
         validate_global_import_bundle(&replacement, GLOBAL_TRANSFER_MAX_BYTES)
@@ -975,7 +981,14 @@ impl GlobalManagerApplication {
         let string_fields: &[&str] = match command {
             "project add" => &["project_id", "description", "folder"],
             "project edit" => &["project_id", "name", "description", "lifecycle", "health"],
-            "todo add" => &["item_id", "title", "description", "kind", "status_id"],
+            "todo add" => &[
+                "item_id",
+                "title",
+                "description",
+                "kind",
+                "status_id",
+                "capture_text",
+            ],
             "task add" | "subtask add" | "milestone add" => {
                 &["item_id", "title", "description", "status_id"]
             }
@@ -993,6 +1006,23 @@ impl GlobalManagerApplication {
                     "{field} must be a string"
                 )));
             }
+        }
+        if p.get("source_ref")
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return Err(GlobalManagerError::Invalid(
+                "source_ref must be a string or null".into(),
+            ));
+        }
+        if p.get("capture_text").is_some() && command != "todo add" {
+            return Err(GlobalManagerError::Invalid(
+                "capture_text is only valid for explicit personal todo capture".into(),
+            ));
+        }
+        if p.get("source_ref").is_some() && p.get("capture_text").is_none() {
+            return Err(GlobalManagerError::Invalid(
+                "source_ref requires explicit capture_text".into(),
+            ));
         }
         for field in ["folder", "path"] {
             if p.get(field)
@@ -1015,6 +1045,47 @@ impl GlobalManagerApplication {
                 | "subtask edit"
                 | "milestone edit"
         ) {
+            if let Some(capture_text) = p.get("capture_text") {
+                if command != "todo add" {
+                    return Err(GlobalManagerError::Invalid(
+                        "capture_text is only valid for explicit personal todo capture".into(),
+                    ));
+                }
+                if capture_text.as_str() != p.get("title").and_then(Value::as_str) {
+                    return Err(GlobalManagerError::Invalid(
+                        "capture_text must exactly match the captured title".into(),
+                    ));
+                }
+                if p.get("project_id").is_some_and(|value| !value.is_null())
+                    || p.get("parent_id").is_some_and(|value| !value.is_null())
+                    || p.get("description")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.is_empty())
+                    || p.get("status_id").is_some()
+                    || p.get("priority")
+                        .is_some_and(|value| value.as_u64().is_none_or(|priority| priority != 0))
+                    || p.get("due_at").is_some_and(|value| !value.is_null())
+                    || p.get("follow_up_at").is_some_and(|value| !value.is_null())
+                    || p.get("labels")
+                        .and_then(Value::as_array)
+                        .is_some_and(|values| !values.is_empty())
+                    || p.get("position")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|value| value != 0)
+                {
+                    return Err(GlobalManagerError::Invalid(
+                        "explicit capture cannot include structured task fields".into(),
+                    ));
+                }
+                let origin = global_capture::origin_for_capture(
+                    capture_text.as_str().expect("capture_text checked above"),
+                    p.get("source_ref").and_then(Value::as_str),
+                )
+                .map_err(GlobalManagerError::Invalid)?;
+                origin
+                    .validate()
+                    .map_err(|error| GlobalManagerError::Invalid(error.to_string()))?;
+            }
             for field in ["project_id", "parent_id"] {
                 if let Some(value) = p.get(field) {
                     if !value.is_null() && !value.is_string() {
@@ -1273,7 +1344,11 @@ impl GlobalManagerApplication {
                 status_id: p
                     .get("status_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("todo")
+                    .unwrap_or(if p.get("capture_text").is_some() {
+                        PERSONAL_INBOX_STATUS_ID
+                    } else {
+                        "todo"
+                    })
                     .to_owned(),
                 priority: p
                     .get("priority")
@@ -1693,7 +1768,15 @@ fn apply_mutation(
                 .transpose()?;
             boreal_domain::global_manager::validate_item_parent(kind, parent_kind)
                 .map_err(|e| StoreError::Invalid(e.to_string()))?;
-            let status = p.get("status_id").and_then(Value::as_str).unwrap_or("todo");
+            let is_capture = p.get("capture_text").is_some();
+            let status = p
+                .get("status_id")
+                .and_then(Value::as_str)
+                .unwrap_or(if is_capture {
+                    PERSONAL_INBOX_STATUS_ID
+                } else {
+                    "todo"
+                });
             validate_status(s, project_id, status)?;
             let iid = p
                 .get("item_id")
@@ -1704,7 +1787,29 @@ fn apply_mutation(
             if priority > 255 {
                 return Err(StoreError::Invalid("priority must be from 0 to 255".into()));
             }
-            let value = json!({"id":iid,"project_id":project_id,"parent_id":parent,"kind":kind.as_str(),"title":title,"description":p.get("description").and_then(Value::as_str).unwrap_or(""),"labels":p.get("labels").cloned().unwrap_or(json!([])),"status_id":status,"priority":priority,"due_at":p.get("due_at").cloned().unwrap_or(Value::Null),"follow_up_at":p.get("follow_up_at").cloned().unwrap_or(Value::Null),"archived":false,"position":p.get("position").and_then(Value::as_i64).unwrap_or(0),"created_at":timestamp,"updated_at":timestamp});
+            let mut value = json!({"id":iid,"project_id":project_id,"parent_id":parent,"kind":kind.as_str(),"title":title,"description":p.get("description").and_then(Value::as_str).unwrap_or(""),"labels":p.get("labels").cloned().unwrap_or(json!([])),"status_id":status,"priority":priority,"due_at":p.get("due_at").cloned().unwrap_or(Value::Null),"follow_up_at":p.get("follow_up_at").cloned().unwrap_or(Value::Null),"archived":false,"position":p.get("position").and_then(Value::as_i64).unwrap_or(0),"created_at":timestamp,"updated_at":timestamp});
+            let capture_witness = if let Some(capture_text) =
+                p.get("capture_text").and_then(Value::as_str)
+            {
+                let origin = global_capture::origin_for_capture(
+                    capture_text,
+                    p.get("source_ref").and_then(Value::as_str),
+                )
+                .map_err(StoreError::Invalid)?;
+                value["capture_origin"] = global_capture::origin_json(&origin);
+                let witness =
+                    global_capture::witness_json(&iid, revision, &timestamp, capture_text, &origin);
+                let witnesses = s
+                    .get_mut("capture_witnesses")
+                    .and_then(Value::as_array_mut)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt("capture_witnesses must be an array".into())
+                    })?;
+                witnesses.push(witness.clone());
+                Some(witness)
+            } else {
+                None
+            };
             arr_mut(s, "items").push(value.clone());
             let status_record = arr(s, "statuses")
                 .iter()
@@ -1712,7 +1817,11 @@ fn apply_mutation(
                 .cloned()
                 .unwrap_or(Value::Null);
             arr_mut(s, "status_history").push(json!({"item_id":iid,"workflow_owner_id":project_id,"from_workflow_owner_id":project_id,"from_status_id":null,"from_status_label":null,"from_status_category":null,"to_status_id":status,"to_status_label":status_record["label"],"to_status_category":status_record["category"],"revision":revision,"changed_at":timestamp}));
-            Ok(value)
+            let mut result = value;
+            if let Some(witness) = capture_witness {
+                result["capture_witness"] = witness;
+            }
+            Ok(result)
         }
         "todo reorder" => {
             let iid = required_string(p, "item_id")?;
@@ -2260,7 +2369,7 @@ fn apply_mutation(
                 }
                 imported_history.push(json!({"source_revision":entry["revision"],"snapshot":entry["snapshot"],"created_at":entry["created_at"].clone(),"imported":true}));
             }
-            *s = json!({"projects":incoming["projects"],"items":incoming["items"],"notes":incoming["notes"],"statuses":incoming["statuses"],"relationships":incoming["relationships"],"note_links":incoming.get("note_links").cloned().unwrap_or(json!([])),"associations":incoming["associations"],"status_history":incoming["status_history"],"imported_history":imported_history});
+            *s = json!({"projects":incoming["projects"],"items":incoming["items"],"notes":incoming["notes"],"statuses":incoming["statuses"],"relationships":incoming["relationships"],"note_links":incoming.get("note_links").cloned().unwrap_or(json!([])),"associations":incoming["associations"],"status_history":incoming["status_history"],"capture_witnesses":incoming.get("capture_witnesses").cloned().unwrap_or(json!([])),"imported_history":imported_history});
             Ok(
                 json!({"imported":true,"counts":{"projects":arr(s,"projects").len(),"items":arr(s,"items").len(),"notes":arr(s,"notes").len()}}),
             )
@@ -2823,6 +2932,7 @@ fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
             return Err(error(&format!("{key} must be an array")));
         }
     }
+    global_capture::validate_snapshot_provenance(snapshot).map_err(|message| error(&message))?;
     let projects = arr(snapshot, "projects");
     let mut project_ids = std::collections::BTreeSet::new();
     for project in projects {
@@ -3552,6 +3662,250 @@ mod global_attention_page_tests {
 
         drop(app);
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod global_capture_workflow_tests {
+    use super::GlobalManagerApplication;
+    use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DB: AtomicU64 = AtomicU64::new(1);
+
+    fn database_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "boreal-global-capture-{}-{}.sqlite",
+            std::process::id(),
+            NEXT_DB.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn call(
+        app: &GlobalManagerApplication,
+        command: &str,
+        payload: Value,
+        operation: &str,
+    ) -> Value {
+        app.execute(command, &payload, operation).unwrap()
+    }
+
+    fn remove_database(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn explicit_capture_records_exact_witness_and_item_edits_keep_immutable_origin() {
+        let path = database_path();
+        let app = GlobalManagerApplication::open(&path).unwrap();
+        let text = "  Café – notes\n";
+        let captured = call(
+            &app,
+            "todo add",
+            json!({"title":text,"capture_text":text,"source_ref":"legacy:raw-7"}),
+            "capture-exact-bytes",
+        );
+        let item_id = captured["id"].as_str().unwrap();
+        let digest = "sha256:8b167964ac7adc09362f702cfcabcebfd3660084e3bc77119da37b2fb2569cc3";
+        assert_eq!(captured["capture_origin"]["digest"], digest);
+        assert_eq!(captured["capture_origin"]["source_ref"], "legacy:raw-7");
+        assert_eq!(captured["capture_witness"]["text"], text);
+        assert_eq!(captured["capture_witness"]["digest"], digest);
+        assert_eq!(
+            captured["created_at"],
+            captured["capture_witness"]["captured_at"]
+        );
+
+        let operation = call(
+            &app,
+            "operation show",
+            json!({"operation_id":"capture-exact-bytes"}),
+            "capture-receipt-readback",
+        );
+        assert_eq!(operation["result"]["capture_witness"]["text"], text);
+
+        let snapshot = call(&app, "snapshot", json!({}), "capture-snapshot");
+        assert_eq!(snapshot["schema_version"], 3);
+        assert_eq!(snapshot["items"][0]["status_id"], "personal-inbox");
+        assert_eq!(snapshot["items"][0]["project_id"], Value::Null);
+        assert_eq!(snapshot["capture_witnesses"].as_array().unwrap().len(), 1);
+
+        call(
+            &app,
+            "todo edit",
+            json!({"item_id":item_id,"title":"Edited after capture"}),
+            "edit-captured-item",
+        );
+        call(
+            &app,
+            "todo archive",
+            json!({"item_id":item_id}),
+            "archive-captured-item",
+        );
+        call(
+            &app,
+            "todo unarchive",
+            json!({"item_id":item_id}),
+            "restore-captured-item",
+        );
+        let item = call(
+            &app,
+            "todo show",
+            json!({"item_id":item_id}),
+            "show-edited-capture",
+        );
+        assert_eq!(item["title"], "Edited after capture");
+        assert_eq!(item["capture_origin"]["digest"], digest);
+        assert_eq!(item["capture_origin"]["source_ref"], "legacy:raw-7");
+        assert_eq!(item["created_at"], captured["created_at"]);
+        let export = call(&app, "export", json!({}), "export-edited-capture");
+        let capture_revision = captured["revision"].as_u64().unwrap();
+        let historical_capture = export["revision_history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["revision"].as_u64() == Some(capture_revision))
+            .unwrap();
+        assert_eq!(
+            historical_capture["snapshot"]["capture_witnesses"][0]["text"],
+            text
+        );
+
+        let detailed = call(
+            &app,
+            "task add",
+            json!({"title":"Detailed task","description":"structured"}),
+            "detailed-task-no-origin",
+        );
+        assert!(detailed.get("capture_origin").is_none());
+        assert!(app
+            .execute(
+                "todo add",
+                &json!({"title":"Structured capture","capture_text":"Structured capture","priority":1}),
+                "reject-structured-capture",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("structured task fields"));
+
+        drop(app);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn schema_two_import_stays_legacy_and_schema_three_round_trips_capture_and_future_fields() {
+        let source_path = database_path();
+        let source = GlobalManagerApplication::open(&source_path).unwrap();
+        let text = "Round-trip exact capture";
+        let captured = call(
+            &source,
+            "todo add",
+            json!({"title":text,"capture_text":text}),
+            "round-trip-capture",
+        );
+        let mut schema_three = call(&source, "export", json!({}), "export-schema-three");
+        assert_eq!(schema_three["schema_version"], 3);
+        let item = schema_three["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["id"] == captured["id"])
+            .unwrap();
+        item["pending_send"] = json!({"source":"legacy-send-1"});
+        item["accepted_intake"] = json!({"receipt":"legacy-intake-2"});
+
+        let target_path = database_path();
+        let target = GlobalManagerApplication::open(&target_path).unwrap();
+        call(
+            &target,
+            "import",
+            json!({"snapshot":schema_three,"replace":true,"expected_revision":0}),
+            "import-schema-three",
+        );
+        let round_trip = call(
+            &target,
+            "export",
+            json!({}),
+            "export-after-schema-three-import",
+        );
+        assert_eq!(round_trip["schema_version"], 3);
+        assert!(round_trip.get("database_id").is_none());
+        let imported = &round_trip["items"][0];
+        assert_eq!(imported["capture_origin"], captured["capture_origin"]);
+        assert_eq!(imported["pending_send"], json!({"source":"legacy-send-1"}));
+        assert_eq!(
+            imported["accepted_intake"],
+            json!({"receipt":"legacy-intake-2"})
+        );
+        assert_eq!(round_trip["capture_witnesses"][0]["text"], text);
+
+        let bad_target_path = database_path();
+        let bad_target = GlobalManagerApplication::open(&bad_target_path).unwrap();
+        let mut tampered = round_trip.clone();
+        tampered["capture_witnesses"][0]["text"] = json!("changed witness bytes");
+        let error = bad_target
+            .execute(
+                "import",
+                &json!({"snapshot":tampered,"replace":true,"expected_revision":0}),
+                "reject-tampered-witness",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("digest does not match exact text"));
+        assert_eq!(bad_target.revision().unwrap(), 0);
+
+        let mut schema_two = call(&source, "export", json!({}), "export-for-schema-two");
+        schema_two["schema_version"] = json!(2);
+        schema_two
+            .as_object_mut()
+            .unwrap()
+            .remove("capture_witnesses");
+        schema_two["items"] = json!([{
+            "id":"old-schema-item",
+            "project_id":null,
+            "parent_id":null,
+            "kind":"task",
+            "title":"Legacy schema two item",
+            "description":"",
+            "labels":[],
+            "status_id":"todo",
+            "priority":0,
+            "due_at":null,
+            "follow_up_at":null,
+            "archived":false,
+            "position":0,
+            "created_at":"old-created",
+            "updated_at":"old-updated"
+        }]);
+        schema_two["status_history"] = json!([]);
+        let legacy_target_path = database_path();
+        let legacy_target = GlobalManagerApplication::open(&legacy_target_path).unwrap();
+        call(
+            &legacy_target,
+            "import",
+            json!({"snapshot":schema_two,"replace":true,"expected_revision":0}),
+            "import-schema-two",
+        );
+        let legacy_export = call(
+            &legacy_target,
+            "export",
+            json!({}),
+            "export-legacy-after-import",
+        );
+        assert_eq!(legacy_export["schema_version"], 3);
+        assert!(legacy_export["items"][0].get("capture_origin").is_none());
+        assert_eq!(legacy_export["capture_witnesses"], json!([]));
+
+        drop(source);
+        drop(target);
+        drop(bad_target);
+        drop(legacy_target);
+        remove_database(&source_path);
+        remove_database(&target_path);
+        remove_database(&bad_target_path);
+        remove_database(&legacy_target_path);
     }
 }
 

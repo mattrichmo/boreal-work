@@ -395,7 +395,7 @@ test('form date and optional priority rules reject invalid input and explain val
 test('blank optional priority is omitted for detailed create and project edit', async () => {
   const h=harness();await h.key('N');await h.key('New detailed task');
   for(const key of ['\t','\t','\t','\t','\t','\t','\t','\t','\x13'])await h.key(key);
-  assert.equal(h.calls[0].command,'todo add');assert.equal(Object.hasOwn(h.calls[0].payload,'priority'),false);
+  assert.equal(h.calls[0].command,'task add');assert.equal(Object.hasOwn(h.calls[0].payload,'priority'),false);assert.equal(Object.hasOwn(h.calls[0].payload,'capture_text'),false);
   h.controller.setRoute('projects');await h.key('e');await h.key('\x13');
   assert.equal(h.calls[1].command,'project edit');assert.equal(Object.hasOwn(h.calls[1].payload,'priority'),false);
   await h.key('\x03');await h.run;

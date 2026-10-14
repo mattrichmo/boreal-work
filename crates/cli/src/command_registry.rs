@@ -1128,7 +1128,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "global todo add",
-        syntax: "bwrk global todo add --title TITLE [--project PROJECT] [--json]",
+        syntax: "bwrk global todo add --title TITLE [--project PROJECT] [--source-ref REF] [--json]",
         action: "mutate",
         output: "global_item",
         direct: true,

@@ -48,7 +48,11 @@ pub enum StatusCategory {
     Blocked,
     Completed,
     Cancelled,
+    Inbox,
 }
+
+/// Stable workflow status used for classification-free personal capture.
+pub const PERSONAL_INBOX_STATUS_ID: &str = "personal-inbox";
 
 impl StatusCategory {
     pub fn as_str(self) -> &'static str {
@@ -59,6 +63,7 @@ impl StatusCategory {
             Self::Blocked => "blocked",
             Self::Completed => "completed",
             Self::Cancelled => "cancelled",
+            Self::Inbox => "inbox",
         }
     }
 }
@@ -73,8 +78,48 @@ impl TryFrom<&str> for StatusCategory {
             "blocked" => Ok(Self::Blocked),
             "completed" => Ok(Self::Completed),
             "cancelled" => Ok(Self::Cancelled),
+            "inbox" => Ok(Self::Inbox),
             _ => Err(GlobalManagerDomainError::InvalidCategory(value.to_owned())),
         }
+    }
+}
+
+/// Immutable identity of the bytes accepted by an explicit Global capture.
+/// The original text is retained separately as a witness, never copied into
+/// every management item record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureOrigin {
+    pub digest: String,
+    pub source_ref: Option<String>,
+}
+
+impl CaptureOrigin {
+    pub fn validate(&self) -> Result<(), GlobalManagerDomainError> {
+        let Some(hex) = self.digest.strip_prefix("sha256:") else {
+            return Err(GlobalManagerDomainError::InvalidCaptureDigest(
+                self.digest.clone(),
+            ));
+        };
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(GlobalManagerDomainError::InvalidCaptureDigest(
+                self.digest.clone(),
+            ));
+        }
+        if let Some(source_ref) = self.source_ref.as_deref() {
+            if source_ref.trim().is_empty()
+                || source_ref.len() > 4096
+                || source_ref.chars().any(char::is_control)
+            {
+                return Err(GlobalManagerDomainError::InvalidCaptureSourceRef(
+                    source_ref.to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -332,6 +377,8 @@ pub fn validate_identifier(value: &str) -> Result<(), GlobalManagerDomainError> 
 pub enum GlobalManagerDomainError {
     InvalidIdentifier(String),
     InvalidCategory(String),
+    InvalidCaptureDigest(String),
+    InvalidCaptureSourceRef(String),
     InvalidItemKind(String),
     InvalidRelationshipKind(String),
     EmptyTitle,
@@ -347,6 +394,10 @@ impl fmt::Display for GlobalManagerDomainError {
         match self {
             Self::InvalidIdentifier(v) => write!(f, "invalid global identifier: {v:?}"),
             Self::InvalidCategory(v) => write!(f, "unknown workflow category: {v}"),
+            Self::InvalidCaptureDigest(v) => write!(f, "invalid capture digest: {v}"),
+            Self::InvalidCaptureSourceRef(v) => {
+                write!(f, "invalid capture source reference: {v:?}")
+            }
             Self::InvalidItemKind(v) => write!(f, "unknown management item kind: {v}"),
             Self::InvalidRelationshipKind(v) => {
                 write!(f, "unknown management relationship kind: {v}")
