@@ -196,7 +196,13 @@ change source.
   no current-source S04-T90 receipt and no S05 validation report. S04 requires
   accepted S00/S01 leaves; S05 T90 requires S04-T90 plus S05 leaves (and
   S05-T05 also requires S12-T01). Existing test definitions do not constitute
-  current-head execution results.
+  current-head execution results. On the current source, `cargo test -p
+  boreal-cli` had one failure out of 156 unit tests in
+  `daily_filter_uses_the_public_global_service_socket_route`; that test passed
+  alone, and the full CLI suite passed with `--test-threads=1`. The failing
+  daily route test and a parallel physical-backup test both mutate
+  `BOREAL_GLOBAL_ROOT`, pointing to a process-environment race. The Global CLI
+  file is under a recorded S06 grant, so I did not change either test.
 - **S12:** The T05 contract reconciliation is committed, but no accepted
   T01–T04 handoffs, T05 execution handoff, or BW-S12 validation directory is
   checked in. Focused CLI/service tests exist, but their exact-tree results,

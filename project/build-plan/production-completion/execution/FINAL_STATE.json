@@ -461,6 +461,12 @@
       "event": "V4_dependency_audits_reconciled",
       "source_commit": "d0fccd3f42799b3760238591b430803697df0ea8",
       "summary": "Three read-only Luna XHigh audits reconciled S00-S05 and S12 predecessor/gate evidence. S00-T90 is unaccepted; S01/S02/S03 are not graph-ready from checked-in evidence; S04 and S02 qualification artifacts are stale for this source; S05 and S12 handoff/T90 evidence is absent. No runtime status or active grants were inferred or mutated. The requested worker-stop confirmation remains unavailable."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "boreal_cli_serial_suite_pass_parallel_environment_race_observed",
+      "source_commit": "d0fccd3f42799b3760238591b430803697df0ea8",
+      "summary": "The default parallel `cargo test -p boreal-cli` run had 155/156 unit tests pass; daily_filter_uses_the_public_global_service_socket_route failed with an empty result. The test passes alone, and the full CLI suite passes with `-- --test-threads=1`. Two parallel tests mutate BOREAL_GLOBAL_ROOT, which points to an environment race. No test files were edited because the Global CLI module remains under a recorded S06 whole-file grant."
     }
   ]
 }
