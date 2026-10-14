@@ -181,26 +181,6 @@
         "project/build-plan/production-completion/execution/FINAL_STATE.json"
       ],
       "journeys": "all application journeys"
-    },
-    {
-      "package": "F4 / BW-S13-T02 typed scheduling and external-wait TUI",
-      "owner": "Luna Extra High agent /root/s13_tui",
-      "model": "GPT-6 Luna Extra High",
-      "worktree": "/Users/cybertron/.codex/worktrees/v4-s13-scheduling/boreal-work",
-      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
-      "exclusive_paths": [
-        "apps/tui/src/",
-        "apps/tui/tests/"
-      ],
-      "shared_paths_read_only": [
-        "crates/protocol/src/models.rs",
-        "crates/cli/src/command_registry.rs",
-        "crates/cli/src/main.rs",
-        "crates/cli/src/service.rs"
-      ],
-      "journeys": [
-        "J13"
-      ]
     }
   ],
   "exclusive_write_owners": {
@@ -221,7 +201,7 @@
     "crates/store/src/memory.rs": "F3 / Agent B",
     "crates/source/": "F3 / Agent B",
     "crates/memory/": "F3 / Agent B",
-    "apps/tui/src/": "F4 / Agent C",
+    "apps/tui/src/": "F4 / coordinator after BW-S13-T02 integration at ef89994",
     "crates/cli/src/main.rs": "F5 coordinator",
     "crates/cli/src/service.rs": "F5 / Coordinator",
     "crates/cli/src/command_registry.rs": "F5 coordinator except the BW-S06 capture command entry leased to /root/s06_capture_origin",
@@ -268,8 +248,8 @@
     "release_url": null,
     "channel_verification": "not_run"
   },
-  "note": "Current source includes the PR #22 baseline, the coordinator finish-recipe grammar correction, integrated F1 project-local onboarding and guidance, and the S07-T03 Global provenance inspector. Workflow and skill package validators pass; F1, S07, and all sprint acceptance remain unrun. The S13-T02 schedule/wait TUI remains an active source lane. Remaining work includes S07 bulk-triage CLI and sprint acceptance, S08 restore identity and Intake receipts, S09 Global Send, S10 scale qualification, S11 release journeys/handover, S12-T05/T06 integration and headless qualification, S13 date/wait parity and reusable mixed-work journeys, and remaining sprint T90 gates. The S07-T03 handoff exposed capture_witnesses in interactive snapshots; the bounded application change is held because the application module is still covered by the S06 whole-file lease. Integrated qualification, installation activation, and release delivery have not occurred. S00-T01/T04 worker-stop confirmation is still unavailable, so their expiry recovery and dependent runtime actions remain untouched. The installed 0.2.0 binary is not current source and uses SQLite 3.43.2 below the declared 3.51.3 floor; do not activate a candidate until qualification and binding review are complete.",
-  "current_source_commit": "6362a66d7a3c2cb7611309eee4e31f71757092c0",
+  "note": "Current integration source includes the PR #22 baseline, workflow finish-recipe grammar and fixture-revision fixes, integrated F1 local guidance/onboarding, S07-T03 Global provenance inspection, and S13 typed scheduling/external-wait TUI. Contract, workflow-package and skill-package validators pass. Focused machine-update tests pass; TUI typecheck and 106 tests pass. S13 T02 source is integrated, but its wait readback consumes an unbounded service list and S13-T90 acceptance remains open. F1 and S07 sprint acceptance remain unrun. Remaining source/gate work includes S02/S03 paired package/Global migration recovery, S05–S07 daily/Inbox/CLI parity and snapshot privacy, S08 receipts, S09 Global Send, S10 scale qualification, S11 release journeys/handover, S12-T05/T06 and S13-T01/T03/T90. Integrated qualification, installation activation and release delivery have not occurred. S00-T01/T04 worker-stop confirmation is unavailable, so their expiry recovery and dependent runtime actions remain untouched. The installed 0.2.0 binary is not current source and uses SQLite 3.43.2 below the declared 3.51.3 floor; do not activate a candidate until qualification and binding review are complete.",
+  "current_source_commit": "ef89994fc8afa05c1f6286a70b740fbd8a232355",
   "environment_inventory": {
     "checked_date": "2026-10-14",
     "native_platform": "macOS ARM64",
@@ -451,6 +431,18 @@
       "event": "S07_T03_interactive_snapshot_privacy_change_held",
       "source_commit": "6362a66d7a3c2cb7611309eee4e31f71757092c0",
       "summary": "The proposed change to omit capture_witnesses from interactive Global snapshots was drafted and its focused application regression passed, but both edits were reverted before commit after confirming an active S06 whole-file write grant on crates/application/src/global_manager.rs. No snapshot behavior changed; reconcile that lease before retrying."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "workflow_fixture_revision_fix_integrated",
+      "source_commit": "2899b741b188bc22b52e03cb41c5310f3fc63137",
+      "summary": "Aligned project/spec/workflows/manifest.json fixture_version with the root and fixture revision. The full project contract validator now passes: 8 protocol envelopes, 11 guidance fixtures, 11 workflow assets, transition vectors, clock/dependency cases, conformance mappings and SQLite schema."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "BW_S13_T02_scheduling_tui_integrated",
+      "source_commit": "ef89994fc8afa05c1f6286a70b740fbd8a232355",
+      "summary": "Integrated the typed date scheduling and external-wait TUI. Typecheck and all 106 TUI tests pass on the integrated tree. The wait readback route still returns the unbounded full list, so the TUI labels its 100-item display partial; BW-S13-T02/T90 acceptance remains open."
     }
   ]
 }

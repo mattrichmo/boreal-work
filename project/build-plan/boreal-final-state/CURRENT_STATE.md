@@ -101,3 +101,38 @@ outside the required release.
 Historical Global audit results (including Node 20 and prior PTY/socket
 checks) remain historical evidence. S00-T90 must qualify the combined exact
 tree and record platform skips/unsupported results honestly.
+
+## Requalification update — 2026-10-14
+
+The exact-head inventory above is historical. Requalification on 2026-10-14 found
+`origin/main` at `b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e`; local `main` is one
+commit ahead at `61828ecf7a9ef2368658d877b6b95e5613a2307c` with the workflow fixture
+revision correction. The isolated `codex/v4-roadmap-continuation` integration
+branch is based on that remote head and currently contains source through
+`ef89994fc8afa05c1f6286a70b740fbd8a232355`. The local main commit has not been
+pushed. GitHub currently reports no open issues or pull requests.
+
+The current integration branch now includes the F1 local guidance/onboarding
+change, S07-T03 provenance inspector, S13 typed scheduling/external-wait TUI,
+and the workflow fixture revision correction. Contract validation, workflow
+package validation, skill package validation, machine-update focused tests,
+Global TUI checks, and project TUI typecheck plus all 106 tests pass. These are
+source checks, not sprint acceptance. The TUI displays at most 100 external
+waits and marks the view partial because the service readback still loads and
+returns the full unbounded list.
+
+S02 already contains supported Node preflight and target-matrix/host-smoke
+scaffolding; exact target execution and S02-T90 remain unqualified. S03 still
+needs paired package/Global backup and migration-failure recovery with the T06
+fault matrix. Remaining work includes S05–S07 daily/Inbox/CLI parity and the
+held interactive snapshot privacy change, S08 Intake receipts, S09 Global Send,
+S10 scale qualification, S11 release journeys/handover, S12-T05/T06, and
+S13-T01/T03/T90. J1–J13 and sprint T90 gates remain unrun/unaccepted; no
+release candidate has been assembled, installed, or published.
+
+The installed local `bwrk` remains 0.2.0 at build
+`6ab1c078150993936d5d381822e7774d9e5cfade` and reports SQLite 3.43.2, below
+the declared 3.51.3 floor. Runtime project revision 99 integrity checks pass.
+The S00-T01/T04 expired-review sessions still require harness confirmation
+that their workers stopped before supported recovery; the user cannot confirm
+yet. No runtime session or installation state was changed.
