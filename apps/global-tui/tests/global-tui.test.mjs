@@ -9,7 +9,7 @@ import { GlobalController, render, runInteractive, validateSnapshot } from "../d
 import { parseArgs } from "../dist/entrypoint.js";
 
 const snapshot = {
-  schema_version: 2, revision: 12,
+  schema_version: 3, revision: 12,
   projects: [{ id:"life",name:"Life",description:"",archived:false,created_at:"now",updated_at:"now" }],
   items: [
     { id:"errand",project_id:"life",parent_id:null,kind:"task",title:"Pick up groceries",description:"",status_id:"inbox",priority:null,due_at:null,archived:false,position:0,created_at:"now",updated_at:"now" },
@@ -99,6 +99,8 @@ test("linked rollups stay paired with their own workspace under one management p
 });
 
 test("snapshot validation, terminal escaping, clipping, and unknown writes fail closed",async()=>{
+  assert.doesNotThrow(()=>validateSnapshot({...snapshot,schema_version:2}));
+  assert.doesNotThrow(()=>validateSnapshot({...snapshot,schema_version:3}));
   assert.throws(()=>validateSnapshot({...snapshot,schema_version:99}),/schema or revision/);
   let current=structuredClone(snapshot); const fake={snapshot:async()=>current,execute:async()=>{throw new GlobalProtocolError("lost response",{unknownOutcome:true,operationId:"op_17",readbackRequired:true});}};
   const controller=new GlobalController(fake); await controller.refresh();
