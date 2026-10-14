@@ -1113,4 +1113,50 @@ mod tests {
         );
         fs::remove_dir_all(prefix).expect("remove test prefix");
     }
+
+    #[test]
+    fn recovery_keeps_a_mismatched_package_unresolved_without_replay() {
+        let prefix = temp_prefix("mismatch");
+        fs::create_dir_all(&prefix).expect("create prefix");
+        let installed = install_fixture_package(&prefix);
+        let marker = prefix.join("installer-was-run");
+        fs::write(
+            prefix.join("share/boreal/install.sh"),
+            format!("#!/bin/sh\ntouch {}\n", marker.display()),
+        )
+        .expect("write installer marker fixture");
+        let mut record = request(&prefix, "op_machine_mismatch");
+        assert_ne!(record.target_package_identity, installed.artifact_identity);
+        record.stage = update::MachineUpdateStage::ReadbackRequired;
+        record.side_effect_ref = Some(update::machine_update_side_effect_ref(&record));
+        {
+            let journal = MachineUpdateJournal::open_locked(&prefix).expect("open journal");
+            journal
+                .register_machine_update(&record)
+                .expect("register mismatch fixture");
+        }
+
+        let recovered = recover_result(&prefix, None).expect("package mismatch is read back");
+        assert_eq!(recovered.outcome, ApplicationOutcome::Unknown);
+        assert!(!marker.exists(), "recovery must never invoke the installer");
+        let journal = MachineUpdateJournal::open_read_only(&prefix).expect("read journal");
+        let unresolved = journal
+            .load("op_machine_mismatch")
+            .expect("load unresolved operation");
+        assert_eq!(
+            unresolved.stage,
+            update::MachineUpdateStage::ReadbackRequired
+        );
+        assert_eq!(
+            unresolved.observed_package_identity, None,
+            "a mismatched package is not a successful readback"
+        );
+        assert!(
+            unresolved
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("does not match the journaled target"))
+        );
+        fs::remove_dir_all(prefix).expect("remove test prefix");
+    }
 }

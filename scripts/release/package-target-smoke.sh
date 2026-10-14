@@ -7,6 +7,19 @@ case "$target" in
   aarch64-apple-darwin|x86_64-apple-darwin|x86_64-unknown-linux-gnu) ;;
   *) echo "package target smoke: unsupported declared target: $target" >&2; exit 2 ;;
 esac
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64|Darwin:aarch64) actual_target=aarch64-apple-darwin ;;
+  Darwin:x86_64|Darwin:amd64) actual_target=x86_64-apple-darwin ;;
+  Linux:x86_64|Linux:amd64) actual_target=x86_64-unknown-linux-gnu ;;
+  *)
+    echo "package target smoke: unsupported qualification host: $(uname -s) $(uname -m)" >&2
+    exit 2
+    ;;
+esac
+[ "$target" = "$actual_target" ] || {
+  echo "package target smoke: refusing to qualify $target on $actual_target host" >&2
+  exit 2
+}
 case "$(basename "$archive")" in
   bwrk-v*-"$target".tar.gz) ;;
   *) echo "package target smoke: archive does not match target $target: $archive" >&2; exit 2 ;;
@@ -63,6 +76,41 @@ if not isinstance(projects, list) or not any(
     for project in projects
 ):
     raise SystemExit("Global dashboard JSON did not include the created project")
+PY
+
+# Force provisioning to reject an explicitly selected Global root after the
+# package files publish. The installer must restore those files and leave the
+# invoking user's separately selected Global database untouched.
+python3 - "$prefix/bin/bwrk" "$BOREAL_GLOBAL_ROOT/global.sqlite" "$scratch" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+binary, database, scratch = map(Path, sys.argv[1:])
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+(Path(scratch) / "before-binary.sha256").write_text(digest(binary), encoding="ascii")
+(Path(scratch) / "before-global.sha256").write_text(digest(database), encoding="ascii")
+PY
+blocked_global_root="$scratch/global-root-is-a-file"
+: > "$blocked_global_root"
+if BOREAL_GLOBAL_ROOT="$blocked_global_root" sh "$root/install.sh" \
+  --archive "$archive" --prefix "$prefix" --yes --no-dashboard; then
+  echo "package target smoke: installer unexpectedly succeeded with an invalid Global root" >&2
+  exit 1
+fi
+python3 - "$prefix/bin/bwrk" "$BOREAL_GLOBAL_ROOT/global.sqlite" "$scratch" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+binary, database, scratch = map(Path, sys.argv[1:])
+root = Path(scratch)
+digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+if digest(binary) != (root / "before-binary.sha256").read_text(encoding="ascii"):
+    raise SystemExit("package rollback did not restore the previous executable bytes")
+if digest(database) != (root / "before-global.sha256").read_text(encoding="ascii"):
+    raise SystemExit("failed package update changed the invoking user's Global database")
 PY
 
 echo "package target smoke: PASS ($target)"

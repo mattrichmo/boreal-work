@@ -102,46 +102,32 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Download target artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: boreal-package-*-${{ github.run_id }}
-          path: ${{ runner.temp }}/boreal-release-candidate
+          path: ${{ runner.temp }}/boreal-release-input
           merge-multiple: true
 
-      - name: Write combined SHA256SUMS
+      - name: Validate and assemble candidate layout
         env:
+          RELEASE_INPUT_DIR: ${{ runner.temp }}/boreal-release-input
           RELEASE_CANDIDATE_DIR: ${{ runner.temp }}/boreal-release-candidate
         run: |
-          python3 - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
+          python3 scripts/release/assemble_artifacts.py \
+            --input-dir "$RELEASE_INPUT_DIR" \
+            --output-dir "$RELEASE_CANDIDATE_DIR"
 
-          output = Path(os.environ["RELEASE_CANDIDATE_DIR"])
-          archives = sorted(output.glob("bwrk-v*.tar.gz"))
-          if not archives:
-              raise SystemExit("release candidate contains no archives")
-          entries = []
-          seen_names = set()
-          for archive in archives:
-              if archive.is_symlink() or not archive.is_file():
-                  raise SystemExit(f"release archive is not a regular file: {archive.name}")
-              if archive.parent != output or archive.name in seen_names:
-                  raise SystemExit(f"release archive name is not a unique basename: {archive.name}")
-              seen_names.add(archive.name)
-              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-              entries.append(f"{digest}  {archive.name}")
-          sums = output / "SHA256SUMS"
-          sums.write_text("\n".join(entries) + "\n", encoding="utf-8")
-          # The installer looks up the exact release-asset basename. Keep the
-          # candidate checksum file in that same flat, downloadable layout.
-          published = [line.split() for line in sums.read_text(encoding="utf-8").splitlines()]
-          if len(published) != len(archives) or any(
-              len(fields) != 2 or fields[1] not in seen_names for fields in published
-          ) or {fields[1] for fields in published} != seen_names:
-              raise SystemExit("SHA256SUMS does not match the flat release-asset layout")
-          PY
+      - name: Check release layout assembler failure cases
+        run: python3 scripts/release/test_assemble_artifacts.py
 
       - name: Retain combined candidate layout
         uses: actions/upload-artifact@v4
