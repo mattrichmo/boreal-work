@@ -1,0 +1,24 @@
+
+> build
+> tsc --outDir /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/boreal-release-n_ohulvx/tui
+
+
+> build
+> tsc --outDir /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/boreal-release-n_ohulvx/global-tui
+
+{"manifest": "/Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/bwrk-v0.2.2-aarch64-apple-darwin.contracts.json", "ok": true, "snapshot_identity": "sha256:1b4c260456a1c5fffd3a5c7fc7a5adf577ffe5b3e0f3493cf2b8540f03d7247b"}
+release package manifest and workflow/skill capability identities verified
++ rustc -vV
+Skipping CLI compilation; compiling clean TUI runtime output
++ npm --prefix /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/apps/tui run build -- --outDir /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/boreal-release-n_ohulvx/tui
++ npm --prefix /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/apps/global-tui run build -- --outDir /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/boreal-release-n_ohulvx/global-tui
++ /opt/homebrew/opt/python@3.14/bin/python3.14 /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/scripts/release/release_identity.py manifest --root /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work --output /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/bwrk-v0.2.2-aarch64-apple-darwin.contracts.json
++ rustc --version
++ cargo --version
++ node --version
++ tsc --version
++ /opt/homebrew/opt/python@3.14/bin/python3.14 /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/scripts/release/verify_release_package.py /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/bwrk-v0.2.2-aarch64-apple-darwin /Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/bwrk-v0.2.2-aarch64-apple-darwin/share/boreal/release.json
+{"archive": "/Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/bwrk-v0.2.2-aarch64-apple-darwin.tar.gz", "release_manifest": "/Users/cybertron/.codex/worktrees/s02-t90-current-head/boreal-work/project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/bwrk-v0.2.2-aarch64-apple-darwin.release.json", "sha256": "sha256:ff712f1ad5e35bc393a4482668e3a0eeb3e6b340b1726a88c027a5fd84d2d3f7", "target": "aarch64-apple-darwin", "version": "0.2.2"}
+
+command=LC_ALL=C LANG=C python3 scripts/release/build_release.py --skip-build --output-dir project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release
+exit_code=0

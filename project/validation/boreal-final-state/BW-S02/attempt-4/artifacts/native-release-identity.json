@@ -1,0 +1,178 @@
+{
+  "acceptance_source_commit": "d1f8ae0b5d42c1886df5bba04930f3692d63e6ef",
+  "archive_sha256": "sha256:ff712f1ad5e35bc393a4482668e3a0eeb3e6b340b1726a88c027a5fd84d2d3f7",
+  "artifact_identity": "sha256:9bd4c779a05633d34d842dd924f4da25a09218e0daca625a01a3ac989007f76e",
+  "asset_count": 86,
+  "assets": [
+    {
+      "bytes": 33398832,
+      "path": "bin/bwrk",
+      "sha256": "sha256:2db66ccabcc1a1c69f183d0db455abeed5a0871593f6e2a527f2f600e413b793"
+    },
+    {
+      "bytes": 12544,
+      "path": "lib/boreal/global-tui/client.js",
+      "sha256": "sha256:19ce4859d19fa37f737ab986f1fcc5d8f12578d6715585f536ee4c360040cba8"
+    },
+    {
+      "bytes": 4635,
+      "path": "lib/boreal/global-tui/entrypoint.js",
+      "sha256": "sha256:6d44a634944bb97714bea8a04b33b112958121a6f92900bd4811fa44516de492"
+    },
+    {
+      "bytes": 7219,
+      "path": "lib/boreal/global-tui/forms.js",
+      "sha256": "sha256:544115dd4a1c6c96fda4130cc452b57136423cae002f61a05405672fd5597cae"
+    },
+    {
+      "bytes": 84880,
+      "path": "lib/boreal/global-tui/interaction.js",
+      "sha256": "sha256:7e33f8404e69bf4afc780c2b78c86c412c7d3dcadb8135923ee9d35500fa35fb"
+    },
+    {
+      "bytes": 252,
+      "path": "lib/boreal/global-tui/interface.js",
+      "sha256": "sha256:9bc24ec6e4d6935f8023b595a529ca1ba59bba255b0792e1217c2bcd7d5d429f"
+    },
+    {
+      "bytes": 47620,
+      "path": "lib/boreal/global-tui/model.js",
+      "sha256": "sha256:6812044dfe0b9c93cce2a026d40f4afdf83c1c2ffff1cbf1bf1f7b3e1be95543"
+    },
+    {
+      "bytes": 337,
+      "path": "lib/boreal/global-tui/package.json",
+      "sha256": "sha256:3c9ce8e05a867bb99eb4ef22522e3647d1cb5eaf95962875c2bc12784e4f4999"
+    },
+    {
+      "bytes": 4053,
+      "path": "lib/boreal/global-tui/terminal/cells.js",
+      "sha256": "sha256:342213cc70c3ef16f76315e2aa1e69b9e044b9ec24b9dcfd788564396f43f65d"
+    },
+    {
+      "bytes": 2615,
+      "path": "lib/boreal/global-tui/terminal/input.js",
+      "sha256": "sha256:bc17b637d93f19e1536377dc6433df099a8de6a1b1f76d7fd3925522031c19b4"
+    },
+    {
+      "bytes": 5558,
+      "path": "lib/boreal/global-tui/terminal/keys.js",
+      "sha256": "sha256:e0c8cb2adf84821a2602a5da11b34f9222b2031fafadc96d91162b35ebd58690"
+    },
+    {
+      "bytes": 4646,
+      "path": "lib/boreal/global-tui/terminal/screen.js",
+      "sha256": "sha256:905d2be451910a0ab2606ad8898e2c8cd43a3b8e2d0723e9acf59f0f4774f601"
+    },
+    {
+      "bytes": 32118,
+      "path": "lib/boreal/global-tui/view.js",
+      "sha256": "sha256:e4604f5980e8a1d3d159ed320056b21d155a20b427e2224c2c40e2345b40f17a"
+    },
+    {
+      "bytes": 126142,
+      "path": "lib/boreal/tui/client.js",
+      "sha256": "sha256:e0510c369aa9ab809a13fc884a835b168db62c4b0c335e598f85d73421b314ea"
+    },
+    {
+      "bytes": 7363,
+      "path": "lib/boreal/tui/entrypoint.js",
+      "sha256": "sha256:4449aa6ebd035513fc64ae1b690a445b25bd039c38b580bbcda524dde170e8e7"
+    },
+    {
+      "bytes": 74762,
+      "path": "lib/boreal/tui/full-screen.js",
+      "sha256": "sha256:cbb758ba1733add1900876dd535b6f27b4a595cc09bf3c5bd31ff44f546ba5f2"
+    },
+    {
+      "bytes": 16411,
+      "path": "lib/boreal/tui/line-shell.js",
+      "sha256": "sha256:dcc286873ef84bd65d444c568950459527600668619e97cd2a218926c21c9b23"
+    },
+    {
+      "bytes": 8039,
+      "path": "lib/boreal/tui/node-transport.js",
+      "sha256": "sha256:e83187877d31b11308a9b592132fe04743143723eeca51d92fd349539f69425a"
+    },
+    {
+      "bytes": 561,
+      "path": "lib/boreal/tui/package.json",
+      "sha256": "sha256:1c2c90da7d5fdc98c8648193c825678a3e465f18fb4a461f721f8050fb5300f1"
+    },
+    {
+      "bytes": 15875,
+      "path": "lib/boreal/tui/terminal.js",
+      "sha256": "sha256:1c0f0a40a1d1af8fb82eed0b0b61f0e9b7c430c0cced82332f7fbf4803f6d0d1"
+    },
+    {
+      "bytes": 4053,
+      "path": "lib/boreal/tui/ui/cells.js",
+      "sha256": "sha256:342213cc70c3ef16f76315e2aa1e69b9e044b9ec24b9dcfd788564396f43f65d"
+    },
+    {
+      "bytes": 33796,
+      "path": "lib/boreal/tui/ui/dashboard.js",
+      "sha256": "sha256:78bb071d7fd26449b77ccbb96e2b1d591bb2620dfa25106c6169d195e0217ca6"
+    },
+    {
+      "bytes": 2534,
+      "path": "lib/boreal/tui/ui/input.js",
+      "sha256": "sha256:a48665507ffc4fff79be53da4d47094051dff7138c01b0cfbfd7065d62cc0fc1"
+    },
+    {
+      "bytes": 5335,
+      "path": "lib/boreal/tui/ui/keys.js",
+      "sha256": "sha256:c6dec118964d56c23176b14b9e93e98734415a914a3febd1bf39842f8560931f"
+    },
+    {
+      "bytes": 2713,
+      "path": "lib/boreal/tui/ui/layout.js",
+      "sha256": "sha256:67aac9cd74e5aa9c4dc52ee8cd5df277edd0857746fb5db94e9a87f44ceaca11"
+    },
+    {
+      "bytes": 20977,
+      "path": "lib/boreal/tui/ui/model.js",
+      "sha256": "sha256:4ae7a74122f36ae482f27c017980772d421777ea249f72595f72d264c887c00b"
+    },
+    {
+      "bytes": 4646,
+      "path": "lib/boreal/tui/ui/screen.js",
+      "sha256": "sha256:905d2be451910a0ab2606ad8898e2c8cd43a3b8e2d0723e9acf59f0f4774f601"
+    },
+    {
+      "bytes": 3083,
+      "path": "lib/boreal/tui/ui/terminal-size.js",
+      "sha256": "sha256:556206877d7c4a9ea62ec1769dcf6d2cab45b0fc27c35862d27c4693f0d88f10"
+    },
+    {
+      "bytes": 16139,
+      "path": "lib/boreal/tui/ui/workspace-view.js",
+      "sha256": "sha256:60f50581a473a576c5856c3ad730f83b02b68431266341386ef4741b0035e49e"
+    },
+    {
+      "bytes": 4568,
+      "path": "share/boreal/LICENSE",
+      "sha256": "sha256:25c4e2092d74c163673818df53604d89c529f404b55f6c9e8db850191bf436e5"
+    },
+    {
+      "bytes": 78994,
+      "path": "share/boreal/install.sh",
+      "sha256": "sha256:59ed396586d2c5603ab3c2aeecf120bfedb7751542f22f330a7b924d930c121a"
+    }
+  ],
+  "binary_sha256": "sha256:2db66ccabcc1a1c69f183d0db455abeed5a0871593f6e2a527f2f600e413b793",
+  "contracts_snapshot_identity": "sha256:1b4c260456a1c5fffd3a5c7fc7a5adf577ffe5b3e0f3493cf2b8540f03d7247b",
+  "global_tui_source_id": "sha256:c9ce081be6dc84b81d540aa0d80830b7565f6d5fa07d4fb49d3bfda172fafe27",
+  "node_range": ">=20 <27",
+  "release_manifest_sha256": "sha256:694d0cadb293f57bea2d3baadb39b91a2324d6db9e7011c07afdacd4a540e261",
+  "source_id": "sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad",
+  "target": "aarch64-apple-darwin",
+  "toolchain": {
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27) (Homebrew)",
+    "node": "v26.8.2",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)",
+    "typescript": "Version 5.4.5"
+  },
+  "tui_source_id": "sha256:fdab01964b4f81980a8483d4d31962ad210630e62e01f752396c43d26e2f093c",
+  "version": "0.2.2"
+}

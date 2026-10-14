@@ -1,0 +1,8 @@
+....
+----------------------------------------------------------------------
+Ran 4 tests in 0.181s
+
+OK
+
+command=python3 scripts/validation/global-tui/test_identity.py
+exit_code=0

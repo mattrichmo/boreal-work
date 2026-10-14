@@ -1,0 +1,37 @@
+
+  BOREAL / WORK
+  Machine installation · project data stays untouched
+
+  [1/4] Resolve installation source
+
+  [2/4] Verify and inspect the release archive
+
+  [3/4] Stage selected components
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+
+  [4/4] Publish installation
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+Boreal 0.2.2 installed to /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-target-smoke.zZzWCL/prefix
+  binary: /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-target-smoke.zZzWCL/prefix/bin/bwrk
+  TUI:    not selected (a previous installed dashboard was removed)
+  global: provisioned (run bwrk dashboard global)
+  add /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-target-smoke.zZzWCL/prefix/bin to PATH to invoke bwrk
+  Next: run bwrk dashboard global; for code projects run bwrk init, then bwrk dashboard.
+
+  BOREAL / WORK
+  Machine installation · project data stays untouched
+
+  [1/4] Resolve installation source
+
+  [2/4] Verify and inspect the release archive
+
+  [3/4] Stage selected components
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+
+  [4/4] Publish installation
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+boreal install: global manager provisioning failed; restoring prior installation
+package target smoke: PASS (aarch64-apple-darwin)
+
+command=LC_ALL=C LANG=C sh scripts/release/package-target-smoke.sh project/validation/boreal-final-state/BW-S02/attempt-4/artifacts/native-release/bwrk-v0.2.2-aarch64-apple-darwin.tar.gz aarch64-apple-darwin
+exit_code=0
