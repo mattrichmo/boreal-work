@@ -136,3 +136,11 @@ the declared 3.51.3 floor. Runtime project revision 99 integrity checks pass.
 The S00-T01/T04 expired-review sessions still require harness confirmation
 that their workers stopped before supported recovery; the user cannot confirm
 yet. No runtime session or installation state was changed.
+
+S08 restore identity and immutable Intake receipt source is present, and a
+limited T05 qualification record exists; the combined S08-T90 acceptance is
+still absent. S09 Global Send has no application/CLI implementation and is
+blocked on S07-T90 and S08-T90. S12-T05 has typed source routes, but the
+callable contract inventory and general-work/artifact-acceptance fixtures
+disagree about available operations; T05 and T90 evidence are absent. S12-T06
+also waits on accepted S12-T05 and S02-T90. S10-T01 must wait for S07-T90.

@@ -2,7 +2,7 @@
 
 **Goal:** Qualify the completed Global + project system on exact supported artifacts, reconcile documentation/parity, and leave a maintainable operator handoff.
 
-**Entry dependency:** BW-S09-T90, BW-S10-T90 and BW-S12-T90  
+**Entry dependency:** BW-S09-T90, BW-S10-T90, BW-S12-T90 and BW-S13-T90
 **Sprint close:** `BW-S11-T90` — integration + sprint-level validation.
 
 ## Required context
