@@ -35,6 +35,7 @@ mod backup_bundle;
 pub mod completion;
 mod completion_migrations;
 pub mod cycle_commands;
+pub use cycle_commands::ContainerRollupSnapshotV3;
 pub mod deliverables;
 pub mod execution;
 pub mod final_result;
