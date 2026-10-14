@@ -467,6 +467,12 @@
       "event": "boreal_cli_serial_suite_pass_parallel_environment_race_observed",
       "source_commit": "d0fccd3f42799b3760238591b430803697df0ea8",
       "summary": "The default parallel `cargo test -p boreal-cli` run had 155/156 unit tests pass; daily_filter_uses_the_public_global_service_socket_route failed with an empty result. The test passes alone, and the full CLI suite passes with `-- --test-threads=1`. Two parallel tests mutate BOREAL_GLOBAL_ROOT, which points to an environment race. No test files were edited because the Global CLI module remains under a recorded S06 whole-file grant."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "V4_continuation_draft_pr_opened",
+      "source_commit": "38024aa4887f9a463e99487f77a8aeeafb54ee9b",
+      "summary": "Pushed the rebased codex/v4-roadmap-continuation branch and opened draft PR #23. The PR keeps the V4 source progress reviewable but makes no sprint-acceptance or release claim. It remains draft pending the S00 worker-stop confirmation, supported task/grant reconciliation and successor acceptance gates."
     }
   ]
 }

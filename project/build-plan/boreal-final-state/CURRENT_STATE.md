@@ -231,9 +231,13 @@ The continuation branch was rebased onto local `main` commit
 `61828ecf7a9ef2368658d877b6b95e5613a2307c`, which contains the workflow-fixture
 correction already cherry-picked by the continuation branch; Git skipped that
 duplicate patch. Contract source tree identity is unchanged by the rebase.
-`gh` returned no open pull requests and no open issues at the time of the
-check. The continuation branch is committed locally but has not been pushed or
-merged.
+At the prepublication check, `gh` returned no open pull requests and no open
+issues. The continuation branch was then pushed and opened as draft PR
+[#23](https://github.com/mattrichmo/boreal-work/pull/23); it has not been
+merged. The PR describes the source and validation evidence and lists the
+unaccepted V4 gates. Keep it in draft until the required S00 confirmation,
+supported task/grant reconciliation and successor acceptance gates are
+complete.
 
 The exact-source full CLI package suite passed with
 `cargo test -p boreal-cli -- --test-threads=1`. A default parallel run failed
