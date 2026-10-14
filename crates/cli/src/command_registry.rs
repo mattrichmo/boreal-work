@@ -1776,11 +1776,11 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "intake list",
-        syntax: "bwrk intake list [ARGS] [--json]",
+        syntax: "bwrk intake list [--project PROJECT] [--limit N] [--offset N] [--json]",
         action: "read",
         output: "intake",
         direct: true,
-        service: false,
+        service: true,
         summary: "project-scoped intake through the canonical application",
     },
     CommandSpec {
@@ -2685,12 +2685,12 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "wait list",
-        syntax: "bwrk wait list --project PROJECT [--socket PATH --json]",
+        syntax: "bwrk wait list --project PROJECT [--limit N] [--offset N] [--expected-revision N] [--socket PATH --json]",
         action: "read",
         output: "external_wait",
         direct: true,
         service: true,
-        summary: "read current project-scoped external waits",
+        summary: "read one bounded, revision-consistent page of project-scoped external waits",
     },
     CommandSpec {
         path: "wait show",
@@ -3884,6 +3884,8 @@ mod tests {
         ParsedCommand {
             path: path.iter().map(|value| (*value).to_owned()).collect(),
             options: CliOptions {
+                transport: None,
+                transport_context: None,
                 service_workspace: None,
                 extra: Default::default(),
                 db: String::new(),

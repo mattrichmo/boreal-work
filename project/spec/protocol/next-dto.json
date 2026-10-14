@@ -12,6 +12,20 @@
     "next_schema_version": "boreal.agent_next.v1",
     "mode": "discover",
     "selection": "ready_work",
+    "context": {
+      "mode": "discover",
+      "project_id": "project_boreal_v2",
+      "actor_id": "agent_alice",
+      "harness_id": "luna",
+      "session_id": "session_local_agent_01",
+      "project_revision": 43,
+      "transport": "unix_socket_service",
+      "transport_context": {
+        "endpoint_id": "service:sha256:fixture-endpoint",
+        "request_id": "op_next_01J8V2NEXT000000000000001",
+        "operation_id": "op_next_01J8V2NEXT000000000000001"
+      }
+    },
     "status": {
       "display_status": "ready",
       "work_id": "work_task_c",
@@ -36,6 +50,14 @@
       "cwd": "/Users/cybertron/Code/boreal-work/boreal-work-v2",
       "runner": "boreal_cli",
       "shell": false
+    },
+    "provenance": {
+      "registry_version": "directives.v1",
+      "registry_path": "boreal.agent.directive.registry.v1",
+      "source_snapshot_hash": "unbound",
+      "config_identity": "unbound",
+      "gap_codes": [],
+      "workflow_refs": ["boreal.workflow.route.v1", "boreal.workflow.plan.v1"]
     },
     "context_refs": [
       {

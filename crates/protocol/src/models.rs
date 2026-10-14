@@ -256,6 +256,8 @@ pub struct AgentGuideDto {
     pub requirements: Vec<RequirementDto>,
     pub next_action: Option<NextActionDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_request: Option<GuidanceOperatorRequestDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_descriptor: Option<AgentActionDescriptorDto>,
     pub provenance: GuidanceProvenanceDto,
     pub selection_key: String,
@@ -267,6 +269,8 @@ pub struct AgentGuideDto {
 pub enum AgentActionInputValueTypeDto {
     UnsignedInteger,
     Identifier,
+    SourceVersion,
+    ConfigIdentity,
     Boolean,
     Text,
     EvidencePayload,
@@ -302,6 +306,41 @@ pub struct AgentActionInputDto {
     pub value_type: AgentActionInputValueTypeDto,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuidanceTransportDto {
+    DirectCli,
+    UnixSocketService,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GuidanceTransportContextDto {
+    pub endpoint_id: String,
+    pub request_id: String,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuidanceOperatorRequestKindDto {
+    CaptureProjectSource,
+}
+
+/// Typed operator input required before an agent can safely claim work.
+/// This is guidance only; the public source workflow still enforces capture
+/// authorization and project revision checks.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GuidanceOperatorRequestDto {
+    pub schema_version: String,
+    pub kind: GuidanceOperatorRequestKindDto,
+    pub required_role: AgentActionRoleDto,
+    pub project_id: String,
+    pub work_id: String,
+    pub expected_project_revision: u64,
+    pub required_inputs: Vec<AgentActionInputDto>,
+    pub instruction: String,
+}
+
 /// Full server-produced action descriptor carried alongside agent guidance.
 /// It is advisory context; the application rechecks authorization and every
 /// revision when an action request is submitted.
@@ -329,6 +368,10 @@ pub struct GuidanceContextDto {
     pub harness_id: Option<String>,
     pub session_id: Option<String>,
     pub project_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<GuidanceTransportDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_context: Option<GuidanceTransportContextDto>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -372,7 +415,13 @@ pub struct AgentNextDto {
     pub reason: NextReasonDto,
     pub next_action: Option<NextActionDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_request: Option<GuidanceOperatorRequestDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_descriptor: Option<AgentActionDescriptorDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<GuidanceContextDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<GuidanceProvenanceDto>,
     #[serde(default)]
     pub context_refs: Vec<ContextRefDto>,
     pub no_goal: bool,
@@ -877,6 +926,20 @@ mod tests {
         let guide: AgentGuideDto = serde_json::from_value(envelope.data.unwrap()).unwrap();
         assert_eq!(guide.kind, "agent_guide");
         assert!(!guide.next_action.as_ref().unwrap().shell);
+        assert_eq!(
+            guide
+                .context
+                .transport_context
+                .as_ref()
+                .unwrap()
+                .request_id,
+            guide
+                .context
+                .transport_context
+                .as_ref()
+                .unwrap()
+                .operation_id
+        );
         assert!(guide.action_descriptor.is_none());
         assert!(serde_json::to_value(&guide)
             .unwrap()
@@ -902,10 +965,20 @@ mod tests {
                 fence: 7,
             }),
             required_roles: vec![AgentActionRoleDto::Agent],
-            required_inputs: vec![AgentActionInputDto {
-                kind: "expected_project_revision".to_owned(),
-                value_type: AgentActionInputValueTypeDto::UnsignedInteger,
-            }],
+            required_inputs: vec![
+                AgentActionInputDto {
+                    kind: "expected_project_revision".to_owned(),
+                    value_type: AgentActionInputValueTypeDto::UnsignedInteger,
+                },
+                AgentActionInputDto {
+                    kind: "source_version".to_owned(),
+                    value_type: AgentActionInputValueTypeDto::SourceVersion,
+                },
+                AgentActionInputDto {
+                    kind: "config_identity".to_owned(),
+                    value_type: AgentActionInputValueTypeDto::ConfigIdentity,
+                },
+            ],
             confirmation: Some("Record this checkpoint?".to_owned()),
             read_only: false,
             recovery: false,
@@ -936,6 +1009,26 @@ mod tests {
                 .unwrap();
         let mut next: AgentNextDto = serde_json::from_value(next_envelope.data.unwrap()).unwrap();
         assert!(next.action_descriptor.is_none());
+        assert_eq!(
+            next.context.as_ref().unwrap().transport,
+            Some(GuidanceTransportDto::UnixSocketService)
+        );
+        let transport_context = next
+            .context
+            .as_ref()
+            .unwrap()
+            .transport_context
+            .as_ref()
+            .unwrap();
+        assert_eq!(transport_context.endpoint_id, "service:sha256:fixture-endpoint");
+        assert_eq!(
+            transport_context.request_id,
+            transport_context.operation_id
+        );
+        assert_eq!(
+            next.provenance.as_ref().unwrap().source_snapshot_hash,
+            "unbound"
+        );
         assert!(serde_json::to_value(&next)
             .unwrap()
             .get("action_descriptor")
@@ -945,6 +1038,14 @@ mod tests {
         assert_eq!(
             next_data["action_descriptor"]["target"]["entity_revision"],
             5
+        );
+        assert_eq!(
+            next_data["action_descriptor"]["required_inputs"][1]["value_type"],
+            "source_version"
+        );
+        assert_eq!(
+            next_data["action_descriptor"]["required_inputs"][2]["value_type"],
+            "config_identity"
         );
         assert_eq!(
             serde_json::from_value::<AgentNextDto>(next_data)
@@ -2026,6 +2127,13 @@ pub const INTAKE_BUCKET_CREATE_SCHEMA_VERSION: &str = "boreal.intake_bucket_crea
 pub const INTAKE_BUCKET_READBACK_SCHEMA_VERSION: &str = "boreal.intake_bucket_readback.v1";
 pub const INTAKE_CAPTURE_SCHEMA_VERSION: &str = "boreal.intake_capture.v1";
 pub const INTAKE_CAPTURE_READBACK_SCHEMA_VERSION: &str = "boreal.intake_capture_readback.v1";
+pub const INTAKE_LIST_SCHEMA_VERSION: &str = "boreal.intake_list.v1";
+pub const INTAKE_LIST_READBACK_SCHEMA_VERSION: &str = "boreal.intake_list_readback.v1";
+pub const INTAKE_DISPOSITION_SCHEMA_VERSION: &str = "boreal.intake_disposition.v1";
+pub const INTAKE_DISPOSITION_READBACK_SCHEMA_VERSION: &str =
+    "boreal.intake_disposition_readback.v1";
+pub const INTAKE_PROMOTE_SCHEMA_VERSION: &str = "boreal.intake_promote.v1";
+pub const INTAKE_PROMOTE_READBACK_SCHEMA_VERSION: &str = "boreal.intake_promote_readback.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2080,6 +2188,110 @@ pub struct IntakeCaptureReadbackDto {
     pub lifecycle: String,
     pub content_revision: u64,
     pub content_digest: String,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeListRequestDto {
+    pub schema_version: String,
+    pub limit: u64,
+    pub offset: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeListItemDto {
+    pub project_id: String,
+    pub intake_id: String,
+    pub bucket_id: String,
+    pub kind: String,
+    pub lifecycle: String,
+    pub content: String,
+    pub content_revision: u64,
+    pub content_digest: String,
+    pub captured_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub revisit_at_utc_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeListReadbackDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub project_revision: u64,
+    pub total: u64,
+    pub offset: u64,
+    pub limit: u64,
+    pub has_more: bool,
+    pub items: Vec<IntakeListItemDto>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntakeLifecycleDto {
+    Captured,
+    Triaged,
+    Deferred,
+    Resolved,
+    Archived,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeDispositionRequestDto {
+    pub schema_version: String,
+    pub expected_project_revision: u64,
+    pub expected_content_revision: u64,
+    pub intake_id: String,
+    pub lifecycle: IntakeLifecycleDto,
+    #[serde(default)]
+    pub revisit_at_utc_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeDispositionReadbackDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub intake_id: String,
+    pub lifecycle: IntakeLifecycleDto,
+    pub content_revision: u64,
+    pub revisit_at_utc_ms: Option<i64>,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntakePromotionTargetKindDto {
+    DraftWork,
+    SourceVersion,
+    MemoryDraft,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakePromoteRequestDto {
+    pub schema_version: String,
+    pub expected_project_revision: u64,
+    pub expected_content_revision: u64,
+    pub intake_id: String,
+    pub target_kind: IntakePromotionTargetKindDto,
+    pub target_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakePromoteReadbackDto {
+    pub schema_version: String,
+    pub project_id: String,
+    pub intake_id: String,
+    pub promotion_id: String,
+    pub target_kind: IntakePromotionTargetKindDto,
+    pub target_id: String,
+    pub content_revision: u64,
     pub replayed: bool,
 }
 
@@ -2269,6 +2481,9 @@ pub const WORK_SCHEDULE_READBACK_SCHEMA_VERSION: &str = "boreal.work_schedule_re
 pub const EXTERNAL_WAIT_CREATE_SCHEMA_VERSION: &str = "boreal.external_wait_create.v1";
 pub const EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION: &str = "boreal.external_wait_resolve.v1";
 pub const EXTERNAL_WAIT_READBACK_SCHEMA_VERSION: &str = "boreal.external_wait_readback.v1";
+pub const EXTERNAL_WAIT_LIST_SCHEMA_VERSION: &str = "boreal.external_wait_list.v1";
+pub const EXTERNAL_WAIT_LIST_READBACK_SCHEMA_VERSION: &str =
+    "boreal.external_wait_list_readback.v1";
 
 /// A required JSON key whose value may explicitly be `null`. Serde rejects a
 /// missing key because this wrapper itself has no default implementation.
@@ -2542,6 +2757,28 @@ pub struct ExternalWaitResolveDto {
 pub struct ExternalWaitReadbackDto {
     pub schema_version: String,
     pub project_revision: u64,
+    pub waits: Vec<ExternalWaitDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWaitListRequestDto {
+    pub schema_version: String,
+    pub limit: u64,
+    pub offset: u64,
+    #[serde(default)]
+    pub expected_project_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWaitListReadbackDto {
+    pub schema_version: String,
+    pub project_revision: u64,
+    pub total: u64,
+    pub offset: u64,
+    pub limit: u64,
+    pub has_more: bool,
     pub waits: Vec<ExternalWaitDto>,
 }
 

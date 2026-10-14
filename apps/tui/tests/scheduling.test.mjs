@@ -67,11 +67,11 @@ test('typed status facts distinguish server decisions from missing fields', () =
 
 test('schedule and wait actions are keyboard-palette available as typed forms', () => {
   const view = fixtureView();
-  view.workspace_actions_available = ['schedule_edit', 'wait_create', 'wait_resolve'];
+  view.workspace_actions_available = ['schedule_edit', 'wait_create', 'wait_resolve', 'wait_page'];
   view.workspace_views_available = ['waits'];
   const state = initialState(view);
   const commands = paletteCommands(view, state);
-  for (const id of ['workspace:schedule', 'workspace:waits', 'workspace-action:schedule_edit', 'workspace-action:wait_create', 'workspace-action:wait_resolve'])
+  for (const id of ['workspace:schedule', 'workspace:waits', 'workspace-action:schedule_edit', 'workspace-action:wait_create', 'workspace-action:wait_resolve', 'workspace-action:wait_page'])
     assert.equal(commands.find(command => command.id === id)?.disabled, false, `${id} is available`);
 
   const schedule = actionForm('schedule_edit', 'tui-104');
@@ -88,6 +88,10 @@ test('schedule and wait actions are keyboard-palette available as typed forms', 
 
   const resolve = actionForm('wait_resolve');
   assert.deepEqual(resolve.fields.find(field => field.name === 'next_state').choices, ['resolved', 'cancelled']);
+  const page = actionForm('wait_page');
+  assert.deepEqual(page.fields.map(field => [field.name, field.required]), [
+    ['limit', true], ['offset', true], ['expected_project_revision', false],
+  ]);
   assert.ok(!resolve.fields.some(field => /json/u.test(field.label)));
 });
 
@@ -131,18 +135,23 @@ test('wait inspection explains exactly which loaded dependents are blocked at ma
 test('wait inspection with mismatched revisions avoids inferring blocked state and bounds display', () => {
   const view = fixtureView();
   view.monitoring.items.find(item => item.work_id === 'tui-101').blocking_external_wait_ids = ['wait-vendor'];
-  const waits = Array.from({ length: 101 }, (_, index) => waitRecord(`wait-${index}`));
+  const waits = Array.from({ length: 50 }, (_, index) => waitRecord(`wait-${index}`));
   const text = formatWorkspaceView('waits', 'boreal-work', 249, '2026-10-14T10:00:00Z', {
     project_revision: 249,
+    total: 101,
+    offset: 0,
+    limit: 50,
+    has_more: true,
     waits,
   }, view.monitoring.items, 248);
   assert.match(text, /does not match the loaded status revision 248/u);
   assert.match(text, /blocked status unavailable for this revision/u);
   assert.doesNotMatch(text, /service reports this wait is blocking/u);
-  assert.match(text, /Showing the first 100 of 101 returned waits\. The service did not provide pagination/u);
-  assert.doesNotMatch(text, /wait-100 · open/u);
+  assert.match(text, /Showing 50 of 101 external waits · page offset 0 · limit 50/u);
+  assert.match(text, /More waits are available from offset 50/u);
+  assert.doesNotMatch(text, /wait-50 · open/u);
   const envelopeMismatch = formatWorkspaceView('waits', 'boreal-work', 250, '2026-10-14T10:00:00Z', {
-    project_revision: 249, waits: [waitRecord('wait-vendor')],
+    project_revision: 249, total: 1, offset: 0, limit: 50, has_more: false, waits: [waitRecord('wait-vendor')],
   }, view.monitoring.items, 249);
   assert.match(envelopeMismatch, /does not match the service envelope revision 250/u);
   assert.match(envelopeMismatch, /blocked status unavailable for this revision/u);
@@ -205,6 +214,10 @@ test('versioned client uses exact typed schedule and wait service commands', asy
         };
       } else if (request.data.command === 'external_wait_readback_v1') {
         readback = { schema_version: 'boreal.external_wait_readback.v1', project_revision: 248, waits: [currentWait] };
+      } else if (request.data.command === 'external_wait_list_v1') {
+        const waits = request.data.wait_list.offset === 0 ? [currentWait] : [];
+        readback = { schema_version: 'boreal.external_wait_list_readback.v1', project_revision: 248,
+          total: 1, offset: request.data.wait_list.offset, limit: request.data.wait_list.limit, has_more: false, waits };
       } else if (request.data.command === 'external_wait_create_v1') {
         outcome = 'changed'; revision = 249;
         readback = {
@@ -236,6 +249,11 @@ test('versioned client uses exact typed schedule and wait service commands', asy
   assert.deepEqual(updated.data.schedule.due, local(2026, 10, 16));
   const listed = await client.readExternalWaits('boreal-work');
   assert.equal(listed.data.waits[0].wait_id, 'wait-vendor');
+  const firstPage = await client.readExternalWaitPage('boreal-work', 25, 0, 248);
+  assert.equal(firstPage.data.total, 1);
+  assert.equal(firstPage.data.waits[0].wait_id, 'wait-vendor');
+  const pastEndPage = await client.readExternalWaitPage('boreal-work', 25, 50, 248);
+  assert.deepEqual(pastEndPage.data.waits, []);
   await client.readExternalWaits('boreal-work', 'wait-vendor');
   await client.createExternalWait(requestEnvelope('op_wait_create', 248, {
     project_id: 'boreal-work',
@@ -258,17 +276,19 @@ test('versioned client uses exact typed schedule and wait service commands', asy
   }));
   assert.deepEqual(calls.map(call => call.command), [
     'work_schedule_readback_v1', 'work_schedule_update_v1', 'external_wait_readback_v1',
-    'external_wait_readback_v1', 'external_wait_create_v1', 'external_wait_resolve_v1',
+    'external_wait_list_v1', 'external_wait_list_v1', 'external_wait_readback_v1',
+    'external_wait_create_v1', 'external_wait_resolve_v1',
   ]);
   assert.deepEqual(calls[1].schedule_update, {
     schema_version: 'boreal.work_schedule_update.v1', expected_project_revision: 248,
     expected_schedule_revision: 2,
     schedule: { not_before: null, due: local(2026, 10, 16), planned_start: null, planned_end: null },
   });
-  assert.equal(calls[3].wait_id, 'wait-vendor');
-  assert.equal(calls[4].wait_create.expected_wait_revision, 0);
-  assert.deepEqual(calls[4].wait_create.affected_work_ids, ['tui-101']);
-  assert.equal(calls[5].wait_resolve.expected_wait_revision, 3);
+  assert.deepEqual(calls[3].wait_list, { schema_version: 'boreal.external_wait_list.v1', limit: 25, offset: 0, expected_project_revision: 248 });
+  assert.equal(calls[5].wait_id, 'wait-vendor');
+  assert.equal(calls[6].wait_create.expected_wait_revision, 0);
+  assert.deepEqual(calls[6].wait_create.affected_work_ids, ['tui-101']);
+  assert.equal(calls[7].wait_resolve.expected_wait_revision, 3);
 });
 
 test('keyboard forms inspect and submit schedules and externally resolved waits', async () => {
@@ -309,6 +329,15 @@ test('keyboard forms inspect and submit schedules and externally resolved waits'
         data: { schema_version: 'boreal.external_wait_readback.v1', project_revision: this.data.monitoring.revision, waits },
       };
     }
+    async readExternalWaitPage(limit, offset, expectedRevision) {
+      this.calls.push(['readExternalWaitPage', limit, offset, expectedRevision]);
+      return {
+        api_version: API_VERSION, schema_version: ENVELOPE_SCHEMA, operation_id: 'op_wait_page',
+        revision: this.data.monitoring.revision, as_of: '2026-10-14T10:00:00Z', transport: 'ok', outcome: 'unchanged', error: null,
+        data: { schema_version: 'boreal.external_wait_list_readback.v1', project_revision: this.data.monitoring.revision,
+          total: 51, offset, limit, has_more: false, waits: [waitRecord('wait-page-50')] },
+      };
+    }
     mutationResult(action, data) {
       this.data.monitoring.revision += 1;
       const operation_id = `op_${action}_${this.data.monitoring.revision}`;
@@ -343,7 +372,7 @@ test('keyboard forms inspect and submit schedules and externally resolved waits'
       });
     }
     constructor() {
-      this.data.workspace_actions_available = ['schedule_edit', 'wait_create', 'wait_resolve'];
+      this.data.workspace_actions_available = ['schedule_edit', 'wait_create', 'wait_resolve', 'wait_page'];
       this.data.workspace_views_available = ['waits'];
     }
   }
@@ -393,6 +422,14 @@ test('keyboard forms inspect and submit schedules and externally resolved waits'
     assert.equal(resolveCall[1].expected_wait_revision, 1);
     assert.equal(resolveCall[1].next_state, 'resolved');
     assert.equal(resolveCall[1].outcome, 'decision_provided');
+
+    terminal.send('pOpen external wait page\r');
+    await tick();
+    terminal.send('\r\r\r');
+    await tick();
+    assert.deepEqual(controller.calls.find(call => call[0] === 'readExternalWaitPage'),
+      ['readExternalWaitPage', 50, 50, undefined]);
+    assert.match(terminal.text(), /Showing 1 of 51 external waits · page offset 50 · limit 50/u);
   } finally {
     terminal.emit('SIGTERM');
     await done;

@@ -124,18 +124,27 @@ normal force-break path for live locks.
 ## Bind the produced result, verify, and finish
 
 When implementation is ready for verification, leave the produced artifact
-in its declared workspace/output. An authorized Operator captures that exact
-artifact with public `source add` in the same project. The worker then binds
-the registered source version and digest to its current attempt/fence using
-the proof revision and operation identity returned by current guidance:
+in its declared workspace/output. The current CLI does not yet expose the
+fenced worker-owned workspace-snapshot capture required by this flow. Public
+`source add` directory capture is Operator-only, and a worker cannot register a
+plain file as the final workspace snapshot. This journey remains open until a
+scoped capture operation validates the active project, work, attempt, fence,
+session, and revisions, then returns the immutable source identity and digest.
+
+After the scoped capture operation lands and advances the project revision,
+refresh guidance for the current project, entity, and proof revisions and
+operation identity. Bind the source version and digest to the current
+attempt/fence:
 
 ```sh
 bwrk evidence bind-result --project PROJECT_ID --work WORK_ID \
   --attempt ATTEMPT_ID --fence FENCE --source-version RESULT_SOURCE_ID \
   --content-digest CONTENT_DIGEST \
+  --expected-revision PROJECT_REVISION \
   --expected-entity-revision ENTITY_REVISION \
-  --expected-proof-revision PROOF_REVISION --operation OPERATION_ID \
-  --actor WORKER_ID --session SESSION_ID --json
+  --expected-proof-revision PROOF_REVISION --operation-id OPERATION_ID \
+  --actor WORKER_ID --session SESSION_ID --harness codex \
+  --socket SERVICE_SOCKET --json
 ```
 
 The binding revalidates the registered bytes and pinned configuration. It

@@ -23,7 +23,8 @@ export type WorkspaceUiAction =
     | "cycle_assign" | "cycle_commit" | "cycle_remove" | "cycle_carry_over"
     | "memory_search" | "memory_show" | "memory_draft" | "memory_review" | "memory_publish" | "memory_reconcile"
     | "recovery_resolve" | "session_end" | "source_capture" | "source_search" | "review_show" | "bind_result"
-    | "schedule_edit" | "wait_create" | "wait_resolve";
+    | "schedule_edit" | "wait_create" | "wait_resolve" | "wait_page"
+    | "intake_page" | "intake_disposition" | "intake_promote";
 export type UiAction = TuiAction | WorkspaceUiAction;
 export const ACTION_NAMES: Record<UiAction, string> = {
     create_project: "Initialize project", create_work: "Create work", claim: "Claim work", accept_start: "Start work", evidence: "Attach evidence", finish: "Finish & close", release: "Release claim",
@@ -37,6 +38,8 @@ export const ACTION_NAMES: Record<UiAction, string> = {
     schedule_edit: "Edit work dates",
     wait_create: "Record external wait",
     wait_resolve: "Resolve external wait",
+    wait_page: "Open external wait page",
+    intake_page: "Open intake page", intake_disposition: "Set intake disposition", intake_promote: "Promote intake item",
 };
 export type Focus = "navigation" | "queue" | "inspector";
 export type Sort = "service" | "priority" | "title";
@@ -241,6 +244,7 @@ export function paletteCommands(view: MountedView, state: DashboardState): Palet
         { id: "readback", label: "Resolve pending operation", hint: "u · read only", disabled: !view.pending_operations.length },
         { id: "workspace:project", label: "Project overview", hint: "Workspace · read only" },
         { id: "workspace:cycles", label: "Cycles", hint: "Workspace · read only", disabled: !view.workspace_views_available?.includes("cycles") },
+        { id: "workspace:intake", label: "Intake inbox", hint: "Project intake · paged and read only", disabled: !view.workspace_views_available?.includes("intake") },
         { id: "workspace:cycle-board", label: "Open a cycle board", hint: "Read · choose a cycle ID", disabled: !view.workspace_actions_available?.includes("cycle_board") },
         { id: "workspace:dependencies", label: "Dependency graph", hint: "Workspace · read only", disabled: !view.workspace_views_available?.includes("dependencies") },
         { id: "workspace:reviews", label: "Reviews", hint: "Workspace · read only", disabled: !view.workspace_views_available?.includes("reviews") },
@@ -256,7 +260,8 @@ export function paletteCommands(view: MountedView, state: DashboardState): Palet
         ...([
             "edit_work", "dependency_add", "dependency_remove", "cycle_create", "cycle_activate", "cycle_close", "cycle_cancel", "cycle_assign", "cycle_commit", "cycle_remove", "cycle_carry_over",
             "memory_search", "memory_show", "memory_draft", "memory_review", "memory_publish", "memory_reconcile", "recovery_resolve", "session_end", "source_capture", "source_search", "review_show", "bind_result",
-            "schedule_edit", "wait_create", "wait_resolve",
+            "schedule_edit", "wait_create", "wait_resolve", "wait_page",
+            "intake_page", "intake_disposition", "intake_promote",
         ] as const).map(action => ({
             id: `workspace-action:${action}`,
             label: ACTION_NAMES[action],
@@ -385,7 +390,28 @@ export function actionForm(action: Exclude<UiAction, "create_project">, workId?:
                                                                     field("resource_state", "Resource state", "Record whether the resource is still active or safely stopped."),
                                                                 ]
                                                                     : action === "source_capture" ? [field("input", "Project-relative file or directory", "The service confines capture to this project's workspace."), field("origin", "Origin", "Explain the source provenance."), field("media_type", "Media type", "Optional; defaults to application/octet-stream.", false)]
-                                                                        : action === "review_show" ? [field("review_id", "Review identifier", "Use the ID shown in Reviews.")]
+                                                                            : action === "wait_page" ? [
+                                                                                field("limit", "Page size", "Number of waits to request, from 1 to 100.", true, "50"),
+                                                                                field("offset", "Starting offset", "Use the next offset shown in External waits to continue paging.", true, "50"),
+                                                                                field("expected_project_revision", "Expected project revision · optional", "Set this to the revision shown on the previous page to keep paging one consistent snapshot.", false),
+                                                                            ]
+                                                                            : action === "intake_page" ? [
+                                                                            field("limit", "Page size", "Number of items to request, from 1 to 100.", true, "50"),
+                                                                            field("offset", "Starting offset", "Use the next offset shown in Intake to continue paging.", true, "0"),
+                                                                        ]
+                                                                            : action === "intake_disposition" ? [
+                                                                                field("intake_id", "Intake identifier", "Use an ID shown in Intake."),
+                                                                                field("content_revision", "Content revision", "Use the content revision shown in Intake."),
+                                                                                { ...field("lifecycle", "Disposition", "Left / Right changes the state.", true, "triaged"), choices: ["triaged", "deferred", "resolved", "archived"] },
+                                                                                field("revisit_at_utc_ms", "Revisit time · milliseconds", "Required for deferred; otherwise leave empty.", false),
+                                                                            ]
+                                                                                : action === "intake_promote" ? [
+                                                                                    field("intake_id", "Intake identifier", "Use an ID shown in Intake."),
+                                                                                    field("content_revision", "Content revision", "Use the content revision shown in Intake."),
+                                                                                    { ...field("target_kind", "Existing target type", "Promotion links an existing target in this project.", true, "draft_work"), choices: ["draft_work", "source_version", "memory_draft"] },
+                                                                                    field("target_id", "Existing target identifier", "The target must already exist in this project."),
+                                                                                ]
+                                                                                    : action === "review_show" ? [field("review_id", "Review identifier", "Use the ID shown in Reviews.")]
                                                                             : [];
     return { kind: "form", action, workId, fields, index: 0, ...(selected ? { workSnapshot: selected } : {}) };
 }

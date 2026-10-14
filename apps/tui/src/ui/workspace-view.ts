@@ -1,5 +1,6 @@
 import type { AttemptReceiptRecord, BusinessDateDto, ExternalWaitAccountableDto, StatusItem, WorkspaceViewKind } from "../client.js";
 import { accountableLabel, businessDateLabel, timestampLabel } from "../scheduling.js";
+import { safeText } from "./cells.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -225,6 +226,35 @@ function sourceLines(data: JsonObject): string[] {
     return lines;
 }
 
+function intakeLines(data: JsonObject): string[] {
+    const items = rows(data.items);
+    const total = typeof data.total === "number" ? data.total : undefined;
+    const offset = typeof data.offset === "number" ? data.offset : 0;
+    const limit = typeof data.limit === "number" ? data.limit : items.length;
+    const hasMore = data.has_more === true;
+    const lines = [
+        `${items.length} shown of ${total ?? "unknown"} · offset ${offset} · page size ${limit}`,
+        ...(hasMore ? [`More available · open Intake page at offset ${offset + items.length}.`] : []),
+        "",
+    ];
+    if (!items.length) return [...lines, "No intake items were returned for this page."];
+    for (const [index, raw] of items.entries()) {
+        const item = object(raw);
+        if (!item) {
+            lines.push(`${index + 1}. A damaged intake row was omitted by the service.`, "");
+            continue;
+        }
+        const intakeId = text(item.intake_id, "Intake ID unavailable");
+        lines.push(`${intakeId} · ${text(item.kind)} · ${text(item.lifecycle)}`);
+        lines.push(`  Bucket ${text(item.bucket_id)} · content revision ${text(item.content_revision)} · captured ${text(item.captured_at)}`);
+        if (typeof item.revisit_at_utc_ms === "number") lines.push(`  Revisit ${time(item.revisit_at_utc_ms)}`);
+        const content = typeof item.content === "string" ? safeText(item.content) : "Content unavailable.";
+        const preview = content.length > 512 ? `${content.slice(0, 512)}… [truncated]` : content;
+        lines.push(`  ${preview.replaceAll("\n", "\n  ")}`, "");
+    }
+    return lines;
+}
+
 function sessionLines(data: JsonObject): string[] {
     return [
         `Session ${text(data.session_id)}`,
@@ -240,14 +270,18 @@ function externalWaitLines(data: JsonObject, statusItems: readonly StatusItem[],
     const readback = object(data.readback) ?? data;
     const waits = rows(readback.waits);
     const projectRevision = typeof readback.project_revision === "number" ? readback.project_revision : undefined;
-    const lines = [`${waits.length} external wait${waits.length === 1 ? "" : "s"} returned by the service.`, ""];
+    const total = typeof readback.total === "number" ? readback.total : waits.length;
+    const offset = typeof readback.offset === "number" ? readback.offset : 0;
+    const limit = typeof readback.limit === "number" ? readback.limit : Math.max(1, waits.length);
+    const hasMore = typeof readback.has_more === "boolean" ? readback.has_more : waits.length < total;
+    const lines = [`Showing ${waits.length} of ${total} external wait${total === 1 ? "" : "s"} · page offset ${offset} · limit ${limit}.`, ""];
   const readbackMatchesEnvelope = projectRevision !== undefined && serviceRevision === projectRevision;
   const statusMatches = readbackMatchesEnvelope && statusRevision === projectRevision;
     if (projectRevision === undefined) lines.push("Project revision unavailable; affected-work status cannot be compared.", "");
   else if (!readbackMatchesEnvelope) lines.push(`Wait readback revision ${projectRevision} does not match the service envelope revision ${serviceRevision ?? "unavailable"}; refresh before comparing blocked work.`, "");
   else if (statusRevision !== projectRevision) lines.push(`Wait readback revision ${projectRevision} does not match the loaded status revision ${statusRevision ?? "unavailable"}; refresh before comparing blocked work.`, "");
     if (!waits.length) return [...lines, "No external waits were returned."];
-    const displayWaits = waits.slice(0, 100);
+    const displayWaits = waits.slice(0, Math.min(100, limit));
     for (const [index, raw] of displayWaits.entries()) {
         const wait = object(raw);
         if (!wait) {
@@ -286,8 +320,8 @@ function externalWaitLines(data: JsonObject, statusItems: readonly StatusItem[],
         if (resolution) lines.push(`  Resolution ${text(resolution.outcome)} · ${text(resolution.detail)} · supplied by ${accountableLabel(object(resolution.supplied_by) as unknown as ExternalWaitAccountableDto)} · recorded by ${text(resolution.recorded_by)}`);
         lines.push("");
     }
-    if (waits.length > displayWaits.length)
-        lines.push(`Showing the first ${displayWaits.length} of ${waits.length} returned waits. The service did not provide pagination, so this view is partial.`);
+    if (hasMore)
+        lines.push(`More waits are available from offset ${offset + waits.length}.`);
     return lines;
 }
 
@@ -352,6 +386,7 @@ export function formatWorkspaceView(
     if (typeof data.project_id === "string" && data.project_id !== projectId)
         return [...header, "The response project does not match this mounted project.", "The response was not displayed."].join("\n");
     const content = kind === "cycles" ? cycleLines(data)
+        : kind === "intake" ? intakeLines(data)
         : kind === "reviews" ? reviewLines(data)
             : kind === "memory" ? memoryLines(data)
                 : kind === "recovery" ? recoveryLines(data)

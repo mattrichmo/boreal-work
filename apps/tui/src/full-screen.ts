@@ -1,4 +1,4 @@
-import type { ActionResult, AttemptReceiptPage, AttemptReceiptRecord, BusinessScheduleDto, CreateWorkDraftInput, CycleChange, CycleCommandInput, DependencyChangeInput, Envelope, ExecutionMode, ExternalWaitAccountableDto, ExternalWaitCategoryDto, ExternalWaitOutcomeDto, ExternalWaitRoleDto, FinalResultBinding, LocalDateTimeInput, MemoryCommandInput, MountedView, RecoveryCommandInput, RevisionedStatusResponse, TuiAction, WorkspaceViewKind, WorkEditInput, WorkProjection } from "./client.js";
+import type { ActionResult, AttemptReceiptPage, AttemptReceiptRecord, BusinessScheduleDto, CreateWorkDraftInput, CycleChange, CycleCommandInput, DependencyChangeInput, Envelope, ExecutionMode, ExternalWaitAccountableDto, ExternalWaitCategoryDto, ExternalWaitOutcomeDto, ExternalWaitRoleDto, FinalResultBinding, IntakeDispositionReadbackDto, IntakeListReadbackDto, IntakeLifecycleDto, IntakePromoteReadbackDto, IntakePromotionTargetKindDto, LocalDateTimeInput, MemoryCommandInput, MountedView, RecoveryCommandInput, RevisionedStatusResponse, TuiAction, WorkspaceViewKind, WorkEditInput, WorkProjection } from "./client.js";
 import type { LineShellController } from "./line-shell.js";
 import { safeText } from "./ui/cells.js";
 import { FrameWriter, type Theme } from "./ui/screen.js";
@@ -43,6 +43,9 @@ type ExtendedController = LineShellController & {
     readWorkspaceView?: (kind: WorkspaceViewKind) => Promise<Envelope<unknown>>;
     readCycle?: (view: "list" | "current" | "board" | "report", cycle_id?: string, limit?: number, offset?: number) => Promise<Envelope<unknown>>;
     readSources?: (limit?: number, offset?: number) => Promise<Envelope<{ project_id: string; items: SourceRow[]; total: number; offset: number; limit: number; has_more: boolean; catalog_root: string }>>;
+    readIntake?: (limit?: number, offset?: number) => Promise<Envelope<IntakeListReadbackDto>>;
+    updateIntakeDisposition?: (input: { intake_id: string; expected_content_revision: number; lifecycle: Exclude<IntakeLifecycleDto, "captured">; revisit_at_utc_ms: number | null }) => Promise<ActionResult<IntakeDispositionReadbackDto>>;
+    promoteIntake?: (input: { intake_id: string; expected_content_revision: number; target_kind: IntakePromotionTargetKindDto; target_id: string }) => Promise<ActionResult<IntakePromoteReadbackDto>>;
     searchSources?: (query: string, limit?: number) => Promise<Envelope<unknown>>;
     readReview?: (review_id: string) => Promise<Envelope<unknown>>;
     readWork?: (work_id: string) => Promise<Envelope<WorkProjection>>;
@@ -59,6 +62,7 @@ type ExtendedController = LineShellController & {
     updateWorkSchedule?: (work_id: string, schedule_revision: number, schedule: BusinessScheduleDto) => Promise<ActionResult<import("./client.js").WorkScheduleMutationReadbackDto>>;
     readProjectCivilTime?: () => Promise<Envelope<import("./client.js").ProjectCivilTimeReadbackDto>>;
     readExternalWaits?: (wait_id?: string) => Promise<Envelope<import("./client.js").ExternalWaitReadbackDto>>;
+    readExternalWaitPage?: (limit?: number, offset?: number, expected_project_revision?: number) => Promise<Envelope<import("./client.js").ExternalWaitListReadbackDto>>;
     createExternalWait?: (input: Omit<import("./client.js").ExternalWaitCreateDto, "schema_version" | "expected_project_revision" | "expected_wait_revision">) => Promise<ActionResult<import("./client.js").ExternalWaitMutationReadbackDto>>;
     resolveExternalWait?: (input: Omit<import("./client.js").ExternalWaitResolveDto, "schema_version" | "expected_project_revision">) => Promise<ActionResult<import("./client.js").ExternalWaitMutationReadbackDto>>;
     readReceiptsForAttempt?: (work_id: string, limit?: number, offset?: number) => Promise<Envelope<AttemptReceiptPage>>;
@@ -78,7 +82,7 @@ const WORKSPACE_UI_ACTIONS = new Set<WorkspaceUiAction>([
     "edit_work", "dependency_add", "dependency_remove", "cycle_create", "cycle_board", "cycle_activate", "cycle_close", "cycle_cancel",
     "cycle_assign", "cycle_commit", "cycle_remove", "cycle_carry_over", "memory_search", "memory_show", "memory_draft", "memory_review",
     "memory_publish", "memory_reconcile", "recovery_resolve", "session_end", "source_capture", "source_search", "review_show", "bind_result",
-    "schedule_edit", "wait_create", "wait_resolve",
+    "schedule_edit", "wait_create", "wait_resolve", "wait_page", "intake_page", "intake_disposition", "intake_promote",
 ]);
 function isWorkspaceUiAction(action: UiAction): action is WorkspaceUiAction {
     return WORKSPACE_UI_ACTIONS.has(action as WorkspaceUiAction);
@@ -485,6 +489,21 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             } else if (form.action === "review_show") {
                 if (!controller.readReview) throw new Error("Review detail is unavailable in this connection.");
                 showWorkspaceData("Review detail", "reviews", await controller.readReview(values.review_id));
+            } else if (form.action === "intake_page") {
+                if (!controller.readIntake) throw new Error("Intake list is unavailable in this connection.");
+                const limit = Number(values.limit), offset = Number(values.offset);
+                if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0)
+                    throw new Error("Intake page size must be 1..100 and offset must be a non-negative integer.");
+                showWorkspaceData("Intake inbox", "intake", await controller.readIntake(limit, offset));
+            } else if (form.action === "wait_page") {
+                if (!controller.readExternalWaitPage) throw new Error("External wait pages are unavailable in this connection.");
+                const limit = Number(values.limit), offset = Number(values.offset);
+                if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0)
+                    throw new Error("External wait page size must be 1..100 and offset must be a non-negative integer.");
+                const expectedRevision = values.expected_project_revision ? Number(values.expected_project_revision) : undefined;
+                if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0))
+                    throw new Error("Expected project revision must be a non-negative integer.");
+                showWorkspaceData("External waits", "waits", await controller.readExternalWaitPage(limit, offset, expectedRevision));
             }
             message(`${ACTION_NAMES[form.action]} loaded from the project service.`);
         });
@@ -759,8 +778,48 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 ]);
             });
         }
-        else if (["cycle_board", "memory_search", "memory_show", "source_search", "review_show"].includes(form.action))
+        else if (["cycle_board", "memory_search", "memory_show", "source_search", "review_show", "intake_page", "wait_page"].includes(form.action))
             readWorkspaceForm(form, values);
+        else if (form.action === "intake_disposition") {
+            const contentRevision = Number(values.content_revision);
+            if (!Number.isSafeInteger(contentRevision) || contentRevision < 1) {
+                form.index = form.fields.findIndex(field => field.name === "content_revision");
+                form.error = "Content revision must be a positive integer from the Intake list.";
+                return;
+            }
+            const revisit = values.revisit_at_utc_ms ? Number(values.revisit_at_utc_ms) : null;
+            if (revisit !== null && (!Number.isSafeInteger(revisit) || revisit < 0)) {
+                form.index = form.fields.findIndex(field => field.name === "revisit_at_utc_ms");
+                form.error = "Revisit time must be a non-negative millisecond timestamp.";
+                return;
+            }
+            if (values.lifecycle === "deferred" && revisit === null) {
+                form.index = form.fields.findIndex(field => field.name === "revisit_at_utc_ms");
+                form.error = "Deferred intake items require a revisit timestamp.";
+                return;
+            }
+            const lifecycle = values.lifecycle as Exclude<IntakeLifecycleDto, "captured">;
+            confirm(form.action, { intake_id: values.intake_id, expected_content_revision: contentRevision,
+                lifecycle, revisit_at_utc_ms: revisit }, `Set intake ${values.intake_id} to ${lifecycle}.`, [
+                `Content revision: ${contentRevision}`,
+                ...(revisit === null ? [] : [`Revisit at UTC milliseconds: ${revisit}`]),
+                "The service rechecks the project and content revisions before saving.",
+            ]);
+        }
+        else if (form.action === "intake_promote") {
+            const contentRevision = Number(values.content_revision);
+            if (!Number.isSafeInteger(contentRevision) || contentRevision < 1) {
+                form.index = form.fields.findIndex(field => field.name === "content_revision");
+                form.error = "Content revision must be a positive integer from the Intake list.";
+                return;
+            }
+            const targetKind = values.target_kind as IntakePromotionTargetKindDto;
+            confirm(form.action, { intake_id: values.intake_id, expected_content_revision: contentRevision,
+                target_kind: targetKind, target_id: values.target_id }, `Link intake ${values.intake_id} to ${targetKind} ${values.target_id}.`, [
+                `Content revision: ${contentRevision}`,
+                "Promotion links an existing same-project target and preserves intake provenance.",
+            ]);
+        }
         else if (form.action === "edit_work") {
             const selected = form.workSnapshot ?? controller.view().monitoring?.items.find(item => item.work_id === form.workId);
             if (!form.workId || !selected) { form.error = "Selected work is no longer in the current service page."; return; }
@@ -940,6 +999,14 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 if (!controller.resolveExternalWait) throw new Error("External wait resolution is unavailable in this connection.");
                 result = await controller.resolveExternalWait(pending.payload as Parameters<NonNullable<ExtendedController["resolveExternalWait"]>>[0]);
                 break;
+            case "intake_disposition":
+                if (!controller.updateIntakeDisposition) throw new Error("Intake disposition is unavailable in this connection.");
+                result = await controller.updateIntakeDisposition(pending.payload as Parameters<NonNullable<ExtendedController["updateIntakeDisposition"]>>[0]);
+                break;
+            case "intake_promote":
+                if (!controller.promoteIntake) throw new Error("Intake promotion is unavailable in this connection.");
+                result = await controller.promoteIntake(pending.payload as Parameters<NonNullable<ExtendedController["promoteIntake"]>>[0]);
+                break;
             default: throw new Error("This workspace action is read-only or unavailable.");
         }
         if (result.ok && pending.action === "bind_result") {
@@ -951,6 +1018,12 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         } else if (result.ok && (pending.action === "wait_create" || pending.action === "wait_resolve")) {
             const readback = result.data as import("./client.js").ExternalWaitMutationReadbackDto;
             message(`External wait ${readback.wait.wait_id} is ${readback.wait.state} · wait revision ${readback.wait.wait_revision} · project revision ${readback.project_revision} · operation ${result.envelope.operation_id}${readback.replayed ? " · read back from the original operation" : ""}`);
+        } else if (result.ok && pending.action === "intake_disposition") {
+            const readback = result.data as IntakeDispositionReadbackDto;
+            message(`Intake ${readback.intake_id} is ${readback.lifecycle} · project revision ${result.envelope.revision ?? "unknown"}${readback.replayed ? " · replayed" : ""}`);
+        } else if (result.ok && pending.action === "intake_promote") {
+            const readback = result.data as IntakePromoteReadbackDto;
+            message(`Intake ${readback.intake_id} linked to ${readback.target_kind} ${readback.target_id} · project revision ${result.envelope.revision ?? "unknown"}${readback.replayed ? " · replayed" : ""}`);
         } else {
             message(result.ok
                 ? `${ACTION_NAMES[pending.action]}: ${result.envelope.outcome} · revision ${result.envelope.revision ?? "unknown"}`
@@ -1143,7 +1216,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 ].join("\n\n") || "No unavailable routes are registered.", offset: 0 };
                 return;
             }
-            if (["cycles", "reviews", "memory", "recovery", "dependencies", "sources", "session", "waits"].includes(viewKind)) {
+            if (["cycles", "reviews", "memory", "recovery", "dependencies", "sources", "session", "waits", "intake"].includes(viewKind)) {
                 if (!controller.readWorkspaceView) {
                     state.modal = { kind: "message", title: `${viewKind.toUpperCase()} UNAVAILABLE`, text: "This service connection does not provide this project view.", offset: 0 };
                     return;

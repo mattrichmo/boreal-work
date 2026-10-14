@@ -48,7 +48,8 @@
     "F7": {
       "title": "Final qualification and repair loop",
       "owner": "coordinator_and_agents",
-      "state": "ready",
+      "state": "blocked",
+      "blocked_on": "F1-F6 integration",
       "entry_requires": [
         "F1",
         "F2",
@@ -62,7 +63,8 @@
     "F8": {
       "title": "Activation and supported release delivery",
       "owner": "coordinator",
-      "state": "ready",
+      "state": "blocked",
+      "blocked_on": "native_artifact_qualified",
       "entry_requires": [
         "native_artifact_qualified"
       ],
@@ -181,6 +183,29 @@
         "project/build-plan/production-completion/execution/FINAL_STATE.json"
       ],
       "journeys": "all application journeys"
+    },
+    {
+      "package": "F3/F4 intake service and dashboard",
+      "owner": "Luna Extra High agent /root/f3_f4_current_audit",
+      "model": "GPT-6 Luna Extra High",
+      "worktree": "/Users/cybertron/.codex/worktrees/v4-coordinator/boreal-work",
+      "source_commit": "2e04e4c1cf9569a377c1c8e853ea6b1c2bac689b",
+      "exclusive_paths": [
+        "crates/application/src/hierarchy.rs intake list/disposition/promotion sections",
+        "crates/store/src/work_model_v3.rs intake list/disposition/promotion sections",
+        "crates/protocol/src/models.rs intake DTO constants and models only",
+        "crates/cli/src/service.rs intake request/route/handler sections",
+        "crates/cli/src/command_registry.rs intake-list row only",
+        "apps/tui/src/client.ts intake routes",
+        "apps/tui/src/ui/model.ts intake view state",
+        "apps/tui/src/full-screen.ts intake actions",
+        "apps/tui/src/ui/workspace-view.ts intake rendering",
+        "focused intake service and TUI tests"
+      ],
+      "journeys": [
+        "J7",
+        "J9"
+      ]
     }
   ],
   "exclusive_write_owners": {
@@ -190,28 +215,28 @@
     "crates/store/src/completion.rs": "F2 / Agent A",
     "crates/store/src/acceptance.rs": "F2 / Luna Extra High agent /root/f2_binding, final-result binding sections",
     "crates/store/src/recovery.rs": "F2 / Agent A",
-    "crates/application/src/hierarchy.rs": "F3/F5 coordinator; container disposition application route integrated at 0a585b5a",
+    "crates/application/src/hierarchy.rs": "F3/F5 coordinator; intake list/disposition/promotion sections leased to /root/f3_f4_current_audit; container disposition application route integrated at 0a585b5a",
     "crates/application/src/planning_v3.rs": "F3 / Agent B",
     "crates/application/src/cycle_runtime.rs": "F3 / Agent B",
     "crates/application/src/intake.rs": "F3 / Agent B",
     "crates/application/src/knowledge.rs": "F3 / Agent B",
-    "crates/store/src/work_model_v3.rs": "F3 coordinator; container disposition readback helper integrated at 2fa9bf3e",
+    "crates/store/src/work_model_v3.rs": "F3 coordinator; intake list/disposition/promotion sections leased to /root/f3_f4_current_audit; container disposition readback helper integrated at 2fa9bf3e",
     "crates/store/src/cycle_commands.rs": "F3 / Agent B",
     "crates/store/src/knowledge.rs": "F3 / Agent B",
     "crates/store/src/memory.rs": "F3 / Agent B",
     "crates/source/": "F3 / Agent B",
     "crates/memory/": "F3 / Agent B",
-    "apps/tui/src/": "F4 / coordinator after BW-S13-T02 integration at ef89994",
+    "apps/tui/src/": "F4 / coordinator after BW-S13-T02 integration at ef89994; intake dashboard flow sections leased to /root/f3_f4_current_audit",
     "crates/cli/src/main.rs": "F5 coordinator",
-    "crates/cli/src/service.rs": "F5 / Coordinator",
-    "crates/cli/src/command_registry.rs": "F5 coordinator except the BW-S06 capture command entry leased to /root/s06_capture_origin",
+    "crates/cli/src/service.rs": "F5 / Coordinator; intake list/disposition/promotion sections leased to /root/f3_f4_current_audit",
+    "crates/cli/src/command_registry.rs": "F5 coordinator except the BW-S06 capture command entry leased to /root/s06_capture_origin and the intake-list row leased to /root/f3_f4_current_audit",
     "crates/cli/src/setup.rs": "F5 / Coordinator",
     "crates/store/src/lib.rs": "F5 coordinator; backup/restore artifact bundle seam integrated at bd9c5ec2",
     "crates/application/src/lib.rs": "F5 / Coordinator",
     "crates/protocol/src/lib.rs": "F5 / Coordinator",
     "workspace manifests and schema wiring": "F5 / Coordinator",
     "project/build-plan/production-completion/execution/FINAL_STATE.json": "Coordinator",
-    "crates/protocol/src/models.rs": "F5 coordinator",
+    "crates/protocol/src/models.rs": "F5 coordinator; intake DTO constants/models leased to /root/f3_f4_current_audit",
     "crates/store/src/final_result.rs": "F2 / Luna Extra High agent /root/f2_binding",
     "crates/application/src/global_capture.rs": "BW-S06 / Luna Extra High agent /root/s06_capture_origin",
     "crates/domain/src/global_manager.rs": "BW-S06 / Luna Extra High agent /root/s06_capture_origin",
@@ -473,6 +498,18 @@
       "event": "V4_continuation_draft_pr_opened",
       "source_commit": "38024aa4887f9a463e99487f77a8aeeafb54ee9b",
       "summary": "Pushed the rebased codex/v4-roadmap-continuation branch and opened draft PR #23. The PR keeps the V4 source progress reviewable but makes no sprint-acceptance or release claim. It remains draft pending the S00 worker-stop confirmation, supported task/grant reconciliation and successor acceptance gates."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "production_phase_gates_reconciled",
+      "source_commit": "2e04e4c1cf9569a377c1c8e853ea6b1c2bac689b",
+      "summary": "Read-only package audits confirmed F1-F6 remain in progress with empty evidence and all J1-J13 unrun. F7 is blocked on F1-F6 integration; F8 is blocked on native artifact qualification. No qualification, activation, release, or runtime lifecycle state was asserted."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "F3_F4_intake_service_dashboard_dispatched",
+      "source_commit": "2e04e4c1cf9569a377c1c8e853ea6b1c2bac689b",
+      "summary": "Delegated the typed paged intake list, lifecycle update/promotion routes, and dashboard intake flow to a Luna Extra High agent with scoped shared-file leases. F1 and S06 areas remain excluded. This is implementation work only; J7/J9 and sprint acceptance remain open."
     }
   ]
 }

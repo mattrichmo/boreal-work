@@ -491,7 +491,7 @@ class ValidatorTests(unittest.TestCase):
 
     def test_checked_in_package_passes(self) -> None:
         report = validate(self.source_root)
-        self.assertEqual(report.asset_count, 10)
+        self.assertEqual(report.asset_count, 11)
         self.assertGreaterEqual(report.command_count, 20)
 
     def test_unknown_package_field_is_rejected(self) -> None:

@@ -30,6 +30,7 @@ fn parity_supported(path: &[String]) -> bool {
             | ["wait", "create" | "resolve" | "list" | "show"]
             | ["evidence", "bind-result" | "receipts"]
             | ["artifact", "result", "bind" | "attempt" | "operation"]
+            | ["intake", "list"]
             | ["work", "close-readiness"]
             | ["work", "disposition"]
             | ["work", "create"]
@@ -177,20 +178,31 @@ mod unix {
         AttemptLifecycleAdapter, AttemptSnapshot, ExternalEffectAcquisition, ExternalEffectAdapter,
         ExternalEffectReadback, ExternalEffectResolution,
     };
-    use boreal_domain::{ActorContext, ActorRole, ReasonCode};
+    use boreal_domain::work_model_v3::{
+        IntakeItemId, IntakeLifecycle, IntakePromotion, PromotionId, PromotionTargetKind,
+    };
+    use boreal_domain::{ActorContext, ActorRole, ProjectId, ReasonCode};
     use boreal_protocol::{
         models::{
-            ArtifactResultBindRequestDto, ExternalWaitCreateDto, ExternalWaitResolveDto,
+            ArtifactResultBindRequestDto, ExternalWaitCreateDto, ExternalWaitListRequestDto,
+            ExternalWaitResolveDto,
             FinalResultCaptureReadbackDto, FinalResultCaptureRequestDto, IntakeBucketCreateDto,
             IntakeBucketReadbackDto, IntakeCaptureDto, IntakeCaptureReadbackDto,
-            IntakeDeliveryReadbackRequestDto, IntakeDeliveryReceiveDto, IntakeKindDto,
+            IntakeDeliveryReadbackRequestDto, IntakeDeliveryReceiveDto, IntakeDispositionReadbackDto,
+            IntakeDispositionRequestDto, IntakeKindDto, IntakeLifecycleDto, IntakeListItemDto,
+            IntakeListReadbackDto, IntakeListRequestDto, IntakePromoteReadbackDto,
+            IntakePromoteRequestDto, IntakePromotionTargetKindDto,
             ProjectCivilTimeUpdateDto, SourceAvailabilityDto, SourceShowReadbackDto,
             SourceVerifyReadbackDto, SourceVersionLookupDto, SourceVersionMetadataDto,
             SourceVersionRegistrationDto, WorkScheduleUpdateDto,
             FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION, FINAL_RESULT_CAPTURE_SCHEMA_VERSION,
+            INTAKE_DISPOSITION_READBACK_SCHEMA_VERSION, INTAKE_DISPOSITION_SCHEMA_VERSION,
+            INTAKE_LIST_READBACK_SCHEMA_VERSION, INTAKE_LIST_SCHEMA_VERSION,
+            INTAKE_PROMOTE_READBACK_SCHEMA_VERSION, INTAKE_PROMOTE_SCHEMA_VERSION,
             INTAKE_BUCKET_CREATE_SCHEMA_VERSION, INTAKE_BUCKET_READBACK_SCHEMA_VERSION,
             INTAKE_CAPTURE_READBACK_SCHEMA_VERSION, INTAKE_CAPTURE_SCHEMA_VERSION,
             INTAKE_DELIVERY_READBACK_SCHEMA_VERSION, INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION,
+            EXTERNAL_WAIT_LIST_SCHEMA_VERSION,
             SOURCE_LOOKUP_SCHEMA_VERSION, SOURCE_SHOW_READBACK_SCHEMA_VERSION,
             SOURCE_VERIFY_READBACK_SCHEMA_VERSION,
         },
@@ -207,11 +219,10 @@ mod unix {
         identity::{IdentityContext, IdentityStore},
         jobs::{ExternalJobInput, ExternalJobRecord},
         AuditEventRecord, OperationOutcome as StoreOperationOutcome, OperationRecord,
-        ReceiptAttestation, ReceiptOutcome, ReceiptRecord,
+        ReceiptAttestation, ReceiptOutcome, ReceiptRecord, V3MutationContext,
     };
     use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
-    const SERVICE_REQUEST_ID: &str = "cli-service-request";
     const MAX_DEADLINE_RETRIES: u8 = 5;
     const DEADLINE_RETRY_DELAY: Duration = Duration::from_secs(1);
     const DEADLINE_RETRY_CAP: Duration = Duration::from_secs(60);
@@ -1309,6 +1320,10 @@ mod unix {
             std::process::id(),
             sha256_content_digest(socket.to_string_lossy().as_bytes())
         );
+        let endpoint_id = format!(
+            "service:{}",
+            sha256_content_digest(socket.to_string_lossy().as_bytes())
+        );
         let timers = TimerRegistry::new();
         schedule_current_attempt_deadlines(&canonical_db, &timers)?;
         let hooks = ProductionServiceHooks {
@@ -1322,6 +1337,7 @@ mod unix {
             ConcurrentServiceCommandHandler {
                 database: canonical_db.clone(),
                 gate_root,
+                endpoint_id,
                 timers: timers.clone(),
             },
             config,
@@ -1418,7 +1434,7 @@ mod unix {
             "data": data,
         });
         let request =
-            JsonRequest::new(SERVICE_REQUEST_ID, payload.to_string()).map_err(|error| {
+            JsonRequest::new(operation, payload.to_string()).map_err(|error| {
                 CliError::with(
                     ErrorCode::ProtocolMismatch,
                     ApplicationOutcome::Failed,
@@ -1470,7 +1486,7 @@ mod unix {
                     },
                 });
                 let readback_request = JsonRequest::new(
-                    format!("{SERVICE_REQUEST_ID}-readback"),
+                    readback_operation.clone(),
                     readback_payload.to_string(),
                 )
                 .map_err(|error| {
@@ -1877,7 +1893,15 @@ mod unix {
                 return Ok(data);
             }
             ["wait", "list"] => {
-                data["command"] = json!("external_wait_readback_v1");
+                let request = ExternalWaitListRequestDto {
+                    schema_version: EXTERNAL_WAIT_LIST_SCHEMA_VERSION.to_owned(),
+                    limit: parsed.options.limit.unwrap_or(50),
+                    offset: parsed.options.offset.unwrap_or(0),
+                    expected_project_revision: parsed.options.expected_revision,
+                };
+                data["command"] = json!("external_wait_list_v1");
+                data["wait_list"] = serde_json::to_value(request)
+                    .map_err(|error| CliError::invalid(error.to_string()))?;
                 return Ok(data);
             }
             ["wait", "show"] => {
@@ -1943,6 +1967,17 @@ mod unix {
                 "source_verify_v1"
             });
             data["lookup"] = serde_json::to_value(lookup)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            return Ok(data);
+        }
+        if path.as_slice() == ["intake", "list"] {
+            let request = IntakeListRequestDto {
+                schema_version: INTAKE_LIST_SCHEMA_VERSION.to_owned(),
+                limit: parsed.options.limit.unwrap_or(50),
+                offset: parsed.options.offset.unwrap_or(0),
+            };
+            data["command"] = json!("intake_list_v1");
+            data["intake_list"] = serde_json::to_value(request)
                 .map_err(|error| CliError::invalid(error.to_string()))?;
             return Ok(data);
         }
@@ -2669,6 +2704,7 @@ mod unix {
     pub(super) struct ServiceCommandHandler {
         pub(super) store: SqliteStore,
         pub(super) gate_root: PathBuf,
+        pub(super) endpoint_id: String,
     }
 
     /// Thread-safe production adapter for the bounded concurrent host.
@@ -2679,6 +2715,7 @@ mod unix {
     pub(super) struct ConcurrentServiceCommandHandler {
         database: PathBuf,
         gate_root: PathBuf,
+        endpoint_id: String,
         timers: TimerRegistry,
     }
 
@@ -2699,6 +2736,7 @@ mod unix {
             let response = ServiceCommandHandler {
                 store,
                 gate_root: self.gate_root.clone(),
+                endpoint_id: self.endpoint_id.clone(),
             }
             .handle(request)?;
             if let Some(request_data) = request_data.as_ref() {
@@ -3020,6 +3058,16 @@ mod unix {
                     parsed.options.session = string(data, "session_id")?;
                     parsed.options.harness = string(data, "harness_id")?;
                     parsed.options.operation_id = Some(request.operation_id.clone());
+                    parsed.options.transport = Some(
+                        boreal_protocol::models::GuidanceTransportDto::UnixSocketService,
+                    );
+                    parsed.options.transport_context = Some(
+                        boreal_protocol::models::GuidanceTransportContextDto {
+                            endpoint_id: self.endpoint_id.clone(),
+                            request_id: request.request_id.clone(),
+                            operation_id: request.operation_id.clone(),
+                        },
+                    );
                     let binding = IdentityStore::new(&self.store)
                         .workspace_binding(&project)
                         .map_err(|e| CliError::invalid(e.to_string()))?;
@@ -3051,12 +3099,16 @@ mod unix {
                 "intake_delivery_readback_v1" => self.intake_delivery_readback(data),
                 "intake_bucket_v1" => self.intake_bucket(data, &request.operation_id),
                 "intake_capture_v1" => self.intake_capture(data, &request.operation_id),
+                "intake_list_v1" => self.intake_list(data),
+                "intake_disposition_v1" => self.intake_disposition(data, &request.operation_id),
+                "intake_promote_v1" => self.intake_promote(data, &request.operation_id),
                 "project_civil_time_update_v1"
                 | "project_civil_time_readback_v1"
                 | "work_schedule_update_v1"
                 | "work_schedule_readback_v1"
                 | "external_wait_create_v1"
                 | "external_wait_resolve_v1"
+                | "external_wait_list_v1"
                 | "external_wait_readback_v1" => self.scheduling_route(request, data),
                 "memory_command" => {
                     let result = super::super::memory_commands::apply(
@@ -3304,6 +3356,30 @@ mod unix {
                     data.get("wait_id").and_then(Value::as_str),
                     &self.store,
                 )?,
+                "external_wait_list_v1" => {
+                    let dto: ExternalWaitListRequestDto =
+                        serde_json::from_value(data.get("wait_list").cloned().ok_or_else(
+                            || CliError::invalid("external-wait list DTO is required"),
+                        )?)
+                        .map_err(|error| invalid_service_dto("external_wait_list_v1", error))?;
+                    if dto.schema_version != EXTERNAL_WAIT_LIST_SCHEMA_VERSION {
+                        return Err(CliError::with(
+                            ErrorCode::ProtocolMismatch,
+                            ApplicationOutcome::Rejected,
+                            format!(
+                                "external-wait list schema mismatch: expected {EXTERNAL_WAIT_LIST_SCHEMA_VERSION}, found {}",
+                                dto.schema_version
+                            ),
+                        ));
+                    }
+                    super::super::external_wait_page_read(
+                        &project,
+                        dto.limit,
+                        dto.offset,
+                        dto.expected_project_revision,
+                        &self.store,
+                    )?
+                }
                 _ => {
                     return Err(CliError::invalid(
                         "unknown date and external-wait service route",
@@ -4718,51 +4794,220 @@ mod unix {
             ))
         }
 
-        #[allow(dead_code)]
-        fn intake_read(&mut self, data: &Value) -> ServiceResult {
-            let project = ProjectId::new(string(data, "project_id")?);
-            let view = WorkApplication::new(&self.store)
-                .intake_items_v3(&project)
-                .map_err(map_application_error)?;
-            let item_id = optional_string(data, "intake_id")?;
-            let items = view
-                .items
-                .iter()
-                .filter(|item| item_id.as_deref().is_none_or(|id| id == item.intake_id))
-                .map(super::super::intake_item_json)
-                .collect::<Vec<_>>();
-            if item_id.is_some() && items.is_empty() {
+        fn intake_list(&mut self, data: &Value) -> ServiceResult {
+            let request: IntakeListRequestDto = serde_json::from_value(
+                data.get("intake_list")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("intake list DTO is required"))?,
+            )
+            .map_err(|error| invalid_service_dto("intake_list_v1", error))?;
+            if request.schema_version != INTAKE_LIST_SCHEMA_VERSION {
                 return Err(CliError::with(
-                    ErrorCode::NotFound,
+                    ErrorCode::ProtocolMismatch,
                     ApplicationOutcome::Rejected,
-                    "intake item was not found",
+                    "intake list DTO schema version is not supported",
                 ));
             }
-            let command = data
-                .get("command")
-                .and_then(Value::as_str)
-                .filter(|command| matches!(*command, "intake_list" | "intake_show"))
-                .unwrap_or("intake_list");
-            let response = if command == "intake_show" {
-                json!({
-                    "command": command,
-                    "project_id": view.project_id.as_str(),
-                    "revision": view.revision,
-                    "item": items.into_iter().next(),
-                })
-            } else {
-                json!({
-                    "command": command,
-                    "project_id": view.project_id.as_str(),
-                    "revision": view.revision,
-                    "items": items,
-                    "total": view.items.len(),
-                })
+            let project = ProjectId::new(string(data, "project_id")?);
+            let page = WorkApplication::new(&self.store)
+                .intake_page_v3(&project, request.limit, request.offset)
+                .map_err(map_application_error)?;
+            let readback = IntakeListReadbackDto {
+                schema_version: INTAKE_LIST_READBACK_SCHEMA_VERSION.to_owned(),
+                project_id: page.project_id.to_string(),
+                project_revision: page.revision,
+                total: page.total,
+                offset: page.offset,
+                limit: page.limit,
+                has_more: page.has_more,
+                items: page.items.iter().map(intake_list_item_dto).collect(),
             };
             Ok((
                 ApplicationOutcome::Unchanged,
-                Some(view.revision),
-                Some(response),
+                Some(page.revision),
+                Some(json!({
+                    "command": "intake_list_v1",
+                    "project_id": project.as_str(),
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("intake list readback cannot be encoded: {error}"))
+                    })?,
+                })),
+            ))
+        }
+
+        fn intake_disposition(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let request: IntakeDispositionRequestDto = serde_json::from_value(
+                data.get("disposition")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("intake disposition DTO is required"))?,
+            )
+            .map_err(|error| invalid_service_dto("intake_disposition_v1", error))?;
+            if request.schema_version != INTAKE_DISPOSITION_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    "intake disposition DTO schema version is not supported",
+                ));
+            }
+            let project_id = string(data, "project_id")?;
+            let actor_id = string(data, "actor_id")?;
+            let session_id = string(data, "session_id")?;
+            let lifecycle = intake_lifecycle(request.lifecycle);
+            let now = now();
+            let context = V3MutationContext {
+                project_id: project_id.clone(),
+                actor_id: actor_id.clone(),
+                session_id: Some(session_id.clone()),
+                operation_id: operation.to_owned(),
+                request_digest: canonical_request_digest(
+                    "intake.disposition.service.v1",
+                    json!({
+                        "project_id": project_id,
+                        "actor_id": actor_id,
+                        "session_id": session_id,
+                        "intake_id": request.intake_id,
+                        "expected_project_revision": request.expected_project_revision,
+                        "expected_content_revision": request.expected_content_revision,
+                        "lifecycle": request.lifecycle,
+                        "revisit_at_utc_ms": request.revisit_at_utc_ms,
+                    }),
+                ),
+                expected_revision: Some(request.expected_project_revision),
+                now,
+            };
+            let mutation = boreal_application::KnowledgeParityApplication::new(&self.store)
+                .update_intake_disposition(
+                    &context,
+                    &request.intake_id,
+                    request.expected_content_revision,
+                    lifecycle,
+                    request.revisit_at_utc_ms,
+                )
+                .map_err(map_application_error)?;
+            let readback = IntakeDispositionReadbackDto {
+                schema_version: INTAKE_DISPOSITION_READBACK_SCHEMA_VERSION.to_owned(),
+                project_id: project_id.clone(),
+                intake_id: request.intake_id,
+                lifecycle: request.lifecycle,
+                content_revision: request.expected_content_revision,
+                revisit_at_utc_ms: request.revisit_at_utc_ms,
+                replayed: mutation.replayed,
+            };
+            Ok((
+                if mutation.replayed {
+                    ApplicationOutcome::Unchanged
+                } else {
+                    ApplicationOutcome::Changed
+                },
+                Some(mutation.revision),
+                Some(json!({
+                    "command": "intake_disposition_v1",
+                    "project_id": project_id,
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("intake disposition readback cannot be encoded: {error}"))
+                    })?,
+                })),
+            ))
+        }
+
+        fn intake_promote(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let request: IntakePromoteRequestDto = serde_json::from_value(
+                data.get("promotion")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("intake promotion DTO is required"))?,
+            )
+            .map_err(|error| invalid_service_dto("intake_promote_v1", error))?;
+            if request.schema_version != INTAKE_PROMOTE_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    "intake promote DTO schema version is not supported",
+                ));
+            }
+            let project_id = string(data, "project_id")?;
+            let actor_id = string(data, "actor_id")?;
+            let session_id = string(data, "session_id")?;
+            let prior_promotion = self
+                .store
+                .intake_promotions_v3(&project_id, &request.intake_id)
+                .map_err(map_store_error)?
+                .into_iter()
+                .find(|record| record.operation_id == operation);
+            let target_kind = match request.target_kind {
+                IntakePromotionTargetKindDto::DraftWork => PromotionTargetKind::DraftWork,
+                IntakePromotionTargetKindDto::SourceVersion => PromotionTargetKind::SourceVersion,
+                IntakePromotionTargetKindDto::MemoryDraft => PromotionTargetKind::MemoryDraft,
+            };
+            let intake_digest = if let Some(prior) = prior_promotion.as_ref() {
+                prior.intake_digest.clone()
+            } else {
+                let item = self
+                    .store
+                    .intake_item_v3(&project_id, &request.intake_id)
+                    .map_err(map_store_error)?
+                    .ok_or_else(|| {
+                        CliError::with(
+                            ErrorCode::NotFound,
+                            ApplicationOutcome::Rejected,
+                            "intake item was not found in this project",
+                        )
+                    })?;
+                if item.content_revision != request.expected_content_revision {
+                    return Err(CliError::with(
+                        ErrorCode::RevisionConflict,
+                        ApplicationOutcome::Conflict,
+                        "intake content revision changed; refresh the intake item before promoting it",
+                    ));
+                }
+                item.content_digest
+            };
+            let promotion = IntakePromotion {
+                id: PromotionId::new(
+                    prior_promotion
+                        .as_ref()
+                        .map(|prior| prior.promotion_id.as_str())
+                        .unwrap_or(operation),
+                ),
+                project_id: ProjectId::new(project_id.clone()),
+                intake_id: IntakeItemId::new(request.intake_id.clone()),
+                intake_revision: request.expected_content_revision,
+                intake_digest,
+                target_kind,
+                target_id: request.target_id.clone(),
+            };
+            let scope = boreal_application::PlanningScope::new(
+                ProjectId::new(project_id.clone()),
+                actor_id,
+            )
+            .with_session(session_id)
+            .at_revision(request.expected_project_revision);
+            let result = boreal_application::KnowledgeParityApplication::new(&self.store)
+                .promote_intake_link(&scope, operation, &promotion, &now())
+                .map_err(map_application_error)?;
+            let readback = IntakePromoteReadbackDto {
+                schema_version: INTAKE_PROMOTE_READBACK_SCHEMA_VERSION.to_owned(),
+                project_id: project_id.clone(),
+                intake_id: request.intake_id,
+                promotion_id: operation.to_owned(),
+                target_kind: request.target_kind,
+                target_id: request.target_id,
+                content_revision: request.expected_content_revision,
+                replayed: !result.changed,
+            };
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(json!({
+                    "command": "intake_promote_v1",
+                    "project_id": project_id,
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("intake promotion readback cannot be encoded: {error}"))
+                    })?,
+                })),
             ))
         }
 
@@ -6714,6 +6959,7 @@ mod unix {
             actor: string(data, "actor_id")?,
             harness: string(data, "harness_id")?,
             session: string(data, "session_id")?,
+            transport: Some(boreal_protocol::models::GuidanceTransportDto::UnixSocketService),
             work: optional_string(data, "work_id")?,
             attempt: optional_string(data, "attempt_id")?,
             expected_revision: optional_u64(data, "expected_revision")?,
@@ -6873,6 +7119,32 @@ mod unix {
         }
     }
 
+    fn intake_lifecycle(value: IntakeLifecycleDto) -> IntakeLifecycle {
+        match value {
+            IntakeLifecycleDto::Captured => IntakeLifecycle::Captured,
+            IntakeLifecycleDto::Triaged => IntakeLifecycle::Triaged,
+            IntakeLifecycleDto::Deferred => IntakeLifecycle::Deferred,
+            IntakeLifecycleDto::Resolved => IntakeLifecycle::Resolved,
+            IntakeLifecycleDto::Archived => IntakeLifecycle::Archived,
+        }
+    }
+
+    fn intake_list_item_dto(item: &boreal_store::IntakeItemV3Record) -> IntakeListItemDto {
+        IntakeListItemDto {
+            project_id: item.project_id.clone(),
+            intake_id: item.intake_id.clone(),
+            bucket_id: item.bucket_id.clone(),
+            kind: item.kind.clone(),
+            lifecycle: item.lifecycle.clone(),
+            content: item.content.clone(),
+            content_revision: item.content_revision,
+            content_digest: item.content_digest.clone(),
+            captured_at: item.captured_at.clone(),
+            updated_at: item.updated_at.clone(),
+            revisit_at_utc_ms: item.revisit_at_utc_ms,
+        }
+    }
+
     fn string(data: &Value, field: &str) -> Result<String, CliError> {
         data.get(field)
             .and_then(Value::as_str)
@@ -6959,15 +7231,20 @@ mod tests {
     use super::*;
     use boreal_protocol::{
         models::{
-            ExternalWaitCreateDto, ExternalWaitMutationReadbackDto, ExternalWaitReadbackDto,
+            ExternalWaitCreateDto, ExternalWaitListReadbackDto, ExternalWaitMutationReadbackDto,
+            ExternalWaitReadbackDto,
             FinalResultCaptureReadbackDto, IntakeBucketReadbackDto, IntakeCaptureReadbackDto,
+            IntakeDispositionReadbackDto, IntakeListReadbackDto, IntakePromoteReadbackDto,
             IntakeKindDto, ProjectCivilTimeMutationReadbackDto, ProjectCivilTimeReadbackDto,
             SourceAvailabilityDto, SourceShowReadbackDto, SourceVerifyReadbackDto,
             WorkScheduleMutationReadbackDto, WorkScheduleReadbackDto,
             EXTERNAL_WAIT_CREATE_SCHEMA_VERSION, EXTERNAL_WAIT_READBACK_SCHEMA_VERSION,
+            EXTERNAL_WAIT_LIST_READBACK_SCHEMA_VERSION, EXTERNAL_WAIT_LIST_SCHEMA_VERSION,
             EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION, FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION,
             FINAL_RESULT_CAPTURE_SCHEMA_VERSION, INTAKE_BUCKET_CREATE_SCHEMA_VERSION,
-            INTAKE_CAPTURE_SCHEMA_VERSION, PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION,
+            INTAKE_CAPTURE_SCHEMA_VERSION, INTAKE_DISPOSITION_READBACK_SCHEMA_VERSION,
+            INTAKE_LIST_READBACK_SCHEMA_VERSION, INTAKE_LIST_SCHEMA_VERSION,
+            INTAKE_PROMOTE_READBACK_SCHEMA_VERSION, PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION,
             PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION, SOURCE_LOOKUP_SCHEMA_VERSION,
             SOURCE_SHOW_READBACK_SCHEMA_VERSION, WORK_SCHEDULE_READBACK_SCHEMA_VERSION,
             WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
@@ -7165,7 +7442,11 @@ mod tests {
     }
 
     fn make_handler_at(store: SqliteStore, gate_root: PathBuf) -> ServiceCommandHandler {
-        ServiceCommandHandler { store, gate_root }
+        ServiceCommandHandler {
+            store,
+            gate_root,
+            endpoint_id: "service:test".to_owned(),
+        }
     }
 
     fn capture_service_test_source(
@@ -7990,6 +8271,196 @@ mod tests {
             items.items[0].content_digest,
             capture_readback.content_digest
         );
+
+        let list_request = json!({
+            "command": "intake_list_v1",
+            "project_id": "service-project",
+            "actor_id": DEFAULT_ACTOR,
+            "session_id": "service-test-session",
+            "credential_ref": SERVICE_TEST_CREDENTIAL,
+            "intake_list": { "schema_version": INTAKE_LIST_SCHEMA_VERSION, "limit": 1, "offset": 0 },
+        });
+        let list = application_envelope(&mut handler, "op_source_intake_list_page", list_request);
+        assert_eq!(list.outcome, ApplicationOutcome::Unchanged);
+        let list_data = list.data.as_ref().expect("typed intake page exists");
+        let list_readback: IntakeListReadbackDto =
+            serde_json::from_value(list_data["readback"].clone())
+                .expect("intake list response is the strict paged DTO");
+        assert_eq!(
+            list_readback.schema_version,
+            INTAKE_LIST_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(list_readback.project_id, "service-project");
+        assert_eq!(list_readback.project_revision, list.revision.unwrap());
+        assert_eq!(list_readback.total, 1);
+        assert_eq!(list_readback.limit, 1);
+        assert_eq!(list_readback.offset, 0);
+        assert!(!list_readback.has_more);
+        assert_eq!(list_readback.items[0].intake_id, "typed-intake");
+        assert_eq!(
+            list_readback.items[0].content,
+            "Which acceptance criteria apply?"
+        );
+
+        let empty_page = application_envelope(
+            &mut handler,
+            "op_source_intake_list_empty_page",
+            json!({
+                "command": "intake_list_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "intake_list": { "schema_version": INTAKE_LIST_SCHEMA_VERSION, "limit": 1, "offset": 1 },
+            }),
+        );
+        let empty_readback: IntakeListReadbackDto =
+            serde_json::from_value(empty_page.data.as_ref().unwrap()["readback"].clone())
+                .expect("empty intake page remains typed");
+        assert!(empty_readback.items.is_empty());
+        assert_eq!(empty_readback.total, 1);
+        assert!(!empty_readback.has_more);
+
+        let promotion_revision = handler.store.project_revision("service-project").unwrap().0;
+        let promoted = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_promote",
+            json!({
+                "command": "intake_promote_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "promotion": {
+                    "schema_version": boreal_protocol::models::INTAKE_PROMOTE_SCHEMA_VERSION,
+                    "expected_project_revision": promotion_revision,
+                    "expected_content_revision": 1,
+                    "intake_id": "typed-intake",
+                    "target_kind": "draft_work",
+                    "target_id": "service-work",
+                },
+            }),
+        );
+        assert_eq!(promoted.outcome, ApplicationOutcome::Changed);
+        let promote_readback: IntakePromoteReadbackDto =
+            serde_json::from_value(promoted.data.as_ref().unwrap()["readback"].clone())
+                .expect("intake promotion returns its strict DTO");
+        assert_eq!(
+            promote_readback.schema_version,
+            INTAKE_PROMOTE_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(promote_readback.intake_id, "typed-intake");
+        assert_eq!(promote_readback.target_id, "service-work");
+        assert!(!promote_readback.replayed);
+
+        let disposition_revision = handler.store.project_revision("service-project").unwrap().0;
+        let disposition = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_disposition",
+            json!({
+                "command": "intake_disposition_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "disposition": {
+                    "schema_version": boreal_protocol::models::INTAKE_DISPOSITION_SCHEMA_VERSION,
+                    "expected_project_revision": disposition_revision,
+                    "expected_content_revision": 1,
+                    "intake_id": "typed-intake",
+                    "lifecycle": "triaged",
+                    "revisit_at_utc_ms": null,
+                },
+            }),
+        );
+        assert_eq!(disposition.outcome, ApplicationOutcome::Changed);
+        let disposition_readback: IntakeDispositionReadbackDto =
+            serde_json::from_value(disposition.data.as_ref().unwrap()["readback"].clone())
+                .expect("intake disposition returns its strict DTO");
+        assert_eq!(
+            disposition_readback.schema_version,
+            INTAKE_DISPOSITION_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(
+            disposition_readback.lifecycle,
+            boreal_protocol::models::IntakeLifecycleDto::Triaged
+        );
+        assert_eq!(disposition_readback.content_revision, 1);
+        assert!(!disposition_readback.replayed);
+
+        let promotion_replay = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_promote",
+            json!({
+                "command": "intake_promote_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "promotion": {
+                    "schema_version": boreal_protocol::models::INTAKE_PROMOTE_SCHEMA_VERSION,
+                    "expected_project_revision": promotion_revision,
+                    "expected_content_revision": 1,
+                    "intake_id": "typed-intake",
+                    "target_kind": "draft_work",
+                    "target_id": "service-work",
+                },
+            }),
+        );
+        assert_eq!(promotion_replay.outcome, ApplicationOutcome::Unchanged);
+        let replay_readback: IntakePromoteReadbackDto = serde_json::from_value(
+            promotion_replay.data.as_ref().unwrap()["readback"].clone(),
+        )
+        .expect("promotion retry returns the original typed readback");
+        assert!(replay_readback.replayed);
+        assert_eq!(replay_readback.promotion_id, "op_source_intake_typed_promote");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn service_guidance_reports_server_endpoint_and_outer_request_identity() {
+        let root = temp_path("guidance-transport-context");
+        let store = seed_project_store(&root);
+        WorkApplication::new(&store)
+            .ensure_work_model_v3()
+            .expect("guidance fixture enables work-model/3");
+        let mut handler = make_handler(store);
+        let feature = ParsedCommand {
+            path: vec!["agent".to_owned(), "guide".to_owned()],
+            options: CliOptions {
+                work: Some("service-work".to_owned()),
+                ..CliOptions::default()
+            },
+        };
+        let response = application_envelope(
+            &mut handler,
+            "op_guidance_transport_socket",
+            json!({
+                "command": "cli_feature_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "feature": serde_json::to_value(feature).expect("feature serializes"),
+            }),
+        );
+        assert_eq!(response.outcome, ApplicationOutcome::Unchanged);
+        let guide: boreal_protocol::models::AgentGuideDto = serde_json::from_value(
+            response.data.expect("service guidance has data"),
+        )
+        .expect("service guidance is typed");
+        assert_eq!(
+            guide.context.transport,
+            Some(boreal_protocol::models::GuidanceTransportDto::UnixSocketService)
+        );
+        let transport = guide
+            .context
+            .transport_context
+            .expect("service transport context is present");
+        assert_eq!(transport.endpoint_id, "service:test");
+        assert_eq!(transport.request_id, "request-op_guidance_transport_socket");
+        assert_eq!(transport.operation_id, "op_guidance_transport_socket");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -8218,6 +8689,25 @@ mod tests {
         assert_eq!(verify_data["command"], "source_verify_v1");
         assert_eq!(verify_data["lookup"]["source_version_id"], "source-1");
 
+        let list = ParsedCommand {
+            path: vec!["intake".to_owned(), "list".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                limit: Some(12),
+                offset: Some(24),
+                ..CliOptions::default()
+            },
+        };
+        assert!(supports(&list));
+        let list_data = request_data(&list, "op_intake_list").unwrap();
+        assert_eq!(list_data["command"], "intake_list_v1");
+        assert_eq!(
+            list_data["intake_list"]["schema_version"],
+            INTAKE_LIST_SCHEMA_VERSION
+        );
+        assert_eq!(list_data["intake_list"]["limit"], 12);
+        assert_eq!(list_data["intake_list"]["offset"], 24);
+
         let bucket = ParsedCommand {
             path: vec!["intake".to_owned(), "bucket".to_owned()],
             options: CliOptions {
@@ -8264,11 +8754,13 @@ mod tests {
         assert_eq!(capture_data["capture"]["content"], "Review the result");
         let mut missing_capture_revision = capture.clone();
         missing_capture_revision.options.expected_revision = None;
-        assert!(request_data(
-            &missing_capture_revision,
-            "op_intake_capture_missing_revision"
-        )
-        .is_err());
+        assert!(
+            request_data(
+                &missing_capture_revision,
+                "op_intake_capture_missing_revision"
+            )
+            .is_err()
+        );
 
         let mut extra = std::collections::BTreeMap::new();
         extra.insert(
@@ -8523,17 +9015,87 @@ mod tests {
                 .expect("wait create replay returns the typed readback");
         assert!(wait_readback.replayed);
 
+        let mut second_wait_request = base();
+        second_wait_request["command"] = json!("external_wait_create_v1");
+        second_wait_request["wait_create"] = json!({
+            "schema_version": EXTERNAL_WAIT_CREATE_SCHEMA_VERSION,
+            "expected_project_revision": wait_create.revision,
+            "expected_wait_revision": 0,
+            "wait_id": "wait-service-2",
+            "source_work_id": "service-work",
+            "affected_work_ids": ["service-work"],
+            "category": "approval",
+            "reason": "Need a second approval",
+            "accountable": {"kind": "role", "role": "operator"},
+            "expected_decision": "Approve the proposed direction",
+            "expected_output": null,
+            "follow_up": null
+        });
+        let second_wait =
+            application_envelope(&mut handler, "op_s13_wait_create_2", second_wait_request);
+        assert_eq!(
+            second_wait.outcome,
+            ApplicationOutcome::Changed,
+            "second wait create failed: {:?}",
+            second_wait.error
+        );
+        let second_wait_revision = second_wait
+            .revision
+            .expect("second wait creation returns the current project revision");
+
         let mut wait_list = base();
-        wait_list["command"] = json!("external_wait_readback_v1");
+        wait_list["command"] = json!("external_wait_list_v1");
+        wait_list["wait_list"] = json!({
+            "schema_version": EXTERNAL_WAIT_LIST_SCHEMA_VERSION,
+            "limit": 1,
+            "offset": 0,
+            "expected_project_revision": second_wait_revision,
+        });
         let wait_list = application_envelope(&mut handler, "op_s13_wait_list", wait_list);
-        let wait_readback: ExternalWaitReadbackDto =
+        let wait_readback: ExternalWaitListReadbackDto =
             serde_json::from_value(wait_list.data.unwrap()["readback"].clone())
-                .expect("wait list returns the typed readback");
+                .expect("wait list returns the typed paged readback");
         assert_eq!(
             wait_readback.schema_version,
-            EXTERNAL_WAIT_READBACK_SCHEMA_VERSION
+            EXTERNAL_WAIT_LIST_READBACK_SCHEMA_VERSION
         );
         assert_eq!(wait_readback.waits.len(), 1);
+        assert_eq!(wait_readback.waits[0].wait_id, "wait-service-1");
+        assert_eq!(wait_readback.total, 2);
+        assert_eq!(wait_readback.offset, 0);
+        assert_eq!(wait_readback.limit, 1);
+        assert!(wait_readback.has_more);
+
+        let mut wait_list_next = base();
+        wait_list_next["command"] = json!("external_wait_list_v1");
+        wait_list_next["wait_list"] = json!({
+            "schema_version": EXTERNAL_WAIT_LIST_SCHEMA_VERSION,
+            "limit": 1,
+            "offset": 1,
+            "expected_project_revision": second_wait_revision,
+        });
+        let wait_list_next =
+            application_envelope(&mut handler, "op_s13_wait_list_next", wait_list_next);
+        let next_page: ExternalWaitListReadbackDto =
+            serde_json::from_value(wait_list_next.data.unwrap()["readback"].clone())
+                .expect("next wait page returns the typed paged readback");
+        assert_eq!(next_page.waits.len(), 1);
+        assert_eq!(next_page.waits[0].wait_id, "wait-service-2");
+        assert_eq!(next_page.total, 2);
+        assert_eq!(next_page.offset, 1);
+        assert!(!next_page.has_more);
+
+        let mut stale_wait_list = base();
+        stale_wait_list["command"] = json!("external_wait_list_v1");
+        stale_wait_list["wait_list"] = json!({
+            "schema_version": EXTERNAL_WAIT_LIST_SCHEMA_VERSION,
+            "limit": 1,
+            "offset": 0,
+            "expected_project_revision": second_wait_revision.saturating_sub(1),
+        });
+        let stale_wait_list =
+            application_envelope(&mut handler, "op_s13_wait_list_stale", stale_wait_list);
+        assert_eq!(stale_wait_list.outcome, ApplicationOutcome::Conflict);
 
         let mut wait_show = base();
         wait_show["command"] = json!("external_wait_readback_v1");
@@ -8549,7 +9111,7 @@ mod tests {
         wait_resolve_request["command"] = json!("external_wait_resolve_v1");
         wait_resolve_request["wait_resolve"] = json!({
             "schema_version": EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
-            "expected_project_revision": wait_create.revision,
+            "expected_project_revision": second_wait_revision,
             "expected_wait_revision": 1,
             "wait_id": "wait-service-1",
             "next_state": "resolved",
@@ -8747,6 +9309,20 @@ mod tests {
             decoded.expected_decision.0.as_deref(),
             Some("Choose a direction")
         );
+
+        let mut wait_list_command = parsed(&["wait", "list"], None, &[]);
+        wait_list_command.options.limit = Some(25);
+        wait_list_command.options.offset = Some(50);
+        wait_list_command.options.expected_revision = Some(12);
+        assert!(supports(&wait_list_command));
+        let wait_list_data = request_data(&wait_list_command, "op_s13_cli_wait_list").unwrap();
+        assert_eq!(wait_list_data["command"], "external_wait_list_v1");
+        let list_dto: boreal_protocol::models::ExternalWaitListRequestDto =
+            serde_json::from_value(wait_list_data["wait_list"].clone())
+                .expect("service wait-list request uses the strict paged DTO");
+        assert_eq!(list_dto.limit, 25);
+        assert_eq!(list_dto.offset, 50);
+        assert_eq!(list_dto.expected_project_revision, Some(12));
 
         let wait_resolve = write_request(
             "wait-resolve.json",
