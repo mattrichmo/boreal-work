@@ -278,7 +278,21 @@ pub(crate) fn build_command(parsed: &ParsedCommand) -> Result<(String, Value), C
             if options.contains_key("--include-archived") {
                 payload["include_archived"] = json!(true);
             }
-            "todo list".to_owned()
+            let filter = value("filter");
+            let paged = filter.is_some()
+                || parsed.options.limit.is_some()
+                || parsed.options.offset.is_some();
+            if paged {
+                payload["filter"] = match filter.as_deref() {
+                    Some(raw) => json!(parse_daily_filter(raw)?),
+                    None => Value::Null,
+                };
+                payload["limit"] = json!(parsed.options.limit.unwrap_or(100));
+                payload["offset"] = json!(parsed.options.offset.unwrap_or(0));
+                "todo daily list".to_owned()
+            } else {
+                "todo list".to_owned()
+            }
         }
         ["todo", "show"] => {
             payload["item_id"] = json!(required(
@@ -936,6 +950,9 @@ pub(crate) fn execute_request(
         }));
     }
     let app = GlobalManagerApplication::open(path).map_err(global_error)?;
+    if command == "todo daily list" {
+        return execute_daily_todo_list(&app, payload, operation);
+    }
     if command == "export" {
         let data = app
             .execute(command, payload, operation)
@@ -1043,6 +1060,344 @@ pub(crate) fn execute_request(
             .collect::<Vec<_>>());
     }
     Ok(result)
+}
+
+const GLOBAL_DAILY_PAGE_SIZE: u64 = 200;
+
+#[derive(Default)]
+struct GlobalDailyPageRead {
+    total: u64,
+    revision: Option<u64>,
+    civil_time: Option<Value>,
+}
+
+fn global_civil_time_identity(value: &Value) -> Result<(String, String, String), CliError> {
+    Ok((
+        value
+            .get("system_civil_date")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::invalid("global daily page omitted its civil date"))?
+            .to_owned(),
+        value
+            .get("timezone")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::invalid("global daily page omitted its timezone"))?
+            .to_owned(),
+        value
+            .get("tzdb_identity")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::invalid("global daily page omitted its timezone identity"))?
+            .to_owned(),
+    ))
+}
+
+fn visit_global_detail_pages(
+    app: &GlobalManagerApplication,
+    collection: &str,
+    operation: &str,
+    project_id: Option<&str>,
+    include_archived: bool,
+    expected_revision: Option<u64>,
+    require_stable_civil_time: bool,
+    mut visit: impl FnMut(&Value) -> Result<(), CliError>,
+) -> Result<GlobalDailyPageRead, CliError> {
+    let mut read = GlobalDailyPageRead::default();
+    let mut offset = 0_u64;
+    let mut expected_total = None;
+    let mut expected_revision = expected_revision;
+    let mut civil_identity: Option<(String, String, String)> = None;
+
+    loop {
+        let mut payload = json!({
+            "collection": collection,
+            "limit": GLOBAL_DAILY_PAGE_SIZE,
+            "offset": offset,
+            "include_archived": include_archived,
+        });
+        if let Some(project_id) = project_id {
+            payload["project_id"] = json!(project_id);
+        }
+        if let Some(expected_revision) = expected_revision {
+            payload["expected_revision"] = json!(expected_revision);
+        }
+        let page = app
+            .execute(
+                "detail page",
+                &payload,
+                &format!("{operation}-daily-{collection}-{offset}"),
+            )
+            .map_err(global_error)?;
+        let page_revision = page
+            .get("revision")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::invalid("global daily page omitted its revision"))?;
+        if page.get("resnapshot_required").and_then(Value::as_bool) == Some(true)
+            || expected_revision.is_some_and(|expected| expected != page_revision)
+        {
+            return Err(CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                format!("Global revision changed while reading {collection}; rerun the command"),
+            ));
+        }
+        if let Some(previous) = read.revision {
+            if previous != page_revision {
+                return Err(CliError::with(
+                    ErrorCode::RevisionConflict,
+                    ApplicationOutcome::Conflict,
+                    format!(
+                        "Global revision changed while reading {collection}; rerun the command"
+                    ),
+                ));
+            }
+        } else {
+            read.revision = Some(page_revision);
+        }
+        expected_revision = Some(page_revision);
+
+        let page_offset = page
+            .get("offset")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::invalid("global daily page omitted its offset"))?;
+        if page_offset != offset {
+            return Err(CliError::invalid(
+                "global daily page returned an unexpected offset",
+            ));
+        }
+        let page_total = page
+            .get("total")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::invalid("global daily page omitted its total"))?;
+        if expected_total.is_some_and(|total| total != page_total) {
+            return Err(CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                format!("Global {collection} total changed within one revision"),
+            ));
+        }
+        expected_total = Some(page_total);
+        read.total = page_total;
+
+        let civil_time = page.get("civil_time").filter(|value| value.is_object());
+        if require_stable_civil_time {
+            let civil_time = civil_time.ok_or_else(|| {
+                CliError::invalid("global daily page omitted application civil-time policy")
+            })?;
+            let identity = global_civil_time_identity(civil_time)?;
+            if civil_identity
+                .as_ref()
+                .is_some_and(|expected| expected != &identity)
+            {
+                return Err(CliError::with(
+                    ErrorCode::RevisionConflict,
+                    ApplicationOutcome::Conflict,
+                    "system civil-time context changed while reading Global items; rerun the command",
+                ));
+            }
+            civil_identity = Some(identity);
+        }
+        if read.civil_time.is_none() {
+            read.civil_time = civil_time.cloned();
+        }
+
+        let rows = page
+            .get("rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| CliError::invalid("global daily page omitted its rows"))?;
+        if rows.len() as u64 > GLOBAL_DAILY_PAGE_SIZE {
+            return Err(CliError::invalid(
+                "global daily page exceeded the requested row bound",
+            ));
+        }
+        for row in rows {
+            visit(row)?;
+        }
+        let next_offset = page.get("next_offset").and_then(Value::as_u64);
+        let has_more = page
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| CliError::invalid("global daily page omitted has_more"))?;
+        match (has_more, next_offset) {
+            (false, None) if offset.saturating_add(rows.len() as u64) == page_total => break,
+            (true, Some(next))
+                if !rows.is_empty()
+                    && next == offset.saturating_add(rows.len() as u64)
+                    && next > offset
+                    && next < page_total =>
+            {
+                offset = next;
+            }
+            _ => {
+                return Err(CliError::invalid(
+                    "global daily page returned an invalid continuation cursor",
+                ));
+            }
+        }
+    }
+    Ok(read)
+}
+
+fn execute_daily_todo_list(
+    app: &GlobalManagerApplication,
+    payload: &Value,
+    operation: &str,
+) -> Result<Value, CliError> {
+    let filter = match payload.get("filter") {
+        Some(Value::String(raw)) => Some(parse_daily_filter(raw)?),
+        Some(Value::Null) | None => None,
+        Some(_) => return Err(CliError::invalid("daily filter must be a string or null")),
+    };
+    let limit = payload.get("limit").and_then(Value::as_u64).unwrap_or(100);
+    if !(1..=100).contains(&limit) {
+        return Err(CliError::invalid(
+            "global todo page limit must be from 1 to 100",
+        ));
+    }
+    let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0);
+    if payload
+        .get("offset")
+        .is_some_and(|value| value.as_u64().is_none())
+    {
+        return Err(CliError::invalid(
+            "global todo page offset must be a non-negative integer",
+        ));
+    }
+    let project_id = match payload.get("project_id") {
+        Some(Value::String(project_id)) if !project_id.trim().is_empty() => {
+            Some(project_id.as_str())
+        }
+        Some(Value::String(_)) => {
+            return Err(CliError::invalid("project_id must not be empty"));
+        }
+        Some(Value::Null) | None => None,
+        Some(_) => return Err(CliError::invalid("project_id must be a string or null")),
+    };
+    let include_archived = payload
+        .get("include_archived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut statuses = std::collections::BTreeMap::<(Option<String>, String), String>::new();
+    let status_read = if filter.is_some() {
+        Some(visit_global_detail_pages(
+            app,
+            "statuses",
+            operation,
+            project_id,
+            include_archived,
+            None,
+            true,
+            |status| {
+                let status_id = status
+                    .get("status_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CliError::invalid("Global status omitted its ID"))?;
+                let owner = status
+                    .get("project_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let category = status
+                    .get("category")
+                    .and_then(Value::as_str)
+                    .unwrap_or("open");
+                statuses.insert((owner, status_id.to_owned()), category.to_owned());
+                Ok(())
+            },
+        )?)
+    } else {
+        None
+    };
+    let expected_revision = status_read.as_ref().and_then(|read| read.revision);
+    let mut matching_total = 0_u64;
+    let mut matching_rows = Vec::new();
+    let item_read = visit_global_detail_pages(
+        app,
+        "items",
+        operation,
+        project_id,
+        include_archived,
+        expected_revision,
+        filter.is_some(),
+        |item| {
+            let status_category = item
+                .get("status_id")
+                .and_then(Value::as_str)
+                .and_then(|status_id| {
+                    let owner = item
+                        .get("project_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    statuses.get(&(owner, status_id.to_owned()))
+                })
+                .map(String::as_str);
+            let is_open = !matches!(status_category, Some("completed" | "cancelled"));
+            let filter_match = match filter {
+                None => true,
+                Some(filter) => {
+                    let flags = item
+                        .get("daily_classification")
+                        .and_then(|classification| classification.get("filters"))
+                        .and_then(Value::as_object)
+                        .ok_or_else(|| {
+                            CliError::invalid(
+                                "Global item omitted application daily-classification flags",
+                            )
+                        })?;
+                    flags.get(filter).and_then(Value::as_bool) == Some(true)
+                }
+            };
+            if filter_match && (filter.is_none() || is_open) {
+                if matching_total >= offset && matching_rows.len() < limit as usize {
+                    matching_rows.push(item.clone());
+                }
+                matching_total = matching_total.saturating_add(1);
+            }
+            Ok(())
+        },
+    )?;
+    if status_read
+        .as_ref()
+        .is_some_and(|status| status.revision != item_read.revision)
+    {
+        return Err(CliError::with(
+            ErrorCode::RevisionConflict,
+            ApplicationOutcome::Conflict,
+            "Global revision changed between status and item reads; rerun the command",
+        ));
+    }
+    if let (Some(status_time), Some(item_time)) = (
+        status_read
+            .as_ref()
+            .and_then(|read| read.civil_time.as_ref()),
+        item_read.civil_time.as_ref(),
+    ) {
+        if global_civil_time_identity(status_time)? != global_civil_time_identity(item_time)? {
+            return Err(CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "system civil-time context changed while reading Global items; rerun the command",
+            ));
+        }
+    }
+    let has_more = offset.saturating_add(matching_rows.len() as u64) < matching_total;
+    let next_offset = has_more.then(|| offset.saturating_add(matching_rows.len() as u64));
+    let filter_name = filter.map(|value| match value {
+        "all_open" => "all-open",
+        other => other,
+    });
+    Ok(json!({
+        "collection": "items",
+        "filter": filter_name,
+        "rows": matching_rows,
+        "total": matching_total,
+        "source_total": item_read.total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": has_more,
+        "next_offset": next_offset,
+        "revision": item_read.revision,
+        "civil_time": item_read.civil_time.or_else(|| status_read.and_then(|read| read.civil_time)),
+    }))
 }
 
 pub(crate) fn write_export(
@@ -1153,6 +1508,7 @@ fn is_mutation(command: &str) -> bool {
             | "project list"
             | "project show"
             | "todo list"
+            | "todo daily list"
             | "todo show"
             | "note list"
             | "note link list"
@@ -1195,6 +1551,19 @@ fn parse_labels(raw: &str) -> Result<Value, CliError> {
         return Err(CliError::invalid("--labels must contain non-empty strings"));
     }
     Ok(json!(labels))
+}
+
+fn parse_daily_filter(raw: &str) -> Result<&'static str, CliError> {
+    match raw {
+        "today" => Ok("today"),
+        "overdue" => Ok("overdue"),
+        "waiting" => Ok("waiting"),
+        "unscheduled" => Ok("unscheduled"),
+        "all-open" | "all_open" => Ok("all_open"),
+        _ => Err(CliError::invalid(
+            "--filter must be today, overdue, waiting, unscheduled, or all-open",
+        )),
+    }
 }
 
 fn parse_position(raw: &str) -> Result<i64, CliError> {
@@ -2287,6 +2656,260 @@ fn linked_workspace_detail(
         path,
     );
     result
+}
+
+#[cfg(test)]
+mod daily_filter_tests {
+    use super::*;
+
+    fn seed_daily_items(app: &GlobalManagerApplication) -> String {
+        let project_id = "daily-filter-project";
+        app.execute(
+            "project add",
+            &json!({"project_id":project_id,"name":"Daily filter test"}),
+            "daily-filter-project-add",
+        )
+        .unwrap();
+        let today = boreal_application::GlobalCivilTimeContext::system()
+            .unwrap()
+            .system_civil_date;
+        let items = [
+            (
+                "daily-item-today",
+                "Due today",
+                json!({"due_at":today,"status_id":"todo"}),
+            ),
+            (
+                "daily-item-overdue",
+                "Overdue",
+                json!({"due_at":"2000-01-01","status_id":"todo"}),
+            ),
+            (
+                "daily-item-unscheduled",
+                "Unscheduled",
+                json!({"follow_up_at":"2099-01-01","status_id":"todo"}),
+            ),
+            (
+                "daily-item-waiting",
+                "Waiting",
+                json!({"follow_up_at":"2099-01-01","status_id":"waiting"}),
+            ),
+            (
+                "daily-item-completed",
+                "Completed",
+                json!({"due_at":today,"status_id":"done"}),
+            ),
+        ];
+        for (item_id, title, fields) in items {
+            let mut payload = json!({
+                "item_id": item_id,
+                "project_id": project_id,
+                "title": title,
+            });
+            for (key, value) in fields.as_object().unwrap() {
+                payload[key] = value.clone();
+            }
+            app.execute("todo add", &payload, &format!("daily-filter-{item_id}"))
+                .unwrap();
+        }
+        project_id.to_owned()
+    }
+
+    #[test]
+    fn daily_filter_grammar_builds_a_bounded_classified_read() {
+        let mut options = CliOptions::default();
+        options
+            .extra
+            .insert("--filter".to_owned(), vec!["all-open".to_owned()]);
+        options.limit = Some(2);
+        options.offset = Some(3);
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "todo".to_owned(), "list".to_owned()],
+            options,
+        };
+
+        let (command, payload) = build_command(&parsed).unwrap();
+        assert_eq!(command, "todo daily list");
+        assert_eq!(payload["filter"], "all_open");
+        assert_eq!(payload["limit"], 2);
+        assert_eq!(payload["offset"], 3);
+        assert!(!mutation(&command));
+        assert!(!may_have_delivery_effect(&command));
+
+        let mut options = CliOptions::default();
+        options
+            .extra
+            .insert("--filter".to_owned(), vec!["next-week".to_owned()]);
+        let parsed = ParsedCommand {
+            path: vec!["global".to_owned(), "todo".to_owned(), "list".to_owned()],
+            options,
+        };
+        assert!(build_command(&parsed)
+            .unwrap_err()
+            .message
+            .contains("--filter must be today"));
+    }
+
+    #[test]
+    fn daily_filters_use_application_classification_and_report_true_page_totals() {
+        let root = std::env::temp_dir().join(format!(
+            "boreal-global-daily-filter-{}-{}",
+            std::process::id(),
+            now_ms_u64()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let app = GlobalManagerApplication::open(root.join("global.sqlite")).unwrap();
+        seed_daily_items(&app);
+
+        let today = execute_daily_todo_list(
+            &app,
+            &json!({"filter":"today","limit":10,"offset":0}),
+            "daily-filter-today-read",
+        )
+        .unwrap();
+        assert_eq!(today["total"], 1);
+        assert_eq!(today["rows"][0]["id"], "daily-item-today");
+        assert_eq!(
+            today["rows"][0]["daily_classification"]["filters"]["today"],
+            true
+        );
+        assert!(today["civil_time"]["system_civil_date"].is_string());
+
+        let overdue = execute_daily_todo_list(
+            &app,
+            &json!({"filter":"overdue","limit":10,"offset":0}),
+            "daily-filter-overdue-read",
+        )
+        .unwrap();
+        assert_eq!(overdue["total"], 1);
+        assert_eq!(overdue["rows"][0]["id"], "daily-item-overdue");
+
+        let waiting = execute_daily_todo_list(
+            &app,
+            &json!({"filter":"waiting","limit":10,"offset":0}),
+            "daily-filter-waiting-read",
+        )
+        .unwrap();
+        assert_eq!(waiting["total"], 1);
+        assert_eq!(waiting["rows"][0]["id"], "daily-item-waiting");
+
+        let unscheduled = execute_daily_todo_list(
+            &app,
+            &json!({"filter":"unscheduled","limit":10,"offset":0}),
+            "daily-filter-unscheduled-read",
+        )
+        .unwrap();
+        assert_eq!(unscheduled["total"], 2);
+        assert!(unscheduled["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "daily-item-unscheduled"));
+
+        let first = execute_daily_todo_list(
+            &app,
+            &json!({"filter":"all_open","limit":2,"offset":0}),
+            "daily-filter-page-one",
+        )
+        .unwrap();
+        assert_eq!(first["source_total"], 5);
+        assert_eq!(first["total"], 4);
+        assert_eq!(first["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(first["next_offset"], 2);
+
+        let second = execute_daily_todo_list(
+            &app,
+            &json!({"filter":"all_open","limit":2,"offset":2}),
+            "daily-filter-page-two",
+        )
+        .unwrap();
+        assert_eq!(second["total"], 4);
+        assert_eq!(second["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(second["has_more"], false);
+        assert_eq!(second["next_offset"], Value::Null);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daily_filter_uses_the_public_global_service_socket_route() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        struct GlobalRootGuard(Option<OsString>);
+        impl GlobalRootGuard {
+            fn set(path: &Path) -> Self {
+                let previous = env::var_os("BOREAL_GLOBAL_ROOT");
+                env::set_var("BOREAL_GLOBAL_ROOT", path);
+                Self(previous)
+            }
+        }
+        impl Drop for GlobalRootGuard {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.take() {
+                    env::set_var("BOREAL_GLOBAL_ROOT", previous);
+                } else {
+                    env::remove_var("BOREAL_GLOBAL_ROOT");
+                }
+            }
+        }
+
+        let root = PathBuf::from("/tmp").join(format!(
+            "boreal-global-daily-service-{}-{}",
+            std::process::id(),
+            now_ms_u64()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let _root_guard = GlobalRootGuard::set(&root);
+        let app = GlobalManagerApplication::open(root.join("global.sqlite")).unwrap();
+        seed_daily_items(&app);
+
+        let socket = root.join("global.sock");
+        let mut service_options = CliOptions::default();
+        service_options.socket = Some(socket.to_string_lossy().into_owned());
+        service_options.max_requests = Some(1);
+        let service = ParsedCommand {
+            path: vec!["global".to_owned(), "service".to_owned(), "run".to_owned()],
+            options: service_options,
+        };
+        let server = std::thread::spawn(move || {
+            crate::global_service::run_service(&service, "daily-service-run")
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !socket.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if !socket.exists() {
+            let server_result = server.join().unwrap();
+            panic!("Global service socket did not start: {server_result:?}");
+        }
+
+        let mut request_options = CliOptions::default();
+        request_options.socket = Some(socket.to_string_lossy().into_owned());
+        request_options
+            .extra
+            .insert("--filter".to_owned(), vec!["overdue".to_owned()]);
+        request_options.limit = Some(1);
+        let request = ParsedCommand {
+            path: vec!["global".to_owned(), "todo".to_owned(), "list".to_owned()],
+            options: request_options,
+        };
+        let response =
+            crate::global_service::request(&request, "op_global_daily_service_read").unwrap();
+        let server_result = server.join().unwrap();
+        assert!(
+            server_result.is_ok(),
+            "Global service failed: {server_result:?}"
+        );
+        let data = response.data.unwrap();
+        assert_eq!(data["total"], 1);
+        assert_eq!(data["rows"][0]["id"], "daily-item-overdue");
+
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(test)]
