@@ -175,3 +175,40 @@ S03-T90 and S05-T90; S07 needs S06-T90. S09, S10 and S11 remain downstream of
 those gates. The user cannot yet confirm that the two named S00 review workers
 stopped, so their session recovery and any dependent runtime mutation remain
 untouched. No canonical database or installation state was changed.
+
+## Dependency and acceptance audit — 2026-10-14
+
+Three additional read-only Luna Extra High audits checked the exact V4 source
+and checked-in evidence at `d0fccd3f` (the documentation-only coordinator
+commit `5690184e` followed). They did not access canonical runtime state or
+change source.
+
+- **S00–S03:** The checked-in S00 qualification report is for `93faf2ad`, not
+  this candidate. S00-T90 is unaccepted. S01 and S02 require S00-T90; S03
+  requires S01-T90 and S02-T90. No S01–S03 source task is graph-ready from the
+  available evidence. S02 attempt 5 is only a focused macOS ARM64 rerun on
+  older source `32e46d19`; full current-head, macOS x86-64 and Linux x86-64
+  acceptance remain absent. No S03 validation evidence exists; paired
+  package/Global recovery and its fault matrix remain open. Do not reassign
+  S00-T01/T04 recovery without the requested worker-stop confirmation.
+- **S04–S05:** S04's checked-in T90 report is a non-closure handoff for older
+  `ae93ae57`; current S04-owned files have changed through `d0fccd3f`. There is
+  no current-source S04-T90 receipt and no S05 validation report. S04 requires
+  accepted S00/S01 leaves; S05 T90 requires S04-T90 plus S05 leaves (and
+  S05-T05 also requires S12-T01). Existing test definitions do not constitute
+  current-head execution results.
+- **S12:** The T05 contract reconciliation is committed, but no accepted
+  T01–T04 handoffs, T05 execution handoff, or BW-S12 validation directory is
+  checked in. Focused CLI/service tests exist, but their exact-tree results,
+  required minimal non-CLI journeys and T05/T90 records are missing. T06 also
+  requires S02-T90, which is unaccepted. Do not edit its shared CLI/store
+  routes until the recorded steward/leaf grants are reconciled.
+
+The checked-in files do not establish current task/attempt status or live
+write-grant expiry. The project workflow resolver is unavailable in this
+checkout because it has no root `boreal.yaml`; therefore no runtime readiness
+or source-leaf acceptance is inferred from these audits. The next safe
+coordinator action is to obtain the required S00 worker-stop confirmation and
+then use the supported project workflow to read/reconcile task status and
+grants before recovery or further leaf dispatch. The user has not yet been
+able to provide that confirmation.
