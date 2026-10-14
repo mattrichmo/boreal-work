@@ -1,0 +1,2 @@
+$ python3 -m unittest scripts.release.test_build_release
+exit=0

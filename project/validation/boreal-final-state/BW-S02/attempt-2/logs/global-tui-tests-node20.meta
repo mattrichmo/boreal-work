@@ -1,0 +1,2 @@
+$ NODE=/tmp/boreal-s02-node20/node_modules/.bin/node --version; PATH=/tmp/boreal-s02-node20/node_modules/.bin:$PATH npm --prefix apps/global-tui test
+exit=0

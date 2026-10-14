@@ -1,0 +1,1 @@
+PASS global CLI cwd independence, configurable workflow, hierarchy, notes, dependency cycle rejection, revision conflict, durable replay, project execution while Global is unavailable, real framed TUI and export/import

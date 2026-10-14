@@ -1,0 +1,2 @@
+$ cargo test --locked -p boreal-cli dashboard_node -- --nocapture
+exit=0; 4 passed, 0 failed (127 filtered in the library target)

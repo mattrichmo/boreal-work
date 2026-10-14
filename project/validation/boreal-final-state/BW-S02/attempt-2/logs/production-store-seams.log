@@ -1,0 +1,26 @@
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling pkg-config v0.3.34
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling vcpkg v0.2.15
+   Compiling serde_json v1.0.151
+   Compiling memchr v2.8.3
+   Compiling cc v1.6.0
+   Compiling itoa v1.0.18
+   Compiling boreal-domain v0.2.1 (/Users/cybertron/.codex/worktrees/v4-s02-s03-gates/boreal-work/crates/domain)
+   Compiling libsqlite3-sys v0.37.0
+   Compiling boreal-store v0.2.1 (/Users/cybertron/.codex/worktrees/v4-s02-s03-gates/boreal-work/crates/store)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.82s
+     Running tests/production_store_seams.rs (target/debug/deps/production_store_seams-2094a3567a7f7f2c)
+
+running 6 tests
+test acceptance_seam_reads_pinned_gate_and_exact_binding ... ok
+test operation_journal_appends_and_scopes_readback_to_the_project ... ok
+test profile_seam_validates_identity_and_definition_before_registration ... ok
+test qualified_root_adapter_delegates_to_one_root_mutation_boundary ... ok
+test execution_seam_preserves_admission_replay_and_lifecycle_states ... ok
+test production_schema_work_creation_reuses_triggered_projection ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+

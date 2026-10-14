@@ -1,0 +1,2 @@
+$ npm --prefix apps/global-tui run typecheck
+exit=0

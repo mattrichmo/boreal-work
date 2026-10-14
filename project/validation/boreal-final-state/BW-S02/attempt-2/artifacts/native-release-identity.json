@@ -1,0 +1,21 @@
+{
+  "archive_bytes": 11941918,
+  "archive_path": "/tmp/boreal-s02-t90-attempt-2-release/bwrk-v0.2.1-aarch64-apple-darwin.tar.gz",
+  "archive_sha256": "sha256:27e2ff66db40d2a958f9e54ea4f67fdf406ee07186b656782ececbb9373dd082",
+  "artifact_identity": "sha256:7f0453d37e9ec606c5c730e221faf11951f21da4f37f4582d233daf1c81fd15e",
+  "binary_asset": {
+    "path": "bin/bwrk",
+    "sha256": "sha256:5e47f61d3a018bcd8ae5304ae15496623e32fe17adacd9873540c82fdf7cf974"
+  },
+  "contract_snapshot_identity": "sha256:06e5426d76cbd09f82dde035bce4bd07f87de4650b53e998316147cc4ceb3c7f",
+  "global_tui_node_range": ">=20 <27",
+  "global_tui_source_id": "sha256:0c111423d3766bc05c24c530646efcfdefe9107cecac373711803af851a7786d",
+  "project_tui_node_range": ">=20 <27",
+  "project_tui_source_id": "sha256:fdab01964b4f81980a8483d4d31962ad210630e62e01f752396c43d26e2f093c",
+  "release_manifest_path": "/tmp/boreal-s02-t90-attempt-2-release/bwrk-v0.2.1-aarch64-apple-darwin.release.json",
+  "release_manifest_sha256": "sha256:18ca1b5aabd9135ece16eb6a0f221bb779190d33587648ccb312bb4c540d849d",
+  "source_id": "sha256:149d8b2e53f1ef7965847ae12bdf0e8ca25a120aa3f869b21fa7966d903f44b3",
+  "source_revision": "de8673e41fa29c54ec1a3e6c2f8097b8e6a39553",
+  "target": "aarch64-apple-darwin",
+  "version": "0.2.1"
+}

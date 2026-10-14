@@ -1,0 +1,2 @@
+$ npm --prefix apps/tui test
+exit=0

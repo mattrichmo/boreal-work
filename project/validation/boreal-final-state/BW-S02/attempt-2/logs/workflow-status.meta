@@ -1,0 +1,4 @@
+$ gh run list --workflow ci.yml --branch codex/v4-completion --limit 10 --json databaseId,status,conclusion,headSha,createdAt,url,displayTitle
+exit=0; stdout=[]
+$ gh run list --workflow release.yml --branch codex/v4-completion --limit 10 --json databaseId,status,conclusion,headSha,createdAt,url,displayTitle
+exit=0; stdout=[]
