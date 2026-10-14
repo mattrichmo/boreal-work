@@ -31,6 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use profiles::{PinnedRequirements, ProfileStore, ProfileVersion, RequirementSubjectKind};
 
 pub mod acceptance;
+mod backup_bundle;
 pub mod completion;
 mod completion_migrations;
 pub mod cycle_commands;
@@ -99,7 +100,8 @@ const LEGACY_SCHEMA_V2_SQL: &str = include_str!("../../../project/spec/schema-v2
 const WORK_MODEL_SCHEMA_V3_SQL: &str = include_str!("../../../project/spec/schema-v3.sql");
 const BACKUP_MANIFEST_FILE: &str = "manifest.json";
 const BACKUP_DATABASE_FILE: &str = "database.sqlite";
-const BACKUP_FORMAT_VERSION: u64 = 2;
+const BACKUP_FORMAT_VERSION: u64 = 3;
+const LEGACY_BACKUP_FORMAT_VERSION: u64 = 2;
 const BACKUP_PACKAGE_KIND: &str = "boreal.sqlite.backup";
 const RESTORE_IDENTITY_INTENT_FILE: &str = "restore-identity.json";
 const RESTORE_IDENTITY_INTENT_TEMP_FILE: &str = "restore-identity.tmp";
@@ -941,6 +943,29 @@ pub struct SqliteBackupPackageReport {
     pub referenced_blob_count: u64,
     pub published_memory_count: u64,
     pub restore_supported: bool,
+    pub restore_disposition: SqliteBackupPackageDisposition,
+}
+
+/// Explicit backup disposition for artifacts that the store cannot safely
+/// carry or restore. Published curated memory still belongs to its Git
+/// repository, which is not represented authoritatively in the SQLite store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SqliteBackupPackageDisposition {
+    Restorable,
+    SourceBlobBundleIncomplete(Vec<SqliteBackupArtifactIssue>),
+    PublishedMemoryRequiresExternalGitRepository {
+        publication_count: u64,
+    },
+    IncompleteSourceBlobsAndPublishedMemoryRequiresExternalGitRepository {
+        issues: Vec<SqliteBackupArtifactIssue>,
+        publication_count: u64,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteBackupArtifactIssue {
+    pub blob_digest: String,
+    pub reason: String,
 }
 
 /// Result of replacing a destination database from a validated backup
@@ -2256,7 +2281,7 @@ impl SqliteStore {
                 StoreError::Unavailable(format!("cannot create package SQLite snapshot: {error}"))
             })?;
             let snapshot =
-                Self::open_read_only(&database_path).map_err(|error| {
+                Self::open(&database_path, PRODUCTION_SCHEMA_SQL).map_err(|error| {
                     StoreError::Unavailable(format!(
                     "cannot reopen package SQLite snapshot {} (exists={}, metadata={:?}): {error}",
                     database_path.display(),
@@ -2264,7 +2289,50 @@ impl SqliteStore {
                     fs::metadata(&database_path).ok().map(|metadata| metadata.len())
                 ))
                 })?;
+            let blob_sources = snapshot.backup_blob_references()?;
+            let source_references = snapshot.backup_source_references()?;
+            let mut blob_bundle = backup_bundle::package_blobs(&staging, &blob_sources)?;
+            for issue in source_blob_reference_issues(&source_references, &blob_sources) {
+                if !blob_bundle
+                    .issues
+                    .iter()
+                    .any(|existing| existing.digest == issue.digest)
+                {
+                    blob_bundle.issues.push(issue);
+                }
+            }
+            snapshot.rewrite_backup_blob_paths(&blob_sources)?;
             let mut manifest = snapshot.backup_manifest()?;
+            manifest["artifact_bundle"] = json!({
+                "format": backup_bundle::FORMAT,
+                "blobs": blob_bundle.files,
+                "unavailable_blobs": blob_bundle.issues.iter().map(|issue| issue.as_json()).collect::<Vec<_>>(),
+            });
+            manifest["restore_policy"]["source_blobs_packaged"] =
+                Value::Bool(blob_bundle.issues.is_empty());
+            manifest["restore_policy"]["external_artifacts_packaged"] = Value::Bool(
+                blob_bundle.issues.is_empty()
+                    && manifest["published_memory"]
+                        .as_array()
+                        .is_none_or(Vec::is_empty),
+            );
+            manifest["restore_policy"]["published_memory_disposition"] = Value::String(
+                if manifest["published_memory"]
+                    .as_array()
+                    .is_some_and(|rows| !rows.is_empty())
+                {
+                    "external_git_repository_required".to_owned()
+                } else {
+                    "no_published_memory".to_owned()
+                },
+            );
+            snapshot.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            snapshot.execute_batch("PRAGMA journal_mode=DELETE")?;
+            if !snapshot.journal_mode()?.eq_ignore_ascii_case("delete") {
+                return Err(StoreError::Busy(
+                    "package SQLite snapshot still has an active WAL connection".into(),
+                ));
+            }
             let database_digest = checksum(&fs::read(&database_path).map_err(|error| {
                 StoreError::Unavailable(format!(
                     "cannot read package SQLite snapshot {}: {error}",
@@ -2294,7 +2362,32 @@ impl SqliteStore {
                 .get("published_memory")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len) as u64;
-            let restore_supported = referenced_blob_count == 0 && published_memory_count == 0;
+            let issues = blob_bundle
+                .issues
+                .iter()
+                .map(|issue| SqliteBackupArtifactIssue {
+                    blob_digest: issue.digest.clone(),
+                    reason: issue.reason.clone(),
+                })
+                .collect::<Vec<_>>();
+            let restore_disposition = match (issues.is_empty(), published_memory_count) {
+                (true, 0) => SqliteBackupPackageDisposition::Restorable,
+                (false, 0) => {
+                    SqliteBackupPackageDisposition::SourceBlobBundleIncomplete(issues)
+                }
+                (true, count) => {
+                    SqliteBackupPackageDisposition::PublishedMemoryRequiresExternalGitRepository {
+                        publication_count: count,
+                    }
+                }
+                (false, count) => SqliteBackupPackageDisposition::
+                    IncompleteSourceBlobsAndPublishedMemoryRequiresExternalGitRepository {
+                        issues,
+                        publication_count: count,
+                    },
+            };
+            let restore_supported =
+                restore_disposition == SqliteBackupPackageDisposition::Restorable;
             drop(snapshot);
             fs::rename(&staging, destination).map_err(|error| {
                 StoreError::Unavailable(format!(
@@ -2311,6 +2404,7 @@ impl SqliteStore {
                 referenced_blob_count,
                 published_memory_count,
                 restore_supported,
+                restore_disposition,
             })
         })();
         if result.is_err() {
@@ -2370,16 +2464,12 @@ impl SqliteStore {
             ));
         }
         if manifest
-            .get("referenced_blobs")
+            .get("published_memory")
             .and_then(Value::as_array)
             .is_some_and(|values| !values.is_empty())
-            || manifest
-                .get("published_memory")
-                .and_then(Value::as_array)
-                .is_some_and(|values| !values.is_empty())
         {
             return Err(StoreError::Conflict(
-                "backup package references external blobs or published Git memory; an artifact bundle is required before restore"
+                "backup package references published Git memory; restore requires the authoritative external Git repository, which is not included in a store-owned backup"
                     .to_owned(),
             ));
         }
@@ -2406,6 +2496,7 @@ impl SqliteStore {
         }
         let source = Self::open_read_only(&database_path)?;
         source.validate_backup_manifest(&manifest)?;
+        let verified_blobs = backup_bundle::verify_package_blobs(package, &manifest)?;
         let source_identity = manifest_database_identity(&manifest)?;
         let source_runtime = source.sqlite_runtime_identity();
         if !source_runtime.at_least((3, 8, 0)) {
@@ -2545,7 +2636,12 @@ impl SqliteStore {
             )?
         };
         let staging_database = staging.join(BACKUP_DATABASE_FILE);
+        let artifact_staging = staging.join(backup_bundle::RESTORE_STAGING_DIRECTORY);
+        let artifact_root =
+            restore_artifact_root(destination, intent.current_restore_epoch, &verified_blobs)?;
+        let mut created_artifact_root = false;
         let result = (|| {
+            backup_bundle::materialize_blobs(&artifact_staging.join("blobs"), &verified_blobs)?;
             let backup = source.backup_to(&staging_database)?;
             let restored = Self::open(&staging_database, PRODUCTION_SCHEMA_SQL)?;
             if job.is_some() {
@@ -2561,6 +2657,9 @@ impl SqliteStore {
                         &production_now(),
                     )
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                if let Some(artifact_root) = artifact_root.as_deref() {
+                    rewrite_restored_blob_paths(&restored, artifact_root, &verified_blobs)?;
+                }
                 if let Some(job) = job {
                     let receipt = json!({
                         "package_path": package,
@@ -2592,6 +2691,11 @@ impl SqliteStore {
             let staged_shm = staging_database.with_extension("sqlite-shm");
             let _ = fs::remove_file(staged_wal);
             let _ = fs::remove_file(staged_shm);
+
+            if let Some(artifact_root) = artifact_root.as_deref() {
+                created_artifact_root =
+                    publish_restore_artifacts(&artifact_staging, artifact_root, &verified_blobs)?;
+            }
 
             let previous_database_path =
                 intent.previous_database_path.as_deref().map(PathBuf::from);
@@ -2642,6 +2746,11 @@ impl SqliteStore {
             })
         })();
         if result.is_err() && job.is_none() {
+            if created_artifact_root {
+                if let Some(artifact_root) = artifact_root.as_deref() {
+                    let _ = fs::remove_dir_all(artifact_root);
+                }
+            }
             let _ = fs::remove_dir_all(&staging);
         }
         drop(source);
@@ -2684,6 +2793,20 @@ impl SqliteStore {
                 "restore package changed after its staged operation was admitted".into(),
             ));
         }
+        if manifest
+            .get("published_memory")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+        {
+            return Err(StoreError::Conflict(
+                "restore requires the authoritative external Git repository for published memory"
+                    .into(),
+            ));
+        }
+        let package_store = Self::open_read_only(&package_database_path)?;
+        package_store.validate_backup_manifest(&manifest)?;
+        let verified_blobs = backup_bundle::verify_package_blobs(package, &manifest)?;
+        drop(package_store);
         let source_identity = manifest_database_identity(&manifest)?;
         let read_receipt = |path: &Path| -> Result<Option<MaintenanceJobRecord>, StoreError> {
             if !path.exists() {
@@ -2720,6 +2843,13 @@ impl SqliteStore {
                     .database_identity()
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?
             };
+            if let Some(artifact_root) =
+                restore_artifact_root(destination, identity.restore_epoch.get(), &verified_blobs)?
+            {
+                backup_bundle::verify_materialized_blobs(&artifact_root, &verified_blobs)?;
+                let restored = Self::open_read_only_for_diagnostics(destination)?;
+                validate_restored_blob_paths(&restored, &artifact_root, &verified_blobs)?;
+            }
             if result.get("package_path").and_then(Value::as_str) != Some(job.package_path.as_str())
                 || result.get("destination_path").and_then(Value::as_str)
                     != Some(job.database_path.as_str())
@@ -2794,6 +2924,15 @@ impl SqliteStore {
             .get("current_restore_epoch")
             .and_then(Value::as_u64)
             .ok_or_else(|| StoreError::Corrupt("restore receipt omitted its epoch".into()))?;
+        let artifact_root = restore_artifact_root(destination, epoch, &verified_blobs)?;
+        if let Some(artifact_root) = artifact_root.as_deref() {
+            let artifact_staging = staging.join(backup_bundle::RESTORE_STAGING_DIRECTORY);
+            if artifact_staging.exists() {
+                backup_bundle::verify_materialized_blobs(&artifact_staging, &verified_blobs)?;
+            } else if !artifact_root.exists() {
+                backup_bundle::materialize_blobs(&artifact_staging.join("blobs"), &verified_blobs)?;
+            }
+        }
         let staged_identity = {
             let staged = Self::open_read_only_for_diagnostics(&staged_database)?;
             identity::IdentityStore::new(&staged)
@@ -2820,6 +2959,16 @@ impl SqliteStore {
             return Err(StoreError::Conflict(
                 "staged restore receipt does not match its package manifest".into(),
             ));
+        }
+        if let Some(artifact_root) = artifact_root.as_deref() {
+            let staged = Self::open_read_only_for_diagnostics(&staged_database)?;
+            validate_restored_blob_paths(&staged, artifact_root, &verified_blobs)?;
+            drop(staged);
+            publish_restore_artifacts(
+                &staging.join(backup_bundle::RESTORE_STAGING_DIRECTORY),
+                artifact_root,
+                &verified_blobs,
+            )?;
         }
         let expected_previous_path = restore_previous_path_value(destination, epoch)?;
         let recorded_previous = result
@@ -2953,6 +3102,94 @@ impl SqliteStore {
         report
     }
 
+    fn backup_blob_references(&self) -> Result<Vec<Value>, StoreError> {
+        let mut blobs = Vec::new();
+        let mut statement = self.prepare(
+            "SELECT blob_digest, byte_count, media_type, path, verified_at, created_at
+             FROM blob ORDER BY blob_digest",
+        )?;
+        while statement.step()? == SQLITE_ROW {
+            blobs.push(json!({
+                "blob_digest": statement.column_text(0)?,
+                "byte_count": statement.column_u64(1)?,
+                "media_type": statement.column_text(2)?,
+                "path": statement.column_text(3)?,
+                "verified_at": statement.column_optional_text(4)?,
+                "created_at": statement.column_text(5)?,
+            }));
+        }
+        Ok(blobs)
+    }
+
+    /// Package database rows use package-relative paths, so the backup does
+    /// not embed machine-specific source paths in the manifest or snapshot.
+    fn rewrite_backup_blob_paths(&self, references: &[Value]) -> Result<(), StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            for reference in references {
+                let Some(digest) = reference.get("blob_digest").and_then(Value::as_str) else {
+                    continue;
+                };
+                // Invalid digests cannot name a bundle member. Keep their
+                // machine-specific source paths out of incomplete packages;
+                // the bundle issue makes this placeholder non-restorable.
+                let path = backup_bundle::canonical_package_path(digest)
+                    .unwrap_or_else(|| "artifacts/unavailable".to_owned());
+                let mut update = self.prepare("UPDATE blob SET path=?1 WHERE blob_digest=?2")?;
+                update.bind_text(1, &path)?;
+                update.bind_text(2, digest)?;
+                update.run()?;
+            }
+            Ok::<(), StoreError>(())
+        })();
+        if let Err(error) = result {
+            let _ = self.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+        self.execute_batch("COMMIT")
+    }
+
+    fn backup_published_memory(&self) -> Result<Vec<Value>, StoreError> {
+        let mut published_memory = Vec::new();
+        let mut statement = self.prepare(
+            "SELECT publication_id, project_id, memory_entry_id, manifest_path,
+                    git_revision, content_digest, updated_at
+             FROM memory_publication
+             WHERE state = 'published'
+             ORDER BY publication_id",
+        )?;
+        while statement.step()? == SQLITE_ROW {
+            published_memory.push(json!({
+                "publication_id": statement.column_text(0)?,
+                "project_id": statement.column_text(1)?,
+                "memory_entry_id": statement.column_text(2)?,
+                "manifest_path": statement.column_text(3)?,
+                "git_revision": statement.column_optional_text(4)?,
+                "content_digest": statement.column_text(5)?,
+                "updated_at": statement.column_text(6)?,
+            }));
+        }
+        Ok(published_memory)
+    }
+
+    fn backup_source_references(&self) -> Result<Vec<Value>, StoreError> {
+        let mut sources = Vec::new();
+        let mut statement = self.prepare(
+            "SELECT source_version_id, project_id, content_digest, byte_count, availability
+             FROM source_version ORDER BY project_id, source_version_id",
+        )?;
+        while statement.step()? == SQLITE_ROW {
+            sources.push(json!({
+                "source_version_id": statement.column_text(0)?,
+                "project_id": statement.column_text(1)?,
+                "content_digest": statement.column_text(2)?,
+                "byte_count": statement.column_u64(3)?,
+                "availability": statement.column_text(4)?,
+            }));
+        }
+        Ok(sources)
+    }
+
     fn backup_manifest(&self) -> Result<Value, StoreError> {
         let database = identity::IdentityStore::new(self)
             .database_identity()
@@ -2970,41 +3207,9 @@ impl SqliteStore {
             }));
         }
 
-        let mut blobs = Vec::new();
-        let mut blob_statement = self.prepare(
-            "SELECT blob_digest, byte_count, media_type, path, verified_at, created_at
-             FROM blob ORDER BY blob_digest",
-        )?;
-        while blob_statement.step()? == SQLITE_ROW {
-            blobs.push(json!({
-                "blob_digest": blob_statement.column_text(0)?,
-                "byte_count": blob_statement.column_u64(1)?,
-                "media_type": blob_statement.column_text(2)?,
-                "path": blob_statement.column_text(3)?,
-                "verified_at": blob_statement.column_optional_text(4)?,
-                "created_at": blob_statement.column_text(5)?,
-            }));
-        }
-
-        let mut published_memory = Vec::new();
-        let mut memory_statement = self.prepare(
-            "SELECT publication_id, project_id, memory_entry_id, manifest_path,
-                    git_revision, content_digest, updated_at
-             FROM memory_publication
-             WHERE state = 'published'
-             ORDER BY publication_id",
-        )?;
-        while memory_statement.step()? == SQLITE_ROW {
-            published_memory.push(json!({
-                "publication_id": memory_statement.column_text(0)?,
-                "project_id": memory_statement.column_text(1)?,
-                "memory_entry_id": memory_statement.column_text(2)?,
-                "manifest_path": memory_statement.column_text(3)?,
-                "git_revision": memory_statement.column_optional_text(4)?,
-                "content_digest": memory_statement.column_text(5)?,
-                "updated_at": memory_statement.column_text(6)?,
-            }));
-        }
+        let blobs = self.backup_blob_references()?;
+        let sources = self.backup_source_references()?;
+        let published_memory = self.backup_published_memory()?;
 
         Ok(json!({
             "kind": BACKUP_PACKAGE_KIND,
@@ -3022,9 +3227,12 @@ impl SqliteStore {
             },
             "projects": projects,
             "referenced_blobs": blobs,
+            "referenced_sources": sources,
             "published_memory": published_memory,
             "restore_policy": {
                 "external_artifacts_packaged": false,
+                "source_blobs_packaged": true,
+                "published_memory_packaged": false,
                 "requires_new_restore_epoch": true,
                 "retains_previous_database": true,
             },
@@ -3099,6 +3307,26 @@ impl SqliteStore {
                     "backup manifest workspace binding does not match project {project_id}"
                 )));
             }
+        }
+        if manifest.get("referenced_blobs") != Some(&Value::Array(self.backup_blob_references()?)) {
+            return Err(StoreError::Conflict(
+                "backup manifest blob references do not match the SQLite snapshot".to_owned(),
+            ));
+        }
+        if manifest.get("format_version").and_then(Value::as_u64) == Some(BACKUP_FORMAT_VERSION)
+            && manifest.get("referenced_sources")
+                != Some(&Value::Array(self.backup_source_references()?))
+        {
+            return Err(StoreError::Conflict(
+                "backup manifest source references do not match the SQLite snapshot".to_owned(),
+            ));
+        }
+        if manifest.get("published_memory") != Some(&Value::Array(self.backup_published_memory()?))
+        {
+            return Err(StoreError::Conflict(
+                "backup manifest published-memory references do not match the SQLite snapshot"
+                    .to_owned(),
+            ));
         }
         Ok(())
     }
@@ -13111,6 +13339,7 @@ fn clear_uncommitted_restore_staging(
         RESTORE_IDENTITY_INTENT_TEMP_FILE,
         RESTORE_IDENTITY_APPLYING_MARKER,
         RESTORE_IDENTITY_APPLYING_TEMP_FILE,
+        backup_bundle::RESTORE_STAGING_DIRECTORY,
     ];
     for entry in fs::read_dir(staging).map_err(|error| {
         StoreError::Unavailable(format!(
@@ -13137,7 +13366,28 @@ fn clear_uncommitted_restore_staging(
                 entry.path().display()
             ))
         })?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() {
+            return Err(StoreError::Conflict(format!(
+                "restore staging entry is not a regular file: {}",
+                entry.path().display()
+            )));
+        }
+        if name == backup_bundle::RESTORE_STAGING_DIRECTORY {
+            if !metadata.is_dir() {
+                return Err(StoreError::Conflict(format!(
+                    "restore artifact staging entry is not a directory: {}",
+                    entry.path().display()
+                )));
+            }
+            fs::remove_dir_all(entry.path()).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot clear interrupted restore artifact staging directory {}: {error}",
+                    entry.path().display()
+                ))
+            })?;
+            continue;
+        }
+        if !metadata.is_file() {
             return Err(StoreError::Conflict(format!(
                 "restore staging entry is not a regular file: {}",
                 entry.path().display()
@@ -13296,6 +13546,164 @@ fn restore_previous_path_value(destination: &Path, epoch: u64) -> Result<PathBuf
         .join(format!("{name}.pre-restore-{epoch}")))
 }
 
+fn source_blob_reference_issues(
+    sources: &[Value],
+    blobs: &[Value],
+) -> Vec<backup_bundle::BlobIssue> {
+    let blob_sizes = blobs
+        .iter()
+        .filter_map(|blob| {
+            Some((
+                blob.get("blob_digest")?.as_str()?.to_owned(),
+                blob.get("byte_count")?.as_u64()?,
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut issues = Vec::new();
+    for source in sources {
+        if source.get("availability").and_then(Value::as_str) != Some("available") {
+            continue;
+        }
+        let digest = source
+            .get("content_digest")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let source_bytes = source.get("byte_count").and_then(Value::as_u64);
+        let Some(blob_bytes) = blob_sizes.get(digest).copied() else {
+            issues.push(backup_bundle::BlobIssue {
+                digest: digest.to_owned(),
+                reason: "available_source_blob_missing_from_store".to_owned(),
+            });
+            continue;
+        };
+        if backup_bundle::canonical_package_path(digest).is_none() {
+            issues.push(backup_bundle::BlobIssue {
+                digest: digest.to_owned(),
+                reason: "available_source_blob_has_invalid_digest".to_owned(),
+            });
+        } else if source_bytes != Some(blob_bytes) {
+            issues.push(backup_bundle::BlobIssue {
+                digest: digest.to_owned(),
+                reason: "source_and_blob_byte_counts_differ".to_owned(),
+            });
+        }
+    }
+    issues
+}
+
+fn restore_artifact_root(
+    destination: &Path,
+    epoch: u64,
+    blobs: &[backup_bundle::VerifiedBlob],
+) -> Result<Option<PathBuf>, StoreError> {
+    if blobs.is_empty() {
+        return Ok(None);
+    }
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            StoreError::Invalid("restore destination must have a UTF-8 filename".into())
+        })?;
+    Ok(Some(
+        destination
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(format!("{name}.artifacts.restore-{epoch}")),
+    ))
+}
+
+fn restored_blob_path(root: &Path, digest: &str) -> Result<PathBuf, StoreError> {
+    let relative = backup_bundle::canonical_package_path(digest).ok_or_else(|| {
+        StoreError::Corrupt("restore artifact has an invalid content digest".into())
+    })?;
+    let file_name = Path::new(&relative)
+        .file_name()
+        .ok_or_else(|| StoreError::Corrupt("restore artifact path has no filename".into()))?;
+    Ok(root.join("blobs").join(file_name))
+}
+
+fn rewrite_restored_blob_paths(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    blobs: &[backup_bundle::VerifiedBlob],
+) -> Result<(), StoreError> {
+    for blob in blobs {
+        let path = restored_blob_path(artifact_root, &blob.digest)?;
+        let path = path.to_str().ok_or_else(|| {
+            StoreError::Invalid("restored artifact path is not valid UTF-8".into())
+        })?;
+        let mut update =
+            store.prepare("UPDATE blob SET path=?1 WHERE blob_digest=?2 AND byte_count=?3")?;
+        update.bind_text(1, path)?;
+        update.bind_text(2, &blob.digest)?;
+        update.bind_i64(3, blob.bytes.len() as u64)?;
+        update.run()?;
+    }
+    validate_restored_blob_paths(store, artifact_root, blobs)
+}
+
+fn validate_restored_blob_paths(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    blobs: &[backup_bundle::VerifiedBlob],
+) -> Result<(), StoreError> {
+    for blob in blobs {
+        let expected_path = restored_blob_path(artifact_root, &blob.digest)?;
+        let expected_path = expected_path.to_str().ok_or_else(|| {
+            StoreError::Invalid("restored artifact path is not valid UTF-8".into())
+        })?;
+        let mut query = store.prepare("SELECT path, byte_count FROM blob WHERE blob_digest=?1")?;
+        query.bind_text(1, &blob.digest)?;
+        if query.step()? != SQLITE_ROW
+            || query.column_text(0)? != expected_path
+            || query.column_u64(1)? != blob.bytes.len() as u64
+        {
+            return Err(StoreError::Conflict(format!(
+                "restored database blob reference {} does not point to its verified artifact",
+                blob.digest
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Publish the verified artifact directory before exposing its database. An
+/// existing path is reused only when every expected byte matches exactly.
+/// The returned flag identifies a newly published directory for ordinary
+/// error cleanup; maintenance restore keeps it available for reconciliation.
+fn publish_restore_artifacts(
+    staging: &Path,
+    destination: &Path,
+    blobs: &[backup_bundle::VerifiedBlob],
+) -> Result<bool, StoreError> {
+    if blobs.is_empty() {
+        return Ok(false);
+    }
+    reject_symlink(destination)?;
+    if destination.exists() {
+        backup_bundle::verify_materialized_blobs(destination, blobs)?;
+        if staging.exists() {
+            backup_bundle::verify_materialized_blobs(staging, blobs)?;
+            fs::remove_dir_all(staging).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot remove duplicate restore artifact staging directory {}: {error}",
+                    staging.display()
+                ))
+            })?;
+        }
+        return Ok(false);
+    }
+    backup_bundle::verify_materialized_blobs(staging, blobs)?;
+    fs::rename(staging, destination).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot publish restored artifact directory {}: {error}",
+            destination.display()
+        ))
+    })?;
+    Ok(true)
+}
+
 fn read_backup_manifest(path: &Path) -> Result<Value, StoreError> {
     let bytes = fs::read(path).map_err(|error| {
         StoreError::Unavailable(format!(
@@ -13313,7 +13721,11 @@ fn validate_backup_manifest(manifest: &Value) -> Result<(), StoreError> {
             "unsupported Boreal backup package kind".to_owned(),
         ));
     }
-    if manifest.get("format_version").and_then(Value::as_u64) != Some(BACKUP_FORMAT_VERSION) {
+    let format_version = manifest
+        .get("format_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| StoreError::Corrupt("backup format version is missing".into()))?;
+    if ![LEGACY_BACKUP_FORMAT_VERSION, BACKUP_FORMAT_VERSION].contains(&format_version) {
         return Err(StoreError::Invalid(
             "unsupported Boreal backup package format version".to_owned(),
         ));
@@ -13357,6 +13769,66 @@ fn validate_backup_manifest(manifest: &Value) -> Result<(), StoreError> {
             return Err(StoreError::Corrupt(format!(
                 "backup manifest {key} is not an array"
             )));
+        }
+    }
+    if format_version == BACKUP_FORMAT_VERSION {
+        if !manifest
+            .get("referenced_sources")
+            .is_some_and(Value::is_array)
+        {
+            return Err(StoreError::Corrupt(
+                "backup manifest referenced_sources is not an array".into(),
+            ));
+        }
+        let bundle = manifest
+            .get("artifact_bundle")
+            .and_then(Value::as_object)
+            .ok_or_else(|| StoreError::Corrupt("backup artifact_bundle is missing".into()))?;
+        if bundle.get("format").and_then(Value::as_str) != Some(backup_bundle::FORMAT)
+            || !bundle.get("blobs").is_some_and(Value::is_array)
+            || !bundle.get("unavailable_blobs").is_some_and(Value::is_array)
+        {
+            return Err(StoreError::Corrupt(
+                "backup artifact_bundle has an unsupported or incomplete shape".into(),
+            ));
+        }
+        if manifest
+            .get("restore_policy")
+            .and_then(Value::as_object)
+            .and_then(|policy| policy.get("published_memory_packaged"))
+            .and_then(Value::as_bool)
+            != Some(false)
+        {
+            return Err(StoreError::Corrupt(
+                "backup manifest must not claim published Git memory is packaged".into(),
+            ));
+        }
+        let source_blobs_packaged = bundle
+            .get("unavailable_blobs")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+        if manifest
+            .get("restore_policy")
+            .and_then(Value::as_object)
+            .and_then(|policy| policy.get("source_blobs_packaged"))
+            .and_then(Value::as_bool)
+            != Some(source_blobs_packaged)
+            || manifest
+                .get("restore_policy")
+                .and_then(Value::as_object)
+                .and_then(|policy| policy.get("external_artifacts_packaged"))
+                .and_then(Value::as_bool)
+                != Some(
+                    source_blobs_packaged
+                        && manifest
+                            .get("published_memory")
+                            .and_then(Value::as_array)
+                            .is_some_and(Vec::is_empty),
+                )
+        {
+            return Err(StoreError::Corrupt(
+                "backup manifest artifact disposition does not match its references".into(),
+            ));
         }
     }
     if manifest
@@ -14925,6 +15397,391 @@ mod sqlite_release_floor_tests {
             "boreal-sqlite-release-floor-{}-{timestamp}.sqlite",
             std::process::id()
         ))
+    }
+}
+
+#[cfg(test)]
+mod backup_bundle_restore_tests {
+    use super::{
+        backup_bundle, checksum,
+        identity::{IdentityStore, WorkspaceBinding},
+        SqliteBackupPackageDisposition, SqliteStore, PRODUCTION_SCHEMA_SQL, SQLITE_ROW,
+    };
+    use serde_json::Value;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn versioned_package_restores_verified_source_blob_without_changing_original() {
+        let source_path = unique_path("source.sqlite");
+        let original_blob_path = unique_path("original-source-blob");
+        let package_path = unique_path("package");
+        let target_path = unique_path("isolated.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_file(&original_blob_path);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let bytes = b"source artifact bytes preserved through backup and restore\n";
+        fs::write(&original_blob_path, bytes).expect("source blob writes");
+        let digest = checksum(bytes);
+        let source = initialize(&source_path, "source-project");
+        let mut source_version = source
+            .prepare(
+                "INSERT INTO source_version
+                 (source_version_id,project_id,origin,access_scope,content_digest,media_type,
+                  byte_count,captured_at,parser_identity,availability,citation_json)
+                 VALUES ('source-artifact','source-project','fixture.txt','project',?1,
+                         'text/plain',?2,'unix-ms:2','fixture/1','available','[]')",
+            )
+            .expect("source version insert prepares");
+        source_version
+            .bind_text(1, &digest)
+            .expect("source digest binds");
+        source_version
+            .bind_i64(2, bytes.len() as u64)
+            .expect("source byte count binds");
+        source_version.run().expect("source version registers");
+        let mut blob = source
+            .prepare(
+                "INSERT INTO blob
+                 (blob_digest,byte_count,media_type,path,verified_at,created_at)
+                 VALUES (?1,?2,'text/plain',?3,'unix-ms:2','unix-ms:2')",
+            )
+            .expect("blob insert prepares");
+        blob.bind_text(1, &digest).expect("blob digest binds");
+        blob.bind_i64(2, bytes.len() as u64)
+            .expect("blob byte count binds");
+        blob.bind_text(3, original_blob_path.to_str().unwrap())
+            .expect("blob path binds");
+        blob.run().expect("blob registers");
+        drop(blob);
+        drop(source_version);
+
+        let package = source
+            .backup_package_to(&package_path)
+            .expect("backup includes referenced blob");
+        assert!(package.restore_supported);
+        assert_eq!(
+            package.restore_disposition,
+            SqliteBackupPackageDisposition::Restorable
+        );
+        assert_eq!(package.referenced_blob_count, 1);
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(&package.manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["format_version"], 3);
+        assert_eq!(manifest["artifact_bundle"]["format"], backup_bundle::FORMAT);
+        assert_eq!(
+            manifest["referenced_blobs"][0]["path"],
+            format!("artifacts/blobs/{}", &digest[7..])
+        );
+        assert_eq!(
+            fs::read(package_path.join("artifacts/blobs").join(&digest[7..])).unwrap(),
+            bytes
+        );
+        drop(source);
+
+        let old_target = initialize(&target_path, "old-project");
+        drop(old_target);
+        let restored = SqliteStore::restore_package_to(&package_path, &target_path)
+            .expect("isolated restore includes source blob");
+        let restored_store =
+            SqliteStore::open(&target_path, PRODUCTION_SCHEMA_SQL).expect("restored store opens");
+        let mut path_query = restored_store
+            .prepare("SELECT path FROM blob WHERE blob_digest=?1")
+            .expect("restored blob path query prepares");
+        path_query.bind_text(1, &digest).unwrap();
+        assert_eq!(path_query.step().unwrap(), SQLITE_ROW);
+        let restored_blob_path = PathBuf::from(path_query.column_text(0).unwrap());
+        assert_ne!(restored_blob_path, original_blob_path);
+        assert_eq!(fs::read(&restored_blob_path).unwrap(), bytes);
+        assert_eq!(
+            restored_store.list_project_ids().unwrap(),
+            vec!["source-project"]
+        );
+        assert!(restored.previous_database_path.as_ref().unwrap().exists());
+        drop(path_query);
+        drop(restored_store);
+
+        let original =
+            SqliteStore::open(&source_path, PRODUCTION_SCHEMA_SQL).expect("original source opens");
+        let mut original_path_query = original
+            .prepare("SELECT path FROM blob WHERE blob_digest=?1")
+            .expect("original blob path query prepares");
+        original_path_query.bind_text(1, &digest).unwrap();
+        assert_eq!(original_path_query.step().unwrap(), SQLITE_ROW);
+        assert_eq!(
+            original_path_query.column_text(0).unwrap(),
+            original_blob_path.to_str().unwrap()
+        );
+        assert_eq!(fs::read(&original_blob_path).unwrap(), bytes);
+        drop(original_path_query);
+        drop(original);
+
+        let artifact_root = target_path.parent().unwrap().join(format!(
+            "{}.artifacts.restore-{}",
+            target_path.file_name().unwrap().to_string_lossy(),
+            restored.current_restore_epoch
+        ));
+        let _ = fs::remove_dir_all(artifact_root);
+        let _ = fs::remove_dir_all(&package_path);
+        let _ = fs::remove_file(&original_blob_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+        if let Some(previous) = restored.previous_database_path {
+            let _ = fs::remove_file(previous);
+        }
+    }
+
+    #[test]
+    fn corrupted_packaged_blob_is_rejected_before_destination_creation() {
+        let source_path = unique_path("corrupt-source.sqlite");
+        let original_blob_path = unique_path("corrupt-original-blob");
+        let package_path = unique_path("corrupt-package");
+        let target_path = unique_path("corrupt-target.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_file(&original_blob_path);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let bytes = b"valid source content";
+        fs::write(&original_blob_path, bytes).unwrap();
+        let digest = checksum(bytes);
+        let source = initialize(&source_path, "corrupt-project");
+        let mut blob = source
+            .prepare(
+                "INSERT INTO blob
+                 (blob_digest,byte_count,media_type,path,verified_at,created_at)
+                 VALUES (?1,?2,'text/plain',?3,'unix-ms:2','unix-ms:2')",
+            )
+            .unwrap();
+        blob.bind_text(1, &digest).unwrap();
+        blob.bind_i64(2, bytes.len() as u64).unwrap();
+        blob.bind_text(3, original_blob_path.to_str().unwrap())
+            .unwrap();
+        blob.run().unwrap();
+        drop(blob);
+        source.backup_package_to(&package_path).unwrap();
+        drop(source);
+
+        let artifact_path = package_path.join("artifacts/blobs").join(&digest[7..]);
+        fs::write(&artifact_path, b"Xalid source content").unwrap();
+        let error = SqliteStore::restore_package_to(&package_path, &target_path)
+            .expect_err("corrupt blob must reject restore");
+        assert!(
+            error.to_string().contains("integrity check"),
+            "unexpected error: {error}"
+        );
+        assert!(!target_path.exists());
+
+        let _ = fs::remove_dir_all(&package_path);
+        let _ = fs::remove_file(&original_blob_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+    }
+
+    #[test]
+    fn published_memory_has_an_explicit_non_restorable_git_disposition() {
+        let source_path = unique_path("memory-source.sqlite");
+        let package_path = unique_path("memory-package");
+        let target_path = unique_path("memory-target.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let source = initialize(&source_path, "memory-project");
+        source
+            .execute_batch(
+                "INSERT INTO source_version
+                 (source_version_id,project_id,origin,access_scope,content_digest,media_type,
+                  byte_count,captured_at,parser_identity,availability,citation_json)
+                 VALUES ('memory-source','memory-project','memory.txt','project',
+                         'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                         'text/plain',1,'unix-ms:1','fixture/1','missing','[]');
+                 INSERT INTO memory_publication
+                 (publication_id,project_id,memory_entry_id,source_version_id,state,
+                  manifest_path,git_revision,content_digest,created_at,updated_at)
+                 VALUES ('publication-1','memory-project','entry-1','memory-source','published',
+                         '/memory/.boreal/memory.json','git-revision-1',
+                         'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                         'unix-ms:1','unix-ms:2');",
+            )
+            .expect("published memory reference inserts");
+        let package = source
+            .backup_package_to(&package_path)
+            .expect("database snapshot is still packaged");
+        assert!(!package.restore_supported);
+        assert_eq!(
+            package.restore_disposition,
+            SqliteBackupPackageDisposition::PublishedMemoryRequiresExternalGitRepository {
+                publication_count: 1
+            }
+        );
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(&package.manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest["restore_policy"]["published_memory_disposition"],
+            "external_git_repository_required"
+        );
+        drop(source);
+
+        let error = SqliteStore::restore_package_to(&package_path, &target_path)
+            .expect_err("published Git memory cannot be restored from SQLite alone");
+        assert!(error
+            .to_string()
+            .contains("authoritative external Git repository"));
+        assert!(!target_path.exists());
+
+        let _ = fs::remove_dir_all(&package_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+    }
+
+    #[test]
+    fn legacy_v2_package_without_external_artifacts_remains_restorable() {
+        let source_path = unique_path("legacy-v2-source.sqlite");
+        let package_path = unique_path("legacy-v2-package");
+        let target_path = unique_path("legacy-v2-target.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_dir_all(&package_path);
+        let source = initialize(&source_path, "legacy-v2-project");
+        source.backup_package_to(&package_path).unwrap();
+        drop(source);
+
+        let manifest_path = package_path.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["format_version"] = Value::from(2);
+        manifest.as_object_mut().unwrap().remove("artifact_bundle");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        SqliteStore::restore_package_to(&package_path, &target_path)
+            .expect("legacy artifact-free v2 package remains restorable");
+        let restored = SqliteStore::open(&target_path, PRODUCTION_SCHEMA_SQL).unwrap();
+        assert_eq!(
+            restored.list_project_ids().unwrap(),
+            vec!["legacy-v2-project"]
+        );
+        drop(restored);
+
+        let _ = fs::remove_dir_all(&package_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let previous = target_path.with_file_name(format!(
+            "{}.pre-restore-2",
+            target_path.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = fs::remove_file(previous);
+    }
+
+    #[test]
+    fn maintenance_restore_readback_keeps_blob_bundle_available() {
+        let source_path = unique_path("maintenance-source.sqlite");
+        let original_blob_path = unique_path("maintenance-original-blob");
+        let package_path = unique_path("maintenance-package");
+        let target_path = unique_path("maintenance-target.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_file(&original_blob_path);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let bytes = b"maintenance restore artifact";
+        fs::write(&original_blob_path, bytes).unwrap();
+        let digest = checksum(bytes);
+        let source = initialize(&source_path, "maintenance-project");
+        let mut blob = source
+            .prepare(
+                "INSERT INTO blob
+                 (blob_digest,byte_count,media_type,path,verified_at,created_at)
+                 VALUES (?1,?2,'text/plain',?3,'unix-ms:2','unix-ms:2')",
+            )
+            .unwrap();
+        blob.bind_text(1, &digest).unwrap();
+        blob.bind_i64(2, bytes.len() as u64).unwrap();
+        blob.bind_text(3, original_blob_path.to_str().unwrap())
+            .unwrap();
+        blob.run().unwrap();
+        drop(blob);
+        source.backup_package_to(&package_path).unwrap();
+        drop(source);
+
+        let job = super::MaintenanceJobInput {
+            operation_id: "restore-artifact-job".into(),
+            kind: "restore".into(),
+            database_path: target_path.to_string_lossy().into_owned(),
+            package_path: package_path.to_string_lossy().into_owned(),
+            request_digest: "sha256:restore-artifact-job".into(),
+            created_at: "unix-ms:3".into(),
+        };
+        let restored = SqliteStore::restore_package_to_with_maintenance_job(
+            &package_path,
+            &target_path,
+            Some(&job),
+        )
+        .expect("maintenance restore publishes database and artifact bundle");
+        let readback = SqliteStore::reconcile_restore_maintenance_job(&target_path, &job)
+            .expect("restore operation reconciles")
+            .expect("restore receipt is committed");
+        assert_eq!(readback.stage, "committed");
+        let store = SqliteStore::open(&target_path, PRODUCTION_SCHEMA_SQL).unwrap();
+        let mut query = store
+            .prepare("SELECT path FROM blob WHERE blob_digest=?1")
+            .unwrap();
+        query.bind_text(1, &digest).unwrap();
+        assert_eq!(query.step().unwrap(), SQLITE_ROW);
+        let restored_blob_path = PathBuf::from(query.column_text(0).unwrap());
+        assert_eq!(fs::read(restored_blob_path).unwrap(), bytes);
+        drop(query);
+        drop(store);
+
+        let artifact_root = target_path.parent().unwrap().join(format!(
+            "{}.artifacts.restore-{}",
+            target_path.file_name().unwrap().to_string_lossy(),
+            restored.current_restore_epoch
+        ));
+        let _ = fs::remove_dir_all(artifact_root);
+        let _ = fs::remove_dir_all(&package_path);
+        let _ = fs::remove_file(&original_blob_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+    }
+
+    fn initialize(path: &Path, project_id: &str) -> SqliteStore {
+        let store = SqliteStore::open(path, PRODUCTION_SCHEMA_SQL).expect("store opens");
+        store.create_project(project_id, "unix-ms:1").unwrap();
+        let binding = WorkspaceBinding::new(
+            "/tmp/boreal-backup-bundle",
+            "/tmp/boreal-backup-bundle/worktree",
+            "sha256:backup-bundle-binding",
+        )
+        .unwrap();
+        IdentityStore::new(&store)
+            .bind_project(project_id, &binding, "unix-ms:1")
+            .unwrap();
+        store
+    }
+
+    fn unique_path(name: &str) -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "boreal-backup-bundle-{}-{timestamp}-{name}",
+            std::process::id()
+        ))
+    }
+
+    fn remove_database(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     }
 }
 
