@@ -273,8 +273,8 @@
     "release_url": null,
     "channel_verification": "not_run"
   },
-  "note": "Integrated the versioned guidance action descriptors, Global TUI inbox hardening, bounded backup artifact continuity, F2 summary/review readbacks, mixed-revision context guard, release preparation, and revision-bound container disposition CLI/service route. Container disposition application/store/CLI focused tests pass. Current agents are implementing final-result binding, Global capture provenance, and S02/S03 package/update recovery on source 2fa9bf3e. F1 onboarding, remaining F3/F4 paths, S08/S09 intake receipts and Global Send, S10 scale qualification, S11 handover, S12-T05/T06, S13 dates/external waits/TUI parity, T90 sprint gates, integrated qualification, safe installation activation, and release delivery remain open. No final qualification, installation activation, or release claim is implied.",
-  "current_source_commit": "94669ceb",
+  "note": "Integrated the versioned guidance action descriptors, Global TUI inbox hardening, bounded backup artifact continuity, F2 summary/review readbacks, mixed-revision context guard, release preparation, revision-bound container disposition CLI/service route, and the missing store export needed by hierarchy callers. Container disposition application/store/CLI focused tests passed on the prior integrated source; final-result binding, Global capture provenance, and S02/S03 package/update recovery are active in isolated agent worktrees based on 2fa9bf3e. F1 onboarding, remaining F3/F4 paths, S08/S09 intake receipts and Global Send, S10 scale qualification, S11 handover, S12-T05/T06, S13 dates/external waits/TUI parity, T90 sprint gates, integrated qualification, safe installation activation, and release delivery remain open. No final qualification, installation activation, or release claim is implied.",
+  "current_source_commit": "2b01e1e9",
   "environment_inventory": {
     "checked_date": "2026-10-13",
     "native_platform": "macOS ARM64",
@@ -377,6 +377,12 @@
       "event": "release_identity_prepared",
       "source_commit": "94669ceb",
       "summary": "Prepared candidate version 0.2.2 across workspace package identity, installer examples, and test-project expectations. This is a source preparation identity only; archives and release qualification have not been built."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "container_rollup_export_unblocked",
+      "source_commit": "2b01e1e980ed12fee33a5d55f17c325cccfbbe01",
+      "summary": "Re-exported ContainerRollupSnapshotV3 from boreal-store so the application hierarchy module can resolve its public type. This addresses the existing compile blocker reported independently by the F2 and S03 lanes; integrated verification is pending."
     },
     {
       "date": "2026-10-14",
