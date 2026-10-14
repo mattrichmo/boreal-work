@@ -205,8 +205,10 @@ change source.
   file is under a recorded S06 grant, so I did not change either test.
 - **S12:** The T05 contract reconciliation is committed, but no accepted
   T01–T04 handoffs, T05 execution handoff, or BW-S12 validation directory is
-  checked in. Focused CLI/service tests exist, but their exact-tree results,
-  required minimal non-CLI journeys and T05/T90 records are missing. T06 also
+  checked in. The exact-source `cargo test -p boreal-cli -- --test-threads=1`
+  run passed, including the source/Intake readback, artifact-result binding
+  and close-readiness service tests. The minimal non-CLI journeys, accepted
+  prerequisite handoffs and T05/T90 records are still missing. T06 also
   requires S02-T90, which is unaccepted. Do not edit its shared CLI/store
   routes until the recorded steward/leaf grants are reconciled.
 
