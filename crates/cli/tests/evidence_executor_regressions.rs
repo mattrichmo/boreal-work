@@ -70,6 +70,32 @@ fn standard_boreal_layout_runs_declared_command_from_workspace_root() {
 }
 
 #[test]
+fn verifier_runs_from_the_bound_changed_final_result_snapshot() {
+    let mut fixture = Fixture::new("final-result-workspace");
+    fixture.executable(
+        "read-final-result",
+        "#!/bin/sh\ncat evidence-result-marker.txt\n",
+    );
+    fixture.start_attempt();
+    fixture.write_gate(
+        "./read-final-result",
+        vec!["./read-final-result"],
+        vec!["bound-final-result-marker"],
+        30_000,
+        None,
+    );
+
+    let output = fixture.evidence_run("op_final_result_workspace");
+    assert_success(&output, "final-result evidence run");
+    let data = envelope(&output)["data"].clone();
+    let stdout_ref = path_value(&data["stdout_ref"]);
+    assert_eq!(fs::read(stdout_ref).unwrap(), b"bound-final-result-marker");
+    let receipt = read_json(path_value(&data["receipt_path"]));
+    assert_eq!(receipt["source_snapshot_hash"], fixture.final_result_source);
+    assert_ne!(receipt["source_snapshot_hash"], fixture.source_version);
+}
+
+#[test]
 fn full_service_gate_id_uses_only_the_scoped_local_policy_declaration() {
     let mut fixture = Fixture::new("namespaced-gate");
     // This verifier exists only in the disposable test fixture; its receipt is
@@ -147,7 +173,8 @@ fn public_source_registration_and_evidence_execution_use_the_rust_service_socket
     assert_eq!(result["outcome"], "changed");
     assert_eq!(result["data"]["result"], "passed");
     let receipt = read_json(path_value(&result["data"]["receipt_path"]));
-    assert_eq!(receipt["source_snapshot_hash"], fixture.source_version);
+    assert_eq!(receipt["source_snapshot_hash"], fixture.final_result_source);
+    assert_ne!(receipt["source_snapshot_hash"], fixture.source_version);
     assert_eq!(receipt["config_identity"], CONFIG);
     assert_eq!(receipt["executable"], "./socket-verifier");
 }
@@ -370,6 +397,7 @@ struct Fixture {
     root: PathBuf,
     database: PathBuf,
     source_version: String,
+    final_result_source: String,
 }
 
 impl Fixture {
@@ -389,6 +417,7 @@ impl Fixture {
             root,
             database,
             source_version: String::new(),
+            final_result_source: String::new(),
         };
         fixture.initialize();
         fixture
@@ -562,6 +591,94 @@ impl Fixture {
             "--json",
         ]);
         assert_success(&output, "agent start");
+
+        // The result capture is deliberately different from the claim input:
+        // this file does not exist until the attempt is running.
+        fs::write(
+            self.root.join("evidence-result-marker.txt"),
+            "bound-final-result-marker",
+        )
+        .unwrap();
+        self.capture_and_bind_final_result();
+    }
+
+    fn capture_and_bind_final_result(&mut self) {
+        let output = self.run(&[
+            "source",
+            "add",
+            PROJECT,
+            "--input",
+            ".",
+            "--origin",
+            "executor-regression/final-result",
+            "--actor",
+            OPERATOR,
+            "--harness",
+            HARNESS,
+            "--session",
+            SETUP_SESSION,
+            "--db",
+            &path(&self.database),
+            "--operation-id",
+            "op_executor_final_result_source",
+            "--json",
+        ]);
+        assert_success(&output, "Operator final-result workspace snapshot capture");
+        let source = &envelope(&output)["data"]["source"];
+        let source_version_id = source["source_version_id"]
+            .as_str()
+            .expect("source add returns the immutable final-result identity")
+            .to_owned();
+        let content_digest = source["content_digest"]
+            .as_str()
+            .expect("source add returns the final-result content digest")
+            .to_owned();
+        let store = SqliteStore::open(&self.database, SCHEMA).unwrap();
+        let attempt = store
+            .current_attempt_for_work(PROJECT, WORK)
+            .unwrap()
+            .expect("running fixture attempt remains current");
+        let (entity_revision, proof_revision) = store.work_revisions(PROJECT, WORK).unwrap();
+        let expected_revision = store.project_revision(PROJECT).unwrap().0;
+        let bind = self.run(&[
+            "evidence",
+            "bind-result",
+            "--project",
+            PROJECT,
+            "--work",
+            WORK,
+            "--attempt",
+            &attempt.attempt_id,
+            "--fence",
+            &attempt.fence.to_string(),
+            "--source-version",
+            &source_version_id,
+            "--content-digest",
+            &content_digest,
+            "--expected-revision",
+            &expected_revision.to_string(),
+            "--expected-entity-revision",
+            &entity_revision.to_string(),
+            "--expected-proof-revision",
+            &proof_revision.to_string(),
+            "--actor",
+            AGENT,
+            "--harness",
+            HARNESS,
+            "--session",
+            SESSION,
+            "--db",
+            &path(&self.database),
+            "--operation-id",
+            "op_executor_final_result_bind",
+            "--json",
+        ]);
+        assert_success(&bind, "Agent final-result binding");
+        assert_eq!(
+            envelope(&bind)["data"]["source_version_id"],
+            source_version_id
+        );
+        self.final_result_source = source_version_id;
     }
 
     fn executable(&self, name: &str, contents: &str) {

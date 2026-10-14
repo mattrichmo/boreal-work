@@ -84,6 +84,14 @@ fn evidence_run_retains_streams_and_hashes_exact_combined_reference() {
         receipt_json["output_digest"],
         sha256_content_digest(&combined)
     );
+    assert_eq!(
+        receipt_json["source_snapshot_hash"],
+        fixture.final_result_source.as_deref().unwrap()
+    );
+    assert_ne!(
+        receipt_json["source_snapshot_hash"],
+        fixture.source_version.as_deref().unwrap()
+    );
 
     fixture.remove();
 }
@@ -156,6 +164,7 @@ struct Fixture {
     root: PathBuf,
     database: PathBuf,
     source_version: Option<String>,
+    final_result_source: Option<String>,
     executable: String,
     argv: Vec<String>,
     observables: Vec<String>,
@@ -177,6 +186,7 @@ impl Fixture {
             root,
             database,
             source_version: None,
+            final_result_source: None,
             executable: executable.to_owned(),
             argv: argv.into_iter().map(str::to_owned).collect(),
             observables: observables.into_iter().map(str::to_owned).collect(),
@@ -380,6 +390,100 @@ impl Fixture {
             let output = run(&self.root, &args);
             assert_success(&output, command);
         }
+
+        // This snapshot contains a file created only after claim/start, which
+        // makes the final-result versus claim-input distinction observable.
+        fs::write(
+            self.root.join("evidence-result-marker.txt"),
+            "bound-final-result-marker",
+        )
+        .unwrap();
+        self.capture_and_bind_final_result();
+    }
+
+    fn capture_and_bind_final_result(&mut self) {
+        let output = run(
+            &self.root,
+            &vec![
+                "source".to_owned(),
+                "add".to_owned(),
+                PROJECT.to_owned(),
+                "--input".to_owned(),
+                ".".to_owned(),
+                "--origin".to_owned(),
+                "evidence-hardening/final-result".to_owned(),
+                "--actor".to_owned(),
+                OPERATOR.to_owned(),
+                "--harness".to_owned(),
+                HARNESS.to_owned(),
+                "--session".to_owned(),
+                SETUP_SESSION.to_owned(),
+                "--db".to_owned(),
+                path(&self.database),
+                "--operation-id".to_owned(),
+                "op_evidence_final_result_source".to_owned(),
+                "--json".to_owned(),
+            ],
+        );
+        assert_success(&output, "Operator final-result workspace snapshot capture");
+        let source = &envelope(&output)["data"]["source"];
+        let source_version_id = source["source_version_id"]
+            .as_str()
+            .expect("source add returns the immutable final-result identity")
+            .to_owned();
+        let content_digest = source["content_digest"]
+            .as_str()
+            .expect("source add returns the final-result content digest")
+            .to_owned();
+        let store = SqliteStore::open(&self.database, SCHEMA).unwrap();
+        let attempt = store
+            .current_attempt_for_work(PROJECT, WORK)
+            .unwrap()
+            .expect("running fixture attempt remains current");
+        let (entity_revision, proof_revision) = store.work_revisions(PROJECT, WORK).unwrap();
+        let expected_revision = store.project_revision(PROJECT).unwrap().0;
+        let bind = run(
+            &self.root,
+            &vec![
+                "evidence".to_owned(),
+                "bind-result".to_owned(),
+                "--project".to_owned(),
+                PROJECT.to_owned(),
+                "--work".to_owned(),
+                WORK.to_owned(),
+                "--attempt".to_owned(),
+                attempt.attempt_id,
+                "--fence".to_owned(),
+                attempt.fence.to_string(),
+                "--source-version".to_owned(),
+                source_version_id.clone(),
+                "--content-digest".to_owned(),
+                content_digest,
+                "--expected-revision".to_owned(),
+                expected_revision.to_string(),
+                "--expected-entity-revision".to_owned(),
+                entity_revision.to_string(),
+                "--expected-proof-revision".to_owned(),
+                proof_revision.to_string(),
+                "--actor".to_owned(),
+                AGENT.to_owned(),
+                "--harness".to_owned(),
+                HARNESS.to_owned(),
+                "--session".to_owned(),
+                SESSION.to_owned(),
+                "--db".to_owned(),
+                path(&self.database),
+                "--operation-id".to_owned(),
+                "op_evidence_final_result_bind".to_owned(),
+                "--json".to_owned(),
+            ],
+        );
+        assert_success(&bind, "Agent final-result binding");
+        assert_eq!(
+            envelope(&bind)["data"]["source_version_id"],
+            source_version_id
+        );
+        self.final_result_source = Some(source_version_id);
     }
 
     fn executable(&self, name: &str, contents: &str) {

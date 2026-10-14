@@ -39,7 +39,8 @@ use boreal_source::{ArtifactRightsProvenance, SourceCatalog, SourceIdentity};
 use boreal_store::identity::{IdentityError, IdentityStore, WorkspaceBinding};
 use boreal_store::{
     acceptance::{
-        AcceptanceResultRecord, ArtifactInspectionAvailability, CompletionAttestationInput,
+        AcceptanceResultRecord, AcceptanceStore, ArtifactInspectionAvailability,
+        CompletionAttestationInput,
     },
     AuditEventRecord, EvidenceExecutionState, MaintenanceJobInput, MaintenanceJobTransition,
     OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation, ReceiptOutcome,
@@ -8789,7 +8790,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
                 "evidence run requires a current attempt",
             )
         })?;
-    let source_version_id = attempt_record.source_version_id.as_deref().ok_or_else(|| {
+    let claim_source_version_id = attempt_record.source_version_id.as_deref().ok_or_else(|| {
         CliError::with(
             ErrorCode::ReceiptPolicyMismatch,
             ApplicationOutcome::Rejected,
@@ -8797,7 +8798,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         )
     })?;
     let captured_source = store
-        .source_version(project.as_str(), source_version_id)
+        .source_version(project.as_str(), claim_source_version_id)
         .map_err(map_store_error)?
         .ok_or_else(|| {
             CliError::with(
@@ -8817,9 +8818,9 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         ));
     }
     let source = knowledge
-        .show_source(project.as_str(), source_version_id)
+        .show_source(project.as_str(), claim_source_version_id)
         .map_err(map_knowledge_error)?;
-    let source_bytes = catalog.verify(&source).map_err(|error| {
+    let _claim_source_bytes = catalog.verify(&source).map_err(|error| {
         CliError::with(
             ErrorCode::IntegrityQuarantined,
             ApplicationOutcome::Rejected,
@@ -8835,8 +8836,77 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             "captured source catalog bytes do not match the immutable project registration",
         ));
     }
+    let final_result = AcceptanceStore::new(store)
+        .current_final_result_for_attempt(&attempt_record)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::ReceiptSourceMismatch,
+                ApplicationOutcome::Rejected,
+                "evidence run requires a current immutable final-result binding; capture and bind the produced workspace before verification",
+            )
+        })?;
+    if final_result.project_id != project.as_str()
+        || final_result.work_id != work_id
+        || final_result.attempt_id != attempt_record.attempt_id
+        || final_result.fence != attempt_record.fence
+        || final_result.actor_id != attempt_record.actor_id
+        || attempt_record.session_id.as_deref() != Some(final_result.session_id.as_str())
+        || final_result.config_identity != attempt_record.config_identity
+        || final_result.source_version_id == claim_source_version_id
+        || final_result.content_digest == captured_source.content_digest
+    {
+        return Err(CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "current final-result binding does not describe a changed result for this attempt and pinned configuration",
+        ));
+    }
+    let result_source_record = store
+        .source_version(project.as_str(), &final_result.source_version_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                "bound final-result workspace snapshot is not registered in this project",
+            )
+        })?;
+    if result_source_record.project_id != project.as_str()
+        || result_source_record.availability != "available"
+        || result_source_record.media_type != "application/vnd.boreal.workspace-snapshot.v1"
+        || result_source_record.content_digest != final_result.content_digest
+    {
+        return Err(CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            "bound final-result source is not an available, digest-matched workspace snapshot",
+        ));
+    }
+    let result_source = knowledge
+        .show_source(project.as_str(), &final_result.source_version_id)
+        .map_err(map_knowledge_error)?;
+    let result_bytes = catalog.verify(&result_source).map_err(|error| {
+        CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            format!("bound final-result workspace snapshot failed digest verification: {error}"),
+        )
+    })?;
+    if result_source.content_digest != final_result.content_digest
+        || result_source.byte_count as u64 != result_source_record.byte_count
+    {
+        return Err(CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            "bound result catalog bytes do not match the immutable project registration",
+        ));
+    }
+    // Keep the claim source as attempt and published-policy lineage, while
+    // running the verifier against the exact immutable output bound by the
+    // current final-result proof generation.
     let temporary_workspace = TemporaryWorkspace::for_evidence(&context.root, operation)?;
-    let workspace_root = temporary_workspace.unpack(&source_bytes)?;
+    let workspace_root = temporary_workspace.unpack(&result_bytes)?;
     let (declaration, policy_record) = gate_policy_for_attempt(
         store,
         &catalog,
@@ -8844,7 +8914,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         &policy_gate_id,
         &attempt_record.config_identity,
     )?;
-    if declaration.source_snapshot_hash != source_version_id
+    if declaration.source_snapshot_hash != claim_source_version_id
         || attempt_record.config_identity != declaration.config_identity
     {
         return Err(CliError::with(
@@ -8940,6 +9010,21 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         .ok_or_else(|| {
             CliError::invalid("evidence run gate is not declared by the work acceptance profile")
         })?;
+    let pinned_requirements =
+        boreal_store::profiles::ProfileStore::new(store)
+            .current_pinned_requirements(project.as_str(), &work_id)
+            .map_err(map_store_error)?;
+    if final_result.profile_id != status_work.work.acceptance_profile.id.as_str()
+        || final_result.profile_version.to_string()
+            != status_work.work.acceptance_profile.version
+        || final_result.profile_digest != pinned_requirements.profile.policy_digest
+    {
+        return Err(CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "current final-result binding does not match the attempt's pinned acceptance profile",
+        ));
+    }
     let kind = parse_gate_kind(&declaration.kind)?;
     if kind != gate.kind || declaration.gate_id != policy_gate_id {
         return Err(CliError::with(
@@ -8956,7 +9041,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         work_id: WorkId::new(work_id.clone()),
         attempt_id: AttemptId::new(attempt_id.clone()),
         fence: Fence::new(fence),
-        source_snapshot_hash: SourceVersionId::new(declaration.source_snapshot_hash.clone()),
+        source_snapshot_hash: SourceVersionId::new(final_result.source_version_id.clone()),
         config_identity: ConfigIdentity::new(declaration.config_identity.clone()),
         profile_id: status_work.work.acceptance_profile.id.clone(),
         profile_version: status_work.work.acceptance_profile.version.clone(),
