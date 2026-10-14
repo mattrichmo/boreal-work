@@ -1,0 +1,474 @@
+
+> test
+> tsc && node --test tests/*.test.mjs
+
+TAP version 13
+# Subtest: client exposes pollable linked-detail jobs and note backlinks
+ok 1 - client exposes pollable linked-detail jobs and note backlinks
+  ---
+  duration_ms: 11.386709
+  ...
+# Subtest: malformed post-delivery envelopes freeze mutations with the original operation id
+ok 2 - malformed post-delivery envelopes freeze mutations with the original operation id
+  ---
+  duration_ms: 21.70225
+  ...
+# Subtest: valid conflict and rejection envelopes are known outcomes, not uncertain writes
+ok 3 - valid conflict and rejection envelopes are known outcomes, not uncertain writes
+  ---
+  duration_ms: 3.840459
+  ...
+# Subtest: launch options expose all implemented color themes and reject unknown themes
+ok 4 - launch options expose all implemented color themes and reject unknown themes
+  ---
+  duration_ms: 0.775541
+  ...
+# Subtest: client validates the outer framing and both versioned correlation envelopes
+ok 5 - client validates the outer framing and both versioned correlation envelopes
+  ---
+  duration_ms: 5.856917
+  ...
+# Subtest: client rejects mismatched versions and does not replay an unknown mutation
+ok 6 - client rejects mismatched versions and does not replay an unknown mutation
+  ---
+  duration_ms: 5.579834
+  ...
+# Subtest: controller binds writes to snapshot revision and board/list render the same item records
+ok 7 - controller binds writes to snapshot revision and board/list render the same item records
+  ---
+  duration_ms: 20.007
+  ...
+# Subtest: linked rollups stay paired with their own workspace under one management project
+ok 8 - linked rollups stay paired with their own workspace under one management project
+  ---
+  duration_ms: 16.064792
+  ...
+# Subtest: snapshot validation, terminal escaping, clipping, and unknown writes fail closed
+ok 9 - snapshot validation, terminal escaping, clipping, and unknown writes fail closed
+  ---
+  duration_ms: 1.785542
+  ...
+# Subtest: keyboard flow creates a project, custom status, task, completes and reopens it, then restores terminal
+ok 10 - keyboard flow creates a project, custom status, task, completes and reopens it, then restores terminal
+  ---
+  duration_ms: 441.337292
+  ...
+# Subtest: unknown mutation is reconciled through operation show without replay
+ok 11 - unknown mutation is reconciled through operation show without replay
+  ---
+  duration_ms: 0.501167
+  ...
+# Subtest: stream decoder preserves split UTF-8/escape and brackets clipboard data away from actions
+ok 12 - stream decoder preserves split UTF-8/escape and brackets clipboard data away from actions
+  ---
+  duration_ms: 1.016667
+  ...
+# Subtest: paste payload cannot trigger archive and Ctrl-C safely restores terminal
+ok 13 - paste payload cannot trigger archive and Ctrl-C safely restores terminal
+  ---
+  duration_ms: 38.366708
+  ...
+# Subtest: quick capture retains Unicode and commas in its title and submits once
+ok 14 - quick capture retains Unicode and commas in its title and submits once
+  ---
+  duration_ms: 74.745291
+  ...
+# Subtest: command palette quick capture performs the selected action
+ok 15 - command palette quick capture performs the selected action
+  ---
+  duration_ms: 99.488542
+  ...
+# Subtest: rejected form save keeps the form and shows the error for correction
+ok 16 - rejected form save keeps the form and shows the error for correction
+  ---
+  duration_ms: 54.609583
+  ...
+# Subtest: searchable picker keeps a selection beyond the first terminal page visible
+ok 17 - searchable picker keeps a selection beyond the first terminal page visible
+  ---
+  duration_ms: 359.762417
+  ...
+# Subtest: refresh retains selected record identity when another client updates the snapshot
+ok 18 - refresh retains selected record identity when another client updates the snapshot
+  ---
+  duration_ms: 5.169459
+  ...
+# Subtest: workflow editor offers semantic backend categories and submits selected category
+ok 19 - workflow editor offers semantic backend categories and submits selected category
+  ---
+  duration_ms: 59.857416
+  ...
+# Subtest: archive recovery dispatches the item unarchive command for a selected archived item
+ok 20 - archive recovery dispatches the item unarchive command for a selected archived item
+  ---
+  duration_ms: 12.013875
+  ...
+# Subtest: focus navigation follows shared route order and inspector arrows change tabs and scroll
+ok 21 - focus navigation follows shared route order and inspector arrows change tabs and scroll
+  ---
+  duration_ms: 20.694208
+  ...
+# Subtest: selection styling stays within the focused work pane
+ok 22 - selection styling stays within the focused work pane
+  ---
+  duration_ms: 10.007875
+  ...
+# Subtest: history reader pages through server history and reports page counts
+ok 23 - history reader pages through server history and reports page counts
+  ---
+  duration_ms: 54.415
+  ...
+# Subtest: linked workspace reader labels partial detail and loads later pages on Enter
+ok 24 - linked workspace reader labels partial detail and loads later pages on Enter
+  ---
+  duration_ms: 32.657208
+  ...
+# Subtest: linked detail polls a refreshing page job and reports failed jobs without hiding cached rows
+ok 25 - linked detail polls a refreshing page job and reports failed jobs without hiding cached rows
+  ---
+  duration_ms: 188.08925
+  ...
+# Subtest: selected work links and unlinks a note through one service mutation
+ok 26 - selected work links and unlinks a note through one service mutation
+  ---
+  duration_ms: 49.322333
+  ...
+# Subtest: note reader shows linked work backlinks from full note readback
+ok 27 - note reader shows linked work backlinks from full note readback
+  ---
+  duration_ms: 10.807791
+  ...
+# Subtest: bulk triage collects marked rows and sends one atomic changes command
+ok 28 - bulk triage collects marked rows and sends one atomic changes command
+  ---
+  duration_ms: 80.074417
+  ...
+# Subtest: planning collapse, parent navigation, and breadcrumb use the selected hierarchy
+ok 29 - planning collapse, parent navigation, and breadcrumb use the selected hierarchy
+  ---
+  duration_ms: 40.000417
+  ...
+# Subtest: J jumps to a related item with dependency wording and Esc restores prior scope and selection
+ok 30 - J jumps to a related item with dependency wording and Esc restores prior scope and selection
+  ---
+  duration_ms: 72.143833
+  ...
+# Subtest: card reorder asks backend to move relative to its adjacent sibling
+ok 31 - card reorder asks backend to move relative to its adjacent sibling
+  ---
+  duration_ms: 29.683166
+  ...
+# Subtest: successful linked handoff restores the full global screen and raw mode
+ok 32 - successful linked handoff restores the full global screen and raw mode
+  ---
+  duration_ms: 31.606833
+  ...
+# Subtest: failed linked handoff restores the full global screen and raw mode
+ok 33 - failed linked handoff restores the full global screen and raw mode
+  ---
+  duration_ms: 28.062458
+  ...
+# Subtest: help stays visible and reports actionable controls at narrow terminal width
+ok 34 - help stays visible and reports actionable controls at narrow terminal width
+  ---
+  duration_ms: 86.631166
+  ...
+# Subtest: labeled form preserves commas and exposes late active fields on short terminals
+ok 35 - labeled form preserves commas and exposes late active fields on short terminals
+  ---
+  duration_ms: 54.362542
+  ...
+# Subtest: multiline viewport pins title and recovery hints while following the wrapped cursor
+ok 36 - multiline viewport pins title and recovery hints while following the wrapped cursor
+  ---
+  duration_ms: 21.118959
+  ...
+# Subtest: form date and optional priority rules reject invalid input and explain valid ranges
+ok 37 - form date and optional priority rules reject invalid input and explain valid ranges
+  ---
+  duration_ms: 1.706292
+  ...
+# Subtest: blank optional priority is omitted for detailed create and project edit
+ok 38 - blank optional priority is omitted for detailed create and project edit
+  ---
+  duration_ms: 421.5655
+  ...
+# Subtest: line parser removes quotes, handles escaped quotes and backslashes, and preserves Unicode and commas
+ok 39 - line parser removes quotes, handles escaped quotes and backslashes, and preserves Unicode and commas
+  ---
+  duration_ms: 10.221125
+  ...
+# Subtest: line interface preserves complete add, search, and note arguments
+ok 40 - line interface preserves complete add, search, and note arguments
+  ---
+  duration_ms: 19.823958
+  ...
+# Subtest: line parser reports unmatched quotes and continues to the next command
+ok 41 - line parser reports unmatched quotes and continues to the next command
+  ---
+  duration_ms: 9.828959
+  ...
+# Subtest: known commit with failed refresh consumes the form and retry reads only
+ok 42 - known commit with failed refresh consumes the form and retry reads only
+  ---
+  duration_ms: 50.090958
+  ...
+# Subtest: uncertain save receipt not_committed with refresh failure false retains only uncommitted drafts
+ok 43 - uncertain save receipt not_committed with refresh failure false retains only uncommitted drafts
+  ---
+  duration_ms: 84.24125
+  ...
+# Subtest: uncertain save receipt committed with refresh failure false retains only uncommitted drafts
+ok 44 - uncertain save receipt committed with refresh failure false retains only uncommitted drafts
+  ---
+  duration_ms: 73.29725
+  ...
+# Subtest: uncertain save receipt committed with refresh failure true retains only uncommitted drafts
+ok 45 - uncertain save receipt committed with refresh failure true retains only uncommitted drafts
+  ---
+  duration_ms: 73.975292
+  ...
+# Subtest: revision conflict refreshes safely while retaining form text for deliberate reapply
+ok 46 - revision conflict refreshes safely while retaining form text for deliberate reapply
+  ---
+  duration_ms: 43.018125
+  ...
+# Subtest: global detailed capture defaults to Personal inbox and exposes destination, parent and workflow mapping
+ok 47 - global detailed capture defaults to Personal inbox and exposes destination, parent and workflow mapping
+  ---
+  duration_ms: 23.722292
+  ...
+# Subtest: Escape from a searchable form picker returns to the retained form draft
+ok 48 - Escape from a searchable form picker returns to the retained form draft
+  ---
+  duration_ms: 129.863791
+  ...
+# Subtest: unscoped quick capture stores in Personal inbox with no project owner
+ok 49 - unscoped quick capture stores in Personal inbox with no project owner
+  ---
+  duration_ms: 43.123958
+  ...
+# Subtest: initial service failure leaves a retryable screen and blocks writes until read succeeds
+ok 50 - initial service failure leaves a retryable screen and blocks writes until read succeeds
+  ---
+  duration_ms: 66.439375
+  ...
+# Subtest: moving an item requires explicit target status and deliberate parent mapping despite reused status IDs
+ok 51 - moving an item requires explicit target status and deliberate parent mapping despite reused status IDs
+  ---
+  duration_ms: 174.774209
+  ...
+# Subtest: board selection stays visible across every status at narrow terminal widths
+ok 52 - board selection stays visible across every status at narrow terminal widths
+  ---
+  duration_ms: 6.085708
+  ...
+# Subtest: list viewport keeps selected row visible when descriptions wrap into many lines
+ok 53 - list viewport keeps selected row visible when descriptions wrap into many lines
+  ---
+  duration_ms: 7.354875
+  ...
+# Subtest: All projects scope exposes portfolio work and a selected project retains stable ID after refresh
+ok 54 - All projects scope exposes portfolio work and a selected project retains stable ID after refresh
+  ---
+  duration_ms: 17.278
+  ...
+# Subtest: planning preserves nested records and inspector shows relationships and linked progress
+ok 55 - planning preserves nested records and inspector shows relationships and linked progress
+  ---
+  duration_ms: 32.770792
+  ...
+# Subtest: overdue calculation is date based and archive route retains archived records
+ok 56 - overdue calculation is date based and archive route retains archived records
+  ---
+  duration_ms: 0.822916
+  ...
+# Subtest: deep board card is selected and visible after vertical scrolling
+ok 57 - deep board card is selected and visible after vertical scrolling
+  ---
+  duration_ms: 4.057292
+  ...
+# Subtest: inspector can take over a narrow screen on focus
+ok 58 - inspector can take over a narrow screen on focus
+  ---
+  duration_ms: 5.101417
+  ...
+# Subtest: history route shows retained status transitions
+ok 59 - history route shows retained status transitions
+  ---
+  duration_ms: 4.110459
+  ...
+# Subtest: all record routes preserve a deep selection across 50+ rows
+ok 60 - all record routes preserve a deep selection across 50+ rows
+  ---
+  duration_ms: 73.046
+  ...
+# Subtest: todo views filter Today, overdue, waiting, and all open independently
+ok 61 - todo views filter Today, overdue, waiting, and all open independently
+  ---
+  duration_ms: 1.587458
+  ...
+# Subtest: archive respects project scope and keeps archived project children reachable
+ok 62 - archive respects project scope and keeps archived project children reachable
+  ---
+  duration_ms: 0.43775
+  ...
+# Subtest: inspector tabs show distinct details, relationship, history, and execution content
+ok 63 - inspector tabs show distinct details, relationship, history, and execution content
+  ---
+  duration_ms: 30.2875
+  ...
+# Subtest: narrow navigation focus shows a reachable window in shared route order
+ok 64 - narrow navigation focus shows a reachable window in shared route order
+  ---
+  duration_ms: 1.540375
+  ...
+# Subtest: Tab focus wraps between work, inspector and navigation
+ok 65 - Tab focus wraps between work, inspector and navigation
+  ---
+  duration_ms: 0.163584
+  ...
+# Subtest: scope toggle returns to the last explicit project and route changes keep the chosen scope
+ok 66 - scope toggle returns to the last explicit project and route changes keep the chosen scope
+  ---
+  duration_ms: 0.508
+  ...
+# Subtest: search is shared by projects, notes, and planning retains matching child ancestors
+ok 67 - search is shared by projects, notes, and planning retains matching child ancestors
+  ---
+  duration_ms: 0.784083
+  ...
+# Subtest: archived project hides active children from Home and active views while archive keeps independent records
+ok 68 - archived project hides active children from Home and active views while archive keeps independent records
+  ---
+  duration_ms: 0.416209
+  ...
+# Subtest: bodyless note summaries render their titles in Archive, Notes, and the inspector across project restore
+ok 69 - bodyless note summaries render their titles in Archive, Notes, and the inspector across project restore
+  ---
+  duration_ms: 22.189125
+  ...
+# Subtest: Home uses its selectable rows for project summaries and mixed rows show project origin
+ok 70 - Home uses its selectable rows for project summaries and mixed rows show project origin
+  ---
+  duration_ms: 203.857708
+  ...
+# Subtest: committed mutation reports a refresh failure without retrying the saved command
+ok 71 - committed mutation reports a refresh failure without retrying the saved command
+  ---
+  duration_ms: 0.828042
+  ...
+# Subtest: Home search with no matches leaves rendered and selectable rows empty
+ok 72 - Home search with no matches leaves rendered and selectable rows empty
+  ---
+  duration_ms: 6.571625
+  ...
+# Subtest: search loads complete server matches and visible note detail on demand
+ok 73 - search loads complete server matches and visible note detail on demand
+  ---
+  duration_ms: 0.817792
+  ...
+# Subtest: waiting follow-up date stays distinct from obligation due date and unscheduled has its own filter
+ok 74 - waiting follow-up date stays distinct from obligation due date and unscheduled has its own filter
+  ---
+  duration_ms: 0.541833
+  ...
+# Subtest: date-only obligations and RFC3339 timestamps use server civil-day classification
+ok 75 - date-only obligations and RFC3339 timestamps use server civil-day classification
+  ---
+  duration_ms: 0.062375
+  ...
+# Subtest: route paging appends rows without changing the selected record
+ok 76 - route paging appends rows without changing the selected record
+  ---
+  duration_ms: 0.904792
+  ...
+# Subtest: refresh rehydrates the selected item detail after it falls outside the capped summary
+ok 77 - refresh rehydrates the selected item detail after it falls outside the capped summary
+  ---
+  duration_ms: 1.512875
+  ...
+# Subtest: linked refresh keeps last-good execution sample stale and drops it after unlink
+ok 78 - linked refresh keeps last-good execution sample stale and drops it after unlink
+  ---
+  duration_ms: 2.6915
+  ...
+# Subtest: authoritative project attention supplies full-state action and milestone summaries
+ok 79 - authoritative project attention supplies full-state action and milestone summaries
+  ---
+  duration_ms: 11.834584
+  ...
+# Subtest: planning collapse, breadcrumbs, milestone progress and bulk selection share row order
+ok 80 - planning collapse, breadcrumbs, milestone progress and bulk selection share row order
+  ---
+  duration_ms: 8.235625
+  ...
+# Subtest: all-project board retains empty project workflows and labels every status by project
+ok 81 - all-project board retains empty project workflows and labels every status by project
+  ---
+  duration_ms: 10.730792
+  ...
+# Subtest: linked page polls async job, caches rows and keeps pagination offset
+ok 82 - linked page polls async job, caches rows and keeps pagination offset
+  ---
+  duration_ms: 1.317334
+  ...
+# Subtest: responsive layouts preserve selected row, scope, freshness and bounded lines
+ok 83 - responsive layouts preserve selected row, scope, freshness and bounded lines
+  ---
+  duration_ms: 26.760625
+  ...
+# Subtest: bulk selection marker is visible on ordinary item rows
+ok 84 - bulk selection marker is visible on ordinary item rows
+  ---
+  duration_ms: 4.782959
+  ...
+# Subtest: Home labels missing project activity as absent from the recent sample
+ok 85 - Home labels missing project activity as absent from the recent sample
+  ---
+  duration_ms: 7.988458
+  ...
+# Subtest: search uses server-filtered revision-pinned pages and retains selection through paging and refresh
+ok 86 - search uses server-filtered revision-pinned pages and retains selection through paging and refresh
+  ---
+  duration_ms: 2.059875
+  ...
+# Subtest: refresh retains a selected server search match when only a server-searchable field matches
+ok 87 - refresh retains a selected server search match when only a server-searchable field matches
+  ---
+  duration_ms: 0.533833
+  ...
+# Subtest: complete project, status, and parent choices page through capped summaries at one revision
+ok 88 - complete project, status, and parent choices page through capped summaries at one revision
+  ---
+  duration_ms: 0.86725
+  ...
+# Subtest: failed complete-choice reads retain a visible page error instead of returning a partial picker
+ok 89 - failed complete-choice reads retain a visible page error instead of returning a partial picker
+  ---
+  duration_ms: 0.902292
+  ...
+# Subtest: detailed item form searches and selects project, parent, and status choices on page 101
+ok 90 - detailed item form searches and selects project, parent, and status choices on page 101
+  ---
+  duration_ms: 736.908667
+  ...
+# Subtest: dependency picker can search and choose an item beyond the snapshot sample
+ok 91 - dependency picker can search and choose an item beyond the snapshot sample
+  ---
+  duration_ms: 172.993333
+  ...
+# Subtest: detailPage forwards its expected revision to the versioned service request
+ok 92 - detailPage forwards its expected revision to the versioned service request
+  ---
+  duration_ms: 3.802542
+  ...
+1..92
+# tests 92
+# suites 0
+# pass 92
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2806.443458

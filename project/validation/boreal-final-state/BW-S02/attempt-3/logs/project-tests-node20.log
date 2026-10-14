@@ -1,0 +1,510 @@
+
+> test
+> tsc && node dist/test.js && node --test tests/*.test.mjs
+
+TUI mounted workflow, protocol/error, monitoring, disabled-action, pagination, recovery, terminal, and refresh tests passed
+TAP version 13
+# Subtest: M02 primary reason and all secondary reasons survive service decoding
+ok 1 - M02 primary reason and all secondary reasons survive service decoding
+  ---
+  duration_ms: 2.049583
+  ...
+# Subtest: older service responses remain readable without a primary field
+ok 2 - older service responses remain readable without a primary field
+  ---
+  duration_ms: 0.130375
+  ...
+# Subtest: contradictory primary reason is rejected, not locally repaired
+ok 3 - contradictory primary reason is rejected, not locally repaired
+  ---
+  duration_ms: 0.197417
+  ...
+# Subtest: M02 reason detail stays bounded at required terminal sizes
+ok 4 - M02 reason detail stays bounded at required terminal sizes
+  ---
+  duration_ms: 22.338375
+  ...
+# Subtest: a degraded row has one selectable identity and no mutation actions
+ok 5 - a degraded row has one selectable identity and no mutation actions
+  ---
+  duration_ms: 0.259958
+  ...
+# Subtest: grapheme-aware widths, truncation, deletion and input tails
+ok 6 - grapheme-aware widths, truncation, deletion and input tails
+  ---
+  duration_ms: 1.704042
+  ...
+# Subtest: service strings cannot introduce ANSI, OSC, controls or bidi overrides
+ok 7 - service strings cannot introduce ANSI, OSC, controls or bidi overrides
+  ---
+  duration_ms: 17.6165
+  ...
+# Subtest: overwriting either half of a wide cell leaves a coherent grid
+ok 8 - overwriting either half of a wide cell leaves a coherent grid
+  ---
+  duration_ms: 0.182459
+  ...
+# Subtest: row-diff renderer does not repaint unchanged frames or clear on navigation
+ok 9 - row-diff renderer does not repaint unchanged frames or clear on navigation
+  ---
+  duration_ms: 0.21525
+  ...
+# Subtest: monochrome emits no colour SGR sequences
+ok 10 - monochrome emits no colour SGR sequences
+  ---
+  duration_ms: 7.206792
+  ...
+# Subtest: streaming decoder retains split Unicode and split CSI input
+ok 11 - streaming decoder retains split Unicode and split CSI input
+  ---
+  duration_ms: 1.447708
+  ...
+# Subtest: bracketed paste is a single inert event across chunk boundaries
+ok 12 - bracketed paste is a single inert event across chunk boundaries
+  ---
+  duration_ms: 0.22975
+  ...
+# Subtest: standalone Escape is delivered only when the timeout flushes it
+ok 13 - standalone Escape is delivered only when the timeout flushes it
+  ---
+  duration_ms: 0.094292
+  ...
+# Subtest: dashboard and every modal stay cell-bounded at 1x1
+ok 14 - dashboard and every modal stay cell-bounded at 1x1
+  ---
+  duration_ms: 4.297334
+  ...
+# Subtest: dashboard and every modal stay cell-bounded at 30x10
+ok 15 - dashboard and every modal stay cell-bounded at 30x10
+  ---
+  duration_ms: 12.337375
+  ...
+# Subtest: dashboard and every modal stay cell-bounded at 44x14
+ok 16 - dashboard and every modal stay cell-bounded at 44x14
+  ---
+  duration_ms: 20.407292
+  ...
+# Subtest: dashboard and every modal stay cell-bounded at 60x20
+ok 17 - dashboard and every modal stay cell-bounded at 60x20
+  ---
+  duration_ms: 32.00175
+  ...
+# Subtest: dashboard and every modal stay cell-bounded at 80x24
+ok 18 - dashboard and every modal stay cell-bounded at 80x24
+  ---
+  duration_ms: 33.956084
+  ...
+# Subtest: dashboard and every modal stay cell-bounded at 100x32
+ok 19 - dashboard and every modal stay cell-bounded at 100x32
+  ---
+  duration_ms: 47.648875
+  ...
+# Subtest: dashboard and every modal stay cell-bounded at 124x40
+ok 20 - dashboard and every modal stay cell-bounded at 124x40
+  ---
+  duration_ms: 55.253458
+  ...
+# Subtest: dashboard and every modal stay cell-bounded at 160x48
+ok 21 - dashboard and every modal stay cell-bounded at 160x48
+  ---
+  duration_ms: 83.149875
+  ...
+# Subtest: dashboard and every modal stay cell-bounded at 200x60
+ok 22 - dashboard and every modal stay cell-bounded at 200x60
+  ---
+  duration_ms: 99.973791
+  ...
+# Subtest: breakpoints remove panes, not contents, and narrow inspector is a full view
+ok 23 - breakpoints remove panes, not contents, and narrow inspector is a full view
+  ---
+  duration_ms: 1.826167
+  ...
+# Subtest: selection is stable by ID through reorder and reconciles when hidden
+ok 24 - selection is stable by ID through reorder and reconciles when hidden
+  ---
+  duration_ms: 0.194
+  ...
+# Subtest: search covers title, ID, description, owner and parent on the loaded page
+ok 25 - search covers title, ID, description, owner and parent on the loaded page
+  ---
+  duration_ms: 0.231667
+  ...
+# Subtest: palette explains disabled actions and never invents unsupported commands
+ok 26 - palette explains disabled actions and never invents unsupported commands
+  ---
+  duration_ms: 0.136167
+  ...
+# Subtest: missing detail data is explicitly labelled instead of fabricated
+ok 27 - missing detail data is explicitly labelled instead of fabricated
+  ---
+  duration_ms: 0.373209
+  ...
+# Subtest: service errors take precedence over the default Ready footer
+ok 28 - service errors take precedence over the default Ready footer
+  ---
+  duration_ms: 3.717458
+  ...
+# Subtest: paste outside a field cannot dispatch or quit; duplicate confirmation dispatches once
+ok 29 - paste outside a field cannot dispatch or quit; duplicate confirmation dispatches once
+  ---
+  duration_ms: 275.128583
+  ...
+# Subtest: a stale revision cancels the exact confirmation without sending a mutation
+ok 30 - a stale revision cancels the exact confirmation without sending a mutation
+  ---
+  duration_ms: 231.637542
+  ...
+# Subtest: standalone Escape cancels the draft; later Enter only inspects
+ok 31 - standalone Escape cancels the draft; later Enter only inspects
+  ---
+  duration_ms: 93.554042
+  ...
+# Subtest: claim rejects unknown source/config values and cancellation sends no mutation
+ok 32 - claim rejects unknown source/config values and cancellation sends no mutation
+  ---
+  duration_ms: 456.846792
+  ...
+# Subtest: create-work form accepts shortcut letters as text and submits the real fields
+ok 33 - create-work form accepts shortcut letters as text and submits the real fields
+  ---
+  duration_ms: 381.789458
+  ...
+# Subtest: JSON arrays are rejected as evidence; real receipt objects remain unchanged
+ok 34 - JSON arrays are rejected as evidence; real receipt objects remain unchanged
+  ---
+  duration_ms: 81.171041
+  ...
+# Subtest: unknown operations are read back, never automatically replayed
+ok 35 - unknown operations are read back, never automatically replayed
+  ---
+  duration_ms: 27.983583
+  ...
+# Subtest: later pages pause polling instead of being silently replaced by page zero
+ok 36 - later pages pause polling instead of being silently replaced by page zero
+  ---
+  duration_ms: 56.555083
+  ...
+# Subtest: resize preserves access to the currently focused inspector
+ok 37 - resize preserves access to the currently focused inspector
+  ---
+  duration_ms: 20.171167
+  ...
+# Subtest: EOF restores raw mode and disposes terminal resources
+ok 38 - EOF restores raw mode and disposes terminal resources
+  ---
+  duration_ms: 15.925083
+  ...
+# Subtest: NO_COLOR and explicit plain/theme flags resolve predictably
+ok 39 - NO_COLOR and explicit plain/theme flags resolve predictably
+  ---
+  duration_ms: 0.416667
+  ...
+# Subtest: ASCII wordmark is five rows, terminal-sized, and contains no non-ASCII art
+ok 40 - ASCII wordmark is five rows, terminal-sized, and contains no non-ASCII art
+  ---
+  duration_ms: 0.258125
+  ...
+# Subtest: agent multi-select keeps both actual adapters and rejects zero selections
+ok 41 - agent multi-select keeps both actual adapters and rejects zero selections
+  ---
+  duration_ms: 0.274583
+  ...
+# Subtest: explicit CLI choices cannot be changed by the wizard
+ok 42 - explicit CLI choices cannot be changed by the wizard
+  ---
+  duration_ms: 0.071084
+  ...
+# Subtest: custom skill root rejects ambiguous multi-agent setup
+ok 43 - custom skill root rejects ambiguous multi-agent setup
+  ---
+  duration_ms: 0.035416
+  ...
+# Subtest: prefix validation rejects relative, root, normalized root and control characters
+ok 44 - prefix validation rejects relative, root, normalized root and control characters
+  ---
+  duration_ms: 0.126792
+  ...
+# Subtest: existing-command protection follows the edited destination
+ok 45 - existing-command protection follows the edited destination
+  ---
+  duration_ms: 1.50175
+  ...
+# Subtest: compact review must be scrolled before final confirmation
+ok 46 - compact review must be scrolled before final confirmation
+  ---
+  duration_ms: 2.3015
+  ...
+# Subtest: every installer screen stays bounded at 30x10
+ok 47 - every installer screen stays bounded at 30x10
+  ---
+  duration_ms: 23.192042
+  ...
+# Subtest: every installer screen stays bounded at 48x18
+ok 48 - every installer screen stays bounded at 48x18
+  ---
+  duration_ms: 22.449875
+  ...
+# Subtest: every installer screen stays bounded at 60x24
+ok 49 - every installer screen stays bounded at 60x24
+  ---
+  duration_ms: 28.232334
+  ...
+# Subtest: every installer screen stays bounded at 80x24
+ok 50 - every installer screen stays bounded at 80x24
+  ---
+  duration_ms: 25.46925
+  ...
+# Subtest: every installer screen stays bounded at 100x36
+ok 51 - every installer screen stays bounded at 100x36
+  ---
+  duration_ms: 37.232667
+  ...
+# Subtest: every installer screen stays bounded at 144x44
+ok 52 - every installer screen stays bounded at 144x44
+  ---
+  duration_ms: 47.934959
+  ...
+# Subtest: wizard cancellation and back navigation produce no apply result
+ok 53 - wizard cancellation and back navigation produce no apply result
+  ---
+  duration_ms: 0.100792
+  ...
+# Subtest: terminal control strings cannot leak shortcut letters into commands
+ok 54 - terminal control strings cannot leak shortcut letters into commands
+  ---
+  duration_ms: 0.123625
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 24x6
+ok 55 - operable content across dashboard, sheets, and both wizards at 24x6
+  ---
+  duration_ms: 40.039333
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 32x8
+ok 56 - operable content across dashboard, sheets, and both wizards at 32x8
+  ---
+  duration_ms: 33.282542
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 40x8
+ok 57 - operable content across dashboard, sheets, and both wizards at 40x8
+  ---
+  duration_ms: 30.399958
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 40x10
+ok 58 - operable content across dashboard, sheets, and both wizards at 40x10
+  ---
+  duration_ms: 31.898958
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 48x10
+ok 59 - operable content across dashboard, sheets, and both wizards at 48x10
+  ---
+  duration_ms: 34.203042
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 60x12
+ok 60 - operable content across dashboard, sheets, and both wizards at 60x12
+  ---
+  duration_ms: 42.879875
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 80x10
+ok 61 - operable content across dashboard, sheets, and both wizards at 80x10
+  ---
+  duration_ms: 41.833083
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 80x12
+ok 62 - operable content across dashboard, sheets, and both wizards at 80x12
+  ---
+  duration_ms: 63.158917
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 96x16
+ok 63 - operable content across dashboard, sheets, and both wizards at 96x16
+  ---
+  duration_ms: 72.086084
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 100x18
+ok 64 - operable content across dashboard, sheets, and both wizards at 100x18
+  ---
+  duration_ms: 78.167875
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 120x8
+ok 65 - operable content across dashboard, sheets, and both wizards at 120x8
+  ---
+  duration_ms: 44.899167
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 120x12
+ok 66 - operable content across dashboard, sheets, and both wizards at 120x12
+  ---
+  duration_ms: 75.650416
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 160x12
+ok 67 - operable content across dashboard, sheets, and both wizards at 160x12
+  ---
+  duration_ms: 87.848625
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 190x12
+ok 68 - operable content across dashboard, sheets, and both wizards at 190x12
+  ---
+  duration_ms: 96.2295
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 190x16
+ok 69 - operable content across dashboard, sheets, and both wizards at 190x16
+  ---
+  duration_ms: 117.129166
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 220x10
+ok 70 - operable content across dashboard, sheets, and both wizards at 220x10
+  ---
+  duration_ms: 87.00175
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 76x32
+ok 71 - operable content across dashboard, sheets, and both wizards at 76x32
+  ---
+  duration_ms: 98.168042
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 80x32
+ok 72 - operable content across dashboard, sheets, and both wizards at 80x32
+  ---
+  duration_ms: 108.250083
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 104x10
+ok 73 - operable content across dashboard, sheets, and both wizards at 104x10
+  ---
+  duration_ms: 104.268417
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 136x26
+ok 74 - operable content across dashboard, sheets, and both wizards at 136x26
+  ---
+  duration_ms: 141.253416
+  ...
+# Subtest: operable content across dashboard, sheets, and both wizards at 160x48
+ok 75 - operable content across dashboard, sheets, and both wizards at 160x48
+  ---
+  duration_ms: 240.004666
+  ...
+# Subtest: height, not only width, decides chrome and available queue rows
+ok 76 - height, not only width, decides chrome and available queue rows
+  ---
+  duration_ms: 0.448375
+  ...
+# Subtest: all panel content rects are contained even at threshold edges
+ok 77 - all panel content rects are contained even at threshold edges
+  ---
+  duration_ms: 1.797208
+  ...
+# Subtest: invalid, zero and transient dimensions preserve known values; env never overrides a live PTY
+ok 78 - invalid, zero and transient dimensions preserve known values; env never overrides a live PTY
+  ---
+  duration_ms: 0.49225
+  ...
+# Subtest: live geometry tracker emits only changed sizes, recovers and disposes SIGWINCH
+ok 79 - live geometry tracker emits only changed sizes, recovers and disposes SIGWINCH
+  ---
+  duration_ms: 0.58825
+  ...
+# Subtest: literal resize-warning implementation is removed, including installer input guards
+ok 80 - literal resize-warning implementation is removed, including installer input guards
+  ---
+  duration_ms: 1.085167
+  ...
+# Subtest: wide-shallow dashboard is navigable and opens a real inspector
+ok 81 - wide-shallow dashboard is navigable and opens a real inspector
+  ---
+  duration_ms: 51.868042
+  ...
+# Subtest: focused inspector survives shrink and returns to the split layout after growth
+ok 82 - focused inspector survives shrink and returns to the split layout after growth
+  ---
+  duration_ms: 30.3015
+  ...
+# Subtest: command views remain accessible without a rail, including the last choice
+ok 83 - command views remain accessible without a rail, including the last choice
+  ---
+  duration_ms: 13.844416
+  ...
+# Subtest: density and focus toggles never strand keyboard focus in a hidden rail
+ok 84 - density and focus toggles never strand keyboard focus in a hidden rail
+  ---
+  duration_ms: 50.854
+  ...
+# Subtest: search text and a form draft survive resize with in-place cursor editing
+ok 85 - search text and a form draft survive resize with in-place cursor editing
+  ---
+  duration_ms: 106.734583
+  ...
+# Subtest: small confirmation pages first and submits only the reviewed work once
+ok 86 - small confirmation pages first and submits only the reviewed work once
+  ---
+  duration_ms: 60.642666
+  ...
+# Subtest: confirmation cannot submit in an unreadable two-row panel; growing preserves the draft
+ok 87 - confirmation cannot submit in an unreadable two-row panel; growing preserves the draft
+  ---
+  duration_ms: 59.184875
+  ...
+# Subtest: stale confirmation remains blocked after resizing and scrolling
+ok 88 - stale confirmation remains blocked after resizing and scrolling
+  ---
+  duration_ms: 74.3205
+  ...
+# Subtest: full status is scrollable, including the end of a long service error
+ok 89 - full status is scrollable, including the end of a long service error
+  ---
+  duration_ms: 17.50975
+  ...
+# Subtest: Ctrl-L repaints without losing the focused draft
+ok 90 - Ctrl-L repaints without losing the focused draft
+  ---
+  duration_ms: 18.828625
+  ...
+# Subtest: caret editing is grapheme-safe, bounded, and supports delete/home/end/paste
+ok 91 - caret editing is grapheme-safe, bounded, and supports delete/home/end/paste
+  ---
+  duration_ms: 10.685375
+  ...
+# Subtest: density options are validated and no runtime dependency is introduced
+ok 92 - density options are validated and no runtime dependency is introduced
+  ---
+  duration_ms: 0.28875
+  ...
+# Subtest: a long review can be fully navigated and confirmed at every small size
+ok 93 - a long review can be fully navigated and confirmed at every small size
+  ---
+  duration_ms: 134.275542
+  ...
+# Subtest: installer selection, path caret and help state survive shrinking/growing
+ok 94 - installer selection, path caret and help state survive shrinking/growing
+  ---
+  duration_ms: 3.346959
+  ...
+# Subtest: every multi-select option can be focused and changed at 24x6
+ok 95 - every multi-select option can be focused and changed at 24x6
+  ---
+  duration_ms: 0.791125
+  ...
+# Subtest: large ASCII banner appears only when it fits, not at the expense of review space
+ok 96 - large ASCII banner appears only when it fits, not at the expense of review space
+  ---
+  duration_ms: 0.038167
+  ...
+# Subtest: review errors and choice explanations remain readable in the full help sheet
+ok 97 - review errors and choice explanations remain readable in the full help sheet
+  ---
+  duration_ms: 1.2275
+  ...
+# Subtest: an inspector selection has real content even below recommended dimensions
+ok 98 - an inspector selection has real content even below recommended dimensions
+  ---
+  duration_ms: 3.532
+  ...
+# Subtest: short split inspector shows the actual next action before low-priority metadata
+ok 99 - short split inspector shows the actual next action before low-priority metadata
+  ---
+  duration_ms: 2.50675
+  ...
+1..99
+# tests 99
+# suites 0
+# pass 99
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2379.667084
