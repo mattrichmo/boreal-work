@@ -166,31 +166,6 @@
       ]
     },
     {
-      "package": "F6 / BW-S02 and BW-S03 package/update recovery",
-      "owner": "Luna Extra High agent /root/s02_s03_update",
-      "model": "GPT-6 Luna Extra High",
-      "worktree": "/Users/cybertron/.codex/worktrees/v4-s03-update-current/boreal-work",
-      "source_commit": "2fa9bf3ed717ae9f917688b6a6b0fb944a6c5b65",
-      "exclusive_paths": [
-        "crates/cli/src/update.rs",
-        "crates/cli/src/machine_update.rs",
-        "crates/cli/tests focused update tests",
-        "scripts/release/**",
-        "scripts/validation/**",
-        ".github/workflows/release.yml",
-        "docs/INSTALL.md"
-      ],
-      "journeys": [
-        "J8",
-        "J10",
-        "J11",
-        "J12",
-        "J13",
-        "BW-S02-T90",
-        "BW-S03-T90"
-      ]
-    },
-    {
       "package": "F5 / F7 integration",
       "owner": "Coordinator",
       "model": "GPT-6 Luna Extra High",
@@ -206,33 +181,6 @@
         "project/build-plan/production-completion/execution/FINAL_STATE.json"
       ],
       "journeys": "all application journeys"
-    },
-    {
-      "package": "BW-S07-T03 / Global TUI capture provenance inspection",
-      "owner": "Luna Extra High agent /root/v4_s07_provenance",
-      "model": "GPT-6 Luna Extra High",
-      "worktree": "/Users/cybertron/.codex/worktrees/v4-s07-gaps/boreal-work",
-      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
-      "exclusive_paths": [
-        "apps/global-tui/src/view.ts",
-        "apps/global-tui/src/model.ts",
-        "apps/global-tui/src/client.ts",
-        "apps/global-tui/tests/model-view.test.mjs",
-        "apps/global-tui/tests/client-recovery.test.mjs"
-      ],
-      "read_only_references": [
-        "project/build-plan/boreal-final-state/sprints/BW-S07/tasks/BW-S07-T03.md",
-        "project/build-plan/boreal-final-state/WORKFLOW_CONTRACT.md"
-      ],
-      "excluded_paths": [
-        "apps/global-tui/src/interaction.ts",
-        "crates/cli/src/command_registry.rs",
-        "crates/cli/src/global_commands.rs",
-        "project/build-plan/boreal-final-state/**"
-      ],
-      "journeys": [
-        "J05"
-      ]
     },
     {
       "package": "F4 / BW-S13-T02 typed scheduling and external-wait TUI",
@@ -320,8 +268,8 @@
     "release_url": null,
     "channel_verification": "not_run"
   },
-  "note": "Current source includes the PR #22 baseline, the coordinator finish-recipe grammar correction, and the integrated F1 project-local onboarding and guidance updates. The workflow and skill package validators pass; F1 journey acceptance and all sprint qualification remain open. The S07-T03 Global provenance inspector and S13-T02 schedule/wait TUI are active source lanes. Remaining work includes S07 bulk-triage CLI and sprint acceptance, S08 restore identity and Intake receipts, S09 Global Send, S10 scale qualification, S11 release journeys/handover, S12-T05/T06 integration and headless qualification, S13 date/wait parity and reusable mixed-work journeys, and the remaining sprint T90 gates. Integrated qualification, installation activation, and release delivery have not occurred. S00-T01/T04 worker-stop confirmation is still unavailable, so their expiry recovery and dependent runtime actions remain untouched. The installed 0.2.0 binary is not current source and uses SQLite 3.43.2 below the declared 3.51.3 floor; do not activate a candidate until qualification and binding review are complete.",
-  "current_source_commit": "adb2a33044a3f9167ef64159505c2450b09ca198",
+  "note": "Current source includes the PR #22 baseline, the coordinator finish-recipe grammar correction, integrated F1 project-local onboarding and guidance, and the S07-T03 Global provenance inspector. Workflow and skill package validators pass; F1, S07, and all sprint acceptance remain unrun. The S13-T02 schedule/wait TUI remains an active source lane. Remaining work includes S07 bulk-triage CLI and sprint acceptance, S08 restore identity and Intake receipts, S09 Global Send, S10 scale qualification, S11 release journeys/handover, S12-T05/T06 integration and headless qualification, S13 date/wait parity and reusable mixed-work journeys, and remaining sprint T90 gates. The S07-T03 handoff exposed capture_witnesses in interactive snapshots; the bounded application change is held because the application module is still covered by the S06 whole-file lease. Integrated qualification, installation activation, and release delivery have not occurred. S00-T01/T04 worker-stop confirmation is still unavailable, so their expiry recovery and dependent runtime actions remain untouched. The installed 0.2.0 binary is not current source and uses SQLite 3.43.2 below the declared 3.51.3 floor; do not activate a candidate until qualification and binding review are complete.",
+  "current_source_commit": "6362a66d7a3c2cb7611309eee4e31f71757092c0",
   "environment_inventory": {
     "checked_date": "2026-10-14",
     "native_platform": "macOS ARM64",
@@ -485,6 +433,24 @@
       "event": "F1_local_guidance_integrated_with_workflow_package",
       "source_commit": "adb2a33044a3f9167ef64159505c2450b09ca198",
       "summary": "Integrated Luna XHigh F1 local route/claim/finish guidance and role-specific onboarding changes from d37ed447. Updated all three local adapter package versions to 1.3.0 and recalculated the shared workflow package identity to sha256:dd3b13120c1ee9b4b0d7e33ed08d0ce3e5e7e60d858d844a12385b7f62412c31. Workflow validator, skill package validator, and diff check pass. F1 journey and sprint acceptance remain unrun; project/spec/validate_contracts.py also has a separate existing workflow-manifest fixture revision mismatch."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "F6_package_update_hardening_reconciled_on_current_main",
+      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
+      "summary": "A Luna XHigh focused comparison found the S02 release-candidate assembly, target smoke, machine-update authority, and rollback-recovery changes from the older F6 branch already present with identical file contents on current main. No branch cherry-pick is needed. S02 closeout remains unverified. S03-T03 paired package/Global rollback and S03-T06 fault injection remain missing; old branch files are stale and were not merged."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S07_T03_capture_provenance_inspector_integrated",
+      "source_commit": "6362a66d7a3c2cb7611309eee4e31f71757092c0",
+      "summary": "Integrated Luna XHigh commit c4ea8cf20e2d411f57ecccadc790cc9fda4d19c5. The Global TUI now loads and verifies original capture witnesses on demand, with bounded history lookup and explicit missing/tampered outcomes. Combined Global TUI typecheck and test suite pass (103/103). S07-T90 acceptance remains open. The handoff identified that the application snapshot still transmits capture_witnesses; a focused change was held because crates/application/src/global_manager.rs remains under the S06 whole-file lease."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S07_T03_interactive_snapshot_privacy_change_held",
+      "source_commit": "6362a66d7a3c2cb7611309eee4e31f71757092c0",
+      "summary": "The proposed change to omit capture_witnesses from interactive Global snapshots was drafted and its focused application regression passed, but both edits were reverted before commit after confirming an active S06 whole-file write grant on crates/application/src/global_manager.rs. No snapshot behavior changed; reconcile that lease before retrying."
     }
   ]
 }
