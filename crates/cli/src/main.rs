@@ -1,12 +1,13 @@
 use boreal_application::{
     canonical_request_digest, resolve_planning_acceptance_profile, sha256_content_digest,
-    AcceptanceGateDefinition, ApplicationError, AttemptPolicy, AttemptRequest,
-    AuthenticatedOperationJournal, BoundedExecutionResult, CommandSpec, EndAttemptRequest,
-    EvidenceExecutionOutcome, EvidenceRunRequest, ExecutorAttestation, IntakeBucket,
-    IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle, KnowledgeApplication,
-    LivenessMetadata, OperationResult, PlanningScope, ReceiptCoverage, ReceiptExpectation,
-    ReceiptPayload, SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter,
-    SummaryPayload, WorkApplication, WorkPlanningEditV3Input, WorkflowRegistry,
+    AcceptanceGateDefinition, ApplicationError, ArtifactAcceptanceRequest, AttemptPolicy,
+    AttemptRequest, AuthenticatedOperationJournal, BoundedExecutionResult, CommandSpec,
+    EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest, ExecutorAttestation,
+    IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle,
+    KnowledgeApplication, LivenessMetadata, OperationResult, PlanningScope, ProducedArtifactInput,
+    ReceiptCoverage, ReceiptExpectation, ReceiptPayload, SessionRegistrationRequest,
+    SourceCaptureInput, SqliteAttemptAdapter, SummaryPayload, WorkApplication,
+    WorkPlanningEditV3Input, WorkflowRegistry,
 };
 use boreal_domain::work_model_v3::ExecutionMode;
 use boreal_domain::{
@@ -18,19 +19,28 @@ use boreal_domain::{
 };
 use boreal_protocol::{
     models::{
-        AcceptedInputBindingV2Dto, AgentGuideDto, AgentNextDto, ContextRefDto, CoverageDto,
-        DeliverableCriterionV2Dto, DeliverableRequirementV2Dto, DeliverableTypeDto,
+        AcceptedInputBindingV2Dto, AgentGuideDto, AgentNextDto, ArtifactResultAttestationDto,
+        ArtifactResultAvailabilityDto, ArtifactResultBindReadbackDto, ArtifactResultBindRequestDto,
+        ArtifactResultCriterionDto, ArtifactResultOutputReadbackDto, ArtifactResultReadbackDto,
+        ArtifactResultRecordDto, ArtifactResultRightsDto, ArtifactResultSourceIdentityDto,
+        CloseReadinessGapDto, CloseReadinessGateDto, CloseReadinessReadbackDto, ContextRefDto,
+        CoverageDto, DeliverableCriterionV2Dto, DeliverableRequirementV2Dto, DeliverableTypeDto,
         GuidanceContextDto, GuidanceProvenanceDto, GuidanceStatusDto, InputArtifactRoleV2Dto,
         InputArtifactScopeV2Dto, NextActionDto, NextReasonDto, NextStatusDto, ReceiptDto,
         ReceiptSubjectDto, RequirementDto, SubjectDto, WorkflowAssetDto, WorkflowCriterionDto,
         WorkflowInputDto, WorkflowPackageDto, WorkflowShowDto,
+        ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION, ARTIFACT_RESULT_BIND_SCHEMA_VERSION,
+        ARTIFACT_RESULT_READBACK_SCHEMA_VERSION, CLOSE_READINESS_READBACK_SCHEMA_VERSION,
     },
     schema, ApplicationOutcome, DetailReference, Envelope, ErrorCode, ProtocolError,
     TransportOutcome, API_VERSION,
 };
-use boreal_source::SourceCatalog;
+use boreal_source::{ArtifactRightsProvenance, SourceCatalog, SourceIdentity};
 use boreal_store::identity::{IdentityError, IdentityStore, WorkspaceBinding};
 use boreal_store::{
+    acceptance::{
+        AcceptanceResultRecord, ArtifactInspectionAvailability, CompletionAttestationInput,
+    },
     AuditEventRecord, EvidenceExecutionState, MaintenanceJobInput, MaintenanceJobTransition,
     OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation, ReceiptOutcome,
     ReceiptRecord, SqliteBackupPackageReport, SqliteRestorePackageReport, SqliteStore, StoreError,
@@ -150,12 +160,15 @@ Usage:
   bwrk dep tree <project> [--db PATH] [--json]
   bwrk dep cycles <project> [--db PATH] [--json]
   bwrk source add <project> --input PATH --origin ORIGIN [--media-type TYPE] [--session ID --expected-revision N --socket PATH] [--db PATH] [--json]
-  bwrk source show <project> <source-version-id> [--db PATH] [--json]
+  bwrk source show <project> <source-version-id> [--socket PATH] [--db PATH] [--json]
   bwrk source list <project> [--limit N] [--offset N] [--db PATH] [--json]
-  bwrk source verify <project> <source-version-id> [--db PATH] [--json]
+  bwrk source verify <project> <source-version-id> [--socket PATH] [--db PATH] [--json]
+  bwrk intake bucket <project> <bucket-id> <name> --expected-revision N [--socket PATH] [--db PATH] [--json]
+  bwrk intake capture <project> <intake-id> <content> --bucket ID --expected-revision N [--kind note|discovery|question|revisit] [--socket PATH] [--db PATH] [--json]
   bwrk doctor [--project PROJECT] [--db PATH] [--json]
   bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk work show <project> <work-id> [--db PATH] [--json]
+  bwrk work close-readiness <project> <work-id> [--socket PATH] [--db PATH] [--json]
   bwrk work claim <project> <work-id> --source-version ID --config-identity ID [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--db PATH] [--json]
   bwrk work accept <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
   bwrk work heartbeat <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
@@ -175,6 +188,9 @@ Usage:
   bwrk evidence run --project PROJECT --work WORK_ID --gate GATE_ID [--attempt ATTEMPT_ID --fence N] [--json]
   bwrk evidence bind-result --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N --source-version ID --content-digest SHA --expected-revision N --expected-entity-revision N --expected-proof-revision N [--actor ID --session ID --operation-id ID --socket PATH --json]
   bwrk evidence receipts --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--limit N --offset N --socket PATH --json]
+  bwrk artifact result bind --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk artifact result attempt --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--socket PATH --json]
+  bwrk artifact result operation --project PROJECT OPERATION_ID [--socket PATH --json]
   bwrk gate policy publish --project PROJECT --gate GATE_ID --input PATH --expected-revision N --yes [--socket PATH] [--json]
   bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]
   bwrk session start --project PROJECT --session SESSION_ID --harness HARNESS_ID [--json]
@@ -1686,6 +1702,7 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["status"] => status_result(parsed, store),
         ["work", "list"] => list_result(parsed, app),
         ["work", "show"] => show_work_result(parsed, app, store),
+        ["work", "close-readiness"] => close_readiness_command(parsed, app),
         ["work", "rollup"] => container_rollup_result(parsed, app),
         ["migration", "dry-run"] => migration_result(parsed, store, false),
         ["migration", "verify"] => migration_result(parsed, store, true),
@@ -1788,6 +1805,11 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["evidence", "add"] => evidence_add_result(parsed, app),
         ["evidence", "bind-result"] => evidence_bind_result_result(parsed, operation, app, store),
         ["evidence", "receipts"] => evidence_receipts_result(parsed, app),
+        ["artifact", "result", "bind"] => {
+            artifact_result_bind_command(parsed, operation, app, store)
+        }
+        ["artifact", "result", "attempt"] => artifact_result_for_attempt_command(parsed, app),
+        ["artifact", "result", "operation"] => artifact_result_for_operation_command(parsed, app),
         ["evidence", "run"] => evidence_run_result(
             parsed,
             app,
@@ -2476,6 +2498,7 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["intake", "show"] => positionals == 1 + usize::from(options.project.is_none()),
         ["intake", "bucket"] | ["intake", "capture"] => {
             positionals == 2 + usize::from(options.project.is_none())
+                && options.expected_revision.is_some()
         }
         ["source", "add"] => {
             positionals == usize::from(options.project.is_none())
@@ -2491,9 +2514,10 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         | ["cycle" | "sprint", "list" | "current"]
         | ["operation", "list" | "stats"]
         | ["export", "json" | "markdown"] => positionals == usize::from(options.project.is_none()),
-        ["work", "history"] | ["work", "split"] | ["work", "split", "show"] => {
-            positionals == 1 + usize::from(options.project.is_none())
-        }
+        ["work", "history"]
+        | ["work", "close-readiness"]
+        | ["work", "split"]
+        | ["work", "split", "show"] => positionals == 1 + usize::from(options.project.is_none()),
         ["sprint", "board" | "report"] => positionals == 1 + usize::from(options.project.is_none()),
         ["orchestrate", "start" | "list"]
         | ["orchestrate", "daemon", "run" | "status"]
@@ -2552,6 +2576,17 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
                 && options.attempt.is_some()
                 && options.fence.is_some()
         }
+        ["artifact", "result", "bind"] => {
+            positionals == 0 && options.input.is_some() && options.project.is_some()
+        }
+        ["artifact", "result", "attempt"] => {
+            positionals == 0
+                && options.project.is_some()
+                && options.work.is_some()
+                && options.attempt.is_some()
+                && options.fence.is_some()
+        }
+        ["artifact", "result", "operation"] => positionals == 1 && options.project.is_some(),
         ["evidence", "add"] => {
             positionals == 0
                 && options.work.is_some()
@@ -2560,6 +2595,16 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         }
         _ => true,
     };
+    if matches!(
+        path.as_slice(),
+        ["intake", "bucket"] | ["intake", "capture"]
+    ) && options.expected_revision.is_none()
+    {
+        return Err(CliError::invalid(format!(
+            "{} requires --expected-revision",
+            path.join(" ")
+        )));
+    }
     if !valid {
         return Err(CliError::invalid(format!(
             "invalid arguments for command path: {}",
@@ -2571,6 +2616,7 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["evidence", "run"]
             | ["evidence", "bind-result"]
             | ["evidence", "receipts"]
+            | ["artifact", "result", "attempt"]
             | ["evidence", "add"]
             | ["work", "accept"]
             | ["work", "heartbeat"]
@@ -3781,14 +3827,14 @@ fn intake_bucket_result(
         name: name.clone(),
         archived: false,
     };
-    let revision = app
-        .intake_items_v3(&project)
-        .map_err(map_application_error)?
-        .revision;
+    let expected_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("intake bucket requires --expected-revision"))?;
     let scope =
         boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
-            .at_revision(parsed.options.expected_revision.unwrap_or(revision));
+            .at_revision(expected_revision);
     let result = app
         .create_intake_bucket_v3(&scope, operation.to_owned(), &bucket, &now())
         .map_err(map_application_error)?;
@@ -3854,14 +3900,14 @@ fn intake_capture_result(
         content_digest: sha256_content_digest(content.as_bytes()),
         revisit_at: None,
     };
-    let revision = app
-        .intake_items_v3(&project)
-        .map_err(map_application_error)?
-        .revision;
+    let expected_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("intake capture requires --expected-revision"))?;
     let scope =
         boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
-            .at_revision(parsed.options.expected_revision.unwrap_or(revision));
+            .at_revision(expected_revision);
     let result = app
         .create_intake_item_v3(
             &scope,
@@ -5038,6 +5084,91 @@ fn planning_projection_json(
         );
     }
     projection("valid", Some(node.execution_mode), node.parent_id, None)
+}
+
+fn close_readiness_command(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project_id = project_argument(parsed, 0)?;
+    let work_index = usize::from(parsed.options.project.is_none());
+    let work_id = parsed
+        .options
+        .positionals
+        .get(work_index)
+        .ok_or_else(|| CliError::invalid("work close-readiness requires a work identifier"))?;
+    let (readback, revision) = close_readiness_readback_for_work(&project_id, work_id, app)?;
+    let data = serde_json::to_value(readback).map_err(|error| {
+        CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Failed,
+            format!("cannot encode close-readiness readback: {error}"),
+        )
+    })?;
+    bounded_result(Some(data), Some(revision)).map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn close_readiness_readback_for_work(
+    project_id: &str,
+    work_id: &str,
+    app: &WorkApplication<'_>,
+) -> Result<(CloseReadinessReadbackDto, u64), CliError> {
+    if !app.work_model_v3_enabled().map_err(map_application_error)? {
+        return Err(CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Rejected,
+            "close readiness requires work-model/3; schema-v2 was left unchanged",
+        ));
+    }
+    let projection = app
+        .read_close_readiness_readback(project_id, work_id)
+        .map_err(map_application_error)?;
+    let revision = projection.project_revision;
+    let gates = projection
+        .readiness
+        .gates
+        .into_iter()
+        .map(|gate| CloseReadinessGateDto {
+            gate_id: gate.gate_id.as_str().to_owned(),
+            state: gate_state_name(gate.state).to_owned(),
+            reason_code: gate.reason.map(|reason| reason.as_str().to_owned()),
+        })
+        .collect();
+    let gaps = projection
+        .readiness
+        .gaps
+        .into_iter()
+        .map(|gap| {
+            let gate_id = match &gap {
+                boreal_application::CloseoutGap::GateUnsatisfied(gate_id)
+                | boreal_application::CloseoutGap::ReviewRequired(gate_id)
+                | boreal_application::CloseoutGap::ReviewRejected(gate_id) => {
+                    Some(gate_id.as_str().to_owned())
+                }
+                _ => None,
+            };
+            CloseReadinessGapDto {
+                gap_code: gap.code().to_owned(),
+                gate_id,
+            }
+        })
+        .collect();
+    Ok((
+        CloseReadinessReadbackDto {
+            schema_version: CLOSE_READINESS_READBACK_SCHEMA_VERSION.to_owned(),
+            project_revision: projection.project_revision,
+            work_id: projection.work_id.as_str().to_owned(),
+            current_attempt_id: projection.attempt_id,
+            current_fence: projection.fence,
+            ready: projection.readiness.ready,
+            gates,
+            gaps,
+        },
+        revision,
+    ))
 }
 
 fn show_work_result(
@@ -7320,6 +7451,8 @@ fn evidence_bind_result_result(
             },
         )
         .map_err(map_application_error)?;
+    let changed = result.changed;
+    let snapshot_revision = result.snapshot_revision;
     let binding = result.value.binding;
     bounded_result(
         Some(json!({
@@ -7344,8 +7477,349 @@ fn evidence_bind_result_result(
             "lineage_pending": result.value.lineage_pending,
             "replayed": !result.changed,
         })),
-        Some(result.snapshot_revision),
+        Some(snapshot_revision),
     )
+    .map(|mut cli_result| {
+        cli_result.outcome = if changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
+        cli_result
+    })
+}
+
+fn artifact_result_bind_command(
+    parsed: &ParsedCommand,
+    operation: &str,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let path =
+        parsed.options.input.as_deref().ok_or_else(|| {
+            CliError::invalid("artifact result bind requires --input REQUEST.json")
+        })?;
+    let request = read_artifact_result_bind_request(path)?;
+    artifact_result_bind_request_result(
+        &project_argument(parsed, 0)?,
+        &parsed.options.actor,
+        &parsed.options.session,
+        operation,
+        request,
+        app,
+        store,
+    )
+}
+
+fn read_artifact_result_bind_request(path: &str) -> Result<ArtifactResultBindRequestDto, CliError> {
+    let bytes = fs::read(path).map_err(|error| {
+        CliError::invalid(format!("cannot read artifact result request: {error}"))
+    })?;
+    if bytes.len() > MAX_JSON_BYTES {
+        return Err(CliError::invalid(
+            "artifact result request exceeds the inline protocol bound",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        CliError::invalid(format!(
+            "artifact result request is not valid strict JSON: {error}"
+        ))
+    })
+}
+
+fn artifact_result_bind_request_result(
+    project_id: &str,
+    actor_id: &str,
+    session_id: &str,
+    operation: &str,
+    request: ArtifactResultBindRequestDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    if request.schema_version != ARTIFACT_RESULT_BIND_SCHEMA_VERSION {
+        return Err(CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Rejected,
+            "artifact result request DTO schema version is not supported",
+        ));
+    }
+    if !app.work_model_v3_enabled().map_err(map_application_error)? {
+        return Err(artifact_result_schema_unavailable());
+    }
+    let database = store.database_path().ok_or_else(|| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Rejected,
+            "artifact result binding requires a file-backed source catalog",
+        )
+    })?;
+    let catalog = source_catalog(&source_catalog_root(&database.to_string_lossy()))?;
+    let request = ArtifactAcceptanceRequest {
+        project_id: project_id.to_owned(),
+        work_id: request.work_id,
+        actor_id: actor_id.to_owned(),
+        session_id: session_id.to_owned(),
+        attempt_id: request.attempt_id,
+        fence: request.fence,
+        expected_project_revision: request.expected_project_revision,
+        expected_entity_revision: request.expected_entity_revision,
+        expected_proof_revision: request.expected_proof_revision,
+        result_id: request.result_id,
+        contract_revision: request.contract_revision,
+        outputs: request
+            .outputs
+            .into_iter()
+            .map(|output| ProducedArtifactInput {
+                requirement_key: output.requirement_key,
+                source: SourceIdentity {
+                    project_id: output.source.project_id,
+                    source_version_id: output.source.source_version_id,
+                    content_digest: output.source.content_digest,
+                },
+                relationship_id: output.relationship_id,
+                rights: ArtifactRightsProvenance {
+                    attribution: output.rights.attribution,
+                    rights_statement: output.rights.rights_statement,
+                    license: output.rights.license,
+                },
+            })
+            .collect(),
+        attestation: request
+            .attestation
+            .map(|attestation| CompletionAttestationInput {
+                statement: attestation.statement,
+            }),
+        operation_id: operation.to_owned(),
+        at: now(),
+    };
+    let result = app
+        .bind_artifact_result(&catalog, &request)
+        .map_err(map_application_error)?;
+    let readback = ArtifactResultBindReadbackDto {
+        schema_version: ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION.to_owned(),
+        result: artifact_result_record_dto(&result.value.result),
+        source_relationship_ids: result.value.source_relationship_ids,
+        lineage_pending: result.value.lineage_pending,
+    };
+    let mut cli_result = bounded_result(
+        Some(serde_json::to_value(readback).map_err(|error| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                format!("cannot encode artifact result readback: {error}"),
+            )
+        })?),
+        Some(result.snapshot_revision),
+    )?;
+    cli_result.outcome = if result.changed {
+        ApplicationOutcome::Changed
+    } else {
+        ApplicationOutcome::Unchanged
+    };
+    Ok(cli_result)
+}
+
+fn artifact_result_for_attempt_command(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let work_id = parsed
+        .options
+        .work
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("artifact result attempt requires --work"))?;
+    let attempt_id = parsed
+        .options
+        .attempt
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("artifact result attempt requires --attempt"))?;
+    let fence = parsed
+        .options
+        .fence
+        .ok_or_else(|| CliError::invalid("artifact result attempt requires --fence"))?;
+    artifact_result_for_attempt_result(
+        &project_argument(parsed, 0)?,
+        work_id,
+        attempt_id,
+        fence,
+        app,
+    )
+}
+
+fn artifact_result_for_operation_command(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let operation_id = parsed
+        .options
+        .positionals
+        .first()
+        .ok_or_else(|| CliError::invalid("artifact result operation requires OPERATION_ID"))?;
+    artifact_result_for_operation_result(&project_argument(parsed, 0)?, operation_id, app)
+}
+
+fn artifact_result_schema_unavailable() -> CliError {
+    CliError::with(
+        ErrorCode::ServiceUnavailable,
+        ApplicationOutcome::Rejected,
+        "artifact result routes require the work-model/3 acceptance schema; schema-v2 was left unchanged",
+    )
+}
+
+fn artifact_result_for_attempt_result(
+    project_id: &str,
+    work_id: &str,
+    attempt_id: &str,
+    fence: u64,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    if !app.work_model_v3_enabled().map_err(map_application_error)? {
+        return Err(artifact_result_schema_unavailable());
+    }
+    let result = app
+        .artifact_result_for_attempt(project_id, work_id, attempt_id, fence)
+        .map_err(map_application_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                "artifact result was not found for the exact attempt fence",
+            )
+        })?;
+    let revision = result.project_revision;
+    let readback = ArtifactResultReadbackDto {
+        schema_version: ARTIFACT_RESULT_READBACK_SCHEMA_VERSION.to_owned(),
+        result: artifact_result_record_dto(&result),
+    };
+    bounded_result(
+        Some(serde_json::to_value(readback).map_err(|error| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                format!("cannot encode artifact result readback: {error}"),
+            )
+        })?),
+        Some(revision),
+    )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn artifact_result_for_operation_result(
+    project_id: &str,
+    operation_id: &str,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    if !app.work_model_v3_enabled().map_err(map_application_error)? {
+        return Err(artifact_result_schema_unavailable());
+    }
+    let result = app
+        .artifact_result_for_operation(project_id, operation_id)
+        .map_err(map_application_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                "artifact result was not found for this project operation",
+            )
+        })?;
+    let revision = result.project_revision;
+    let readback = ArtifactResultReadbackDto {
+        schema_version: ARTIFACT_RESULT_READBACK_SCHEMA_VERSION.to_owned(),
+        result: artifact_result_record_dto(&result),
+    };
+    bounded_result(
+        Some(serde_json::to_value(readback).map_err(|error| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                format!("cannot encode artifact result readback: {error}"),
+            )
+        })?),
+        Some(revision),
+    )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn artifact_result_record_dto(record: &AcceptanceResultRecord) -> ArtifactResultRecordDto {
+    ArtifactResultRecordDto {
+        result_id: record.result_id.clone(),
+        project_id: record.project_id.clone(),
+        work_id: record.work_id.clone(),
+        attempt_id: record.attempt_id.clone(),
+        fence: record.fence,
+        entity_revision: record.entity_revision,
+        proof_revision: record.proof_revision,
+        actor_id: record.actor_id.clone(),
+        session_id: record.session_id.clone(),
+        source_version_id: record.source_version_id.clone(),
+        config_identity: record.config_identity.clone(),
+        profile_id: record.profile_id.clone(),
+        profile_version: record.profile_version,
+        profile_digest: record.profile_digest.clone(),
+        contract_revision: record.contract_revision,
+        result_digest: record.result_digest.clone(),
+        outputs: record
+            .outputs
+            .iter()
+            .map(|output| ArtifactResultOutputReadbackDto {
+                requirement_key: output.requirement_key.clone(),
+                relationship_id: output.relationship_id.clone(),
+                rights: ArtifactResultRightsDto {
+                    attribution: output.attribution.clone(),
+                    rights_statement: output.rights_statement.clone(),
+                    license: output.license.clone(),
+                },
+                source: ArtifactResultSourceIdentityDto {
+                    project_id: record.project_id.clone(),
+                    source_version_id: output.source_version_id.clone(),
+                    content_digest: output.content_digest.clone(),
+                },
+                media_type: output.media_type.clone(),
+                availability: match output.availability {
+                    ArtifactInspectionAvailability::Available => {
+                        ArtifactResultAvailabilityDto::Available
+                    }
+                    ArtifactInspectionAvailability::Missing => {
+                        ArtifactResultAvailabilityDto::Missing
+                    }
+                    ArtifactInspectionAvailability::Corrupt => {
+                        ArtifactResultAvailabilityDto::Corrupt
+                    }
+                    ArtifactInspectionAvailability::TooLarge => {
+                        ArtifactResultAvailabilityDto::TooLarge
+                    }
+                },
+                media_type_allowed: output.media_type_allowed,
+                byte_count: output.byte_count,
+                criteria: output
+                    .criteria
+                    .iter()
+                    .map(|criterion| ArtifactResultCriterionDto {
+                        criterion_id: criterion.criterion_id.clone(),
+                        passed: criterion.passed,
+                        observed: criterion.observed.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        attestation: record
+            .attestation
+            .as_ref()
+            .map(|attestation| ArtifactResultAttestationDto {
+                statement: attestation.statement.clone(),
+            }),
+        operation_id: record.operation_id.clone(),
+        request_digest: record.request_digest.clone(),
+        project_revision: record.project_revision,
+        created_at: record.created_at.clone(),
+        replayed: record.replayed,
+    }
 }
 
 fn evidence_receipts_result(
@@ -11394,6 +11868,56 @@ mod tests {
     }
 
     #[test]
+    fn intake_routes_require_explicit_expected_revision_for_direct_and_service_parity() {
+        let bucket = parse(&args(&[
+            "intake",
+            "bucket",
+            "project-1",
+            "bucket-1",
+            "Inbox",
+        ]))
+        .expect_err("intake bucket without a revision must be rejected");
+        assert_eq!(bucket.code, ErrorCode::InvalidArgument);
+        assert!(bucket.message.contains("--expected-revision"));
+
+        let capture = parse(&args(&[
+            "intake",
+            "capture",
+            "project-1",
+            "intake-1",
+            "A note",
+            "--bucket",
+            "bucket-1",
+        ]))
+        .expect_err("intake capture without a revision must be rejected");
+        assert_eq!(capture.code, ErrorCode::InvalidArgument);
+        assert!(capture.message.contains("--expected-revision"));
+
+        assert!(parse(&args(&[
+            "intake",
+            "bucket",
+            "project-1",
+            "bucket-1",
+            "Inbox",
+            "--expected-revision",
+            "7",
+        ]))
+        .is_ok());
+        assert!(parse(&args(&[
+            "intake",
+            "capture",
+            "project-1",
+            "intake-1",
+            "A note",
+            "--bucket",
+            "bucket-1",
+            "--expected-revision",
+            "7",
+        ]))
+        .is_ok());
+    }
+
+    #[test]
     fn evidence_execution_state_readback_uses_protocol_terminal_names() {
         assert_eq!(
             evidence_execution_state_name(EvidenceExecutionState::ReceiptCommitted),
@@ -11485,7 +12009,7 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_selected_socket_rejects_direct_only_source_routes() {
+    fn explicitly_selected_socket_routes_source_show_to_service() {
         let error = run_with_operation(
             &args(&[
                 "source",
@@ -11497,16 +12021,16 @@ mod tests {
             ]),
             "op_unavailable_route",
         )
-        .expect_err("direct-only source route must fail closed");
-        assert_eq!(error.code, ErrorCode::UnknownCommandNamespace);
-        assert_eq!(error.outcome, ApplicationOutcome::Rejected);
-        assert!(error
+        .expect_err("source route should reach the selected service socket");
+        assert_eq!(error.code, ErrorCode::ServiceUnavailable);
+        assert_eq!(error.outcome, ApplicationOutcome::Failed);
+        assert!(!error
             .message
             .contains("not available through the selected service socket"));
     }
 
     #[test]
-    fn direct_only_v3_intake_service_route_is_rejected_before_database_open() {
+    fn explicitly_selected_socket_routes_intake_capture_without_opening_a_database() {
         let path = env::temp_dir().join(format!("boreal-cli-v3-gap-{}.sqlite", now_ms_u64()));
         let db = path.to_string_lossy().to_string();
         let socket = env::temp_dir()
@@ -11524,16 +12048,18 @@ mod tests {
             "captured note",
             "--bucket",
             "inbox",
+            "--expected-revision",
+            "1",
             "--db",
             &db,
             "--socket",
             &socket,
             "--json",
         ]))
-        .expect_err("direct-only V3 intake capture must be unavailable through a service socket");
-        assert_eq!(error.code, ErrorCode::UnknownCommandNamespace);
-        assert_eq!(error.outcome, ApplicationOutcome::Rejected);
-        assert!(error
+        .expect_err("Intake capture should reach the selected socket route");
+        assert_eq!(error.code, ErrorCode::ServiceUnavailable);
+        assert_eq!(error.outcome, ApplicationOutcome::Failed);
+        assert!(!error
             .message
             .contains("not available through the selected service socket"));
         assert!(!path.exists(), "unavailable route opened a database");

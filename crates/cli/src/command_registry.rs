@@ -1749,21 +1749,21 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "intake capture",
-        syntax: "bwrk intake capture [ARGS] [--json]",
+        syntax: "bwrk intake capture PROJECT INTAKE_ID CONTENT --bucket BUCKET_ID --expected-revision N [--kind note|discovery|question|revisit] [--socket PATH --json]",
         action: "mutate",
         output: "intake",
         direct: true,
-        service: false,
-        summary: "project-scoped intake through the canonical application",
+        service: true,
+        summary: "capture typed project intake through the canonical application; service requests require an expected revision and reject schema-v2 without migration",
     },
     CommandSpec {
         path: "intake bucket",
-        syntax: "bwrk intake bucket [ARGS] [--json]",
+        syntax: "bwrk intake bucket PROJECT BUCKET_ID NAME --expected-revision N [--socket PATH --json]",
         action: "mutate",
         output: "intake",
         direct: true,
-        service: false,
-        summary: "project-scoped intake through the canonical application",
+        service: true,
+        summary: "create a project intake bucket through the canonical application; service requests require an expected revision and reject schema-v2 without migration",
     },
     CommandSpec {
         path: "intake show",
@@ -2369,6 +2369,15 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "read one exact work item",
     },
     CommandSpec {
+        path: "work close-readiness",
+        syntax: "bwrk work close-readiness PROJECT WORK_ID [--socket PATH --json]",
+        action: "read",
+        output: "close_readiness",
+        direct: true,
+        service: true,
+        summary: "read exact application-owned close blockers from one revision-consistent snapshot",
+    },
+    CommandSpec {
         path: "work create",
         syntax: "bwrk work create --project PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID] [--execution-mode direct|container] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--acceptance focused|reviewed|PROFILE/VERSION] [--hold CODE] [--planning-contract .boreal/contracts/NAME.json] [--session SESSION_ID] --expected-revision N [--json]",
         action: "mutate",
@@ -2612,6 +2621,33 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "read bounded receipt history for one exact attempt fence",
     },
     CommandSpec {
+        path: "artifact result bind",
+        syntax: "bwrk artifact result bind --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "artifact_result",
+        direct: true,
+        service: true,
+        summary: "inspect exact registered source versions and bind typed output facts to the current attempt",
+    },
+    CommandSpec {
+        path: "artifact result attempt",
+        syntax: "bwrk artifact result attempt --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--socket PATH --json]",
+        action: "read",
+        output: "artifact_result",
+        direct: true,
+        service: true,
+        summary: "read the immutable typed output result for one exact attempt fence",
+    },
+    CommandSpec {
+        path: "artifact result operation",
+        syntax: "bwrk artifact result operation --project PROJECT OPERATION_ID [--socket PATH --json]",
+        action: "read",
+        output: "artifact_result",
+        direct: true,
+        service: true,
+        summary: "read the immutable typed output result bound by one project operation",
+    },
+    CommandSpec {
         path: "gate policy publish",
         syntax: "bwrk gate policy publish --project PROJECT --gate GATE_ID --input PATH --expected-revision N --yes",
         action: "mutate",
@@ -2703,12 +2739,12 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "source show",
-        syntax: "bwrk source show PROJECT SOURCE_VERSION_ID",
+        syntax: "bwrk source show PROJECT SOURCE_VERSION_ID [--socket PATH --json]",
         action: "read",
         output: "source",
         direct: true,
-        service: false,
-        summary: "read one exact source version and its registration",
+        service: true,
+        summary: "read one exact source version and its registration through the workspace-bound service catalog",
     },
     CommandSpec {
         path: "source list",
@@ -2730,12 +2766,12 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "source verify",
-        syntax: "bwrk source verify PROJECT SOURCE_VERSION_ID",
+        syntax: "bwrk source verify PROJECT SOURCE_VERSION_ID [--socket PATH --json]",
         action: "read",
         output: "source_verification",
         direct: true,
-        service: false,
-        summary: "verify a source blob against its immutable digest",
+        service: true,
+        summary: "verify a source blob against its immutable digest through the workspace-bound service catalog",
     },
 ];
 
@@ -3161,6 +3197,63 @@ fn input_schema(path: &str) -> Value {
         "merge show" | "compact show" => {
             json!({"type":"object","required":["source_kind","source_id"],"properties":{"source_kind":{"type":"string"},"source_id":{"type":"string"}}})
         }
+        "work close-readiness" => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["work_id"],
+            "properties": {"work_id": {"type": "string", "minLength": 1}},
+            "description": "The service evaluates canonical persisted proof; project, actor and session come from the authenticated envelope."
+        }),
+        "artifact result bind" => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema_version", "work_id", "attempt_id", "fence", "expected_project_revision", "expected_entity_revision", "expected_proof_revision", "result_id", "contract_revision", "outputs"],
+            "properties": {
+                "schema_version": {"const": "boreal.artifact_result_bind.v1"},
+                "work_id": {"type": "string", "minLength": 1},
+                "attempt_id": {"type": "string", "minLength": 1},
+                "fence": {"type": "integer", "minimum": 1},
+                "expected_project_revision": {"type": "integer", "minimum": 1},
+                "expected_entity_revision": {"type": "integer", "minimum": 0},
+                "expected_proof_revision": {"type": "integer", "minimum": 1},
+                "result_id": {"type": "string", "minLength": 1},
+                "contract_revision": {"type": "integer", "minimum": 0},
+                "outputs": {
+                    "type": "array", "maxItems": 32,
+                    "items": {
+                        "type": "object", "additionalProperties": false,
+                        "required": ["requirement_key", "source", "relationship_id", "rights"],
+                        "properties": {
+                            "requirement_key": {"type": "string", "minLength": 1},
+                            "source": {
+                                "type": "object", "additionalProperties": false,
+                                "required": ["project_id", "source_version_id", "content_digest"],
+                                "properties": {"project_id": {"type": "string"}, "source_version_id": {"type": "string"}, "content_digest": {"type": "string"}}
+                            },
+                            "relationship_id": {"type": "string", "minLength": 1},
+                            "rights": {
+                                "type": "object", "additionalProperties": false,
+                                "properties": {"attribution": {"type": ["string", "null"]}, "rights_statement": {"type": ["string", "null"]}, "license": {"type": ["string", "null"]}}
+                            }
+                        }
+                    }
+                },
+                "attestation": {"type": ["object", "null"], "additionalProperties": false, "properties": {"statement": {"type": "string", "minLength": 1, "maxLength": 4096}}}
+            },
+            "description": "Project/actor/session/operation/time come from the authenticated envelope or service. Source identity is revalidated against the local catalog; do not submit inspection facts or catalog paths."
+        }),
+        "artifact result attempt" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["work_id", "attempt_id", "fence"],
+            "properties": {"work_id": {"type": "string"}, "attempt_id": {"type": "string"}, "fence": {"type": "integer", "minimum": 1}},
+            "description": "Read one immutable result by exact project/work/attempt/fence."
+        }),
+        "artifact result operation" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["target_operation_id"],
+            "properties": {"target_operation_id": {"type": "string", "minLength": 1}},
+            "description": "Read one immutable result by a project-scoped operation ID; the read request's own operation ID is envelope-owned."
+        }),
         "orchestrate pool configure" => {
             json!({"type":"object","additionalProperties":false,"required":["workers"],"properties":{"workers":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["actor_id","session_id","harness_id"],"properties":{"actor_id":{"type":"string"},"session_id":{"type":"string"},"harness_id":{"type":"string"}}}}},"description":"Distinct active sessions with project-local private credentials and registered harness policies."})
         }
@@ -3708,7 +3801,7 @@ mod tests {
         assert_eq!(route["path"], "source show");
         assert_eq!(route["availability"], "available");
         assert_eq!(route["adapters"]["direct"], true);
-        assert_eq!(route["adapters"]["service"], false);
+        assert_eq!(route["adapters"]["service"], true);
 
         let memory = registry_result(Some("memory")).unwrap();
         let memory_data = memory.data.unwrap();
@@ -3717,6 +3810,77 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn artifact_result_routes_publish_typed_inputs_and_exact_read_keys() {
+        let bind = COMMANDS
+            .iter()
+            .find(|command| command.path == "artifact result bind")
+            .expect("artifact result bind is registered");
+        let bind = command_json(bind);
+        assert_eq!(bind["action"], "mutate");
+        assert_eq!(bind["adapters"]["direct"], true);
+        assert_eq!(bind["adapters"]["service"], true);
+        assert!(bind["syntax"]
+            .as_str()
+            .unwrap()
+            .contains("--input REQUEST.json"));
+        assert_eq!(
+            bind["input_schema"]["properties"]["schema_version"]["const"],
+            "boreal.artifact_result_bind.v1"
+        );
+        assert!(bind["input_schema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "expected_proof_revision"));
+        assert_eq!(bind["input_schema"]["additionalProperties"], false);
+
+        for (path, action, expected) in [
+            (
+                "artifact result attempt",
+                "read",
+                ["work_id", "attempt_id", "fence"].as_slice(),
+            ),
+            (
+                "artifact result operation",
+                "read",
+                ["target_operation_id"].as_slice(),
+            ),
+        ] {
+            let route = COMMANDS
+                .iter()
+                .find(|command| command.path == path)
+                .unwrap_or_else(|| panic!("{path} is registered"));
+            let data = command_json(route);
+            assert_eq!(data["action"], action, "{path}");
+            for field in expected {
+                assert!(
+                    data["input_schema"]["required"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|required| required == field),
+                    "{path} input schema must require {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn close_readiness_is_a_typed_read_route_without_caller_facts() {
+        let route = COMMANDS
+            .iter()
+            .find(|command| command.path == "work close-readiness")
+            .expect("close-readiness route is registered");
+        let data = command_json(route);
+        assert_eq!(data["action"], "read");
+        assert_eq!(data["adapters"]["direct"], true);
+        assert_eq!(data["adapters"]["service"], true);
+        assert_eq!(data["input_schema"]["required"], json!(["work_id"]));
+        assert_eq!(data["input_schema"]["additionalProperties"], false);
+        assert_eq!(data["output"], "close_readiness");
     }
 
     #[test]

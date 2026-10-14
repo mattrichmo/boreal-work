@@ -169,27 +169,41 @@ receipts bind work, attempt, fence and gate; operation IDs remain the mutation
 readback key.
 
 `work create`, `work edit`, `work claim`, source intake/list, evidence add/run,
-review approval and operation readback have checked direct and service paths
-as recorded in the CLI contract. Source show/verify and intake capture/bucket
-are direct CLI routes without service parity. Source and status list routes use
-`limit`/`offset` paging; the legacy cursor spelling above is not the current
-callable paging shape. `operation show` can return operation, execution,
-external-job, recovery and receipt details; the sections are optional, and a
-finish-close recovery may be partial.
+review history reads and operation readback have direct and service paths as
+recorded in the callable registry. Source `show` and `verify` now also have
+service routes with versioned request/readback DTOs. `intake bucket` and
+`intake capture` use versioned service DTOs and require `--expected-revision`;
+when work-model/3 is unavailable on an older store, the service rejects these
+routes without migrating or mutating that store. Their direct CLI behavior is
+unchanged. `evidence bind-result` has a typed service request/readback DTO
+whose work/attempt/fence, project/entity/proof revisions, source version and
+digest must match the current application state. Source and status list routes
+use `limit`/`offset` paging; the legacy cursor spelling above is not the
+current callable paging shape. `operation show` can return operation,
+execution, external-job, recovery and receipt details; the sections are
+optional, and a finish-close recovery may be partial.
 
-Current source-version identity and gate-receipt proof are callable. Review
-approval has a typed decision DTO with project, entity and proof revision
-bindings; actor authorization comes from the authenticated service session.
-General-work create/edit does not expose callable deliverable requirement
-schemas, artifact submission identity or typed output inspection. A claim
+`work close-readiness` reads the application-owned close-readiness snapshot
+through both the direct CLI and service. Its versioned readback includes the
+snapshot project revision, work ID, current attempt/fence when present, gate
+states and exact blockers; callers cannot submit readiness facts. A schema-v2
+service rejects the route as unavailable without migration or mutation.
+
+Current source-version identity and gate-receipt proof are callable. A claim
 binds one source version and config identity, but there is no callable
-accepted-input bundle. BW-S12-T01 now freezes additive, strict protocol
-schemas and examples for requirements, accepted input bundles, attempt-bound
-submissions, automated inspection facts, and revision-bound human acceptance.
-These schemas are explicitly contract-only: they are not registered routes or
-capabilities and do not imply that storage, validation or authorization exists.
-The BW-S12-T02/T03/T04 owners implement the respective behavior; BW-S12-T05
-restores service parity for direct-only source and intake routes. S13 owns
+accepted-input bundle. The strict T01 examples for generic requirement,
+submission, inspection and acceptance payloads remain contract-only: those
+schemas are not registered routes and do not imply public adapter support.
+Typed producer output inspection now uses `artifact result bind` with the
+versioned `boreal.artifact_result_bind.v1` request, plus exact attempt-fence
+and project-operation readbacks. The application revalidates each project-
+scoped source identity and computes inspection facts; request DTOs exclude
+caller-supplied inspection facts and host catalog paths. The bind readback
+preserves result, actor/session, pinned profile/contract, output criteria,
+replay and lineage outcomes. Schema-v2 stores return explicit unavailable
+without migration. This callable result binding does not make the frozen T01
+generic submission or human artifact-decision DTOs callable. The final-result
+source binding remains a separate proof-generation operation. S13 owns
 date/wait and TUI contract work.
 
 Artifact inspections are attributable observations over an exact submitted

@@ -355,16 +355,16 @@
       {"path": "work claim", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::claim_with_context", "callable_fields": ["project_id", "work_id", "actor_id", "harness_id", "session_id", "attempt_id", "operation_id", "expected_revision", "source_version_id", "config_identity", "lease_ttl_ms", "hard_time_limit_ms"]},
       {"path": "source add", "status": "implemented", "direct_cli": true, "service": true, "application": "source capture and registration", "result_identity": ["project_id", "source_version_id", "content_digest", "media_type", "byte_count", "availability", "parser_identity"]},
       {"path": "source list", "status": "implemented", "direct_cli": true, "service": true, "paging": ["limit", "offset", "total", "has_more"]},
-      {"path": "source show", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05", "reason": "The command registry marks this route unavailable to service dispatch."},
-      {"path": "source verify", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05", "reason": "The command registry marks this route unavailable to service dispatch."},
+      {"path": "source show", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "request_schema": "boreal.source_lookup.v1", "request_fields": ["source_version_id"], "readback_schema": "boreal.source_show_readback.v1", "service_readback_fields": ["source", "sqlite_registration"], "host_catalog_root_in_service_payload": false},
+      {"path": "source verify", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "request_schema": "boreal.source_lookup.v1", "request_fields": ["source_version_id"], "readback_schema": "boreal.source_verify_readback.v1", "service_readback_fields": ["source_version_id", "availability", "verified_digest", "byte_count", "verified"], "host_catalog_root_in_service_payload": false},
       {"path": "evidence add", "status": "implemented", "direct_cli": true, "service": true, "result_identity": ["work_id", "attempt_id", "fence", "gate_id", "operation_id", "receipt_id"]},
       {"path": "evidence run", "status": "implemented", "direct_cli": true, "service": true, "result_identity": ["work_id", "attempt_id", "fence", "gate_id", "operation_id", "receipt_id"]},
       {"path": "review approve", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::complete", "required_decision_revisions": ["expected_revision", "expected_entity_revision", "expected_proof_revision"]},
       {"path": "operation show", "status": "implemented", "direct_cli": true, "service": true, "readback": ["operation", "execution", "external_job", "recovery_obligations", "receipt", "readback_required"]},
-      {"path": "intake capture", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05"},
-      {"path": "intake bucket", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05"},
+      {"path": "intake capture", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "request_schema": "boreal.intake_capture.v1", "required_fields": ["expected_revision", "intake_id", "bucket_id", "kind", "content"], "readback_schema": "boreal.intake_capture_readback.v1", "service_old_schema": "reject_service_unavailable_without_migration_or_mutation", "direct_old_schema": "preserve_existing_additive_work_model_v3_ensure"},
+      {"path": "intake bucket", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "request_schema": "boreal.intake_bucket_create.v1", "required_fields": ["expected_revision", "bucket_id", "name"], "readback_schema": "boreal.intake_bucket_readback.v1", "service_old_schema": "reject_service_unavailable_without_migration_or_mutation", "direct_old_schema": "preserve_existing_additive_work_model_v3_ensure"},
       {"path": "general-work deliverable requirements", "status": "unavailable", "reason": "Callable create/edit request schemas contain no requirement collection."},
-      {"behavior": "general-work artifact submission and typed inspection", "status": "unavailable", "reason": "No public submission or typed output-inspection route is registered."}
+      {"behavior": "general-work artifact submission and typed inspection", "status": "partial", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "routes": ["artifact result bind", "artifact result attempt", "artifact result operation"], "request_schema": "boreal.artifact_result_bind.v1", "required_fields": ["work_id", "attempt_id", "fence", "expected_project_revision", "expected_entity_revision", "expected_proof_revision", "result_id", "contract_revision", "outputs"], "bounded_reads": ["exact_attempt_fence", "project_operation_id"], "identity_authority": "project_actor_session_operation_trusted_time_from_envelope_or_server", "inspection_authority": "application_revalidates_exact_source_versions_and_computes_inspection_facts", "host_catalog_path_in_payload": false, "direct_old_schema": "reject_unavailable_without_migration_or_mutation", "service_old_schema": "reject_service_unavailable_without_migration_or_mutation", "reason": "Typed output binding, inspection readback and exact result reads are callable; generic artifact_submission and human artifact-decision DTO routes remain unavailable."}
     ],
     "authority_boundaries": {
       "project_work": "The project application/store owns work transitions, expected project revisions, session binding and attempt fencing.",
@@ -378,7 +378,7 @@
       "accepted_input_bundle_schema": "partial",
       "source_version_identity": "implemented",
       "generic_output_submission_identity": "unavailable",
-      "typed_output_inspection": "unavailable",
+      "typed_output_inspection": "implemented",
       "gate_receipt_proof": "implemented",
       "review_decision": "implemented",
       "generic_human_deliverable_acceptance": "unavailable"

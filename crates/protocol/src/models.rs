@@ -399,6 +399,45 @@ pub struct CloseIntentDto {
     pub valid: bool,
 }
 
+pub const CLOSE_READINESS_READBACK_SCHEMA_VERSION: &str = "boreal.close_readiness_readback.v1";
+
+/// One gate evaluated from the canonical close-readiness snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseReadinessGateDto {
+    pub gate_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+}
+
+/// One exact blocker returned by the application-owned close-readiness
+/// evaluation. Gate IDs are present only for gate-specific gaps.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseReadinessGapDto {
+    pub gap_code: String,
+    #[serde(default)]
+    pub gate_id: Option<String>,
+}
+
+/// Atomic close-readiness readback. Project, work, current attempt/fence and
+/// revision are returned from one application snapshot, never caller facts.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseReadinessReadbackDto {
+    pub schema_version: String,
+    pub project_revision: u64,
+    pub work_id: String,
+    #[serde(default)]
+    pub current_attempt_id: Option<String>,
+    #[serde(default)]
+    pub current_fence: Option<u64>,
+    pub ready: bool,
+    pub gates: Vec<CloseReadinessGateDto>,
+    pub gaps: Vec<CloseReadinessGapDto>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GateErrorDto {
     pub code: String,
@@ -420,6 +459,280 @@ pub struct NotificationDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_versioned_dto_round_trip<T>(dto: &T, schema_version: &str)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + Eq + std::fmt::Debug,
+    {
+        let encoded = serde_json::to_value(dto).unwrap();
+        assert_eq!(encoded["schema_version"], schema_version);
+        assert_eq!(serde_json::from_value::<T>(encoded.clone()).unwrap(), *dto);
+        let mut unknown = encoded;
+        unknown["unexpected_field"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<T>(unknown).is_err());
+    }
+
+    #[test]
+    fn close_readiness_readback_is_versioned_strict_and_round_trips_exact_gaps() {
+        let readback = CloseReadinessReadbackDto {
+            schema_version: CLOSE_READINESS_READBACK_SCHEMA_VERSION.to_owned(),
+            project_revision: 17,
+            work_id: "work-1".to_owned(),
+            current_attempt_id: Some("attempt-2".to_owned()),
+            current_fence: Some(3),
+            ready: false,
+            gates: vec![CloseReadinessGateDto {
+                gate_id: "verify".to_owned(),
+                state: "open".to_owned(),
+                reason_code: Some("receipt_missing".to_owned()),
+            }],
+            gaps: vec![
+                CloseReadinessGapDto {
+                    gap_code: "gate_unsatisfied".to_owned(),
+                    gate_id: Some("verify".to_owned()),
+                },
+                CloseReadinessGapDto {
+                    gap_code: "summary_missing".to_owned(),
+                    gate_id: None,
+                },
+            ],
+        };
+        assert_versioned_dto_round_trip(&readback, CLOSE_READINESS_READBACK_SCHEMA_VERSION);
+
+        let mut nested_unknown = serde_json::to_value(readback).unwrap();
+        nested_unknown["gaps"][0]["caller_supplied"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<CloseReadinessReadbackDto>(nested_unknown).is_err());
+    }
+
+    #[test]
+    fn source_and_intake_route_dtos_are_versioned_strict_and_round_trip() {
+        let source_lookup = SourceVersionLookupDto {
+            schema_version: SOURCE_LOOKUP_SCHEMA_VERSION.to_owned(),
+            source_version_id: "source-version-1".to_owned(),
+        };
+        assert_versioned_dto_round_trip(&source_lookup, SOURCE_LOOKUP_SCHEMA_VERSION);
+
+        let source_show = SourceShowReadbackDto {
+            schema_version: SOURCE_SHOW_READBACK_SCHEMA_VERSION.to_owned(),
+            source: SourceVersionMetadataDto {
+                source_version_id: "source-version-1".to_owned(),
+                origin: "file:brief.md".to_owned(),
+                media_type: "text/markdown".to_owned(),
+                byte_count: 9,
+                content_digest: "sha256:abc".to_owned(),
+                availability: SourceAvailabilityDto::Available,
+                parser_identity: None,
+            },
+            sqlite_registration: Some(SourceVersionRegistrationDto {
+                source_version_id: "source-version-1".to_owned(),
+                origin: "file:brief.md".to_owned(),
+                access_scope: "project".to_owned(),
+                content_digest: "sha256:abc".to_owned(),
+                media_type: "text/markdown".to_owned(),
+                byte_count: 9,
+                captured_at: "unix-ms:1".to_owned(),
+                parser_identity: "boreal.source/1".to_owned(),
+                availability: "available".to_owned(),
+            }),
+        };
+        assert_versioned_dto_round_trip(&source_show, SOURCE_SHOW_READBACK_SCHEMA_VERSION);
+
+        let source_verify = SourceVerifyReadbackDto {
+            schema_version: SOURCE_VERIFY_READBACK_SCHEMA_VERSION.to_owned(),
+            source_version_id: "source-version-1".to_owned(),
+            availability: SourceAvailabilityDto::Available,
+            verified_digest: Some("sha256:abc".to_owned()),
+            byte_count: 9,
+            verified: true,
+        };
+        assert_versioned_dto_round_trip(&source_verify, SOURCE_VERIFY_READBACK_SCHEMA_VERSION);
+
+        let bucket_request = IntakeBucketCreateDto {
+            schema_version: INTAKE_BUCKET_CREATE_SCHEMA_VERSION.to_owned(),
+            expected_revision: 4,
+            bucket_id: "inbox".to_owned(),
+            name: "Inbox".to_owned(),
+        };
+        assert_versioned_dto_round_trip(&bucket_request, INTAKE_BUCKET_CREATE_SCHEMA_VERSION);
+        let bucket_readback = IntakeBucketReadbackDto {
+            schema_version: INTAKE_BUCKET_READBACK_SCHEMA_VERSION.to_owned(),
+            bucket_id: "inbox".to_owned(),
+            name: "Inbox".to_owned(),
+            archived: false,
+            replayed: true,
+        };
+        assert_versioned_dto_round_trip(&bucket_readback, INTAKE_BUCKET_READBACK_SCHEMA_VERSION);
+
+        let capture_request = IntakeCaptureDto {
+            schema_version: INTAKE_CAPTURE_SCHEMA_VERSION.to_owned(),
+            expected_revision: 5,
+            intake_id: "intake-1".to_owned(),
+            bucket_id: "inbox".to_owned(),
+            kind: IntakeKindDto::Question,
+            content: "Which review criteria apply?".to_owned(),
+        };
+        assert_versioned_dto_round_trip(&capture_request, INTAKE_CAPTURE_SCHEMA_VERSION);
+        let capture_readback = IntakeCaptureReadbackDto {
+            schema_version: INTAKE_CAPTURE_READBACK_SCHEMA_VERSION.to_owned(),
+            intake_id: "intake-1".to_owned(),
+            bucket_id: "inbox".to_owned(),
+            kind: IntakeKindDto::Question,
+            lifecycle: "captured".to_owned(),
+            content_revision: 1,
+            content_digest: "sha256:def".to_owned(),
+            replayed: false,
+        };
+        assert_versioned_dto_round_trip(&capture_readback, INTAKE_CAPTURE_READBACK_SCHEMA_VERSION);
+
+        let final_result_request = FinalResultCaptureRequestDto {
+            schema_version: FINAL_RESULT_CAPTURE_SCHEMA_VERSION.to_owned(),
+            work_id: "work-1".to_owned(),
+            attempt_id: "attempt-1".to_owned(),
+            fence: 3,
+            expected_project_revision: 12,
+            expected_entity_revision: 4,
+            expected_proof_revision: 6,
+            source_version_id: "result-source-1".to_owned(),
+            content_digest: "sha256:fed".to_owned(),
+        };
+        assert_versioned_dto_round_trip(&final_result_request, FINAL_RESULT_CAPTURE_SCHEMA_VERSION);
+        let final_result_readback = FinalResultCaptureReadbackDto {
+            schema_version: FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION.to_owned(),
+            binding_id: "binding-1".to_owned(),
+            work_id: "work-1".to_owned(),
+            attempt_id: "attempt-1".to_owned(),
+            fence: 3,
+            source_version_id: "result-source-1".to_owned(),
+            content_digest: "sha256:fed".to_owned(),
+            config_identity: "config-1".to_owned(),
+            profile_id: "focused".to_owned(),
+            profile_version: 1,
+            profile_digest: "sha256:profile".to_owned(),
+            entity_revision: 4,
+            prior_proof_revision: 5,
+            proof_revision: 6,
+            request_digest: "sha256:request".to_owned(),
+            project_revision: 12,
+            created_at: "unix-ms:10".to_owned(),
+            lineage_pending: Some("relationship repair pending".to_owned()),
+            replayed: false,
+        };
+        assert_versioned_dto_round_trip(
+            &final_result_readback,
+            FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION,
+        );
+
+        let artifact_request = ArtifactResultBindRequestDto {
+            schema_version: ARTIFACT_RESULT_BIND_SCHEMA_VERSION.to_owned(),
+            work_id: "work-report".to_owned(),
+            attempt_id: "attempt-7".to_owned(),
+            fence: 7,
+            expected_project_revision: 23,
+            expected_entity_revision: 8,
+            expected_proof_revision: 11,
+            result_id: "result-report".to_owned(),
+            contract_revision: 2,
+            outputs: vec![ArtifactResultOutputRequestDto {
+                requirement_key: "report".to_owned(),
+                source: ArtifactResultSourceIdentityDto {
+                    project_id: "project-demo".to_owned(),
+                    source_version_id: "source-report".to_owned(),
+                    content_digest: "sha256:report".to_owned(),
+                },
+                relationship_id: "report-v1".to_owned(),
+                rights: ArtifactResultRightsDto {
+                    attribution: Some("agent-1".to_owned()),
+                    rights_statement: Some("created for this project".to_owned()),
+                    license: None,
+                },
+            }],
+            attestation: Some(ArtifactResultAttestationDto {
+                statement: "The report is complete.".to_owned(),
+            }),
+        };
+        assert_versioned_dto_round_trip(&artifact_request, ARTIFACT_RESULT_BIND_SCHEMA_VERSION);
+
+        let artifact_record = ArtifactResultRecordDto {
+            result_id: "result-report".to_owned(),
+            project_id: "project-demo".to_owned(),
+            work_id: "work-report".to_owned(),
+            attempt_id: "attempt-7".to_owned(),
+            fence: 7,
+            entity_revision: 8,
+            proof_revision: 12,
+            actor_id: "agent-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            source_version_id: "source-claim".to_owned(),
+            config_identity: "config-1".to_owned(),
+            profile_id: "validated-deliverables".to_owned(),
+            profile_version: 1,
+            profile_digest: "sha256:profile".to_owned(),
+            contract_revision: 2,
+            result_digest: "sha256:result".to_owned(),
+            outputs: vec![ArtifactResultOutputReadbackDto {
+                requirement_key: "report".to_owned(),
+                relationship_id: "report-v1".to_owned(),
+                rights: ArtifactResultRightsDto {
+                    attribution: Some("agent-1".to_owned()),
+                    rights_statement: Some("created for this project".to_owned()),
+                    license: None,
+                },
+                source: ArtifactResultSourceIdentityDto {
+                    project_id: "project-demo".to_owned(),
+                    source_version_id: "source-report".to_owned(),
+                    content_digest: "sha256:report".to_owned(),
+                },
+                media_type: "text/plain".to_owned(),
+                availability: ArtifactResultAvailabilityDto::Available,
+                media_type_allowed: true,
+                byte_count: 128,
+                criteria: vec![ArtifactResultCriterionDto {
+                    criterion_id: "min_bytes".to_owned(),
+                    passed: true,
+                    observed: "128".to_owned(),
+                }],
+            }],
+            attestation: Some(ArtifactResultAttestationDto {
+                statement: "The report is complete.".to_owned(),
+            }),
+            operation_id: "op-result-bind".to_owned(),
+            request_digest: "sha256:request".to_owned(),
+            project_revision: 24,
+            created_at: "unix-ms:123".to_owned(),
+            replayed: false,
+        };
+        let bind_readback = ArtifactResultBindReadbackDto {
+            schema_version: ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION.to_owned(),
+            result: artifact_record.clone(),
+            source_relationship_ids: vec!["report-v1".to_owned()],
+            lineage_pending: vec![],
+        };
+        assert_versioned_dto_round_trip(
+            &bind_readback,
+            ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION,
+        );
+        let artifact_readback = ArtifactResultReadbackDto {
+            schema_version: ARTIFACT_RESULT_READBACK_SCHEMA_VERSION.to_owned(),
+            result: artifact_record,
+        };
+        assert_versioned_dto_round_trip(
+            &artifact_readback,
+            ARTIFACT_RESULT_READBACK_SCHEMA_VERSION,
+        );
+
+        let mut request_with_host_path = serde_json::to_value(artifact_request).unwrap();
+        request_with_host_path["outputs"][0]["source"]["catalog_root"] =
+            serde_json::json!("/host/local/path");
+        assert!(
+            serde_json::from_value::<ArtifactResultBindRequestDto>(request_with_host_path).is_err()
+        );
+        let mut readback_with_unknown = serde_json::to_value(artifact_readback).unwrap();
+        readback_with_unknown["result"]["outputs"][0]["inspection_claim"] =
+            serde_json::json!("caller supplied");
+        assert!(
+            serde_json::from_value::<ArtifactResultReadbackDto>(readback_with_unknown).is_err()
+        );
+    }
 
     #[test]
     fn fixture_dtos_round_trip_without_losing_versioned_fields() {
@@ -612,11 +925,16 @@ mod tests {
         );
         assert_eq!(
             fixture["v4_optional_contracts"]["generic_deliverable_submission_identity"]["status"],
-            "unavailable"
+            "partial"
+        );
+        assert_eq!(
+            fixture["v4_optional_contracts"]["generic_deliverable_submission_identity"]
+                ["schema_status"],
+            "typed_artifact_result_binding_only"
         );
         assert_eq!(
             fixture["v4_optional_contracts"]["typed_output_inspection"]["status"],
-            "unavailable"
+            "implemented"
         );
     }
 
@@ -902,6 +1220,269 @@ pub struct ArtifactVersionIdentityDto {
     pub media_type: String,
     pub byte_count: u64,
     pub availability: String,
+}
+
+pub const SOURCE_LOOKUP_SCHEMA_VERSION: &str = "boreal.source_lookup.v1";
+pub const SOURCE_SHOW_READBACK_SCHEMA_VERSION: &str = "boreal.source_show_readback.v1";
+pub const SOURCE_VERIFY_READBACK_SCHEMA_VERSION: &str = "boreal.source_verify_readback.v1";
+
+/// Lookup identity for exact source-version inspection. Project and caller
+/// identity are supplied by the authenticated application envelope.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceVersionLookupDto {
+    pub schema_version: String,
+    pub source_version_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceAvailabilityDto {
+    Available,
+    Missing,
+    Corrupt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceVersionMetadataDto {
+    pub source_version_id: String,
+    pub origin: String,
+    pub media_type: String,
+    pub byte_count: u64,
+    pub content_digest: String,
+    pub availability: SourceAvailabilityDto,
+    #[serde(default)]
+    pub parser_identity: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceVersionRegistrationDto {
+    pub source_version_id: String,
+    pub origin: String,
+    pub access_scope: String,
+    pub content_digest: String,
+    pub media_type: String,
+    pub byte_count: u64,
+    pub captured_at: String,
+    pub parser_identity: String,
+    pub availability: String,
+}
+
+/// Host-independent source metadata and its optional canonical registration.
+/// Local catalog paths are intentionally not part of the protocol result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceShowReadbackDto {
+    pub schema_version: String,
+    pub source: SourceVersionMetadataDto,
+    #[serde(default)]
+    pub sqlite_registration: Option<SourceVersionRegistrationDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceVerifyReadbackDto {
+    pub schema_version: String,
+    pub source_version_id: String,
+    pub availability: SourceAvailabilityDto,
+    #[serde(default)]
+    pub verified_digest: Option<String>,
+    pub byte_count: u64,
+    pub verified: bool,
+}
+
+pub const FINAL_RESULT_CAPTURE_SCHEMA_VERSION: &str = "boreal.final_result_capture.v1";
+pub const FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION: &str =
+    "boreal.final_result_capture_readback.v1";
+
+/// Revision-bound binding of one captured source to a proof generation.
+/// Project, actor, session, operation, and trusted time come from the
+/// authenticated service envelope/server.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalResultCaptureRequestDto {
+    pub schema_version: String,
+    pub work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub expected_project_revision: u64,
+    pub expected_entity_revision: u64,
+    pub expected_proof_revision: u64,
+    pub source_version_id: String,
+    pub content_digest: String,
+}
+
+/// Authoritative final-result binding readback. Project, actor, session and
+/// operation identity are carried by the authenticated service envelope.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalResultCaptureReadbackDto {
+    pub schema_version: String,
+    pub binding_id: String,
+    pub work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub source_version_id: String,
+    pub content_digest: String,
+    pub config_identity: String,
+    pub profile_id: String,
+    pub profile_version: u64,
+    pub profile_digest: String,
+    pub entity_revision: u64,
+    pub prior_proof_revision: u64,
+    pub proof_revision: u64,
+    pub request_digest: String,
+    pub project_revision: u64,
+    pub created_at: String,
+    #[serde(default)]
+    pub lineage_pending: Option<String>,
+    pub replayed: bool,
+}
+
+pub const ARTIFACT_RESULT_BIND_SCHEMA_VERSION: &str = "boreal.artifact_result_bind.v1";
+pub const ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION: &str =
+    "boreal.artifact_result_bind_readback.v1";
+pub const ARTIFACT_RESULT_READBACK_SCHEMA_VERSION: &str = "boreal.artifact_result_readback.v1";
+
+/// Exact project-scoped source identity asserted by a result producer. The
+/// application revalidates these fields against the source catalog; callers
+/// cannot provide inspection facts or host-local paths here.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultSourceIdentityDto {
+    pub project_id: String,
+    pub source_version_id: String,
+    pub content_digest: String,
+}
+
+/// Optional provenance attached to a produced output relationship.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultRightsDto {
+    #[serde(default)]
+    pub attribution: Option<String>,
+    #[serde(default)]
+    pub rights_statement: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultOutputRequestDto {
+    pub requirement_key: String,
+    pub source: ArtifactResultSourceIdentityDto,
+    pub relationship_id: String,
+    pub rights: ArtifactResultRightsDto,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultAttestationDto {
+    pub statement: String,
+}
+
+/// Request to inspect exact source versions and bind their deterministic
+/// inspection facts to one fenced attempt. Project, actor, session, operation,
+/// and trusted time are supplied by the authenticated service envelope.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultBindRequestDto {
+    pub schema_version: String,
+    pub work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub expected_project_revision: u64,
+    pub expected_entity_revision: u64,
+    pub expected_proof_revision: u64,
+    pub result_id: String,
+    pub contract_revision: u64,
+    pub outputs: Vec<ArtifactResultOutputRequestDto>,
+    #[serde(default)]
+    pub attestation: Option<ArtifactResultAttestationDto>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactResultAvailabilityDto {
+    Available,
+    Missing,
+    Corrupt,
+    TooLarge,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultCriterionDto {
+    pub criterion_id: String,
+    pub passed: bool,
+    pub observed: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultOutputReadbackDto {
+    pub requirement_key: String,
+    pub relationship_id: String,
+    pub rights: ArtifactResultRightsDto,
+    pub source: ArtifactResultSourceIdentityDto,
+    pub media_type: String,
+    pub availability: ArtifactResultAvailabilityDto,
+    pub media_type_allowed: bool,
+    pub byte_count: u64,
+    pub criteria: Vec<ArtifactResultCriterionDto>,
+}
+
+/// Canonical immutable acceptance-result record returned by bind and bounded
+/// read operations. Actor/session/operation/time values are server-owned.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultRecordDto {
+    pub result_id: String,
+    pub project_id: String,
+    pub work_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub entity_revision: u64,
+    pub proof_revision: u64,
+    pub actor_id: String,
+    pub session_id: String,
+    pub source_version_id: String,
+    pub config_identity: String,
+    pub profile_id: String,
+    pub profile_version: u64,
+    pub profile_digest: String,
+    pub contract_revision: u64,
+    pub result_digest: String,
+    pub outputs: Vec<ArtifactResultOutputReadbackDto>,
+    #[serde(default)]
+    pub attestation: Option<ArtifactResultAttestationDto>,
+    pub operation_id: String,
+    pub request_digest: String,
+    pub project_revision: u64,
+    pub created_at: String,
+    pub replayed: bool,
+}
+
+/// Result-binding response adds the catalog lineage work performed by the
+/// application to the canonical immutable record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultBindReadbackDto {
+    pub schema_version: String,
+    pub result: ArtifactResultRecordDto,
+    pub source_relationship_ids: Vec<String>,
+    pub lineage_pending: Vec<String>,
+}
+
+/// Bounded attempt-fence and operation readback for one canonical result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactResultReadbackDto {
+    pub schema_version: String,
+    pub result: ArtifactResultRecordDto,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1250,6 +1831,67 @@ pub struct IntakeDeliveryReadbackDto {
     pub receipt: Option<IntakeDeliveryReceiptDto>,
     #[serde(default)]
     pub intake: Option<IntakeDeliveryItemDto>,
+}
+
+pub const INTAKE_BUCKET_CREATE_SCHEMA_VERSION: &str = "boreal.intake_bucket_create.v1";
+pub const INTAKE_BUCKET_READBACK_SCHEMA_VERSION: &str = "boreal.intake_bucket_readback.v1";
+pub const INTAKE_CAPTURE_SCHEMA_VERSION: &str = "boreal.intake_capture.v1";
+pub const INTAKE_CAPTURE_READBACK_SCHEMA_VERSION: &str = "boreal.intake_capture_readback.v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntakeKindDto {
+    Note,
+    Discovery,
+    Question,
+    Revisit,
+}
+
+/// Revision-bound request to create a project Intake bucket. Project and
+/// actor/session/operation identity are supplied by the authenticated route.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeBucketCreateDto {
+    pub schema_version: String,
+    pub expected_revision: u64,
+    pub bucket_id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeBucketReadbackDto {
+    pub schema_version: String,
+    pub bucket_id: String,
+    pub name: String,
+    pub archived: bool,
+    pub replayed: bool,
+}
+
+/// Revision-bound Intake capture. The service supplies the capture time and
+/// derives the immutable content digest from the supplied content.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeCaptureDto {
+    pub schema_version: String,
+    pub expected_revision: u64,
+    pub intake_id: String,
+    pub bucket_id: String,
+    pub kind: IntakeKindDto,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeCaptureReadbackDto {
+    pub schema_version: String,
+    pub intake_id: String,
+    pub bucket_id: String,
+    pub kind: IntakeKindDto,
+    pub lifecycle: String,
+    pub content_revision: u64,
+    pub content_digest: String,
+    pub replayed: bool,
 }
 
 /// Local wall-clock input is resolved by the application against its actual
