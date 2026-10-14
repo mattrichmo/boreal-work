@@ -17,9 +17,10 @@
     "bwrk init --agents <agent_targets> --yes --json",
     "bwrk status <project_id> --json",
     "bwrk workflows show <workflow_ref> --json",
-    "bwrk auth key --actor <actor_id> --actor-role <actor_role> --json",
-    "bwrk auth key --actor <actor_id> --actor-role <actor_role> --json",
-    "bwrk auth key --actor <actor_id> --actor-role <actor_role> --json",
+    "bwrk auth key --actor <operator_actor_id> --actor-role <operator_actor_role> --json",
+    "bwrk auth key --actor <worker_actor_id> --actor-role <worker_actor_role> --json",
+    "bwrk auth key --actor <reviewer_actor_id> --actor-role <reviewer_actor_role> --json",
+    "bwrk auth key --actor <publisher_actor_id> --actor-role <publisher_actor_role> --json",
     "bwrk auth grant --input <enrollment_path> --expected-revision <revision> --reason <reason> --yes --json",
     "bwrk session start --project <project_id> --session <session_id> --harness <harness_id> --json",
     "bwrk source list <project_id> --json",
@@ -66,6 +67,34 @@
       "required": false,
       "source": "operator_enrollment_request",
       "validation": "separate_principal_when_project_memory_publication_is_delegated"
+    },
+    {
+      "name": "operator_actor_role",
+      "type": "enum:agent|reviewer|operator|publisher",
+      "required": true,
+      "source": "trusted_onboarding_step",
+      "validation": "must_equal_operator"
+    },
+    {
+      "name": "worker_actor_role",
+      "type": "enum:agent|reviewer|operator|publisher",
+      "required": true,
+      "source": "trusted_onboarding_step",
+      "validation": "must_equal_agent"
+    },
+    {
+      "name": "reviewer_actor_role",
+      "type": "enum:agent|reviewer|operator|publisher",
+      "required": false,
+      "source": "trusted_onboarding_step",
+      "validation": "must_equal_reviewer"
+    },
+    {
+      "name": "publisher_actor_role",
+      "type": "enum:agent|reviewer|operator|publisher",
+      "required": false,
+      "source": "trusted_onboarding_step",
+      "validation": "must_equal_publisher"
     },
     {
       "name": "expected_project_revision",
