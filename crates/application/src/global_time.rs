@@ -46,8 +46,13 @@ impl GlobalCivilTimeContext {
         let zone = TzifZone::parse(bytes)?;
         let observed_seconds = i64::try_from(observed_at_unix_ms / 1_000)
             .map_err(|_| GlobalTimeError("observed instant exceeds the supported range".into()))?;
+        let offset = zone.offset_at(observed_seconds).ok_or_else(|| {
+            GlobalTimeError(
+                "TZif data does not define local time after its final transition".into(),
+            )
+        })?;
         let local_seconds = observed_seconds
-            .checked_add(i64::from(zone.offset_at(observed_seconds)))
+            .checked_add(i64::from(offset))
             .ok_or_else(|| GlobalTimeError("local system time overflow".into()))?;
         Ok(Self {
             observed_at_unix_ms,
@@ -67,7 +72,8 @@ impl GlobalCivilTimeContext {
             return Some(format_civil_date(days_from_civil(date.0, date.1, date.2)));
         }
         let utc_seconds = parse_rfc3339_seconds(value)?;
-        let local_seconds = utc_seconds.checked_add(i64::from(self.zone.offset_at(utc_seconds)))?;
+        let offset = self.zone.offset_at(utc_seconds)?;
+        let local_seconds = utc_seconds.checked_add(i64::from(offset))?;
         Some(format_civil_date(local_seconds.div_euclid(86_400)))
     }
 }
@@ -197,6 +203,7 @@ fn zone_name_from_path(path: &Path) -> Option<String> {
 struct TzifZone {
     transitions: Vec<(i64, i32)>,
     initial_offset: i32,
+    future_rule: Option<PosixTimeZone>,
 }
 
 impl TzifZone {
@@ -206,16 +213,50 @@ impl TzifZone {
                 "system timezone file is not TZif data".into(),
             ));
         }
+        if bytes.len() > MAX_TZIF_BYTES {
+            return Err(GlobalTimeError(
+                "system timezone file exceeds the size limit".into(),
+            ));
+        }
         let version = bytes[4];
+        if !matches!(version, 0 | b'2' | b'3' | b'4') {
+            return Err(GlobalTimeError("unsupported TZif version".into()));
+        }
         let first = parse_tzif_block(bytes, 0, 4)?;
-        let block = if matches!(version, b'2' | b'3' | b'4') {
-            parse_tzif_block(bytes, first.end, 8)?
+        let (block, future_rule) = if matches!(version, b'2' | b'3' | b'4') {
+            if bytes.get(first.end + 4) != Some(&version) {
+                return Err(GlobalTimeError(
+                    "TZif extended block version does not match its header".into(),
+                ));
+            }
+            let block = parse_tzif_block(bytes, first.end, 8)?;
+            let footer = parse_tzif_footer(bytes, block.end)?;
+            let rule = if footer.is_empty() {
+                None
+            } else {
+                Some(PosixTimeZone::parse(footer, version >= b'3')?)
+            };
+            (block, rule)
         } else {
-            first
+            (first, None)
         };
         if block.offsets.is_empty() {
             return Err(GlobalTimeError(
                 "system timezone has no local-time types".into(),
+            ));
+        }
+        if block.leap_count != 0 {
+            return Err(GlobalTimeError(
+                "system timezone uses leap-second timestamps that this reader cannot resolve".into(),
+            ));
+        }
+        if block
+            .transition_times
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(GlobalTimeError(
+                "TZif transitions are not strictly increasing".into(),
             ));
         }
         let transitions = block
@@ -231,19 +272,372 @@ impl TzifZone {
                     .ok_or_else(|| GlobalTimeError("TZif transition type is out of range".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if let (Some(rule), Some((last_at, last_offset))) =
+            (future_rule.as_ref(), transitions.last())
+        {
+            if rule.offset_at(*last_at) != *last_offset {
+                return Err(GlobalTimeError(
+                    "TZif POSIX footer disagrees with the final explicit transition".into(),
+                ));
+            }
+        }
         Ok(Self {
             transitions,
             initial_offset: block.offsets[0],
+            future_rule,
+        })
+    }
+
+    fn offset_at(&self, instant: i64) -> Option<i32> {
+        if self.transitions.is_empty() {
+            return Some(
+                self.future_rule
+                    .as_ref()
+                    .map_or(self.initial_offset, |rule| rule.offset_at(instant)),
+            );
+        }
+        let last_transition = self.transitions.last()?.0;
+        if instant > last_transition {
+            return self
+                .future_rule
+                .as_ref()
+                .map(|rule| rule.offset_at(instant));
+        }
+        Some(
+            self.transitions
+                .iter()
+                .rev()
+                .find(|(at, _)| *at <= instant)
+                .map(|(_, offset)| *offset)
+                .unwrap_or(self.initial_offset),
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PosixTimeZone {
+    standard_offset: i32,
+    daylight_offset: Option<i32>,
+    start: Option<PosixTransitionRule>,
+    end: Option<PosixTransitionRule>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PosixTransitionDay {
+    JulianNoLeap(u16),
+    Julian(u16),
+    MonthWeekday { month: u8, week: u8, weekday: u8 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PosixTransitionRule {
+    day: PosixTransitionDay,
+    transition_seconds: i32,
+}
+
+impl PosixTimeZone {
+    fn parse(value: &[u8], allow_extended_transition_hours: bool) -> Result<Self, GlobalTimeError> {
+        if !value.is_ascii() || value.contains(&0) {
+            return Err(GlobalTimeError(
+                "TZif POSIX footer must contain non-NUL ASCII".into(),
+            ));
+        }
+        let mut parser = PosixParser {
+            bytes: value,
+            cursor: 0,
+            allow_extended_transition_hours,
+        };
+        parser.name()?;
+        let standard_offset = -parser.clock_value(false)?;
+        if parser.is_done() {
+            return Ok(Self {
+                standard_offset,
+                daylight_offset: None,
+                start: None,
+                end: None,
+            });
+        }
+
+        parser.name()?;
+        let daylight_offset = if parser.peek() == Some(b',') {
+            standard_offset
+                .checked_add(3_600)
+                .ok_or_else(|| GlobalTimeError("POSIX daylight offset overflow".into()))?
+        } else {
+            -parser.clock_value(false)?
+        };
+        if !(-86_400..=86_400).contains(&standard_offset)
+            || !(-86_400..=86_400).contains(&daylight_offset)
+        {
+            return Err(GlobalTimeError(
+                "TZif POSIX offset is outside the supported range".into(),
+            ));
+        }
+        parser.expect(b',')?;
+        let start = parser.transition_rule()?;
+        parser.expect(b',')?;
+        let end = parser.transition_rule()?;
+        if !parser.is_done() {
+            return Err(GlobalTimeError(
+                "unexpected data in TZif POSIX footer".into(),
+            ));
+        }
+        Ok(Self {
+            standard_offset,
+            daylight_offset: Some(daylight_offset),
+            start: Some(start),
+            end: Some(end),
         })
     }
 
     fn offset_at(&self, instant: i64) -> i32 {
-        self.transitions
+        let (Some(daylight_offset), Some(start), Some(end)) =
+            (self.daylight_offset, self.start, self.end)
+        else {
+            return self.standard_offset;
+        };
+        // RFC 9636 section 3.3.1 defines this case as all-year daylight time.
+        if daylight_offset < self.standard_offset {
+            return daylight_offset;
+        }
+
+        let utc_day = instant.div_euclid(86_400);
+        let year = civil_from_days(utc_day).0;
+        let mut transitions = Vec::with_capacity(10);
+        for candidate_year in year.saturating_sub(2)..=year.saturating_add(2) {
+            if let Some(at) = start.at_utc(candidate_year, self.standard_offset) {
+                transitions.push((at, daylight_offset));
+            }
+            if let Some(at) = end.at_utc(candidate_year, daylight_offset) {
+                transitions.push((at, self.standard_offset));
+            }
+        }
+        transitions.sort_unstable_by_key(|(at, _)| *at);
+        transitions
             .iter()
             .rev()
             .find(|(at, _)| *at <= instant)
             .map(|(_, offset)| *offset)
-            .unwrap_or(self.initial_offset)
+            .unwrap_or(self.standard_offset)
+    }
+}
+
+impl PosixTransitionRule {
+    fn at_utc(self, year: i64, offset_before: i32) -> Option<i64> {
+        let day = match self.day {
+            PosixTransitionDay::JulianNoLeap(day) => {
+                let leap_adjustment = i64::from(is_leap_year(year) && day >= 60);
+                days_from_civil(year, 1, 1).checked_add(i64::from(day) - 1 + leap_adjustment)?
+            }
+            PosixTransitionDay::Julian(day) => {
+                days_from_civil(year, 1, 1).checked_add(i64::from(day))?
+            }
+            PosixTransitionDay::MonthWeekday {
+                month,
+                week,
+                weekday,
+            } => {
+                let first_day = days_from_civil(year, month, 1);
+                let first_weekday = (first_day + 4).rem_euclid(7) as u8;
+                let month_day = if week == 5 {
+                    let last = days_in_month(year, month)?;
+                    let last_day = days_from_civil(year, month, last);
+                    let last_weekday = (last_day + 4).rem_euclid(7) as u8;
+                    last - (last_weekday + 7 - weekday) % 7
+                } else {
+                    1 + (weekday + 7 - first_weekday) % 7 + (week - 1) * 7
+                };
+                days_from_civil(year, month, month_day)
+            }
+        };
+        let local = day
+            .checked_mul(86_400)?
+            .checked_add(i64::from(self.transition_seconds))?;
+        local.checked_sub(i64::from(offset_before))
+    }
+}
+
+struct PosixParser<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+    allow_extended_transition_hours: bool,
+}
+
+impl PosixParser<'_> {
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.cursor).copied()
+    }
+
+    fn is_done(&self) -> bool {
+        self.cursor == self.bytes.len()
+    }
+
+    fn expect(&mut self, expected: u8) -> Result<(), GlobalTimeError> {
+        if self.peek() != Some(expected) {
+            return Err(GlobalTimeError(
+                "invalid TZif POSIX footer syntax".into(),
+            ));
+        }
+        self.cursor += 1;
+        Ok(())
+    }
+
+    fn name(&mut self) -> Result<(), GlobalTimeError> {
+        let start;
+        let end;
+        if self.peek() == Some(b'<') {
+            self.cursor += 1;
+            start = self.cursor;
+            while self.peek().is_some_and(|byte| byte != b'>') {
+                let byte = self.peek().unwrap();
+                if !byte.is_ascii_graphic() || byte == b',' || byte == b'<' {
+                    return Err(GlobalTimeError(
+                        "invalid quoted name in TZif POSIX footer".into(),
+                    ));
+                }
+                self.cursor += 1;
+            }
+            end = self.cursor;
+            self.expect(b'>')?;
+        } else {
+            start = self.cursor;
+            while self.peek().is_some_and(|byte| byte.is_ascii_alphabetic()) {
+                self.cursor += 1;
+            }
+            end = self.cursor;
+        }
+        if end.saturating_sub(start) < 3 {
+            return Err(GlobalTimeError(
+                "TZif POSIX timezone names must have at least three characters".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Parse a POSIX offset or transition clock as signed seconds. POSIX
+    /// offsets use west-positive syntax; transition clocks are interpreted
+    /// relative to the wall-clock basis supplied by the caller.
+    fn clock_value(&mut self, transition: bool) -> Result<i32, GlobalTimeError> {
+        let (sign, explicit_sign) = match self.peek() {
+            Some(b'+') => {
+                self.cursor += 1;
+                (1_i32, true)
+            }
+            Some(b'-') => {
+                self.cursor += 1;
+                (-1_i32, true)
+            }
+            _ => (1_i32, false),
+        };
+        let hours = self.number(3)?;
+        let maximum = if transition && self.allow_extended_transition_hours {
+            167
+        } else {
+            24
+        };
+        if hours > maximum {
+            return Err(GlobalTimeError(
+                "TZif POSIX clock hour is outside the supported range".into(),
+            ));
+        }
+        let minutes = if self.peek() == Some(b':') {
+            self.cursor += 1;
+            self.number(2)?
+        } else {
+            0
+        };
+        let seconds = if self.peek() == Some(b':') {
+            self.cursor += 1;
+            self.number(2)?
+        } else {
+            0
+        };
+        if minutes > 59
+            || seconds > 59
+            || (!transition || !self.allow_extended_transition_hours)
+                && hours == 24
+                && (minutes != 0 || seconds != 0)
+            || (transition && !self.allow_extended_transition_hours && explicit_sign)
+        {
+            return Err(GlobalTimeError(
+                "invalid TZif POSIX clock value".into(),
+            ));
+        }
+        let magnitude = hours * 3_600 + minutes * 60 + seconds;
+        i32::try_from(magnitude * sign)
+            .map_err(|_| GlobalTimeError("TZif POSIX clock value overflow".into()))
+    }
+
+    fn number(&mut self, max_digits: usize) -> Result<i32, GlobalTimeError> {
+        let start = self.cursor;
+        let mut value = 0_i32;
+        while self.cursor - start < max_digits {
+            let Some(byte) = self.peek() else { break };
+            if !byte.is_ascii_digit() {
+                break;
+            }
+            value = value
+                .checked_mul(10)
+                .and_then(|current| current.checked_add(i32::from(byte - b'0')))
+                .ok_or_else(|| GlobalTimeError("TZif POSIX number overflow".into()))?;
+            self.cursor += 1;
+        }
+        if self.cursor == start {
+            return Err(GlobalTimeError(
+                "expected a number in TZif POSIX footer".into(),
+            ));
+        }
+        Ok(value)
+    }
+
+    fn transition_rule(&mut self) -> Result<PosixTransitionRule, GlobalTimeError> {
+        let day = match self.peek() {
+            Some(b'J') => {
+                self.cursor += 1;
+                let day = self.number(3)?;
+                if !(1..=365).contains(&day) {
+                    return Err(GlobalTimeError("invalid Julian TZ rule day".into()));
+                }
+                PosixTransitionDay::JulianNoLeap(day as u16)
+            }
+            Some(b'M') => {
+                self.cursor += 1;
+                let month = self.number(2)?;
+                self.expect(b'.')?;
+                let week = self.number(1)?;
+                self.expect(b'.')?;
+                let weekday = self.number(1)?;
+                if !(1..=12).contains(&month)
+                    || !(1..=5).contains(&week)
+                    || !(0..=6).contains(&weekday)
+                {
+                    return Err(GlobalTimeError("invalid month-weekday TZ rule".into()));
+                }
+                PosixTransitionDay::MonthWeekday {
+                    month: month as u8,
+                    week: week as u8,
+                    weekday: weekday as u8,
+                }
+            }
+            Some(byte) if byte.is_ascii_digit() => {
+                let day = self.number(3)?;
+                if !(0..=365).contains(&day) {
+                    return Err(GlobalTimeError("invalid Julian TZ rule day".into()));
+                }
+                PosixTransitionDay::Julian(day as u16)
+            }
+            _ => return Err(GlobalTimeError("invalid TZif POSIX transition rule".into())),
+        };
+        let transition_seconds = if self.peek() == Some(b'/') {
+            self.cursor += 1;
+            self.clock_value(true)?
+        } else {
+            7_200
+        };
+        Ok(PosixTransitionRule {
+            day,
+            transition_seconds,
+        })
     }
 }
 
@@ -252,6 +646,23 @@ struct TzifBlock {
     transition_times: Vec<i64>,
     transition_types: Vec<u8>,
     offsets: Vec<i32>,
+    leap_count: u32,
+}
+
+fn parse_tzif_footer(bytes: &[u8], start: usize) -> Result<&[u8], GlobalTimeError> {
+    if bytes.get(start) != Some(&b'\n') {
+        return Err(GlobalTimeError("TZif footer is missing its opening newline".into()));
+    }
+    let footer_start = start + 1;
+    let footer_end = bytes
+        .get(footer_start..)
+        .and_then(|rest| rest.iter().position(|byte| *byte == b'\n'))
+        .map(|offset| footer_start + offset)
+        .ok_or_else(|| GlobalTimeError("TZif footer is missing its closing newline".into()))?;
+    if footer_end + 1 != bytes.len() {
+        return Err(GlobalTimeError("unexpected data after TZif footer".into()));
+    }
+    Ok(&bytes[footer_start..footer_end])
 }
 
 fn parse_tzif_block(
@@ -333,6 +744,7 @@ fn parse_tzif_block(
         transition_times,
         transition_types,
         offsets,
+        leap_count,
     })
 }
 
@@ -431,6 +843,20 @@ fn parse_date(value: &str) -> Option<(i64, u8, u8)> {
     (day >= 1 && day <= month_days).then_some((year, month, day))
 }
 
+fn is_leap_year(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn days_in_month(year: i64, month: u8) -> Option<u8> {
+    Some(match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    })
+}
+
 fn parse_two(bytes: &[u8], start: usize) -> Option<u8> {
     let tens = bytes.get(start)?.checked_sub(b'0')?;
     let ones = bytes.get(start + 1)?.checked_sub(b'0')?;
@@ -451,6 +877,11 @@ fn days_from_civil(year: i64, month: u8, day: u8) -> i64 {
 }
 
 fn format_civil_date(days: i64) -> String {
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn civil_from_days(days: i64) -> (i64, u8, u8) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let day_of_era = z - era * 146_097;
@@ -462,7 +893,7 @@ fn format_civil_date(days: i64) -> String {
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
+    (year, month as u8, day as u8)
 }
 
 #[cfg(test)]
@@ -487,7 +918,39 @@ mod tests {
         offsets: &[(i32, bool, u8)],
         abbreviations: &[u8],
     ) -> Vec<u8> {
-        let mut bytes = b"TZif\0".to_vec();
+        tzif_block(0, transitions, offsets, abbreviations, 4)
+    }
+
+    fn tzif_v2(
+        version: u8,
+        transitions: &[(i64, u8)],
+        offsets: &[(i32, bool, u8)],
+        abbreviations: &[u8],
+        footer: &str,
+    ) -> Vec<u8> {
+        let mut bytes = tzif_block(version, transitions, offsets, abbreviations, 4);
+        bytes.extend_from_slice(&tzif_block(
+            version,
+            transitions,
+            offsets,
+            abbreviations,
+            8,
+        ));
+        bytes.push(b'\n');
+        bytes.extend_from_slice(footer.as_bytes());
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn tzif_block(
+        version: u8,
+        transitions: &[(i64, u8)],
+        offsets: &[(i32, bool, u8)],
+        abbreviations: &[u8],
+        time_size: usize,
+    ) -> Vec<u8> {
+        let mut bytes = b"TZif".to_vec();
+        bytes.push(version);
         bytes.extend_from_slice(&[0; 15]);
         for count in [
             0_u32,
@@ -500,11 +963,15 @@ mod tests {
             bytes.extend_from_slice(&count.to_be_bytes());
         }
         for (at, _) in transitions {
-            bytes.extend_from_slice(
-                &i32::try_from(*at)
-                    .expect("test transition fits a TZif v1 timestamp")
-                    .to_be_bytes(),
-            );
+            if time_size == 8 {
+                bytes.extend_from_slice(&at.to_be_bytes());
+            } else {
+                bytes.extend_from_slice(
+                    &i32::try_from(*at)
+                        .expect("test transition fits a TZif v1 timestamp")
+                        .to_be_bytes(),
+                );
+            }
         }
         for (_, type_index) in transitions {
             bytes.push(*type_index);
@@ -516,6 +983,19 @@ mod tests {
         }
         bytes.extend_from_slice(abbreviations);
         bytes
+    }
+
+    fn new_york_tzif_v2() -> Vec<u8> {
+        tzif_v2(
+            b'2',
+            &[
+                (unix_seconds(2024, 3, 10, 7, 0, 0), 1),
+                (unix_seconds(2024, 11, 3, 6, 0, 0), 0),
+            ],
+            &[(-5 * HOUR, false, 0), (-4 * HOUR, true, 4)],
+            b"EST\0EDT\0",
+            "EST5EDT,M3.2.0/2,M11.1.0/2",
+        )
     }
 
     fn new_york_tzif() -> Vec<u8> {
@@ -567,19 +1047,19 @@ mod tests {
         assert_eq!(context.system_civil_date, "2024-03-10");
         assert_eq!(
             context.zone.offset_at(unix_seconds(2024, 3, 10, 6, 59, 59)),
-            -5 * HOUR
+            Some(-5 * HOUR)
         );
         assert_eq!(
             context.zone.offset_at(unix_seconds(2024, 3, 10, 7, 0, 0)),
-            -4 * HOUR
+            Some(-4 * HOUR)
         );
         assert_eq!(
             context.zone.offset_at(unix_seconds(2024, 11, 3, 5, 59, 59)),
-            -4 * HOUR
+            Some(-4 * HOUR)
         );
         assert_eq!(
             context.zone.offset_at(unix_seconds(2024, 11, 3, 6, 0, 0)),
-            -5 * HOUR
+            Some(-5 * HOUR)
         );
 
         assert_eq!(
@@ -594,6 +1074,153 @@ mod tests {
             context.civil_day_for("2024-03-10T07:00:00Z"),
             Some("2024-03-10".into())
         );
+    }
+
+    #[test]
+    fn tzif_posix_footer_supplies_future_dst_transitions() {
+        let zone = TzifZone::parse(&new_york_tzif_v2()).unwrap();
+        assert_eq!(
+            zone.offset_at(unix_seconds(2025, 3, 9, 6, 59, 59)),
+            Some(-5 * HOUR)
+        );
+        assert_eq!(
+            zone.offset_at(unix_seconds(2025, 3, 9, 7, 0, 0)),
+            Some(-4 * HOUR)
+        );
+        assert_eq!(
+            zone.offset_at(unix_seconds(2025, 11, 2, 5, 59, 59)),
+            Some(-4 * HOUR)
+        );
+        assert_eq!(
+            zone.offset_at(unix_seconds(2025, 11, 2, 6, 0, 0)),
+            Some(-5 * HOUR)
+        );
+
+        let context = GlobalCivilTimeContext::from_tzif(
+            unix_ms(2025, 3, 9, 7, 0, 0),
+            "America/New_York",
+            &new_york_tzif_v2(),
+        )
+        .unwrap();
+        assert_eq!(context.system_civil_date, "2025-03-09");
+        assert_eq!(
+            context.civil_day_for("2025-03-09T04:30:00Z"),
+            Some("2025-03-08".into())
+        );
+    }
+
+    #[test]
+    fn tzif_footer_defines_fixed_zones_without_explicit_transitions() {
+        let bytes = tzif_v2(b'2', &[], &[(3_600, false, 0)], b"XST\0", "UTC0");
+        let context = GlobalCivilTimeContext::from_tzif(
+            unix_ms(2024, 1, 1, 0, 30, 0),
+            "Etc/UTC",
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(context.system_civil_date, "2024-01-01");
+        assert_eq!(context.zone.offset_at(unix_seconds(2050, 6, 1, 0, 0, 0)), Some(0));
+    }
+
+    #[test]
+    fn tzif_v3_footer_accepts_signed_transition_times() {
+        let bytes = tzif_v2(
+            b'3',
+            &[],
+            &[(0, false, 0), (HOUR, true, 4)],
+            b"XST\0XDT\0",
+            "XST0XDT-1,M3.2.0/-2,M11.1.0/-1",
+        );
+        let zone = TzifZone::parse(&bytes).unwrap();
+        assert_eq!(
+            zone.offset_at(unix_seconds(2025, 3, 8, 21, 59, 59)),
+            Some(0)
+        );
+        assert_eq!(
+            zone.offset_at(unix_seconds(2025, 3, 8, 22, 0, 0)),
+            Some(HOUR)
+        );
+        assert_eq!(
+            zone.offset_at(unix_seconds(2025, 11, 1, 21, 59, 59)),
+            Some(HOUR)
+        );
+        assert_eq!(
+            zone.offset_at(unix_seconds(2025, 11, 1, 22, 0, 0)),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn missing_or_inconsistent_tzif_footer_never_freezes_a_future_offset() {
+        let final_transition = unix_seconds(2024, 1, 2, 0, 0, 0);
+        let empty_footer = tzif_v2(
+            b'2',
+            &[(final_transition, 0)],
+            &[(0, false, 0)],
+            b"UTC\0",
+            "",
+        );
+        assert!(GlobalCivilTimeContext::from_tzif(
+            unix_ms(2025, 1, 1, 0, 0, 0),
+            "Etc/UTC",
+            &empty_footer,
+        )
+        .is_err());
+        let context = GlobalCivilTimeContext::from_tzif(
+            unix_ms(2024, 1, 1, 0, 0, 0),
+            "Etc/UTC",
+            &empty_footer,
+        )
+        .unwrap();
+        assert_eq!(
+            context.civil_day_for("2025-01-01T00:00:00Z"),
+            None
+        );
+
+        let inconsistent = tzif_v2(
+            b'2',
+            &[(final_transition, 1)],
+            &[(0, false, 0), (HOUR, true, 4)],
+            b"UTC\0DST\0",
+            "UTC0",
+        );
+        assert!(TzifZone::parse(&inconsistent).is_err());
+    }
+
+    #[test]
+    fn posix_julian_rules_skip_february_29_only_for_julian_no_leap_rules() {
+        let zone = PosixTimeZone::parse(b"EST5EDT,J60/2,300/2", false).unwrap();
+        let start = zone.start.unwrap().at_utc(2024, -5 * HOUR).unwrap();
+        assert_eq!(start, unix_seconds(2024, 3, 1, 7, 0, 0));
+        let leap_day_counted = PosixTimeZone::parse(b"EST5EDT,59/2,300/2", false).unwrap();
+        let counted_start = leap_day_counted
+            .start
+            .unwrap()
+            .at_utc(2024, -5 * HOUR)
+            .unwrap();
+        assert_eq!(counted_start, unix_seconds(2024, 2, 29, 7, 0, 0));
+    }
+
+    #[test]
+    fn malformed_tzif_footer_and_unsorted_transitions_fail_closed() {
+        let malformed_footer = tzif_v2(
+            b'2',
+            &[],
+            &[(0, false, 0)],
+            b"UTC\0",
+            "EST5EDT,M3.2.0,M11.1.0,extra",
+        );
+        assert!(TzifZone::parse(&malformed_footer).is_err());
+
+        let unsorted = tzif_v1(
+            &[
+                (unix_seconds(2024, 11, 3, 6, 0, 0), 0),
+                (unix_seconds(2024, 3, 10, 7, 0, 0), 1),
+            ],
+            &[(-5 * HOUR, false, 0), (-4 * HOUR, true, 4)],
+            b"EST\0EDT\0",
+        );
+        assert!(TzifZone::parse(&unsorted).is_err());
     }
 
     #[test]

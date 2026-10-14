@@ -148,7 +148,9 @@ impl ProfileIdentity {
     }
 }
 
-/// All proof-bearing records use this exact subject and policy context.
+/// Proof-bearing records share one work, proof revision and policy context.
+/// Execution records identify the immutable claim input; submissions and
+/// reviews may identify a separately bound result source.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProofIdentity {
     pub entity: EntityIdentity,
@@ -1319,7 +1321,7 @@ impl DecisionInputs {
             }
             // Execution ownership and the authenticated reader are different
             // facts. Action policy enforces ownership only for owner actions.
-            self.check_proof_revision(&mut diagnostics, &execution.proof);
+            self.check_proof_context(&mut diagnostics, FactKind::Execution, &execution.proof);
         }
 
         if let Some(submission) = self.submission.as_present() {
@@ -1334,7 +1336,7 @@ impl DecisionInputs {
                 &subject,
                 &submission.proof,
             );
-            self.check_proof_revision(&mut diagnostics, &submission.proof);
+            self.check_proof_context(&mut diagnostics, FactKind::Submission, &submission.proof);
             if let Some(execution) = self.execution.as_present() {
                 if submission.proof.attempt.as_ref() != Some(&execution.attempt) {
                     diagnostics.push(DecisionDiagnostic::Contradictory {
@@ -1353,7 +1355,7 @@ impl DecisionInputs {
                 FactTarget::Review(review.id.clone()),
             );
             self.check_proof_identity(&mut diagnostics, FactKind::Review, &subject, &review.proof);
-            self.check_proof_revision(&mut diagnostics, &review.proof);
+            self.check_proof_context(&mut diagnostics, FactKind::Review, &review.proof);
             if review.reviewer_id == review.attempt_actor_id
                 || review.reviewer_authority_root == review.attempt_authority_root
             {
@@ -1487,16 +1489,29 @@ impl DecisionInputs {
         }
     }
 
-    fn check_proof_revision(
+    fn check_proof_context(
         &self,
         diagnostics: &mut Vec<DecisionDiagnostic>,
+        fact: FactKind,
         proof: &ProofIdentity,
     ) {
         if let Some(requirements) = self.requirements.as_present() {
+            // The pinned and execution facts retain the immutable claim
+            // source. A sealed submission can instead name the separately
+            // bound final-result source; review is checked against that exact
+            // submission below. Store close validation proves the result
+            // source binding before lifecycle authorization.
+            let result_source = fact == FactKind::Submission
+                || (fact == FactKind::Review
+                    && self
+                        .submission
+                        .as_present()
+                        .is_some_and(|submission| submission.proof == *proof));
             if proof.proof_revision != requirements.proof.proof_revision
                 || proof.profile != requirements.proof.profile
                 || (requirements.proof.is_bound()
-                    && (proof.source_snapshot != requirements.proof.source_snapshot
+                    && ((!result_source
+                        && proof.source_snapshot != requirements.proof.source_snapshot)
                         || proof.configuration != requirements.proof.configuration))
             {
                 diagnostics.push(DecisionDiagnostic::Contradictory {

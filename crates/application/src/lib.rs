@@ -935,7 +935,21 @@ impl<'a> WorkApplication<'a> {
         source_version_id: Option<&str>,
         config_identity: &str,
     ) -> Result<OperationResult<ClaimResult>, ApplicationError> {
-        let value = self.store.claim_work_with_context(
+        let claimed_at_millis = claimed_at
+            .strip_prefix("unix-ms:")
+            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                ApplicationError::Invalid(
+                    "claim timestamp must use canonical unix-ms form".to_owned(),
+                )
+            })?;
+        let business_time = self.business_status_context_for_work(
+            project_id,
+            work_id,
+            boreal_domain::TimestampMs::from_millis(claimed_at_millis),
+        )?;
+        let value = self.store.claim_work_with_context_and_business_time(
             project_id.as_str(),
             work_id,
             actor_id,
@@ -950,6 +964,7 @@ impl<'a> WorkApplication<'a> {
             max_attempt_deadline,
             source_version_id,
             config_identity,
+            business_time.as_ref(),
         )?;
         Ok(OperationResult {
             operation_id: operation_id.to_owned(),
@@ -957,6 +972,52 @@ impl<'a> WorkApplication<'a> {
             changed: !value.replayed,
             value,
         })
+    }
+
+    pub(crate) fn business_status_context_for_work(
+        &self,
+        project_id: &ProjectId,
+        work_id: &str,
+        as_of: boreal_domain::TimestampMs,
+    ) -> Result<Option<boreal_domain::work_model_v3::BusinessStatusContext>, ApplicationError> {
+        let snapshot = self.store.read_project_status(project_id.as_str())?;
+        let Some(setting) = snapshot.civil_time_setting.as_ref() else {
+            return Ok(None);
+        };
+        let timezone_database = crate::planning_v3::SystemTimeZoneDatabase::default();
+        let time = timezone_database.business_time_context(setting, as_of)?;
+        let mut work_input = snapshot
+            .works
+            .iter()
+            .find(|row| row.work.id.as_str() == work_id)
+            .map(crate::status::status_input_from_store_row)
+            .transpose()
+            .map_err(ApplicationError::Invalid)?;
+        if let Some(work_input) = work_input.as_mut() {
+            crate::status::apply_business_time(
+                work_input,
+                setting,
+                &time,
+                &timezone_database,
+            )
+            .map_err(ApplicationError::Invalid)?;
+        }
+        Ok(Some(boreal_domain::work_model_v3::BusinessStatusContext {
+            time,
+            project_revision: snapshot.revision.0,
+            work_schedule_revision: work_input
+                .as_ref()
+                .and_then(|input| input.business_schedule_revision),
+            not_before_at: work_input
+                .as_ref()
+                .and_then(|input| input.business_not_before_at),
+            schedule_next_change_at: work_input
+                .as_ref()
+                .and_then(|input| input.business_schedule_next_change_at),
+            external_wait_next_change_at: work_input
+                .as_ref()
+                .and_then(|input| input.external_wait_next_change_at),
+        }))
     }
 
     pub fn validate_parent(

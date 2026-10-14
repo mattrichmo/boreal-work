@@ -347,10 +347,21 @@ mod typed_acceptance_tests {
         );
         work.lifecycle = PersistedLifecycle::Open;
         work.dispatch_policy = DispatchPolicy::Automatic;
-        let mut gates = vec![GateRequirement::required(
+        let mut gates = Vec::new();
+        if profile_id == "focused" {
+            gates.push(GateRequirement::required(
+                GateId::new("checkpoint"),
+                GateKind::Checkpoint,
+            ));
+            gates.push(GateRequirement::required(
+                GateId::new("verification"),
+                GateKind::Verification,
+            ));
+        }
+        gates.push(GateRequirement::required(
             GateId::new("summary"),
             GateKind::Summary,
-        )];
+        ));
         if profile_id == "reviewed-artifacts" {
             gates.push(GateRequirement::required(
                 GateId::new("artifact_review"),
@@ -947,6 +958,21 @@ mod typed_acceptance_tests {
             .current_submission("p1", "w1", proof_revision)
             .unwrap()
             .expect("review closeout seals a submission");
+        let pending_readiness = AcceptanceStore::new(&store)
+            .close_readiness_snapshot("p1", "w1")
+            .unwrap();
+        assert_eq!(
+            pending_readiness
+                .acceptance_result
+                .as_ref()
+                .map(|record| record.result_id.as_str()),
+            Some(result.result_id.as_str())
+        );
+        assert_eq!(pending_readiness.artifact_decision, None);
+        assert_eq!(
+            pending_readiness.typed_acceptance,
+            CloseReadinessTypedAcceptance::ArtifactDecisionMissing
+        );
         assert_eq!(
             store
                 .submission_acceptance_binding("p1", "w1", &submission.submission_id)
@@ -1019,6 +1045,14 @@ mod typed_acceptance_tests {
         assert_eq!(decision.result_id, result.result_id);
         assert_eq!(decision.result_digest, result.result_digest);
         assert_eq!(decision.reviewer_actor_id, "reviewer-1");
+        let rejected_readiness = AcceptanceStore::new(&store)
+            .close_readiness_snapshot("p1", "w1")
+            .unwrap();
+        assert_eq!(rejected_readiness.artifact_decision, Some(decision.clone()));
+        assert_eq!(
+            rejected_readiness.typed_acceptance,
+            CloseReadinessTypedAcceptance::ArtifactDecisionMismatch
+        );
 
         let replay = store.apply_completion_command(&review_request).unwrap();
         assert!(replay.replayed);
@@ -1208,7 +1242,9 @@ mod typed_acceptance_tests {
         assert!(snapshot.proof_attempt.as_ref().unwrap().current);
 
         store
-            .execute_batch("UPDATE attempt SET current=0 WHERE attempt_id='attempt-1'")
+            .execute_batch(
+                "UPDATE attempt SET current=0, state='released' WHERE attempt_id='attempt-1'",
+            )
             .unwrap();
         let stale = AcceptanceStore::new(&store)
             .close_readiness_snapshot("p1", "w1")
@@ -1260,6 +1296,13 @@ pub struct CloseReadinessSnapshot {
     pub pinned_requirements: super::profiles::PinnedRequirements,
     pub final_result: Option<FinalResultBindingRecord>,
     pub submission: Option<SubmissionRecord>,
+    /// Typed artifact or attestation result linked to the exact current
+    /// submission, when one has been bound.
+    pub acceptance_result_binding: Option<CloseReadinessAcceptanceBinding>,
+    pub acceptance_result: Option<AcceptanceResultRecord>,
+    /// Independent artifact decision linked to the exact current submission.
+    pub artifact_decision: Option<ArtifactDecisionRecord>,
+    pub typed_acceptance: CloseReadinessTypedAcceptance,
     /// Receipt history for `proof_attempt`, in canonical row order, including
     /// failed, rejected, and superseded facts.
     pub ordered_receipts: Vec<ReceiptRecord>,
@@ -1268,6 +1311,22 @@ pub struct CloseReadinessSnapshot {
     /// The newest intent for this work item, including non-open states so the
     /// application can report stale or invalidated intents precisely.
     pub close_intent: Option<CloseIntentRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseReadinessAcceptanceBinding {
+    pub result_id: String,
+    pub result_digest: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseReadinessTypedAcceptance {
+    NotRequired,
+    Ready,
+    ResultMissing,
+    ResultMismatch,
+    ArtifactDecisionMissing,
+    ArtifactDecisionMismatch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1568,6 +1627,44 @@ impl<'a> AcceptanceStore<'a> {
             let submission = self
                 .store
                 .current_submission(project_id, work_id, proof_revision)?;
+            let (acceptance_result_binding, acceptance_result, artifact_decision) =
+                if let Some(submission) = &submission {
+                    let binding = self.store.submission_acceptance_binding(
+                        project_id,
+                        work_id,
+                        &submission.submission_id,
+                    )?;
+                    let acceptance_result = match binding.as_ref() {
+                        Some((result_id, _)) => {
+                            self.store.acceptance_result_by_id(project_id, result_id)?
+                        }
+                        None => None,
+                    };
+                    let artifact_decision = self
+                        .store
+                        .current_artifact_decision(project_id, &submission.submission_id)?;
+                    (
+                        binding.map(
+                            |(result_id, result_digest)| CloseReadinessAcceptanceBinding {
+                                result_id,
+                                result_digest,
+                            },
+                        ),
+                        acceptance_result,
+                        artifact_decision,
+                    )
+                } else {
+                    (None, None, None)
+                };
+            let typed_acceptance = self.store.close_readiness_typed_acceptance(
+                project_id,
+                work_id,
+                &pinned_requirements,
+                submission.as_ref(),
+                acceptance_result_binding.as_ref(),
+                acceptance_result.as_ref(),
+                artifact_decision.as_ref(),
+            )?;
             let proof_attempt = if let Some(attempt) = current_attempt.clone() {
                 Some(attempt)
             } else {
@@ -1629,6 +1726,10 @@ impl<'a> AcceptanceStore<'a> {
                 pinned_requirements,
                 final_result,
                 submission,
+                acceptance_result_binding,
+                acceptance_result,
+                artifact_decision,
+                typed_acceptance,
                 ordered_receipts,
                 required_review,
                 current_summary,
@@ -3030,7 +3131,7 @@ impl SqliteStore {
             return Ok(());
         };
         validate_registered_profile_gates(&pin, profile)?;
-        let (result_id, result_digest) = self
+        let binding = self
             .submission_acceptance_binding(
                 &request.project_id,
                 &request.work_id,
@@ -3043,9 +3144,38 @@ impl SqliteStore {
                 )
             })?;
         let result = self
-            .acceptance_result_by_id(&request.project_id, &result_id)?
+            .acceptance_result_by_id(&request.project_id, &binding.0)?
             .ok_or_else(|| StoreError::Corrupt("submission result binding is missing".into()))?;
-        if result.result_digest != result_digest
+        self.validate_typed_acceptance_result_for_close(
+            &request.project_id,
+            &request.work_id,
+            profile,
+            submission,
+            &binding,
+            &result,
+        )?;
+        if profile.mode == super::profiles::RegisteredAcceptanceMode::ReviewedArtifacts {
+            validate_independent_artifact_decision(
+                self.current_artifact_decision(&request.project_id, &submission.submission_id)?,
+                &result,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_typed_acceptance_result_for_close(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        profile: super::profiles::RegisteredAcceptanceProfile,
+        submission: &SubmissionRecord,
+        binding: &(String, String),
+        result: &AcceptanceResultRecord,
+    ) -> Result<(), StoreError> {
+        if result.result_id != binding.0
+            || result.result_digest != binding.1
+            || result.project_id != project_id
+            || result.work_id != work_id
             || result.attempt_id != submission.attempt_id
             || result.fence != submission.fence
             || result.entity_revision != submission.entity_revision
@@ -3060,8 +3190,7 @@ impl SqliteStore {
                 "typed result no longer matches the exact submitted proof".into(),
             ));
         }
-        let (contract_revision, requirements) =
-            acceptance_contract(self, &request.project_id, &request.work_id)?;
+        let (contract_revision, requirements) = acceptance_contract(self, project_id, work_id)?;
         if contract_revision != result.contract_revision {
             return Err(StoreError::Conflict(
                 "planning contract changed after result binding; rebind and resubmit before close"
@@ -3076,15 +3205,69 @@ impl SqliteStore {
             true,
         )?;
         for output in &result.outputs {
-            validate_output_source(self, &request.project_id, output)?;
-        }
-        if profile.mode == super::profiles::RegisteredAcceptanceMode::ReviewedArtifacts {
-            validate_independent_artifact_decision(
-                self.current_artifact_decision(&request.project_id, &submission.submission_id)?,
-                &result,
-            )?;
+            validate_output_source(self, project_id, output)?;
         }
         Ok(())
+    }
+
+    fn close_readiness_typed_acceptance(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        pin: &super::PinnedRequirements,
+        submission: Option<&SubmissionRecord>,
+        binding: Option<&CloseReadinessAcceptanceBinding>,
+        result: Option<&AcceptanceResultRecord>,
+        artifact_decision: Option<&ArtifactDecisionRecord>,
+    ) -> Result<CloseReadinessTypedAcceptance, StoreError> {
+        let Some(profile) = super::profiles::registered_acceptance_profile(
+            &pin.profile.profile_id,
+            pin.profile.version,
+        )?
+        else {
+            return Ok(CloseReadinessTypedAcceptance::NotRequired);
+        };
+        validate_registered_profile_gates(pin, profile)?;
+        let Some(submission) = submission else {
+            return Ok(CloseReadinessTypedAcceptance::ResultMissing);
+        };
+        let Some(binding) = binding else {
+            return Ok(CloseReadinessTypedAcceptance::ResultMissing);
+        };
+        let Some(result) = result else {
+            return Ok(CloseReadinessTypedAcceptance::ResultMismatch);
+        };
+        if let Err(error) = self.validate_typed_acceptance_result_for_close(
+            project_id,
+            work_id,
+            profile,
+            submission,
+            &(binding.result_id.clone(), binding.result_digest.clone()),
+            result,
+        ) {
+            return match error {
+                StoreError::Conflict(_) | StoreError::NotFound { .. } => {
+                    Ok(CloseReadinessTypedAcceptance::ResultMismatch)
+                }
+                error => Err(error),
+            };
+        }
+        if profile.mode == super::profiles::RegisteredAcceptanceMode::ReviewedArtifacts {
+            let Some(artifact_decision) = artifact_decision else {
+                return Ok(CloseReadinessTypedAcceptance::ArtifactDecisionMissing);
+            };
+            return match validate_independent_artifact_decision(
+                Some(artifact_decision.clone()),
+                result,
+            ) {
+                Ok(()) => Ok(CloseReadinessTypedAcceptance::Ready),
+                Err(StoreError::Conflict(_)) => {
+                    Ok(CloseReadinessTypedAcceptance::ArtifactDecisionMismatch)
+                }
+                Err(error) => Err(error),
+            };
+        }
+        Ok(CloseReadinessTypedAcceptance::Ready)
     }
 
     pub(crate) fn typed_acceptance_close_blocker(

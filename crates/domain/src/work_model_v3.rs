@@ -334,6 +334,31 @@ impl BusinessDate {
         }
     }
 
+    /// Parse the deliberately narrow legacy `due_at` surface. Date-only
+    /// values stay civil dates; absolute timestamps must carry an explicit
+    /// UTC designator or numeric offset. Ambiguous local timestamps and
+    /// historic synthetic strings are rejected instead of guessed.
+    pub fn parse_legacy_due(value: &str) -> Result<Self, ModelError> {
+        if let Some(digits) = value.strip_prefix("unix-ms:") {
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(ModelError::InvalidSchedule(
+                    "legacy due timestamp must be canonical unix milliseconds",
+                ));
+            }
+            let millis = digits.parse::<u64>().map_err(|_| {
+                ModelError::InvalidSchedule("legacy due timestamp is outside the supported range")
+            })?;
+            return Ok(Self::Instant(TimestampMs(millis)));
+        }
+
+        if value.len() == 10 {
+            let date = parse_iso_date(value)?;
+            return Ok(Self::LocalDate(date));
+        }
+
+        parse_explicit_timestamp(value).map(Self::Instant)
+    }
+
     fn instant(&self) -> Option<TimestampMs> {
         match self {
             Self::Instant(value) => Some(*value),
@@ -434,6 +459,20 @@ impl BusinessTimeContext {
         }
         Ok(())
     }
+}
+
+/// Application-resolved timing facts that may be reused by a transactional
+/// claim. The store checks the observed project and schedule revisions again
+/// before applying these facts, while timezone resolution remains in the
+/// application layer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BusinessStatusContext {
+    pub time: BusinessTimeContext,
+    pub project_revision: u64,
+    pub work_schedule_revision: Option<u64>,
+    pub not_before_at: Option<TimestampMs>,
+    pub schedule_next_change_at: Option<TimestampMs>,
+    pub external_wait_next_change_at: Option<TimestampMs>,
 }
 
 /// Versioned, attributable project timezone configuration. A date-only
@@ -1304,6 +1343,15 @@ impl LocalDate {
         Self { year, month, day }
     }
 
+    /// Convert a signed number of days since 1970-01-01 without consulting
+    /// the host timezone or locale.
+    pub fn from_epoch_days(days: i64) -> Result<Self, ModelError> {
+        let (year, month, day) = civil_from_days(days);
+        let date = Self::new(year, month, day);
+        date.validate()?;
+        Ok(date)
+    }
+
     pub fn validate(self) -> Result<(), ModelError> {
         if !(1..=12).contains(&self.month)
             || self.day == 0
@@ -1967,6 +2015,132 @@ fn days_in_month(year: i32, month: u8) -> u8 {
     }
 }
 
+fn parse_iso_date(value: &str) -> Result<LocalDate, ModelError> {
+    let bytes = value.as_bytes();
+    if !value.is_ascii() || bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return Err(ModelError::InvalidSchedule(
+            "legacy due date must be YYYY-MM-DD or an explicitly zoned timestamp",
+        ));
+    }
+    let year = parse_ascii_digits(&bytes[0..4])? as i32;
+    let month = parse_ascii_digits(&bytes[5..7])? as u8;
+    let day = parse_ascii_digits(&bytes[8..10])? as u8;
+    let date = LocalDate::new(year, month, day);
+    date.validate()?;
+    Ok(date)
+}
+
+fn parse_explicit_timestamp(value: &str) -> Result<TimestampMs, ModelError> {
+    let invalid = || {
+        ModelError::InvalidSchedule(
+            "legacy due timestamp must include Z or an explicit numeric UTC offset",
+        )
+    };
+    let bytes = value.as_bytes();
+    if !value.is_ascii()
+        || bytes.len() < 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b'T' | b't')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return Err(invalid());
+    }
+    let date = parse_iso_date(&value[..10])?;
+    let hour = parse_ascii_digits(&bytes[11..13])? as u8;
+    let minute = parse_ascii_digits(&bytes[14..16])? as u8;
+    let second = parse_ascii_digits(&bytes[17..19])? as u8;
+    let time = LocalTime::new(hour, minute, second);
+    time.validate()?;
+
+    let zone_start = match bytes.last().copied() {
+        Some(b'Z' | b'z') => bytes.len() - 1,
+        Some(b'0'..=b'9') => bytes
+            .iter()
+            .enumerate()
+            .skip(19)
+            .rev()
+            .find_map(|(index, byte)| matches!(byte, b'+' | b'-').then_some(index))
+            .ok_or_else(invalid)?,
+        _ => return Err(invalid()),
+    };
+
+    let millis = if zone_start == 19 {
+        0
+    } else {
+        if bytes[19] != b'.' || zone_start <= 20 {
+            return Err(invalid());
+        }
+        let fraction = &bytes[20..zone_start];
+        if fraction.is_empty() || !fraction.iter().all(u8::is_ascii_digit) {
+            return Err(invalid());
+        }
+        let retained = fraction.len().min(3);
+        let mut fraction_millis = parse_ascii_digits(&fraction[..retained])? as u16;
+        if retained == 1 {
+            fraction_millis *= 100;
+        } else if retained == 2 {
+            fraction_millis *= 10;
+        }
+        fraction_millis
+    };
+
+    let offset_seconds = if zone_start == bytes.len() - 1 {
+        if !matches!(bytes[zone_start], b'Z' | b'z') {
+            return Err(invalid());
+        }
+        0_i64
+    } else {
+        let sign = match bytes[zone_start] {
+            b'+' => 1_i64,
+            b'-' => -1_i64,
+            _ => return Err(invalid()),
+        };
+        if zone_start + 6 != bytes.len() || bytes[zone_start + 3] != b':' {
+            return Err(invalid());
+        }
+        let hours = parse_ascii_digits(&bytes[zone_start + 1..zone_start + 3])? as i64;
+        let minutes = parse_ascii_digits(&bytes[zone_start + 4..zone_start + 6])? as i64;
+        if hours > 23 || minutes > 59 {
+            return Err(invalid());
+        }
+        sign * (hours * 3_600 + minutes * 60)
+    };
+
+    let local_seconds = days_from_civil(date.year, date.month, date.day)
+        .checked_mul(86_400)
+        .and_then(|value| value.checked_add(hour as i64 * 3_600))
+        .and_then(|value| value.checked_add(minute as i64 * 60))
+        .and_then(|value| value.checked_add(second as i64))
+        .ok_or_else(invalid)?;
+    let utc_seconds = local_seconds
+        .checked_sub(offset_seconds)
+        .ok_or_else(invalid)?;
+    let utc_millis = utc_seconds
+        .checked_mul(1_000)
+        .and_then(|value| value.checked_add(millis as i64))
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(invalid)?;
+    Ok(TimestampMs(utc_millis))
+}
+
+fn parse_ascii_digits(bytes: &[u8]) -> Result<u32, ModelError> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return Err(ModelError::InvalidSchedule(
+            "legacy due value contains invalid numeric fields",
+        ));
+    }
+    bytes.iter().try_fold(0_u32, |value, byte| {
+        value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add((*byte - b'0') as u32))
+            .ok_or(ModelError::InvalidSchedule(
+                "legacy due numeric field is outside the supported range",
+            ))
+    })
+}
+
 // Proleptic Gregorian civil-date conversion, based on integer-only formulas.
 fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
     let y = year as i64 - i64::from(month <= 2);
@@ -2041,6 +2215,58 @@ pub fn project_planning_actions(
             expected_project_revision:revision,allowed:denial.is_none(),denial_reason:denial,
             confirmation:"Confirm the project-scoped planning change at this revision."}
     }).collect()
+}
+
+#[cfg(test)]
+mod legacy_due_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_due_parser_preserves_dates_and_normalizes_explicit_offsets() {
+        assert_eq!(
+            BusinessDate::parse_legacy_due("2026-01-01").unwrap(),
+            BusinessDate::LocalDate(LocalDate::new(2026, 1, 1))
+        );
+        assert_eq!(
+            BusinessDate::parse_legacy_due("2026-01-01T00:00:00Z").unwrap(),
+            BusinessDate::Instant(TimestampMs(1_767_225_600_000))
+        );
+        assert_eq!(
+            BusinessDate::parse_legacy_due("2025-12-31T19:00:00-05:00").unwrap(),
+            BusinessDate::Instant(TimestampMs(1_767_225_600_000))
+        );
+        assert_eq!(
+            BusinessDate::parse_legacy_due("2026-01-01T00:00:00.123456Z").unwrap(),
+            BusinessDate::Instant(TimestampMs(1_767_225_600_123))
+        );
+        assert_eq!(
+            BusinessDate::parse_legacy_due("unix-ms:42").unwrap(),
+            BusinessDate::Instant(TimestampMs(42))
+        );
+    }
+
+    #[test]
+    fn legacy_due_parser_rejects_ambiguous_and_malformed_values() {
+        for value in [
+            "2026-02-30",
+            "2026-01-01T00:00:00",
+            "2026-01-01 00:00:00Z",
+            "tomorrow",
+            "unix-ms:-1",
+            "2026-01-01T00:00:00+25:00",
+            "２０２６-01-01",
+        ] {
+            assert!(
+                BusinessDate::parse_legacy_due(value).is_err(),
+                "accepted malformed legacy date {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_date_converts_from_epoch_days() {
+        assert_eq!(LocalDate::from_epoch_days(20_454).unwrap(), LocalDate::new(2026, 1, 1));
+    }
 }
 
 #[cfg(test)]

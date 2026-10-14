@@ -101,6 +101,17 @@ pub struct StatusDto {
     pub lifecycle: String,
     #[serde(default)]
     pub reason_codes: Vec<String>,
+    /// Civil-time schedule classifications from the canonical status decision.
+    #[serde(default)]
+    pub due_today: bool,
+    #[serde(default)]
+    pub overdue: bool,
+    /// Open external waits that currently block this work item.
+    #[serde(default)]
+    pub blocking_external_wait_ids: Vec<String>,
+    /// Open external waits whose local follow-up date has arrived.
+    #[serde(default)]
+    pub follow_up_due_wait_ids: Vec<String>,
     /// Additive M02 field; absent in pre-M02 readers/fixtures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_reason: Option<String>,
@@ -806,6 +817,10 @@ mod tests {
         .unwrap();
         assert_eq!(status.schema_version, "boreal.status.v1");
         assert_eq!(status.display_status, "blocked");
+        assert!(!status.due_today);
+        assert!(!status.overdue);
+        assert!(status.blocking_external_wait_ids.is_empty());
+        assert!(status.follow_up_due_wait_ids.is_empty());
 
         let receipt: ReceiptDto = serde_json::from_str(include_str!(
             "../../../project/spec/protocol/receipt-success.json"
@@ -815,6 +830,41 @@ mod tests {
         assert_eq!(
             serde_json::to_value(receipt).unwrap()["subject"]["fence"],
             1
+        );
+    }
+
+    #[test]
+    fn status_facts_default_for_legacy_payloads_and_round_trip_additively() {
+        let mut legacy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../project/spec/protocol/status-dto.json"
+        ))
+        .unwrap();
+        let decoded: StatusDto = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(!decoded.due_today);
+        assert!(!decoded.overdue);
+        assert!(decoded.blocking_external_wait_ids.is_empty());
+        assert!(decoded.follow_up_due_wait_ids.is_empty());
+
+        legacy["due_today"] = serde_json::json!(true);
+        legacy["overdue"] = serde_json::json!(true);
+        legacy["blocking_external_wait_ids"] = serde_json::json!(["wait-1", "wait-2"]);
+        legacy["follow_up_due_wait_ids"] = serde_json::json!(["wait-2"]);
+        let decoded: StatusDto = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.due_today);
+        assert!(decoded.overdue);
+        assert_eq!(decoded.blocking_external_wait_ids, ["wait-1", "wait-2"]);
+        assert_eq!(decoded.follow_up_due_wait_ids, ["wait-2"]);
+
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert_eq!(encoded["due_today"], true);
+        assert_eq!(encoded["overdue"], true);
+        assert_eq!(
+            encoded["blocking_external_wait_ids"],
+            serde_json::json!(["wait-1", "wait-2"])
+        );
+        assert_eq!(
+            encoded["follow_up_due_wait_ids"],
+            serde_json::json!(["wait-2"])
         );
     }
 

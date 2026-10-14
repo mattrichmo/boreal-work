@@ -9,9 +9,10 @@
 use std::{collections::BTreeSet, fmt, fs, path::PathBuf};
 
 use boreal_domain::work_model_v3::{
-    validate_cycle_assignments, validate_decomposition, validate_direct_dependencies, Cycle,
-    CycleAssignment, CycleId, CycleInstance, CycleSeries, CycleTemplate, DirectDependency,
-    ExecutionMode, FoldPolicy, GapPolicy, LocalDateTime, ModelError, TimeResolution,
+    validate_cycle_assignments, validate_decomposition, validate_direct_dependencies,
+    BusinessTimeContext, Cycle, CycleAssignment, CycleId, CycleInstance, CycleSeries,
+    CycleTemplate, DirectDependency, ExecutionMode, FoldPolicy, GapPolicy, LocalDate,
+    LocalDateTime, LocalTime, ModelError, ProjectCivilTimeSetting, TimeResolution,
 };
 use boreal_domain::{
     AcceptanceProfile, DispatchPolicy, GateId, GateKind, GateRequirement, ProjectId, ReasonCode,
@@ -646,6 +647,75 @@ impl SystemTimeZoneDatabase {
         })
     }
 
+    /// Derive a project-local civil date from an absolute observation using
+    /// the exact timezone database bytes pinned by the project setting.
+    /// Host-local time is never consulted.
+    pub fn business_time_context(
+        &self,
+        setting: &ProjectCivilTimeSetting,
+        as_of: TimestampMs,
+    ) -> Result<BusinessTimeContext, PlanningError> {
+        setting.validate()?;
+        let (bytes, _) = self.read_zone(&setting.timezone)?;
+        if crate::sha256_content_digest(&bytes) != setting.tzdb_identity {
+            return Err(PlanningError::TimeZoneParse(
+                "project civil-time setting does not match the selected timezone database".into(),
+            ));
+        }
+        let zone = TzifZone::parse(&bytes)?;
+        let utc_seconds = i64::try_from(as_of.as_millis() / 1_000).map_err(|_| {
+            PlanningError::Invalid("observed instant is outside the timezone range".into())
+        })?;
+        let local_seconds = utc_seconds
+            .checked_add(zone.offset_at(utc_seconds) as i64)
+            .ok_or_else(|| PlanningError::Invalid("local instant overflow".into()))?;
+        let civil_date = LocalDate::from_epoch_days(local_seconds.div_euclid(86_400))?;
+        let context = setting.context(as_of, civil_date)?;
+        crate::intake::validate_project_civil_time_context(setting, &context, self)?;
+        Ok(context)
+    }
+
+    /// Resolve the beginning of a project-local civil date against the exact
+    /// timezone database identity pinned by the setting. Midnight gaps use
+    /// the first valid local time; folds choose the earlier offset.
+    pub fn business_date_start(
+        &self,
+        setting: &ProjectCivilTimeSetting,
+        date: LocalDate,
+    ) -> Result<TimestampMs, PlanningError> {
+        setting.validate()?;
+        let (bytes, _) = self.read_zone(&setting.timezone)?;
+        if crate::sha256_content_digest(&bytes) != setting.tzdb_identity {
+            return Err(PlanningError::TimeZoneParse(
+                "project civil-time setting does not match the selected timezone database".into(),
+            ));
+        }
+        let zone = TzifZone::parse(&bytes)?;
+        let local_seconds = local_seconds(LocalDateTime::new(date, LocalTime::new(0, 0, 0)))?;
+        let mut candidates = zone
+            .offsets()
+            .into_iter()
+            .filter_map(|offset| {
+                let utc = local_seconds.checked_sub(offset as i64)?;
+                (zone.offset_at(utc) == offset).then_some((utc, offset))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        let (utc_seconds, _) = match candidates.as_slice() {
+            [candidate] => *candidate,
+            [first, .., _] => *first,
+            [] => zone.next_valid_after_gap(local_seconds)?,
+        };
+        let millis = utc_seconds
+            .checked_mul(1_000)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| {
+                PlanningError::Invalid("resolved timestamp is outside supported range".into())
+            })?;
+        Ok(TimestampMs::from_millis(millis))
+    }
+
     pub fn resolve(
         &self,
         timezone: &str,
@@ -1076,6 +1146,35 @@ mod tests {
         assert_eq!(early.utc_offset_minutes, -240);
         assert_eq!(late.utc_offset_minutes, -300);
         assert!(early.utc_instant < late.utc_instant);
+    }
+
+    #[test]
+    fn business_date_start_uses_the_pinned_zone_and_dst_boundary() {
+        let tzdb = SystemTimeZoneDatabase::system();
+        let (bytes, _) = tzdb
+            .read_zone("America/New_York")
+            .expect("the supported host must provide America/New_York TZif data");
+        let setting = ProjectCivilTimeSetting {
+            project_id: ProjectId::new("p1"),
+            revision: 1,
+            timezone: "America/New_York".into(),
+            tzdb_identity: crate::sha256_content_digest(&bytes),
+            changed_by: "operator".into(),
+            changed_at: TimestampMs::from_millis(0),
+        };
+
+        assert_eq!(
+            tzdb
+                .business_date_start(&setting, LocalDate::new(2024, 3, 10))
+                .unwrap(),
+            TimestampMs::from_millis(1_710_046_800_000)
+        );
+
+        let mut stale = setting;
+        stale.tzdb_identity = "sha256:stale".into();
+        assert!(tzdb
+            .business_date_start(&stale, LocalDate::new(2024, 3, 10))
+            .is_err());
     }
 
     #[test]

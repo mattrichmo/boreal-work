@@ -4,12 +4,15 @@
 //! persistence primitives. It deliberately does not decide lifecycle status;
 //! that belongs to the domain/application layer.
 
-use boreal_domain::work_model_v3::WorkSchedule;
+use boreal_domain::work_model_v3::{
+    ExternalWaitState, ProjectCivilTimeSetting, WorkSchedule, WorkScheduleRecord,
+};
 use boreal_domain::{
     AcceptanceProfile, AttemptPhase, BlockingDependency, DependencyPolicy, DispatchPolicy,
     GateKind, GateRequirement, GateState, PersistedLifecycle, ProfileId, ProjectId, ReasonCode,
     Reservation, TimestampMs, WorkId, WorkItem, WorkKind,
 };
+use boreal_domain::decision_inputs::{ExternalWaitPersistedState, ExternalWaitScopeInput};
 use libsqlite3_sys::{
     sqlite3_compileoption_get, sqlite3_libversion, sqlite3_libversion_number, sqlite3_sourceid,
 };
@@ -658,6 +661,16 @@ pub struct StatusWorkRecord {
     /// available. Retry timing is deliberately not converted into a work
     /// schedule.
     pub schedule: Option<WorkSchedule>,
+    /// Latest typed business schedule, when the additive schedule schema is
+    /// installed. An explicit empty schedule remains present and shadows the
+    /// legacy `due_at` column.
+    pub business_schedule: Option<WorkScheduleRecord>,
+    /// Untouched legacy `due_at` value, present only when no typed schedule
+    /// revision exists. The status adapter accepts only strict ISO dates,
+    /// explicitly zoned timestamps, or canonical unix-ms values.
+    pub legacy_due_at: Option<String>,
+    /// Exact scoped wait facts for this work item from the same snapshot.
+    pub external_waits: Vec<ExternalWaitScopeInput>,
     /// Earliest live cycle-assignment activation instant for this work, when
     /// the v3 planning projection provides one.
     pub activation_at: Option<TimestampMs>,
@@ -792,6 +805,8 @@ pub struct ProjectStatusRead {
     pub works: Vec<StatusWorkRecord>,
     pub diagnostics: Vec<StatusRecordDiagnostic>,
     pub dependencies: Vec<StatusDependencyRecord>,
+    /// Current project civil-time setting read with the same project snapshot.
+    pub civil_time_setting: Option<ProjectCivilTimeSetting>,
 }
 
 #[derive(Clone, Debug)]
@@ -5955,6 +5970,68 @@ impl SqliteStore {
         } else {
             self.status_planning_facts_for_project(project_id)?
         };
+        // Scheduling is an additive feature. Read its facts from this same
+        // SQLite transaction when the feature is installed; old databases
+        // retain the legacy status projection without probing absent tables.
+        let mut civil_time_error = None;
+        let civil_time_setting = if self.table_exists("project_civil_time_v1")? {
+            match self.project_civil_time_v1(project_id) {
+                Ok(setting) => setting,
+                Err(error) => {
+                    civil_time_error = Some(error.to_string());
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let schedule_table_installed = self.table_exists("work_schedule_v3")?;
+        let mut schedule_read_error = None;
+        let business_schedules = if schedule_table_installed {
+            match self.work_schedules_v3(project_id) {
+                Ok(records) => records
+                    .into_iter()
+                    .map(|record| (record.work_id.to_string(), record))
+                    .collect::<BTreeMap<_, _>>(),
+                Err(error) => {
+                    schedule_read_error = Some(error.to_string());
+                    BTreeMap::new()
+                }
+            }
+        } else {
+            BTreeMap::new()
+        };
+        let mut wait_read_error = None;
+        let mut external_waits_by_work = BTreeMap::<String, Vec<ExternalWaitScopeInput>>::new();
+        match self.external_wait_schema_installed() {
+            Ok(true) => match self.external_waits_v1(project_id) {
+                Ok(waits) => {
+                    for wait in waits {
+                        let state = match wait.state {
+                            ExternalWaitState::Open => ExternalWaitPersistedState::Open,
+                            ExternalWaitState::Resolved => ExternalWaitPersistedState::Resolved,
+                            ExternalWaitState::Cancelled => ExternalWaitPersistedState::Cancelled,
+                        };
+                        for affected_work_id in wait.affected_work_ids {
+                            external_waits_by_work
+                                .entry(affected_work_id.to_string())
+                                .or_default()
+                                .push(ExternalWaitScopeInput {
+                                    project_id: wait.project_id.clone(),
+                                    wait_id: wait.id.to_string(),
+                                    affected_work_id,
+                                    state,
+                                    follow_up: wait.follow_up.clone(),
+                                    civil_time_setting_revision: wait.civil_time_setting_revision,
+                                });
+                        }
+                    }
+                }
+                Err(error) => wait_read_error = Some(error.to_string()),
+            },
+            Ok(false) => {}
+            Err(error) => wait_read_error = Some(error.to_string()),
+        }
         let activation_projection = if inline_planning {
             "(SELECT MIN(CASE ca.activation_policy
                            WHEN 'explicit_not_before' THEN ca.activation_at_utc_ms
@@ -6001,12 +6078,20 @@ impl SqliteStore {
         } else {
             ("", "NULL, NULL, 0, 0")
         };
+        let schedule_presence_projection = if schedule_table_installed {
+            "EXISTS (SELECT 1 FROM work_schedule_v3 schedule
+                    WHERE schedule.project_id = wi.project_id
+                      AND schedule.work_id = wi.work_id)"
+        } else {
+            "0"
+        };
         let work_query = format!(
             "SELECT wi.work_id, wi.project_id, wi.kind, wi.parent_id, wi.lifecycle,
                     wi.dispatch_policy, wi.retry_not_before, wi.priority,
                     wi.acceptance_profile_id, wi.acceptance_profile_version,
                     wi.title, wi.description, wi.rowid, {activation_projection},
-                    {canonical_seed_projection}
+                    {canonical_seed_projection}, wi.due_at,
+                    {schedule_presence_projection}
              FROM work_item wi {status_cursor_join}
              WHERE wi.project_id = ?1 ORDER BY wi.work_id"
         );
@@ -6099,6 +6184,9 @@ impl SqliteStore {
                 };
                 let mut hard_holds = active_holds.get(&work_id).cloned().unwrap_or_default();
                 if requirement_diagnostics.contains_key(&work_id)
+                    || civil_time_error.is_some()
+                    || schedule_read_error.is_some()
+                    || wait_read_error.is_some()
                     || scoped_diagnostics
                         .iter()
                         .any(|diagnostic| diagnostic.work_id == work_id)
@@ -6131,6 +6219,29 @@ impl SqliteStore {
             })();
             match work {
                 Ok((work, schedule, activation_at, retry_not_before)) => {
+                    let business_schedule = business_schedules.get(&work_id).cloned();
+                    let legacy_due_at = if business_schedule.is_none()
+                        && !rows.column_bool(19)?
+                    {
+                        rows.column_optional_text(18)?
+                    } else {
+                        None
+                    };
+                    let mut work_diagnostics = Vec::new();
+                    for (code, detail) in [
+                        ("civil_time_setting_corrupt", civil_time_error.as_ref()),
+                        ("business_schedule_corrupt", schedule_read_error.as_ref()),
+                        ("external_wait_corrupt", wait_read_error.as_ref()),
+                    ] {
+                        if let Some(detail) = detail {
+                            work_diagnostics.push(StatusRecordDiagnostic {
+                                work_id: work_id.clone(),
+                                title: Some(work.title.clone()),
+                                code: code.to_owned(),
+                                detail: detail.clone(),
+                            });
+                        }
+                    }
                     let canonical_seed = if self.canonical_production {
                         // Cursor values are also read by the per-row canonical
                         // evaluator below. Keep malformed seed values out of
@@ -6166,12 +6277,18 @@ impl SqliteStore {
                         work,
                         retry_not_before,
                         schedule,
+                        business_schedule,
+                        legacy_due_at,
+                        external_waits: external_waits_by_work
+                            .remove(&work_id)
+                            .unwrap_or_default(),
                         activation_at,
                         current_attempt,
                         gate_diagnostics: diagnostics,
                         canonical_seed,
                         action_facts: StatusActionFacts::unavailable(),
-                    })
+                    });
+                    row_diagnostics.extend(work_diagnostics);
                 }
                 Err(error) => row_diagnostics.push(StatusRecordDiagnostic {
                     work_id,
@@ -6242,6 +6359,7 @@ impl SqliteStore {
             works,
             diagnostics: record_diagnostics,
             dependencies,
+            civil_time_setting,
         };
         let v3_nodes = if work_model_v3_enabled {
             Some(self.work_nodes_v3(project_id)?)
@@ -6307,6 +6425,47 @@ impl SqliteStore {
         max_attempt_deadline: &str,
         source_version_id: Option<&str>,
         config_identity: &str,
+    ) -> Result<ClaimResult, StoreError> {
+        self.claim_work_with_context_and_business_time(
+            project_id,
+            work_id,
+            actor_id,
+            harness_id,
+            session_id,
+            attempt_id,
+            operation_id,
+            request_digest,
+            expected_revision,
+            claimed_at,
+            lease_deadline,
+            max_attempt_deadline,
+            source_version_id,
+            config_identity,
+            None,
+        )
+    }
+
+    /// Claim with an application-validated project civil-time context. The
+    /// write transaction rechecks that its setting identity and evaluation
+    /// instant still match before using the context in canonical policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_work_with_context_and_business_time(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        actor_id: &str,
+        harness_id: &str,
+        session_id: Option<&str>,
+        attempt_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_revision: Option<u64>,
+        claimed_at: &str,
+        lease_deadline: &str,
+        max_attempt_deadline: &str,
+        source_version_id: Option<&str>,
+        config_identity: &str,
+        business_time: Option<&boreal_domain::work_model_v3::BusinessStatusContext>,
     ) -> Result<ClaimResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
@@ -6391,13 +6550,14 @@ impl SqliteStore {
                 ));
             }
             if self.canonical_production {
-                self.authorize_work_action_in_transaction(
+                self.authorize_work_action_in_transaction_with_business_time(
                     project_id,
                     work_id,
                     actor_id,
                     session_id,
                     claimed_at_ms,
                     boreal_domain::actions::ActionKind::Claim,
+                    business_time,
                 )?;
             } else {
                 // Compatibility schemas have no complete canonical action
@@ -6405,11 +6565,12 @@ impl SqliteStore {
                 // not rerun a session-less projection after the production
                 // action check: that would discard the authenticated session
                 // and could contradict the descriptor just authorized above.
-                let decision = self.status_decision_in_transaction(
+                let decision = self.status_decision_in_transaction_with_business_time(
                     project_id,
                     work_id,
                     actor_id,
                     claimed_at_ms,
+                    business_time,
                 )?;
                 if !decision.claimable_for_actor {
                     return Err(StoreError::Conflict(format!(
@@ -7513,7 +7674,19 @@ impl SqliteStore {
         request: impl Borrow<AttemptMutationRequest>,
     ) -> Result<AttemptMutationResult, StoreError> {
         let request = request.borrow();
-        self.apply_attempt_mutation_with_recover_descriptor(request, None)
+        self.apply_attempt_mutation_with_business_time(request, None)
+    }
+
+    /// Applies a fenced attempt mutation with a business-time context derived
+    /// for the mutation timestamp. The context is revalidated under the same
+    /// writer transaction as the attempt and canonical action checks.
+    pub fn apply_attempt_mutation_with_business_time(
+        &self,
+        request: impl Borrow<AttemptMutationRequest>,
+        business_time: Option<&boreal_domain::work_model_v3::BusinessStatusContext>,
+    ) -> Result<AttemptMutationResult, StoreError> {
+        let request = request.borrow();
+        self.apply_attempt_mutation_with_recover_descriptor(request, None, business_time)
     }
 
     /// Submit the versioned Recover action as a descriptor-bound expiry. The
@@ -7555,13 +7728,14 @@ impl SqliteStore {
                 recovery::recover_action_disposition_name(input.disposition)
             )),
         };
-        self.apply_attempt_mutation_with_recover_descriptor(&request, Some(input))
+        self.apply_attempt_mutation_with_recover_descriptor(&request, Some(input), None)
     }
 
     fn apply_attempt_mutation_with_recover_descriptor(
         &self,
         request: &AttemptMutationRequest,
         recover_action: Option<&recovery::RecoverActionInput>,
+        business_time: Option<&boreal_domain::work_model_v3::BusinessStatusContext>,
     ) -> Result<AttemptMutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
@@ -7645,13 +7819,14 @@ impl SqliteStore {
                     | AttemptMutationKind::RenewLease { .. } => None,
                 };
                 if let Some(action) = action {
-                    let descriptor = self.authorize_work_action_in_transaction(
+                    let descriptor = self.authorize_work_action_in_transaction_with_business_time(
                         &request.project_id,
                         &request.work_id,
                         &request.actor_id,
                         request.session_id.as_deref(),
                         status_evaluation::canonical_status_timestamp(&request.at)?,
                         action,
+                        business_time,
                     )?;
                     if let Some(input) = recover_action {
                         validate_recover_action_descriptor(&input.descriptor, &descriptor)?;
@@ -11831,6 +12006,18 @@ impl SqliteStore {
         self.schema_object_exists("table", table)
     }
 
+    fn external_wait_schema_installed(&self) -> Result<bool, StoreError> {
+        let waits = self.table_exists("external_wait_v1")?;
+        let scopes = self.table_exists("external_wait_scope_v1")?;
+        match (waits, scopes) {
+            (true, true) => Ok(true),
+            (false, false) => Ok(false),
+            _ => Err(StoreError::Corrupt(
+                "external-wait schema is partially installed".to_owned(),
+            )),
+        }
+    }
+
     fn table_has_column(&self, table: &str, column: &str) -> Result<bool, StoreError> {
         let mut statement =
             self.prepare(&format!("PRAGMA table_info({})", quote_identifier(table)))?;
@@ -15465,6 +15652,24 @@ mod scheduling_feature_schema_tests {
                     .contains("project_civil_time_revisions_are_immutable"),
                 "{error:?}"
             );
+        }
+    }
+
+    #[test]
+    fn partial_external_wait_schema_is_reported_as_corrupt() {
+        for table in ["external_wait_v1", "external_wait_scope_v1"] {
+            let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA_SQL)
+                .expect("canonical schema opens");
+            store
+                .execute_batch(&format!("DROP TABLE {table}"))
+                .expect("one optional external-wait table can be removed for the fixture");
+
+            let error = store
+                .external_wait_schema_installed()
+                .expect_err("a partially installed wait schema is not treated as absent");
+
+            assert!(matches!(error, StoreError::Corrupt(_)), "{error:?}");
+            assert!(error.to_string().contains("partially installed"));
         }
     }
 }

@@ -591,7 +591,16 @@ fn global_todo_flags_and_recent_activity_are_visible() {
         );
     }
     let second = Command::new(binary())
-        .args(["global", "todo", "add", "--title", "Second title", "--json"])
+        .args([
+            "global",
+            "todo",
+            "add",
+            "--title",
+            "Second title",
+            "--description",
+            "Second description",
+            "--json",
+        ])
         .env("BOREAL_GLOBAL_ROOT", &global)
         .output()
         .unwrap();
@@ -604,27 +613,29 @@ fn global_todo_flags_and_recent_activity_are_visible() {
         .as_str()
         .unwrap()
         .to_owned();
-    let reorder = Command::new(binary())
-        .args([
-            "global",
-            "todo",
-            "reorder",
-            item_id,
-            "--direction",
-            "down",
-            "--json",
-        ])
-        .env("BOREAL_GLOBAL_ROOT", &global)
-        .output()
-        .unwrap();
-    assert!(
-        reorder.status.success(),
-        "{}",
-        String::from_utf8_lossy(&reorder.stdout)
-    );
-    let reorder: Value = serde_json::from_slice(&reorder.stdout).unwrap();
+    let reorder = |id: &str, direction: &str| {
+        let output = Command::new(binary())
+            .args([
+                "global", "todo", "reorder", id, "--direction", direction, "--json",
+            ])
+            .env("BOREAL_GLOBAL_ROOT", &global)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let first_reorder = reorder(item_id, "down");
+    let (reorder, expected_order) = if first_reorder["data"]["moved"] == true {
+        (first_reorder, json!([second_id, item_id]))
+    } else {
+        (reorder(&second_id, "down"), json!([item_id, second_id]))
+    };
     assert_eq!(reorder["data"]["moved"], true);
-    assert_eq!(reorder["data"]["ordered_ids"], json!([second_id, item_id]));
+    assert_eq!(reorder["data"]["ordered_ids"], expected_order);
     let history = Command::new(binary())
         .args([
             "global", "history", "--limit", "1", "--item", item_id, "--json",

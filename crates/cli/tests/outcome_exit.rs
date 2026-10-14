@@ -139,6 +139,78 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
             attempt_id
         ))
         .unwrap();
+    fs::write(root.join("final-result.txt"), "captured closeout result").unwrap();
+    let captured = run(
+        &root,
+        [
+            "source",
+            "add",
+            "p",
+            "--input",
+            ".",
+            "--origin",
+            "outcome-exit/final-result",
+            "--actor",
+            BOOTSTRAP_OPERATOR,
+            "--harness",
+            FIXTURE_HARNESS,
+            "--session",
+            "close-session",
+            "--db",
+            path(&database),
+            "--operation-id",
+            "op_outcome_exit_final_result_source",
+            "--json",
+        ],
+    );
+    assert_success(captured.clone());
+    let final_result = envelope(&captured)["data"]["source"].clone();
+    let final_result_source = final_result["source_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let final_result_digest = final_result["content_digest"].as_str().unwrap().to_owned();
+    let store = SqliteStore::open(&database, SCHEMA).unwrap();
+    let (entity_revision, proof_revision) = store.work_revisions("p", "w").unwrap();
+    let current_revision = store.project_revision("p").unwrap().0;
+    drop(store);
+    let bound = run(
+        &root,
+        [
+            "evidence",
+            "bind-result",
+            "--project",
+            "p",
+            "--work",
+            "w",
+            "--attempt",
+            &attempt_id,
+            "--fence",
+            &fence.to_string(),
+            "--source-version",
+            &final_result_source,
+            "--content-digest",
+            &final_result_digest,
+            "--expected-revision",
+            &current_revision.to_string(),
+            "--expected-entity-revision",
+            &entity_revision.to_string(),
+            "--expected-proof-revision",
+            &proof_revision.to_string(),
+            "--actor",
+            "close-agent",
+            "--session",
+            "close-agent-session",
+            "--harness",
+            FIXTURE_HARNESS,
+            "--db",
+            path(&database),
+            "--operation-id",
+            "op_outcome_exit_final_result_bind",
+            "--json",
+        ],
+    );
+    assert_success(bound);
     fs::write(
         &receipt,
         serde_json::to_vec(&json!({
@@ -158,7 +230,7 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
             "exit_code": 0,
             "started_at": "unix-ms:10",
             "ended_at": "unix-ms:11",
-            "source_snapshot_hash": "source-1",
+            "source_snapshot_hash": final_result_source,
             "config_identity": "config-1",
             "environment_fingerprint": "env-1",
             "output_digest": "output-1",

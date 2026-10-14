@@ -4807,6 +4807,10 @@ fn status_item_json(item: &boreal_application::StatusWork, store: &SqliteStore) 
         "claimable_for_actor": item.claimable_for_actor(),
         "primary_reason": item.decision.primary_reason.stable_code(),
         "reason_codes": item.decision.reason_codes.iter().map(|reason| reason.stable_code()).collect::<Vec<_>>(),
+        "due_today": item.decision.due_today,
+        "overdue": item.decision.overdue,
+        "blocking_external_wait_ids": item.decision.blocking_external_wait_ids,
+        "follow_up_due_wait_ids": item.decision.follow_up_due_wait_ids,
         "next_action": item.decision.next_action.map(domain_action_name),
         "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
         "attempt": attempt,
@@ -13062,6 +13066,53 @@ mod tests {
         (catalog, captured.source.source_version_id)
     }
 
+    fn register_fixture_workspace_source(
+        database: &Path,
+        project: &str,
+        actor: &str,
+    ) -> (String, String) {
+        let database_arg = database.to_string_lossy();
+        let catalog = source_catalog_create(&source_catalog_root(&database_arg))
+            .expect("persistent source catalog opens");
+        let workspace = database
+            .parent()
+            .and_then(Path::parent)
+            .expect("fixture database has a project root")
+            .join(format!("result-workspace-{}", now_ms_u64()));
+        fs::create_dir_all(&workspace).expect("result workspace creates");
+        fs::write(workspace.join("README.md"), "distinct final result snapshot")
+            .expect("result workspace content writes");
+        let bytes = boreal_source::workspace_snapshot::pack(
+            &workspace,
+            boreal_source::workspace_snapshot::DEFAULT_MAX_SNAPSHOT_BYTES,
+        )
+        .expect("result workspace snapshot packs");
+        let _ = fs::remove_dir_all(&workspace);
+        let store = SqliteStore::open(database, PRODUCTION_SCHEMA).expect("fixture database opens");
+        let captured = KnowledgeApplication::new(&catalog)
+            .capture_source_with_store(
+                &store,
+                boreal_application::SourceCaptureInput {
+                    operation_id: format!(
+                        "op_cli_fixture_result_{}_{}",
+                        std::process::id(),
+                        now_ms_u64()
+                    ),
+                    project_id: project.to_owned(),
+                    origin: "tests/cli-final-result-workspace".to_owned(),
+                    media_type: "application/vnd.boreal.workspace-snapshot.v1".to_owned(),
+                    bytes,
+                },
+                actor,
+                &now(),
+            )
+            .expect("persistent final-result workspace source captures");
+        (
+            captured.source.source_version_id,
+            captured.source.content_digest,
+        )
+    }
+
     fn enroll_fixture_agent(database: &Path, project: &str, session: Option<&str>) -> &'static str {
         let actor = "fixture-agent";
         let root = database
@@ -13524,46 +13575,70 @@ mod tests {
 
     #[test]
     fn explicitly_selected_socket_routes_source_show_to_service() {
-        let error = run_with_operation(
+        let path = project_db_path("source-show-unavailable-socket");
+        let db = path.to_string_lossy().to_string();
+        let root = path.parent().and_then(Path::parent).expect("project root");
+        cleanup_project_db(&path);
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        let socket = root.join(".boreal/unavailable.sock");
+        let socket = socket.to_string_lossy().to_string();
+        fs::write(&socket, b"no service is listening here")
+            .expect("unavailable endpoint exists inside the project boundary");
+        let error = run(
             &args(&[
                 "source",
                 "show",
-                "project-1",
+                "p",
                 "source-1",
                 "--socket",
-                "/tmp/boreal-unavailable-route.sock",
+                &socket,
+                "--db",
+                &db,
             ]),
-            "op_unavailable_route",
         )
         .expect_err("source route should reach the selected service socket");
-        assert_eq!(error.code, ErrorCode::ServiceUnavailable);
+        assert_eq!(
+            error.code,
+            ErrorCode::ServiceUnavailable,
+            "selected socket route should report transport unavailability: {error:?}",
+        );
         assert_eq!(error.outcome, ApplicationOutcome::Failed);
         assert!(!error
             .message
             .contains("not available through the selected service socket"));
+        cleanup_project_db(&path);
     }
 
     #[test]
-    fn explicitly_selected_socket_routes_intake_capture_without_opening_a_database() {
-        let path = env::temp_dir().join(format!("boreal-cli-v3-gap-{}.sqlite", now_ms_u64()));
+    fn explicitly_selected_socket_routes_intake_capture_without_mutating_project_when_unavailable() {
+        let path = project_db_path("intake-capture-unavailable-socket");
         let db = path.to_string_lossy().to_string();
-        let socket = env::temp_dir()
-            .join(format!("boreal-cli-v3-gap-{}.sock", now_ms_u64()))
-            .to_string_lossy()
-            .into_owned();
-        let _ = fs::remove_file(&path);
+        let root = path.parent().and_then(Path::parent).expect("project root");
+        cleanup_project_db(&path);
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        let socket = root.join(".boreal/unavailable.sock");
+        let socket = socket.to_string_lossy().to_string();
+        fs::write(&socket, b"no service is listening here")
+            .expect("unavailable endpoint exists inside the project boundary");
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("project database opens");
+        let revision_before = store.project_revision("p").expect("project revision reads");
+        assert!(store
+            .intake_item_v3("p", "intake-1")
+            .expect("Intake fixture lookup succeeds")
+            .is_none());
+        drop(store);
 
         let error = run(&args(&[
             "intake",
             "capture",
             "--project",
-            "project-1",
+            "p",
             "intake-1",
             "captured note",
             "--bucket",
             "inbox",
             "--expected-revision",
-            "1",
+            &revision_before.0.to_string(),
             "--db",
             &db,
             "--socket",
@@ -13571,14 +13646,27 @@ mod tests {
             "--json",
         ]))
         .expect_err("Intake capture should reach the selected socket route");
-        assert_eq!(error.code, ErrorCode::ServiceUnavailable);
+        assert_eq!(
+            error.code,
+            ErrorCode::ServiceUnavailable,
+            "selected socket route should report transport unavailability: {error:?}",
+        );
         assert_eq!(error.outcome, ApplicationOutcome::Failed);
         assert!(!error
             .message
             .contains("not available through the selected service socket"));
-        assert!(!path.exists(), "unavailable route opened a database");
-
-        let _ = fs::remove_file(path);
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA)
+            .expect("project database remains available after unavailable route");
+        assert_eq!(
+            store.project_revision("p").expect("project revision reads"),
+            revision_before,
+            "the failed transport performs no project mutation",
+        );
+        assert!(store
+            .intake_item_v3("p", "intake-1")
+            .expect("Intake fixture lookup succeeds")
+            .is_none());
+        cleanup_project_db(&path);
     }
 
     #[test]
@@ -14235,6 +14323,10 @@ mod tests {
             .expect("task row");
         assert_eq!(task["kind"], "task");
         assert_eq!(task["claimable_for_actor"], false);
+        assert_eq!(task["due_today"], false);
+        assert_eq!(task["overdue"], false);
+        assert_eq!(task["blocking_external_wait_ids"], json!([]));
+        assert_eq!(task["follow_up_due_wait_ids"], json!([]));
         let denied_actions = task["actions"]["denied"]
             .as_array()
             .expect("status includes the canonical denied-action list");
@@ -14267,6 +14359,133 @@ mod tests {
             .as_array()
             .is_some_and(|inputs| inputs.iter().any(|input| input == "session_id")));
 
+        cleanup_project_db(&path);
+    }
+
+    #[test]
+    fn shared_status_snapshot_readback_uses_canonical_due_and_wait_facts() {
+        let path = project_db_path("status-facts-readback");
+        let db = path.to_string_lossy().to_string();
+        cleanup_project_db(&path);
+
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        for work_id in ["due-today", "overdue"] {
+            run(&args(&[
+                "work",
+                "create",
+                "p",
+                work_id,
+                "Status facts fixture",
+                "--db",
+                &db,
+            ]))
+            .expect("work item creates");
+        }
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("fixture database opens");
+
+        // 1970-01-01 at unix-ms:0 keeps the date policy deterministic without
+        // introducing a host clock or timezone dependency into this mapper test.
+        let as_of = TimestampMs::from_millis(0);
+        let today = LocalDate::new(1970, 1, 1);
+        let yesterday = LocalDate::new(1969, 12, 31);
+        let project_id = ProjectId::new("p");
+        let business_time = boreal_domain::work_model_v3::BusinessTimeContext {
+            project_id: project_id.clone(),
+            setting_revision: 1,
+            as_of,
+            civil_date: today,
+            timezone: "Etc/UTC".to_owned(),
+            tzdb_identity: "fixture-tzdb/v1".to_owned(),
+        };
+
+        let mut due_today = boreal_application::StatusWorkInput::new(
+            WorkItem::new(
+                project_id.clone(),
+                WorkId::new("due-today"),
+                WorkKind::Task,
+                None,
+                "Due today",
+            )
+            .open(),
+        );
+        due_today.business_schedule = Some(BusinessSchedule {
+            due: Some(BusinessDate::LocalDate(today)),
+            ..BusinessSchedule::default()
+        });
+        due_today.business_schedule_revision = Some(1);
+        due_today.business_schedule_setting_revision = Some(1);
+        due_today.business_time = Some(business_time.clone());
+        due_today
+            .external_waits
+            .push(boreal_domain::decision_inputs::ExternalWaitScopeInput {
+                project_id: project_id.clone(),
+                wait_id: "wait-decision".to_owned(),
+                affected_work_id: WorkId::new("due-today"),
+                state: boreal_domain::decision_inputs::ExternalWaitPersistedState::Open,
+                follow_up: Some(BusinessDate::LocalDate(today)),
+                civil_time_setting_revision: Some(1),
+            });
+
+        let mut overdue = boreal_application::StatusWorkInput::new(
+            WorkItem::new(
+                project_id.clone(),
+                WorkId::new("overdue"),
+                WorkKind::Task,
+                None,
+                "Overdue",
+            )
+            .open(),
+        );
+        overdue.business_schedule = Some(BusinessSchedule {
+            due: Some(BusinessDate::LocalDate(yesterday)),
+            ..BusinessSchedule::default()
+        });
+        overdue.business_schedule_revision = Some(1);
+        overdue.business_schedule_setting_revision = Some(1);
+        overdue.business_time = Some(business_time);
+
+        let snapshot = boreal_application::project_status(
+            &project_id,
+            &boreal_domain::ActorContext {
+                actor_id: ActorId::new(DEFAULT_ACTOR),
+                role: ActorRole::Operator,
+            },
+            as_of,
+            boreal_domain::Revision(4),
+            &[due_today, overdue],
+            &[],
+            100,
+            0,
+        )
+        .expect("canonical status decisions are produced");
+        let readback = status_snapshot_json(&snapshot, None, &store);
+        let items = readback["items"].as_array().expect("status items");
+        let due_today = items
+            .iter()
+            .find(|item| item["work_id"] == "due-today")
+            .expect("due-today status row");
+        assert_eq!(due_today["due_today"], true);
+        assert_eq!(due_today["overdue"], false);
+        assert_eq!(
+            due_today["blocking_external_wait_ids"],
+            json!(["wait-decision"])
+        );
+        assert_eq!(
+            due_today["follow_up_due_wait_ids"],
+            json!(["wait-decision"])
+        );
+
+        let overdue = items
+            .iter()
+            .find(|item| item["work_id"] == "overdue")
+            .expect("overdue status row");
+        assert_eq!(overdue["due_today"], false);
+        assert_eq!(overdue["overdue"], true);
+        assert_eq!(overdue["blocking_external_wait_ids"], json!([]));
+        assert_eq!(overdue["follow_up_due_wait_ids"], json!([]));
+
+        // Both direct CLI status and the service's status command serialize
+        // through this shared snapshot mapper.
         cleanup_project_db(&path);
     }
 
@@ -14617,6 +14836,48 @@ mod tests {
                 .expect("current attempt exists")
                 .review_required_after_expiry
         );
+        drop(claimed_store);
+        let (result_source_version, result_content_digest) =
+            register_fixture_workspace_source(&db_path, "p", actor);
+        let bind_store =
+            SqliteStore::open(&db_path, PRODUCTION_SCHEMA).expect("database opens for result bind");
+        let (entity_revision, proof_revision) = bind_store
+            .work_revisions("p", "w")
+            .expect("work revisions read before result binding");
+        let expected_revision = bind_store
+            .project_revision("p")
+            .expect("project revision reads before result binding")
+            .0;
+        drop(bind_store);
+        run(&args(&[
+            "evidence",
+            "bind-result",
+            "--project",
+            "p",
+            "--work",
+            "w",
+            "--attempt",
+            attempt_id,
+            "--fence",
+            &fence.to_string(),
+            "--source-version",
+            &result_source_version,
+            "--content-digest",
+            &result_content_digest,
+            "--expected-revision",
+            &expected_revision.to_string(),
+            "--expected-entity-revision",
+            &entity_revision.to_string(),
+            "--expected-proof-revision",
+            &proof_revision.to_string(),
+            "--actor",
+            actor,
+            "--session",
+            "s",
+            "--db",
+            &db,
+        ]))
+        .expect("attempt binds its distinct immutable final-result workspace");
         fs::write(
             &receipt_path,
             serde_json::to_string(&json!({
@@ -14631,7 +14892,7 @@ mod tests {
                 "exit_code": 0,
                 "started_at": "unix-ms:10",
                 "ended_at": "unix-ms:11",
-                "source_snapshot_hash": source_version,
+                "source_snapshot_hash": result_source_version,
                 "config_identity": "test-cli-config/v1",
                 "environment_fingerprint": "env-1",
                 "output_digest": "output-1",

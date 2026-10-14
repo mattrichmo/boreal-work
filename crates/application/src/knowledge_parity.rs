@@ -841,10 +841,21 @@ mod focused_context_revision_tests {
     #[test]
     fn focused_context_revision_recheck_rejects_stale_capsules() {
         let store = SqliteStore::open_in_memory(include_str!(
-            "../../../project/spec/schema-production.sql"
+            "../../../project/spec/schema-v2.sql"
         ))
         .unwrap();
-        store.create_project("project-a", "unix-ms:0").unwrap();
+        store
+            .initialize_project(
+                "project-a",
+                "operator",
+                "operator",
+                "operator-credential",
+                "Operator",
+                "initialize-project-a",
+                "sha256:initialize-project-a",
+                "unix-ms:0",
+            )
+            .unwrap();
         let actual = store.project_revision("project-a").unwrap().0;
         assert!(actual > 0, "project initialization should advance revision");
         let stale = actual - 1;

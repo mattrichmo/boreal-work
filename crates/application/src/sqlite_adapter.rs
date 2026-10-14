@@ -43,7 +43,7 @@ impl AttemptLifecycleAdapter for SqliteAttemptAdapter<'_> {
         &self,
         command: AttemptCommand,
     ) -> Result<AttemptMutation, AttemptAdapterError> {
-        let result = self.store.apply_attempt_mutation(&StoreMutationRequest {
+        let request = StoreMutationRequest {
             project_id: command.project_id.as_str().to_owned(),
             work_id: command.work_id.as_str().to_owned(),
             attempt_id: command.attempt_id.as_str().to_owned(),
@@ -63,7 +63,31 @@ impl AttemptLifecycleAdapter for SqliteAttemptAdapter<'_> {
             mutation: store_mutation(&command.kind, command.at, command.liveness.as_ref())
                 .map_err(AttemptAdapterError::Rejected)?,
             reason: command.reason,
-        })?;
+        };
+        let needs_business_time = matches!(
+            &request.mutation,
+            StoreMutationKind::Accept
+                | StoreMutationKind::Start
+                | StoreMutationKind::Submit
+                | StoreMutationKind::Release
+                | StoreMutationKind::Fail
+                | StoreMutationKind::Expire { .. }
+                | StoreMutationKind::Cancel { .. }
+        );
+        let business_time = if needs_business_time {
+            crate::WorkApplication::new(self.store)
+                .business_status_context_for_work(
+                    &command.project_id,
+                    command.work_id.as_str(),
+                    command.at,
+                )
+                .map_err(|error| AttemptAdapterError::Rejected(error.to_string()))?
+        } else {
+            None
+        };
+        let result = self
+            .store
+            .apply_attempt_mutation_with_business_time(&request, business_time.as_ref())?;
         mutation(result).map_err(AttemptAdapterError::Rejected)
     }
 

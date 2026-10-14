@@ -6,7 +6,8 @@
 
 use std::{fmt, str::FromStr};
 
-use crate::work_model_v3::WorkSchedule;
+use crate::work_model_v3::{BusinessSchedule, BusinessTimeContext, WorkSchedule};
+use crate::decision_inputs::ExternalWaitScopeInput;
 
 pub mod acceptance;
 pub mod actions;
@@ -863,6 +864,8 @@ pub enum ReasonCode {
     RetryNotBefore(TimestampMs),
     /// A declared work or cycle activation instant has not arrived.
     ScheduledStart(TimestampMs),
+    /// An explicitly scoped external decision remains unresolved.
+    ExternalWaitOpen(String),
     Eligible,
     OperatorOnly,
     NonExecutableContainer,
@@ -895,6 +898,7 @@ impl ReasonCode {
             Self::Paused => "paused".to_owned(),
             Self::RetryNotBefore(at) => format!("retry_not_before({at})"),
             Self::ScheduledStart(at) => format!("scheduled_start({at})"),
+            Self::ExternalWaitOpen(id) => format!("external_wait_open({id})"),
             Self::Eligible => "eligible".to_owned(),
             Self::OperatorOnly => "operator_only".to_owned(),
             Self::NonExecutableContainer => "non_executable_container".to_owned(),
@@ -942,6 +946,12 @@ pub struct StatusDecision {
     pub project_revision: Revision,
     pub as_of: TimestampMs,
     pub next_status_change_at: Option<TimestampMs>,
+    /// Business-calendar classification from the supplied project-local
+    /// context. These fields never mutate the persisted work or wait state.
+    pub due_today: bool,
+    pub overdue: bool,
+    pub blocking_external_wait_ids: Vec<String>,
+    pub follow_up_due_wait_ids: Vec<String>,
     pub display_status: DerivedStatus,
     /// Chosen by precedence, never inferred from lexical reason ordering.
     pub primary_reason: ReasonCode,
@@ -1020,6 +1030,20 @@ pub struct StatusContext<'a> {
     /// Optional canonical work schedule. `not_before_at` is a blocking
     /// availability constraint; target start/end remain planning metadata.
     pub schedule: Option<WorkSchedule>,
+    /// Typed civil-date and instant planning values. The application supplies
+    /// a validated project clock when any value needs local-date semantics.
+    pub business_schedule: Option<&'a BusinessSchedule>,
+    pub business_schedule_revision: Option<u64>,
+    pub business_schedule_setting_revision: Option<u64>,
+    pub business_time: Option<&'a BusinessTimeContext>,
+    /// Absolute start boundary for the declared not-before value.
+    pub business_not_before_at: Option<TimestampMs>,
+    /// Absolute boundary for the next business schedule change, resolved by
+    /// the application with the validated timezone database.
+    pub business_schedule_next_change_at: Option<TimestampMs>,
+    pub external_wait_next_change_at: Option<TimestampMs>,
+    /// Exact project/work scope edges from the same store snapshot.
+    pub external_waits: &'a [ExternalWaitScopeInput],
     /// Resolved cycle/assignment activation instant, when planning has
     /// supplied one. It is a second canonical constraint, not a UI hint.
     pub activation_at: Option<TimestampMs>,
@@ -1046,6 +1070,14 @@ impl<'a> StatusContext<'a> {
             project_revision,
             retry_not_before: None,
             schedule: None,
+            business_schedule: None,
+            business_schedule_revision: None,
+            business_schedule_setting_revision: None,
+            business_time: None,
+            business_not_before_at: None,
+            business_schedule_next_change_at: None,
+            external_wait_next_change_at: None,
+            external_waits: &[],
             activation_at: None,
             affected_dependents: &[],
         }
@@ -1476,6 +1508,14 @@ mod tests {
             project_revision: Revision(1),
             retry_not_before: None,
             schedule: None,
+            business_schedule: None,
+            business_schedule_revision: None,
+            business_schedule_setting_revision: None,
+            business_time: None,
+            business_not_before_at: None,
+            business_schedule_next_change_at: None,
+            external_wait_next_change_at: None,
+            external_waits: &[],
             activation_at: None,
             affected_dependents: &[],
         });

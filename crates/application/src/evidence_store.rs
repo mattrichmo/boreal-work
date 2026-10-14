@@ -328,6 +328,44 @@ impl WorkApplication<'_> {
                     )));
             }
         }
+        match snapshot.typed_acceptance {
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::NotRequired
+            | boreal_store::acceptance::CloseReadinessTypedAcceptance::Ready => {}
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::ResultMissing => {
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::AcceptanceResultMissing);
+            }
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::ResultMismatch => {
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::AcceptanceResultMismatch);
+            }
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::ArtifactDecisionMissing => {
+                let gate_id = snapshot
+                    .pinned_requirements
+                    .declarations
+                    .iter()
+                    .find(|declaration| declaration.required && declaration.kind == "review")
+                    .map(|declaration| declaration.gate_id.as_str())
+                    .unwrap_or("artifact_review");
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::ReviewRequired(GateId::new(gate_id)));
+            }
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::ArtifactDecisionMismatch => {
+                let gate_id = snapshot
+                    .pinned_requirements
+                    .declarations
+                    .iter()
+                    .find(|declaration| declaration.required && declaration.kind == "review")
+                    .map(|declaration| declaration.gate_id.as_str())
+                    .unwrap_or("artifact_review");
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::ReviewRejected(GateId::new(gate_id)));
+            }
+        }
         let attempt_context = snapshot.proof_attempt.as_ref();
         let binding_mismatch = snapshot.final_result.as_ref().is_some_and(|binding| {
             let Some(attempt) = attempt_context else {
@@ -2443,13 +2481,14 @@ mod tests {
     use super::*;
     use crate::CommandSpec;
     use boreal_domain::{
-        AcceptanceProfile, ActorRole, ConfigIdentity, DispatchPolicy, PersistedLifecycle,
-        ProjectId, WorkId, WorkItem, WorkKind,
+        AcceptanceProfile, ActorRole, ConfigIdentity, DispatchPolicy, GateRequirement,
+        PersistedLifecycle, ProjectId, WorkId, WorkItem, WorkKind,
     };
     use boreal_store::{
         EvidenceExecutionState,
         identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
         principals::{PrincipalGrantRequest, PrincipalRevocationRequest},
+        SourceVersionRegistrationInput,
     };
 
     const FIXTURE_SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -2690,6 +2729,72 @@ mod tests {
         (store, project)
     }
 
+    fn bind_verifier_final_result(
+        store: &SqliteStore,
+        project: &ProjectId,
+        request: &mut EvidenceRunRequest,
+        binding_at: TimestampMs,
+    ) {
+        let attempt = store
+            .current_attempt_for_work(project.as_str(), request.expectation.work_id.as_str())
+            .expect("read current verifier attempt")
+            .expect("current verifier attempt exists");
+        let session_id = attempt
+            .session_id
+            .as_deref()
+            .expect("verifier attempt has a session");
+        let fixture_id = request.operation_id.as_str();
+        let origin = format!("{fixture_id}-final-result.txt");
+        let body = format!("final verifier result bytes for {fixture_id}");
+        let version = SourceCatalog::default()
+            .capture(project.as_str(), &origin, body.as_bytes(), "text/plain")
+            .expect("capture verifier final result");
+        store
+            .register_source_version(&SourceVersionRegistrationInput {
+                operation_id: format!("op-source-register-{fixture_id}"),
+                project_id: project.as_str().to_owned(),
+                actor_id: attempt.actor_id.clone(),
+                source_version_id: version.source_version_id.clone(),
+                origin,
+                access_scope: "project".to_owned(),
+                content_digest: version.content_digest.clone(),
+                media_type: version.media_type.clone(),
+                byte_count: version.byte_count as u64,
+                captured_at: stamp(TimestampMs::from_millis(
+                    binding_at.as_millis().saturating_sub(10),
+                )),
+                parser_identity: "verifier-test/1".to_owned(),
+                availability: "available".to_owned(),
+                citation_json: "[]".to_owned(),
+                request_digest: format!("sha256:source-register-{fixture_id}"),
+            })
+            .expect("register verifier final result source");
+        let (entity_revision, proof_revision) = store
+            .work_revisions(project.as_str(), request.expectation.work_id.as_str())
+            .expect("read verifier proof revisions");
+        boreal_store::acceptance::AcceptanceStore::new(store)
+            .bind_final_result(&boreal_store::acceptance::FinalResultBindingRequest {
+                project_id: project.as_str().to_owned(),
+                work_id: request.expectation.work_id.as_str().to_owned(),
+                actor_id: attempt.actor_id,
+                session_id: session_id.to_owned(),
+                attempt_id: request.expectation.attempt_id.as_str().to_owned(),
+                fence: request.expectation.fence.get(),
+                expected_project_revision: store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+                expected_entity_revision: entity_revision,
+                expected_proof_revision: proof_revision,
+                source_version_id: version.source_version_id.clone(),
+                content_digest: version.content_digest,
+                operation_id: format!("op-final-result-{fixture_id}"),
+                at: stamp(binding_at),
+            })
+            .expect("bind verifier final result");
+        request.expectation.source_snapshot_hash = SourceVersionId::new(version.source_version_id);
+    }
+
     fn production_reviewed_verifier_work(
         store: &SqliteStore,
         project: &ProjectId,
@@ -2749,6 +2854,72 @@ mod tests {
             .expect("put reviewed verifier attempt in running phase");
     }
 
+    fn production_general_attestation_work(
+        store: &SqliteStore,
+        project: &ProjectId,
+        work_id: &str,
+        attempt_id: &str,
+        session_id: &str,
+    ) {
+        let app = WorkApplication::new(store);
+        app.register_session_as(
+            project,
+            "agent-one",
+            "verifier-harness",
+            session_id,
+            "unix-ms:12",
+            &format!("op-session-{work_id}"),
+        )
+        .expect("register general-work agent session");
+        let mut work = verifier_work(project);
+        work.id = WorkId::new(work_id);
+        work.acceptance_profile = AcceptanceProfile {
+            id: ProfileId::new("general-attestation"),
+            version: "1".to_owned(),
+            gates: vec![GateRequirement::required(
+                GateId::new("summary"),
+                GateKind::Summary,
+            )],
+        };
+        app.create_work_as_session_checked(
+            &work,
+            "verifier-operator",
+            VERIFIER_OPERATOR_SESSION,
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            "unix-ms:10",
+            &format!("op-create-{work_id}"),
+        )
+        .expect("create general-attestation work");
+        app.claim_with_context(
+            project,
+            work_id,
+            "agent-one",
+            "verifier-harness",
+            Some(session_id),
+            attempt_id,
+            &format!("op-claim-{work_id}"),
+            &format!("sha256:{work_id}-claim"),
+            None,
+            "unix-ms:1000",
+            "unix-ms:2000",
+            "unix-ms:3000",
+            Some("source-one"),
+            "config-one",
+        )
+        .expect("claim general-attestation work");
+        store
+            .execute_batch(&format!(
+                "UPDATE attempt SET state = 'running', accepted_at = 'unix-ms:1001'
+                 WHERE attempt_id = '{attempt_id}'"
+            ))
+            .expect("put general-attestation attempt in running phase");
+    }
+
     fn persist_open_close_intent(
         store: &SqliteStore,
         project: &ProjectId,
@@ -2765,6 +2936,62 @@ mod tests {
             .session_id
             .as_deref()
             .expect("test attempt has a session");
+        let mut final_result_source = attempt.source_version_id.clone();
+        if matches!(profile_id, "focused" | "reviewed") {
+            let catalog = SourceCatalog::default();
+            let origin = format!("{work_id}-final-result.txt");
+            let final_result_body = format!("final result bytes for {work_id}");
+            let version = catalog
+                .capture(
+                    project.as_str(),
+                    &origin,
+                    final_result_body.as_bytes(),
+                    "text/plain",
+                )
+                .expect("capture a fixture final result");
+            store
+                .register_source_version(&SourceVersionRegistrationInput {
+                    operation_id: format!("op-source-register-{work_id}"),
+                    project_id: project.as_str().to_owned(),
+                    actor_id: attempt.actor_id.clone(),
+                    source_version_id: version.source_version_id.clone(),
+                    origin,
+                    access_scope: "project".to_owned(),
+                    content_digest: version.content_digest.clone(),
+                    media_type: version.media_type.clone(),
+                    byte_count: version.byte_count as u64,
+                    captured_at: "unix-ms:1300".to_owned(),
+                    parser_identity: "close-readiness-test/1".to_owned(),
+                    availability: "available".to_owned(),
+                    citation_json: "[]".to_owned(),
+                    request_digest: format!("sha256:source-register-{work_id}"),
+                })
+                .expect("register fixture final result source");
+            let (entity_revision, proof_revision) = store
+                .work_revisions(project.as_str(), work_id)
+                .expect("read current software proof revisions");
+            final_result_source = Some(version.source_version_id.clone());
+            boreal_store::acceptance::AcceptanceStore::new(store)
+                .bind_final_result(&boreal_store::acceptance::FinalResultBindingRequest {
+                    project_id: project.as_str().to_owned(),
+                    work_id: work_id.to_owned(),
+                    actor_id: attempt.actor_id.clone(),
+                    session_id: session_id.to_owned(),
+                    attempt_id: attempt_id.to_owned(),
+                    fence: attempt.fence,
+                    expected_project_revision: store
+                        .project_revision(project.as_str())
+                        .expect("project revision")
+                        .0,
+                    expected_entity_revision: entity_revision,
+                    expected_proof_revision: proof_revision,
+                    source_version_id: version.source_version_id,
+                    content_digest: version.content_digest,
+                    operation_id: format!("op-final-result-{work_id}"),
+                    at: "unix-ms:1350".to_owned(),
+                })
+                .expect("bind a final result for the software-profile fixture");
+        }
         store
             .apply_attempt_mutation(boreal_store::AttemptMutationRequest {
                 project_id: project.as_str().to_owned(),
@@ -2795,7 +3022,9 @@ mod tests {
             work_id: WorkId::new(work_id),
             attempt_id: AttemptId::new(attempt_id),
             fence: Fence::new(attempt.fence),
-            source_snapshot_hash: SourceVersionId::new("source-one"),
+            source_snapshot_hash: SourceVersionId::new(
+                final_result_source.as_deref().unwrap_or(""),
+            ),
             config_identity: ConfigIdentity::new("config-one"),
             profile_id: ProfileId::new(profile_id),
             profile_version: "1".to_owned(),
@@ -2823,7 +3052,9 @@ mod tests {
             work_id: WorkId::new(work_id),
             attempt_id: AttemptId::new(attempt_id),
             fence: Fence::new(attempt.fence),
-            source_snapshot_hash: SourceVersionId::new("source-one"),
+            source_snapshot_hash: SourceVersionId::new(
+                final_result_source.as_deref().unwrap_or(""),
+            ),
             config_identity: ConfigIdentity::new("config-one"),
             profile_id: ProfileId::new(profile_id),
             profile_version: "1".to_owned(),
@@ -2858,41 +3089,66 @@ mod tests {
         let requirements = boreal_store::profiles::ProfileStore::new(store)
             .current_pinned_requirements(project.as_str(), work_id)
             .expect("read reviewed profile pin");
-        let definition = close_readiness_definition(&requirements)
-            .expect("build reviewed close-readiness definition");
         let attempt = store
             .attempt_record_by_id(project.as_str(), attempt_id)
             .expect("read reviewed attempt")
             .expect("reviewed attempt exists");
-        let request = ReviewDecisionRequest {
-            review_id: review_id.to_owned(),
-            work_id: WorkId::new(work_id),
-            attempt_id: AttemptId::new(attempt_id),
-            fence: Fence::new(attempt.fence),
-            reviewer_actor_id: ActorId::new("reviewer-one"),
-            attempt_actor_id: ActorId::new("agent-one"),
-            reviewer_role: ActorRole::Reviewer,
-            decision,
-            reason: "reviewed close-readiness test submission".to_owned(),
-            source_snapshot_hash: SourceVersionId::new("source-one"),
-            config_identity: ConfigIdentity::new("config-one"),
-            policy_version: requirements.profile.version.to_string(),
+        let revisions_before = store
+            .work_revisions(project.as_str(), work_id)
+            .expect("read reviewed proof revision");
+        let (_, proof_revision) = revisions_before;
+        let submission = store
+            .current_submission(project.as_str(), work_id, proof_revision)
+            .expect("read reviewed submission")
+            .expect("reviewed work has an immutable submission");
+        // This test targets close-readiness review readback only; it does not
+        // exercise review-write authorization. A software final-result
+        // submission has a produced source distinct from the immutable claim
+        // source, so do not route the fixture through the review action
+        // preflight (which evaluates the claim proof). Seed the legacy review
+        // row against the exact sealed submission instead.
+        let gate_id = store
+            .gate_id_for_work(project.as_str(), work_id, "review")
+            .expect("read exact reviewed gate id");
+        let decision = match decision {
+            ReviewDecision::Accepted => "accepted",
+            ReviewDecision::Rejected => "rejected",
         };
-        WorkApplication::new(store)
-            .record_review(
-                &ActorId::new("reviewer-one"),
-                Some("reviewer-session"),
-                &request,
-                &definition,
-                Some(
-                    store
-                        .project_revision(project.as_str())
-                        .expect("project revision")
-                        .0,
-                ),
-                TimestampMs::from_millis(now),
-            )
-            .expect("persist required review decision");
+        let project_id = project.as_str();
+        let sql = format!(
+            "INSERT INTO review (
+                 review_id,work_id,attempt_id,fence,gate_id,reviewer_actor_id,
+                 decision,reason,source_version_id,policy_digest,created_at
+             ) VALUES (
+                 '{review_id}','{work_id}','{attempt_id}',{},'{gate_id}',
+                 'reviewer-one','{decision}','reviewed close-readiness test submission',
+                 '{}','{}','unix-ms:{now}'
+             );
+             UPDATE project
+             SET project_revision=project_revision+1,updated_at='unix-ms:{now}'
+             WHERE project_id='{project_id}';",
+            attempt.fence,
+            submission.source_version_id,
+            requirements.profile.policy_digest,
+        );
+        store
+            .execute_batch(&sql)
+            .expect("seed exact legacy review readback fixture");
+        assert_eq!(
+            store
+                .work_revisions(project.as_str(), work_id)
+                .expect("read work revisions after review fixture"),
+            revisions_before,
+            "recording a review must not advance entity or proof revisions",
+        );
+        assert_eq!(
+            store
+                .attempt_record_by_id(project.as_str(), attempt_id)
+                .expect("read attempt after review fixture")
+                .expect("reviewed attempt remains durable"),
+            attempt,
+            "recording a review must not mutate the immutable claim attempt",
+        );
     }
 
     fn finished_production_execution<'a>(
@@ -2917,6 +3173,12 @@ mod tests {
         let app = WorkApplication::new(store);
         let mut request = verifier_request(operation_id);
         request.expectation.gate.command = Some(CommandSpec::new("true", vec!["true".to_owned()]));
+        bind_verifier_final_result(
+            store,
+            project,
+            &mut request,
+            TimestampMs::from_millis(1_050),
+        );
         let admission = app
             .admit_witnessed_execution(
                 "agent-one",
@@ -3074,13 +3336,14 @@ mod tests {
             store
                 .operation("verifier:op-verifier-admission-order")
                 .expect("read verifier operation")
-                .is_some()
+                .is_none(),
+            "hard-deadline rejection happens before the admission journal is written"
         );
         assert!(
             store
                 .audit_event("verifier:op-verifier-admission-order")
                 .expect("read verifier audit")
-                .is_some()
+                .is_none()
         );
         assert!(
             store
@@ -3094,7 +3357,13 @@ mod tests {
     fn verifier_admission_replay_repairs_either_durable_half_without_second_job() {
         let (store, project) = production_verifier_setup();
         let app = WorkApplication::new(&store);
-        let request = verifier_request("op-verifier-admission-repair");
+        let mut request = verifier_request("op-verifier-admission-repair");
+        bind_verifier_final_result(
+            &store,
+            &project,
+            &mut request,
+            TimestampMs::from_millis(1_050),
+        );
 
         let first = app
             .admit_witnessed_execution(
@@ -3182,7 +3451,13 @@ mod tests {
     fn verifier_unknown_outcome_remains_readback_required_after_atomic_admission() {
         let (store, project) = production_verifier_setup();
         let app = WorkApplication::new(&store);
-        let request = verifier_request("op-verifier-unknown-readback");
+        let mut request = verifier_request("op-verifier-unknown-readback");
+        bind_verifier_final_result(
+            &store,
+            &project,
+            &mut request,
+            TimestampMs::from_millis(1_050),
+        );
 
         app.admit_witnessed_execution(
             "agent-one",
@@ -3222,18 +3497,23 @@ mod tests {
         let (store, project) = production_verifier_setup();
         let (app, request, result) =
             finished_production_execution(&store, &project, "op-verifier-source-change");
-        store
-            .execute_batch(
-                "INSERT INTO source_version
-                 (source_version_id, project_id, origin, access_scope, content_digest,
-                  media_type, byte_count, captured_at, parser_identity, availability, citation_json)
-                 VALUES ('source-two', 'verifier-production-project', 'fixture', 'project',
-                         'sha256:source-two', 'text/plain', 0, 'unix-ms:1300',
-                         'verifier-test/1', 'available', '[]');
-                 UPDATE attempt SET source_version_id = 'source-two'
-                 WHERE attempt_id = 'verifier-attempt'",
-            )
-            .expect("change source context");
+        // A newer produced result supersedes the output this verifier ran
+        // against. The old receipt must fail its source-context preflight
+        // before the external job is reconciled.
+        let mut changed_result_request = request.clone();
+        changed_result_request.operation_id =
+            boreal_domain::OperationId::new("op-verifier-source-change-rebind");
+        bind_verifier_final_result(
+            &store,
+            &project,
+            &mut changed_result_request,
+            TimestampMs::from_millis(1_360),
+        );
+        assert_ne!(
+            changed_result_request.expectation.source_snapshot_hash,
+            request.expectation.source_snapshot_hash,
+            "the newer final-result binding must supersede the verifier's source"
+        );
 
         let error = app.record_witnessed_execution(
             "agent-one",
@@ -3245,10 +3525,8 @@ mod tests {
         );
         assert!(matches!(
             error,
-            Err(ApplicationError::Evidence(
-                crate::EvidenceValidationError { .. }
-            )) | Err(ApplicationError::Store(StoreError::Conflict(_)))
-                | Err(ApplicationError::Store(StoreError::Invalid(_)))
+            Err(ApplicationError::Evidence(error))
+                if error.code() == EvidenceErrorCode::ReceiptPolicyMismatch
         ));
         assert!(
             store
@@ -3466,6 +3744,101 @@ mod tests {
         assert!(codes.contains(&"summary_missing"));
         assert!(codes.contains(&"close_intent_missing"));
         assert!(!codes.contains(&"attempt_not_current"));
+    }
+
+    #[test]
+    fn close_readiness_blocks_missing_or_mismatched_typed_acceptance_results() {
+        let (store, project) = production_verifier_setup();
+        production_general_attestation_work(
+            &store,
+            &project,
+            "attested-work",
+            "attested-attempt",
+            "attested-session",
+        );
+        let app = WorkApplication::new(&store);
+        let missing = app
+            .read_close_readiness(project.as_str(), "attested-work")
+            .expect("read missing typed acceptance readiness");
+        assert!(!missing.ready);
+        assert!(
+            missing
+                .gaps
+                .contains(&crate::CloseoutGap::AcceptanceResultMissing)
+        );
+
+        let attempt = store
+            .current_attempt_for_work(project.as_str(), "attested-work")
+            .expect("read current typed acceptance attempt")
+            .expect("typed acceptance attempt exists");
+        let (entity_revision, proof_revision) = store
+            .work_revisions(project.as_str(), "attested-work")
+            .expect("read typed acceptance revisions");
+        let bind_request = boreal_store::acceptance::AcceptanceResultBindRequest {
+            project_id: project.as_str().to_owned(),
+            work_id: "attested-work".to_owned(),
+            actor_id: "agent-one".to_owned(),
+            session_id: "attested-session".to_owned(),
+            attempt_id: attempt.attempt_id.clone(),
+            fence: attempt.fence,
+            expected_project_revision: store
+                .project_revision(project.as_str())
+                .expect("project revision")
+                .0,
+            expected_entity_revision: entity_revision,
+            expected_proof_revision: proof_revision,
+            result_id: "result-attested-work".to_owned(),
+            contract_revision: 0,
+            outputs: Vec::new(),
+            attestation: Some(boreal_store::acceptance::CompletionAttestationInput {
+                statement: "Completed bounded general work".to_owned(),
+            }),
+            operation_id: "op-bind-attested-work".to_owned(),
+            at: "unix-ms:1300".to_owned(),
+        };
+        boreal_store::acceptance::AcceptanceStore::new(&store)
+            .bind_result(&bind_request)
+            .expect("bind general-attestation result");
+        persist_open_close_intent(
+            &store,
+            &project,
+            "attested-work",
+            "attested-attempt",
+            "general-attestation",
+        );
+
+        let valid_snapshot = boreal_store::acceptance::AcceptanceStore::new(&store)
+            .close_readiness_snapshot(project.as_str(), "attested-work")
+            .expect("read exact typed acceptance snapshot");
+        assert_eq!(
+            valid_snapshot
+                .acceptance_result
+                .as_ref()
+                .map(|record| record.result_id.as_str()),
+            Some("result-attested-work")
+        );
+        assert_eq!(
+            valid_snapshot.typed_acceptance,
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::Ready
+        );
+
+        store
+            .execute_batch(
+                "DROP TRIGGER boreal_submission_acceptance_immutable_update;
+                 UPDATE boreal_submission_acceptance_v1
+                 SET result_digest='sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+                 WHERE work_id='attested-work';",
+            )
+            .expect("tamper only the result binding digest fixture");
+        let mismatched = app
+            .read_close_readiness(project.as_str(), "attested-work")
+            .expect("read mismatched typed acceptance readiness");
+        assert!(!mismatched.ready);
+        assert!(
+            mismatched
+                .gaps
+                .contains(&crate::CloseoutGap::AcceptanceResultMismatch)
+        );
     }
 
     #[test]

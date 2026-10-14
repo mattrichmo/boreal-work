@@ -7234,6 +7234,74 @@ mod tests {
         (catalog, captured.source.source_version_id)
     }
 
+    fn bind_service_test_final_result(
+        handler: &mut ServiceCommandHandler,
+        project: &str,
+        work: &str,
+        actor: &str,
+        session: &str,
+        attempt: &str,
+        fence: u64,
+        operation_id: &str,
+    ) -> String {
+        let (_, source_version_id) = capture_service_test_workspace(
+            &handler.store,
+            project,
+            &format!("{operation_id}_source"),
+        );
+        let source = handler
+            .store
+            .source_version(project, &source_version_id)
+            .expect("final-result source read succeeds")
+            .expect("final-result source is registered");
+        let (entity_revision, proof_revision) = handler
+            .store
+            .work_revisions(project, work)
+            .expect("final-result work revisions read");
+        let project_revision = handler
+            .store
+            .project_revision(project)
+            .expect("final-result project revision reads")
+            .0;
+        let credential = if actor == DEFAULT_ACTOR {
+            SERVICE_TEST_CREDENTIAL
+        } else {
+            SERVICE_TEST_AGENT_CREDENTIAL
+        };
+        let response = application_envelope(
+            handler,
+            operation_id,
+            json!({
+                "command": "bind_final_result_v1",
+                "credential_ref": credential,
+                "project_id": project,
+                "actor_id": actor,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": session,
+                "final_result": {
+                    "schema_version": FINAL_RESULT_CAPTURE_SCHEMA_VERSION,
+                    "work_id": work,
+                    "attempt_id": attempt,
+                    "fence": fence,
+                    "expected_project_revision": project_revision,
+                    "expected_entity_revision": entity_revision,
+                    "expected_proof_revision": proof_revision,
+                    "source_version_id": source_version_id,
+                    "content_digest": source.content_digest,
+                },
+            }),
+        );
+        assert_eq!(
+            response.outcome,
+            ApplicationOutcome::Changed,
+            "final-result binding response: {response:?}",
+        );
+        response.data.expect("final-result binding has readback data")["readback"]["source_version_id"]
+            .as_str()
+            .expect("final-result readback names its source")
+            .to_owned()
+    }
+
     struct ServiceTestGatePolicy<'a> {
         source_version_id: &'a str,
         gate_id: &'a str,
@@ -7368,6 +7436,16 @@ mod tests {
                 "op_service_witnessed_start",
             )
             .expect("witnessed finish attempt starts");
+        let result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            "session-cli",
+            "attempt-witnessed-finish",
+            1,
+            "op_service_witnessed_bind_result",
+        );
         let evidence_operation = "op_service_witnessed_evidence".to_owned();
         let evidence = handler
             .evidence_run(
@@ -7393,6 +7471,10 @@ mod tests {
             &fs::read_to_string(receipt_path).expect("witnessed receipt is readable"),
         )
         .expect("witnessed receipt is JSON");
+        assert_eq!(
+            receipt_sidecar["source_snapshot_hash"], result_source_version_id,
+            "the verifier receipt names the bound result instead of the claim input",
+        );
         let durable_receipt = handler
             .store
             .receipt(
@@ -10583,6 +10665,16 @@ mod tests {
                 "op_production_concurrent_start",
             )
             .expect("evidence fixture attempt starts");
+        let _result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            "session-production-concurrent",
+            "attempt-production-concurrent",
+            1,
+            "op_production_concurrent_bind_result",
+        );
         drop(handler);
 
         let host = match bind_service_host(
@@ -11719,8 +11811,8 @@ mod tests {
 
     #[test]
     fn service_finish_close_persists_receipt_and_retains_gate_diagnostics() {
-        let db = temp_path("finish.sqlite");
-        let store = seed_store(&db);
+        let root = temp_path("finish");
+        let store = seed_project_store(&root);
         let (_catalog, source_version_id) =
             capture_service_test_source(&store, "service-project", "op_finish_source");
         let revision = store.project_revision("service-project").unwrap().0;
@@ -11730,7 +11822,7 @@ mod tests {
             "command": "claim",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": "session-finish",
             "attempt_id": "attempt-finish",
@@ -11748,7 +11840,7 @@ mod tests {
             "command": "start",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": "session-finish",
             "attempt_id": "attempt-finish",
@@ -11757,11 +11849,21 @@ mod tests {
         handler
             .start(&start, "op_service_finish_start")
             .expect("service start succeeds");
+        let result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            "session-finish",
+            "attempt-finish",
+            1,
+            "op_service_finish_bind_result",
+        );
         let mut finish = json!({
             "command": "finish_close",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": "session-finish",
             "attempt_id": "attempt-finish",
@@ -11779,7 +11881,7 @@ mod tests {
                 "exit_code": 0,
                 "started_at": "unix-ms:1",
                 "ended_at": "unix-ms:2",
-                "source_snapshot_hash": source_version_id,
+                "source_snapshot_hash": result_source_version_id,
                 "config_identity": "config-finish-v1",
                 "environment_fingerprint": "env-1",
                 "output_digest": "digest-1",
@@ -11876,46 +11978,64 @@ mod tests {
 
         // Public review list/show must expose canonical events while keeping
         // old review rows addressable through their historical IDs.
+        let (review_entity_revision, review_proof_revision) = handler
+            .store
+            .work_revisions("service-project", "service-work")
+            .expect("review fixture reads current work revisions");
         handler
             .store
-            .execute_batch(
-                "INSERT INTO boreal_submission(
+            .execute_batch(&format!(
+                r#"INSERT INTO boreal_submission(
                     submission_id,project_id,work_id,attempt_id,fence,entity_revision,
                     proof_revision,source_version_id,config_identity,profile_id,
                     profile_version,profile_digest,summary_id,summary_digest,
                     receipt_ids_json,sealed_at
                  )
-                 SELECT 'service-review-submission',a.project_id,a.work_id,a.attempt_id,
-                    a.fence,0,1,a.source_version_id,a.config_identity,
+                 SELECT 'service-review-submission',w.project_id,a.work_id,a.attempt_id,
+                    a.fence,{review_entity_revision},{review_proof_revision},
+                    '{result_source_version_id}',a.config_identity,
                     w.acceptance_profile_id,w.acceptance_profile_version,p.policy_digest,
                     s.summary_id,s.body_digest,'[]','unix-ms:9000000000000'
                  FROM attempt a
-                 JOIN work_item w ON w.project_id=a.project_id AND w.work_id=a.work_id
+                 JOIN work_item w ON w.work_id=a.work_id
+                    AND w.project_id='service-project'
                  JOIN acceptance_profile p ON p.profile_id=w.acceptance_profile_id
                     AND p.version=w.acceptance_profile_version
                  JOIN summary s ON s.work_id=a.work_id AND s.attempt_id=a.attempt_id
                     AND s.fence=a.fence
-                 WHERE a.project_id='service-project' AND a.work_id='service-work'
-                    AND a.attempt_id='attempt-finish';
-                 INSERT INTO boreal_review_event(
+                 WHERE w.project_id='service-project' AND a.work_id='service-work'
+                    AND a.attempt_id='attempt-finish';"#,
+            ))
+            .expect("canonical review submission fixture inserts");
+        handler
+            .store
+            .execute_batch(
+                "INSERT INTO boreal_review_event(
                     review_event_id,project_id,work_id,submission_id,gate_id,
                     reviewer_actor_id,outcome,reason,operation_id,created_at
                  ) VALUES (
                     'service-canonical-review','service-project','service-work',
                     'service-review-submission','verification','operator','approved',
                     'canonical reviewed','op_service_finish_close','unix-ms:9000000000001'
-                 );
-                 INSERT INTO review(
+                 );",
+            )
+            .expect("canonical review event fixture inserts");
+        handler
+            .store
+            .execute_batch(
+                "INSERT INTO review(
                     review_id,work_id,attempt_id,fence,gate_id,reviewer_actor_id,
                     decision,reason,source_version_id,policy_digest,created_at
                  ) VALUES (
                     'service-legacy-review','service-work','attempt-finish',1,
-                    'verification','operator','accepted','legacy reviewed',
+                    (SELECT gate_id FROM gate WHERE work_id='service-work'
+                     AND kind='verification' ORDER BY gate_id LIMIT 1),
+                    'operator','accepted','legacy reviewed',
                     (SELECT source_version_id FROM attempt WHERE attempt_id='attempt-finish'),
                     'legacy-policy','unix-ms:9000000000000'
                  );",
             )
-            .expect("canonical and legacy review history fixtures insert");
+            .expect("legacy review fixture inserts");
         let mut list_command = ParsedCommand {
             path: vec!["review".to_owned(), "list".to_owned()],
             options: CliOptions::default(),
@@ -11985,12 +12105,13 @@ mod tests {
             .expect("result operation reads")
             .expect("result operation exists");
         assert_eq!(result.command, "finish_close.result");
-        let _ = fs::remove_file(db);
+        let _ = fs::remove_dir_all(root);
     }
 
     fn external_finish_fixture(kind: &str) -> (PathBuf, ServiceCommandHandler, Value) {
-        let db = temp_path(kind);
-        let store = seed_store(&db);
+        let root = temp_path(kind);
+        let store = seed_project_store(&root);
+        let db = root.join(".boreal/boreal.sqlite");
         let source_operation = format!("op_{kind}_source");
         let (_catalog, source_version_id) =
             capture_service_test_source(&store, "service-project", &source_operation);
@@ -12002,7 +12123,7 @@ mod tests {
             "command": "claim",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": session_id,
             "attempt_id": attempt_id,
@@ -12023,7 +12144,7 @@ mod tests {
                     "command": "start",
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
                     "session_id": session_id,
                     "attempt_id": attempt_id,
@@ -12032,6 +12153,16 @@ mod tests {
                 &format!("op_{kind}_start"),
             )
             .expect("finish fixture attempt starts");
+        let result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            &session_id,
+            &attempt_id,
+            1,
+            &format!("op_{kind}_bind_result"),
+        );
 
         let receipt_id = format!("receipt-{kind}");
         let receipt_operation = format!("op-receipt-{kind}");
@@ -12039,7 +12170,7 @@ mod tests {
             "command": "finish_close",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": session_id,
             "attempt_id": attempt_id,
@@ -12057,7 +12188,7 @@ mod tests {
                 "exit_code": 0,
                 "started_at": "unix-ms:1",
                 "ended_at": "unix-ms:2",
-                "source_snapshot_hash": source_version_id,
+                "source_snapshot_hash": result_source_version_id,
                 "config_identity": "config-finish-v1",
                 "environment_fingerprint": "env-1",
                 "output_digest": "digest-1",
@@ -12154,7 +12285,7 @@ mod tests {
             .is_none());
 
         drop(handler);
-        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+        let store = SqliteStore::open(&db, super::super::PRODUCTION_SCHEMA)
             .expect("service database reopens after simulated interruption");
         let mut handler = make_handler(store);
         let resumed = handler
@@ -12196,7 +12327,9 @@ mod tests {
             .finish_close(&finish, operation)
             .expect("exact result replay does not create another receipt or finish");
         assert_eq!(replay.2.unwrap()["receipt_id"], receipt_id.as_str());
-        let _ = fs::remove_file(db);
+        if let Some(root) = db.parent().and_then(Path::parent) {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -12246,7 +12379,7 @@ mod tests {
             .expect("attempt submit is durable before interruption");
 
         drop(handler);
-        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+        let store = SqliteStore::open(&db, super::super::PRODUCTION_SCHEMA)
             .expect("service database reopens after simulated submit response loss");
         let mut handler = make_handler(store);
         let resumed = handler
@@ -12271,7 +12404,9 @@ mod tests {
             .expect("finish result read succeeds")
             .expect("finish result is recorded after submit reconciliation");
         assert_eq!(result_operation.command, "finish_close.result");
-        let _ = fs::remove_file(db);
+        if let Some(root) = db.parent().and_then(Path::parent) {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -12336,7 +12471,7 @@ mod tests {
         );
 
         drop(handler);
-        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+        let store = SqliteStore::open(&db, super::super::PRODUCTION_SCHEMA)
             .expect("service database reopens after terminal submit rejection");
         let mut handler = make_handler(store);
         let replay = handler
@@ -12357,7 +12492,9 @@ mod tests {
             .receipt(receipt_id)
             .expect("receipt read succeeds")
             .is_some());
-        let _ = fs::remove_file(db);
+        if let Some(root) = db.parent().and_then(Path::parent) {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -12583,6 +12720,16 @@ mod tests {
                 "op_service_evidence_start",
             )
             .expect("evidence attempt starts");
+        let _result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            "session-cli",
+            "attempt-evidence-failure",
+            1,
+            "op_service_evidence_failure_bind_result",
+        );
         let request = json!({
             "command": "evidence_run",
             "project_id": "service-project",
