@@ -435,6 +435,74 @@ fn store_v3_mutations_use_revisions_audit_and_typed_replay() {
 }
 
 #[test]
+fn container_disposition_readback_includes_superseded_history() {
+    let store = store_v3();
+    seed_base(&store);
+    seed_nodes(&store);
+    let context = |operation_id: &str, request_digest: &str| V3MutationContext {
+        project_id: "p1".to_owned(),
+        actor_id: "agent-1".to_owned(),
+        session_id: None,
+        operation_id: operation_id.to_owned(),
+        request_digest: request_digest.to_owned(),
+        expected_revision: None,
+        now: "t1".to_owned(),
+    };
+    let first = ContainerDispositionV3Input {
+        project_id: "p1".to_owned(),
+        disposition_id: "disposition-first".to_owned(),
+        container_work_id: "container-1".to_owned(),
+        descendant_work_id: "direct-a".to_owned(),
+        kind: "deferred".to_owned(),
+        descendant_revision: 1,
+        descendant_outcome_digest: "sha256:first".to_owned(),
+        replacement_work_id: None,
+        reason: Some("first decision".to_owned()),
+        supersedes_id: None,
+        created_at: "t1".to_owned(),
+    };
+    store
+        .append_container_disposition_v3(
+            &context("op-disposition-first", "sha256:first-operation"),
+            &first,
+        )
+        .expect("first disposition commits");
+
+    let mut successor = first.clone();
+    successor.disposition_id = "disposition-second".to_owned();
+    successor.descendant_outcome_digest = "sha256:second".to_owned();
+    successor.reason = Some("updated decision".to_owned());
+    successor.supersedes_id = Some(first.disposition_id.clone());
+    store
+        .append_container_disposition_v3(
+            &context("op-disposition-second", "sha256:second-operation"),
+            &successor,
+        )
+        .expect("successor disposition commits");
+
+    assert_eq!(
+        store
+            .current_container_disposition_v3("p1", "container-1", "direct-a")
+            .unwrap(),
+        Some(successor)
+    );
+    assert_eq!(
+        store
+            .container_disposition_by_id_v3("p1", "disposition-first")
+            .unwrap(),
+        Some(first),
+        "replay readback can recover the immutable original payload"
+    );
+    assert_eq!(
+        store
+            .container_disposition_by_id_v3("other-project", "disposition-first")
+            .unwrap(),
+        None,
+        "readback remains project scoped"
+    );
+}
+
+#[test]
 fn v3_replay_requires_actor_session_subject_and_revision_identity() {
     let store = store_v3();
     seed_base(&store);

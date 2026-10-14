@@ -14,10 +14,11 @@ use boreal_domain::rollups::{
     DescendantIntegrity, RollupBlocker, RollupScope, ScopeDisposition, TaskRollupInput,
 };
 use boreal_domain::work_model_v3::{
-    ActivationPolicy, Cycle, CycleAssignment, CycleAssignmentState, CycleId, CycleInstance,
-    CycleLifecycle, CycleSeries, CycleSeriesLifecycle, CycleTemplate, DispositionKind,
-    ExecutionMode, FoldPolicy, GapPolicy, IntakeBucket, IntakeItem, IntakeKind, IntakeLifecycle,
-    IntakePromotion, PromotionTargetKind,
+    ActivationPolicy, CloseoutDispositionId, ContainerDisposition, Cycle, CycleAssignment,
+    CycleAssignmentState, CycleId, CycleInstance, CycleLifecycle, CycleSeries,
+    CycleSeriesLifecycle, CycleTemplate, DecompositionKind, DispositionKind, ExecutionMode,
+    FoldPolicy, GapPolicy, IntakeBucket, IntakeItem, IntakeKind, IntakeLifecycle, IntakePromotion,
+    PromotionTargetKind, WorkNode,
 };
 use boreal_domain::{DispatchPolicy, ProjectId, SessionId, TimestampMs, WorkId, WorkItem};
 use boreal_store::{
@@ -1448,6 +1449,340 @@ impl WorkApplication<'_> {
         Ok(operation_result(operation_id, mutation))
     }
 
+    /// Reconcile one descendant of a work container from a single canonical
+    /// snapshot, then append the disposition through the revisioned store
+    /// boundary. The snapshot read closes before the write transaction; the
+    /// store's expected-revision check rejects any intervening mutation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_container_disposition_v3(
+        &self,
+        scope: &PlanningScope,
+        operation_id: impl Into<String>,
+        disposition_id: CloseoutDispositionId,
+        container_id: &WorkId,
+        descendant_id: &WorkId,
+        kind: DispositionKind,
+        replacement_id: Option<WorkId>,
+        reason: Option<String>,
+        supersedes_id: Option<CloseoutDispositionId>,
+        as_of: TimestampMs,
+        now: &str,
+    ) -> Result<OperationResult<ContainerDisposition>, ApplicationError> {
+        ensure_mutation_scope(self.store_ref(), scope)?;
+        let operation_id = operation_id.into();
+        validate_nonempty("operation id", &operation_id)?;
+        validate_nonempty("disposition id", disposition_id.as_str())?;
+        validate_nonempty("container id", container_id.as_str())?;
+        validate_nonempty("descendant id", descendant_id.as_str())?;
+        validate_nonempty("mutation timestamp", now)?;
+        if !self.store_ref().work_model_v3_enabled()? {
+            return Err(ApplicationError::Invalid(
+                "container disposition requires work-model/3 to be enabled".to_owned(),
+            ));
+        }
+
+        // A retry after an unknown response must reach the store's replay-first
+        // path even though the original write advanced the project revision.
+        // Recover the immutable row by ID so a later supersession does not
+        // require consulting the mutable container snapshot before replay.
+        if let Some(existing) = self.store_ref().operation(&operation_id)? {
+            return self.replay_container_disposition(
+                scope,
+                &operation_id,
+                &existing,
+                &disposition_id,
+                container_id,
+                descendant_id,
+                kind,
+                replacement_id.as_ref(),
+                reason.as_deref(),
+                supersedes_id.as_ref(),
+                now,
+            );
+        }
+
+        let snapshot = self.store_ref().container_rollup_snapshot_v3(
+            scope.project_id.as_str(),
+            container_id.as_str(),
+            &scope.actor_id,
+            scope.session_id.as_deref(),
+            as_of,
+        )?;
+        scope
+            .require_revision(snapshot.status.revision.0)
+            .map_err(ApplicationError::from)?;
+
+        let descendant_ids = container_descendant_ids(&snapshot, container_id.as_str());
+        if descendant_id == container_id || !descendant_ids.contains(descendant_id.as_str()) {
+            return Err(ApplicationError::Planning(PlanningError::Invalid(
+                "disposition target is not a descendant of this container".to_owned(),
+            )));
+        }
+
+        let container_node = snapshot
+            .work_nodes
+            .iter()
+            .find(|node| node.work_id == container_id.as_str())
+            .ok_or_else(|| boreal_store::StoreError::NotFound {
+                entity: "work container",
+                id: container_id.to_string(),
+            })?;
+        let container_work = snapshot
+            .status
+            .works
+            .iter()
+            .find(|row| row.work.id == *container_id)
+            .ok_or_else(|| boreal_store::StoreError::NotFound {
+                entity: "container work",
+                id: container_id.to_string(),
+            })?;
+        let container = domain_work_node_from_snapshot(
+            container_node,
+            Some(&container_work.work),
+            &scope.project_id,
+        )?;
+
+        let nodes_by_id = snapshot
+            .work_nodes
+            .iter()
+            .map(|node| (node.work_id.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+        let work_by_id = snapshot
+            .status
+            .works
+            .iter()
+            .map(|row| (row.work.id.as_str(), row))
+            .collect::<BTreeMap<_, _>>();
+        let mut descendants = Vec::with_capacity(descendant_ids.len());
+        for id in &descendant_ids {
+            let Some(node) = nodes_by_id.get(id.as_str()).copied() else {
+                // Legacy/schema-2 descendants without a v3 node remain visible
+                // in rollups, but cannot receive a v3 disposition yet.
+                continue;
+            };
+            let work = work_by_id.get(id.as_str()).map(|row| &row.work);
+            descendants.push(domain_work_node_from_snapshot(
+                node,
+                work,
+                &scope.project_id,
+            )?);
+        }
+        if !descendants.iter().any(|node| node.id == *descendant_id) {
+            return Err(ApplicationError::Planning(PlanningError::Invalid(
+                "disposition target has no valid work-model/3 decomposition node".to_owned(),
+            )));
+        }
+
+        let descendant_work = work_by_id
+            .get(descendant_id.as_str())
+            .copied()
+            .ok_or_else(|| boreal_store::StoreError::NotFound {
+                entity: "descendant work",
+                id: descendant_id.to_string(),
+            })?;
+        let descendant_revision = descendant_work
+            .action_facts
+            .entity_revision
+            .or_else(|| {
+                descendant_work
+                    .action_facts
+                    .canonical_inputs
+                    .as_ref()
+                    .map(|facts| facts.subject.revision.get())
+            })
+            .ok_or_else(|| {
+                ApplicationError::Planning(PlanningError::Invalid(
+                    "disposition target has no canonical entity revision".to_owned(),
+                ))
+            })?;
+        let descendant_outcome_digest = match kind {
+            DispositionKind::AcceptedClosed => {
+                if descendant_work.work.lifecycle != boreal_domain::PersistedLifecycle::Closed {
+                    return Err(ApplicationError::Planning(PlanningError::Invalid(
+                        "accepted_closed disposition requires a closed descendant".to_owned(),
+                    )));
+                }
+                let outcome = snapshot
+                    .accepted_outcomes
+                    .get(descendant_id.as_str())
+                    .ok_or_else(|| {
+                        ApplicationError::Planning(PlanningError::Invalid(
+                            "accepted_closed disposition requires a current accepted outcome"
+                                .to_owned(),
+                        ))
+                    })?;
+                if outcome.entity_revision != descendant_revision
+                    || outcome.project_id != scope.project_id.as_str()
+                    || outcome.work_id != descendant_id.as_str()
+                    || outcome.summary_digest.trim().is_empty()
+                {
+                    return Err(ApplicationError::Planning(PlanningError::Invalid(
+                        "accepted outcome does not match the current descendant revision"
+                            .to_owned(),
+                    )));
+                }
+                outcome.summary_digest.clone()
+            }
+            DispositionKind::AcceptedCancelled => {
+                if descendant_work.work.lifecycle != boreal_domain::PersistedLifecycle::Cancelled {
+                    return Err(ApplicationError::Planning(PlanningError::Invalid(
+                        "accepted_cancelled disposition requires a cancelled descendant".to_owned(),
+                    )));
+                }
+                if reason.as_deref().unwrap_or_default().trim().is_empty() {
+                    return Err(ApplicationError::Planning(PlanningError::Invalid(
+                        "accepted_cancelled disposition requires a reason".to_owned(),
+                    )));
+                }
+                descendant_state_digest(
+                    &scope.project_id,
+                    descendant_id,
+                    descendant_revision,
+                    "cancelled",
+                )
+            }
+            DispositionKind::Deferred | DispositionKind::Replaced => descendant_state_digest(
+                &scope.project_id,
+                descendant_id,
+                descendant_revision,
+                persisted_lifecycle_name(descendant_work.work.lifecycle),
+            ),
+        };
+
+        if let Some(replacement_id) = &replacement_id {
+            if !work_by_id.contains_key(replacement_id.as_str()) {
+                return Err(ApplicationError::Planning(PlanningError::Invalid(
+                    "replacement work must exist in this project".to_owned(),
+                )));
+            }
+            if replacement_id == descendant_id {
+                return Err(ApplicationError::Planning(PlanningError::Invalid(
+                    "replacement work must differ from the disposed descendant".to_owned(),
+                )));
+            }
+        }
+
+        let current = snapshot
+            .dispositions
+            .values()
+            .map(disposition_from_store_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        let current_for_descendant = snapshot.dispositions.get(descendant_id.as_str());
+        match (current_for_descendant, supersedes_id.as_ref()) {
+            (Some(current), Some(supersedes)) if current.disposition_id == supersedes.as_str() => {}
+            (Some(_), _) => {
+                return Err(ApplicationError::Planning(PlanningError::Invalid(
+                    "a current disposition must be explicitly superseded by its exact ID"
+                        .to_owned(),
+                )))
+            }
+            (None, Some(_)) => {
+                return Err(ApplicationError::Planning(PlanningError::Invalid(
+                    "supersedes_id does not identify a current disposition for this descendant"
+                        .to_owned(),
+                )))
+            }
+            (None, None) => {}
+        }
+
+        let disposition = ContainerDisposition {
+            id: disposition_id,
+            container_id: container_id.clone(),
+            descendant_id: descendant_id.clone(),
+            project_id: scope.project_id.clone(),
+            kind,
+            descendant_revision,
+            descendant_outcome_digest,
+            replacement_id,
+            reason,
+            supersedes_id,
+        };
+        validate_disposition_shape(&disposition)?;
+        let request = crate::intake::DispositionRequest {
+            scope: scope.clone(),
+            operation_id: operation_id.clone(),
+            disposition: disposition.clone(),
+            container,
+            descendants,
+            current,
+        };
+        let planned = self.plan_container_disposition(&request)?;
+        let appended =
+            self.append_container_disposition_v3(scope, planned.operation_id, &planned.value, now)?;
+        Ok(OperationResult {
+            operation_id: appended.operation_id,
+            snapshot_revision: appended.snapshot_revision,
+            changed: appended.changed,
+            value: planned.value,
+        })
+    }
+
+    fn replay_container_disposition(
+        &self,
+        scope: &PlanningScope,
+        operation_id: &str,
+        existing: &boreal_store::OperationRecord,
+        disposition_id: &CloseoutDispositionId,
+        container_id: &WorkId,
+        descendant_id: &WorkId,
+        kind: DispositionKind,
+        replacement_id: Option<&WorkId>,
+        reason: Option<&str>,
+        supersedes_id: Option<&CloseoutDispositionId>,
+        now: &str,
+    ) -> Result<OperationResult<ContainerDisposition>, ApplicationError> {
+        let result: serde_json::Value =
+            serde_json::from_str(&existing.result_json).map_err(|_| {
+                ApplicationError::Store(boreal_store::StoreError::Corrupt(
+                    "container disposition operation result is not valid JSON".to_owned(),
+                ))
+            })?;
+        let subject_id = result.get("subject_id").and_then(serde_json::Value::as_str);
+        if existing.project_id != scope.project_id.as_str()
+            || existing.command != "container.disposition.append"
+            || existing.actor_id != scope.actor_id
+            || existing.session_id != scope.session_id
+            || existing.expected_revision != scope.expected_revision
+            || subject_id != Some(container_id.as_str())
+        {
+            return Err(ApplicationError::Store(boreal_store::StoreError::Conflict(
+                "operation ID is already bound to another container disposition request".to_owned(),
+            )));
+        }
+        let record = self
+            .store_ref()
+            .container_disposition_by_id_v3(scope.project_id.as_str(), disposition_id.as_str())?
+            .ok_or_else(|| {
+                ApplicationError::Store(boreal_store::StoreError::Conflict(
+                    "operation ID was reused with a different container disposition ID".to_owned(),
+                ))
+            })?;
+        if record.container_work_id != container_id.as_str()
+            || record.descendant_work_id != descendant_id.as_str()
+            || record.kind != disposition_kind(kind)
+            || record.replacement_work_id.as_deref() != replacement_id.map(WorkId::as_str)
+            || record.reason.as_deref() != reason
+            || record.supersedes_id.as_deref() != supersedes_id.map(CloseoutDispositionId::as_str)
+        {
+            return Err(ApplicationError::Store(boreal_store::StoreError::Conflict(
+                "operation ID was reused with different container disposition inputs".to_owned(),
+            )));
+        }
+        let disposition = disposition_from_store_record(&record)?;
+        let appended = self.append_container_disposition_v3(
+            scope,
+            operation_id.to_owned(),
+            &disposition,
+            now,
+        )?;
+        Ok(OperationResult {
+            operation_id: appended.operation_id,
+            snapshot_revision: appended.snapshot_revision,
+            changed: appended.changed,
+            value: disposition,
+        })
+    }
+
     pub fn append_container_disposition_v3(
         &self,
         scope: &PlanningScope,
@@ -1822,6 +2157,142 @@ fn validate_nonempty(field: &'static str, value: &str) -> Result<(), Application
     Ok(())
 }
 
+fn container_descendant_ids(
+    snapshot: &boreal_store::ContainerRollupSnapshotV3,
+    container_id: &str,
+) -> BTreeSet<String> {
+    let mut descendants = BTreeSet::new();
+    let mut frontier = BTreeSet::from([container_id.to_owned()]);
+    while !frontier.is_empty() {
+        let parents = frontier;
+        frontier = BTreeSet::new();
+        for node in &snapshot.work_nodes {
+            if node
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| parents.contains(parent))
+                && descendants.insert(node.work_id.clone())
+            {
+                frontier.insert(node.work_id.clone());
+            }
+        }
+        for row in &snapshot.status.works {
+            if row
+                .work
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| parents.contains(parent.as_str()))
+                && descendants.insert(row.work.id.to_string())
+            {
+                frontier.insert(row.work.id.to_string());
+            }
+        }
+    }
+    descendants
+}
+
+fn domain_work_node_from_snapshot(
+    node: &boreal_store::WorkNodeV3Record,
+    work: Option<&WorkItem>,
+    project_id: &ProjectId,
+) -> Result<WorkNode, ApplicationError> {
+    if node.project_id != project_id.as_str()
+        || work
+            .is_some_and(|work| work.project_id != *project_id || work.id.as_str() != node.work_id)
+    {
+        return Err(ApplicationError::Planning(PlanningError::ScopeConflict {
+            expected: project_id.to_string(),
+            actual: node.project_id.clone(),
+        }));
+    }
+    let kind = match node.decomposition_kind.as_str() {
+        "milestone" => DecompositionKind::Milestone,
+        "task" => DecompositionKind::Task,
+        other => {
+            return Err(ApplicationError::Planning(PlanningError::Invalid(format!(
+                "unknown work decomposition kind: {other}"
+            ))));
+        }
+    };
+    let execution_mode = match node.execution_mode.as_str() {
+        "container" => ExecutionMode::Container,
+        "direct" => ExecutionMode::Direct,
+        other => {
+            return Err(ApplicationError::Planning(PlanningError::Invalid(format!(
+                "unknown work execution mode: {other}"
+            ))));
+        }
+    };
+    Ok(WorkNode {
+        id: WorkId::new(node.work_id.clone()),
+        project_id: project_id.clone(),
+        kind,
+        execution_mode,
+        parent_id: node.parent_id.clone().map(WorkId::new),
+        title: work.map_or_else(String::new, |work| work.title.clone()),
+    })
+}
+
+fn disposition_from_store_record(
+    record: &ContainerDispositionV3Input,
+) -> Result<ContainerDisposition, ApplicationError> {
+    let kind = match record.kind.as_str() {
+        "accepted_closed" => DispositionKind::AcceptedClosed,
+        "accepted_cancelled" => DispositionKind::AcceptedCancelled,
+        "deferred" => DispositionKind::Deferred,
+        "replaced" => DispositionKind::Replaced,
+        other => {
+            return Err(ApplicationError::Planning(PlanningError::Invalid(format!(
+                "unknown persisted container disposition kind: {other}"
+            ))));
+        }
+    };
+    Ok(ContainerDisposition {
+        id: CloseoutDispositionId::new(record.disposition_id.clone()),
+        container_id: WorkId::new(record.container_work_id.clone()),
+        descendant_id: WorkId::new(record.descendant_work_id.clone()),
+        project_id: ProjectId::new(record.project_id.clone()),
+        kind,
+        descendant_revision: record.descendant_revision,
+        descendant_outcome_digest: record.descendant_outcome_digest.clone(),
+        replacement_id: record
+            .replacement_work_id
+            .as_ref()
+            .map(|id| WorkId::new(id.clone())),
+        reason: record.reason.clone(),
+        supersedes_id: record
+            .supersedes_id
+            .as_ref()
+            .map(|id| CloseoutDispositionId::new(id.clone())),
+    })
+}
+
+fn descendant_state_digest(
+    project_id: &ProjectId,
+    descendant_id: &WorkId,
+    descendant_revision: u64,
+    lifecycle: &str,
+) -> String {
+    canonical_request_digest(
+        "container.disposition.descendant-state/v1",
+        serde_json::json!({
+            "project_id": project_id.as_str(),
+            "descendant_id": descendant_id.as_str(),
+            "descendant_revision": descendant_revision,
+            "lifecycle": lifecycle,
+        }),
+    )
+}
+
+fn persisted_lifecycle_name(lifecycle: boreal_domain::PersistedLifecycle) -> &'static str {
+    match lifecycle {
+        boreal_domain::PersistedLifecycle::Draft => "draft",
+        boreal_domain::PersistedLifecycle::Open => "open",
+        boreal_domain::PersistedLifecycle::Closed => "closed",
+        boreal_domain::PersistedLifecycle::Cancelled => "cancelled",
+    }
+}
+
 fn validate_disposition_shape(
     disposition: &boreal_domain::work_model_v3::ContainerDisposition,
 ) -> Result<(), ApplicationError> {
@@ -1842,6 +2313,18 @@ fn validate_disposition_shape(
         {
             Err(ApplicationError::Invalid(
                 "accepted disposition cannot name a replacement".to_owned(),
+            ))
+        }
+        DispositionKind::AcceptedCancelled
+            if disposition
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty() =>
+        {
+            Err(ApplicationError::Invalid(
+                "accepted_cancelled disposition requires a reason".to_owned(),
             ))
         }
         DispositionKind::Deferred
@@ -2033,4 +2516,142 @@ fn disposition_kind(value: DispositionKind) -> String {
         DispositionKind::Replaced => "replaced",
     }
     .to_owned()
+}
+
+#[cfg(test)]
+mod container_disposition_tests {
+    use super::*;
+    use boreal_domain::{AcceptanceProfile, PersistedLifecycle, WorkKind};
+    use boreal_store::SqliteStore;
+
+    const SCHEMA_V2: &str = include_str!("../../../project/spec/schema-v2.sql");
+
+    fn work(project_id: &ProjectId, id: &str, kind: WorkKind, parent_id: Option<&str>) -> WorkItem {
+        WorkItem {
+            id: WorkId::new(id),
+            project_id: project_id.clone(),
+            kind,
+            parent_id: parent_id.map(WorkId::new),
+            title: id.to_owned(),
+            description: String::new(),
+            lifecycle: PersistedLifecycle::Open,
+            priority: 0,
+            dispatch_policy: DispatchPolicy::Automatic,
+            hard_holds: Vec::new(),
+            acceptance_profile: AcceptanceProfile::focused(),
+        }
+    }
+
+    fn scope(store: &SqliteStore, project_id: &ProjectId) -> PlanningScope {
+        PlanningScope::new(project_id.clone(), "operator-1")
+            .at_revision(store.project_revision(project_id.as_str()).unwrap().0)
+    }
+
+    #[test]
+    fn disposition_retry_replays_after_a_successor_was_appended() {
+        let store = SqliteStore::open_in_memory(SCHEMA_V2).unwrap();
+        let app = WorkApplication::new(&store);
+        let project = ProjectId::new("p-disposition");
+        app.init_project(
+            &project,
+            "operator-1",
+            "operator",
+            "credential",
+            "Operator",
+            "t1",
+            "op-init",
+        )
+        .unwrap();
+        app.create_work_as(
+            &work(&project, "container", WorkKind::Milestone, None),
+            "operator-1",
+            "t2",
+            "op-work-container",
+        )
+        .unwrap();
+        app.create_work_as(
+            &work(&project, "descendant", WorkKind::Task, Some("container")),
+            "operator-1",
+            "t3",
+            "op-work-descendant",
+        )
+        .unwrap();
+        app.ensure_work_model_v3().unwrap();
+
+        let container_node =
+            WorkNode::milestone(project.clone(), WorkId::new("container"), "Container");
+        app.create_work_node_v3(
+            &scope(&store, &project),
+            "op-node-container",
+            &container_node,
+            "t4",
+        )
+        .unwrap();
+        let descendant_node = WorkNode::task(
+            project.clone(),
+            WorkId::new("descendant"),
+            ExecutionMode::Direct,
+            Some(WorkId::new("container")),
+            "Descendant",
+        );
+        app.create_work_node_v3(
+            &scope(&store, &project),
+            "op-node-descendant",
+            &descendant_node,
+            "t5",
+        )
+        .unwrap();
+
+        let first_scope = scope(&store, &project);
+        let first = app
+            .apply_container_disposition_v3(
+                &first_scope,
+                "op-disposition-first",
+                CloseoutDispositionId::new("disposition-first"),
+                &WorkId::new("container"),
+                &WorkId::new("descendant"),
+                DispositionKind::Deferred,
+                None,
+                Some("waiting on an external dependency".to_owned()),
+                None,
+                TimestampMs(6),
+                "t6",
+            )
+            .unwrap();
+        assert!(first.changed);
+
+        app.apply_container_disposition_v3(
+            &scope(&store, &project),
+            "op-disposition-successor",
+            CloseoutDispositionId::new("disposition-successor"),
+            &WorkId::new("container"),
+            &WorkId::new("descendant"),
+            DispositionKind::Deferred,
+            None,
+            Some("dependency is still unresolved".to_owned()),
+            Some(CloseoutDispositionId::new("disposition-first")),
+            TimestampMs(7),
+            "t7",
+        )
+        .unwrap();
+
+        let replay = app
+            .apply_container_disposition_v3(
+                &first_scope,
+                "op-disposition-first",
+                CloseoutDispositionId::new("disposition-first"),
+                &WorkId::new("container"),
+                &WorkId::new("descendant"),
+                DispositionKind::Deferred,
+                None,
+                Some("waiting on an external dependency".to_owned()),
+                None,
+                TimestampMs(8),
+                "t8",
+            )
+            .expect("exact retry reaches durable store replay after supersession");
+        assert!(!replay.changed);
+        assert_eq!(replay.snapshot_revision, first.snapshot_revision);
+        assert_eq!(replay.value, first.value);
+    }
 }

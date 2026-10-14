@@ -1916,6 +1916,43 @@ impl SqliteStore {
         }))
     }
 
+    /// Read an immutable disposition by its stable ID, including historical
+    /// rows that have since been superseded. This is used to reconstruct the
+    /// exact payload for replaying an operation after later dispositions have
+    /// advanced the current chain.
+    pub fn container_disposition_by_id_v3(
+        &self,
+        project_id: &str,
+        disposition_id: &str,
+    ) -> Result<Option<ContainerDispositionV3Input>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT project_id, disposition_id, container_work_id,
+                    descendant_work_id, kind, descendant_revision,
+                    descendant_outcome_digest, replacement_work_id, reason,
+                    supersedes_id, created_at
+             FROM container_disposition_v3
+             WHERE project_id = ?1 AND disposition_id = ?2",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, disposition_id)?;
+        if statement.step()? != SQLITE_ROW {
+            return Ok(None);
+        }
+        Ok(Some(ContainerDispositionV3Input {
+            project_id: statement.column_text(0)?,
+            disposition_id: statement.column_text(1)?,
+            container_work_id: statement.column_text(2)?,
+            descendant_work_id: statement.column_text(3)?,
+            kind: statement.column_text(4)?,
+            descendant_revision: statement.column_u64(5)?,
+            descendant_outcome_digest: statement.column_text(6)?,
+            replacement_work_id: statement.column_optional_text(7)?,
+            reason: statement.column_optional_text(8)?,
+            supersedes_id: statement.column_optional_text(9)?,
+            created_at: statement.column_text(10)?,
+        }))
+    }
+
     pub(crate) fn v3_mutation<F>(
         &self,
         context: &V3MutationContext,
