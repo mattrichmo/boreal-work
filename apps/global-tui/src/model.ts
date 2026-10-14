@@ -302,7 +302,7 @@ export class GlobalController {
     const archivedOwners=new Set(snap.projects.filter(p=>p.archived).map(p=>p.id));
     const q=this.searchQuery.trim().toLocaleLowerCase();
     return snap.items.filter(i=>!i.archived&&!(i.project_id&&archivedOwners.has(i.project_id))&&(route==="inbox"?(this.projectId?i.project_id===this.projectId:true):(!this.projectId||i.project_id===this.projectId))&&!isDone(this.statusFor(i))&&(route==="inbox"?isInbox(this.statusFor(i)):matchesTodoFilter(i,this.todoFilter))&&(!q||this.searchMatchedIds.has(i.id)||[i.title,i.description??"",this.projectName(i.project_id),this.statusFor(i)?.label??""].some(v=>v.toLocaleLowerCase().includes(q))))
-      .sort((a,b)=>route==="todos"&&isWaiting(a)&&isWaiting(b)?(Date.parse(a.follow_up_at??"")||Number.MAX_SAFE_INTEGER)-(Date.parse(b.follow_up_at??"")||Number.MAX_SAFE_INTEGER):urgency(a)-urgency(b)||a.position-b.position);
+      .sort((a,b)=>route==="todos"?compareDailyItems(a,b,this.todoFilter):urgency(a)-urgency(b)||a.position-b.position||a.id.localeCompare(b.id));
   }
   statusFor(item:Item):Status|undefined{return this.snapshot?.statuses.find(s=>s.project_id===item.project_id&&s.status_id===item.status_id);}
   selectedRow(): Row | undefined { return this.route === "board" ? this.boardSelected : this.rows()[this.selected]; }
@@ -391,6 +391,17 @@ export function dailyClassification(item:Item):DailyClassificationView|undefined
 export function isOverdue(item:Item):boolean{return dailyClassification(item)?.deadline==="overdue";}
 function urgency(item:Item):number{const group=dailyClassification(item)?.group;return group==="overdue"?0:group==="due_today"?1:group==="waiting"?2:group==="unscheduled"?3:group==="later"?4:5;}
 function isWaiting(item:Item):boolean{return dailyClassification(item)?.waiting===true;}
+function followUpTime(item:Item):number{const value=item.follow_up_at;if(typeof value!=="string")return Number.MAX_SAFE_INTEGER;const time=Date.parse(value);return Number.isFinite(time)?time:Number.MAX_SAFE_INTEGER;}
+function compareDailyItems(left:Item,right:Item,filter:TodoFilter):number{
+  if(filter==="waiting")return followUpTime(left)-followUpTime(right)||(right.priority??-1)-(left.priority??-1)||left.position-right.position||left.id.localeCompare(right.id);
+  const leftWaiting=isWaiting(left),rightWaiting=isWaiting(right);
+  return urgency(left)-urgency(right)
+    ||Number(rightWaiting)-Number(leftWaiting)
+    ||(leftWaiting?followUpTime(left)-followUpTime(right):0)
+    ||(right.priority??-1)-(left.priority??-1)
+    ||left.position-right.position
+    ||left.id.localeCompare(right.id);
+}
 function isInbox(s:Status|undefined):boolean{return s?.category==="inbox"||s?.status_id.toLowerCase()==="inbox";}
 function matchesTodoFilter(item:Item,filter:TodoFilter):boolean{if(filter==="all_open")return true;return dailyClassification(item)?.filters?.[filter]===true;}
 function keyOf(r:Row|undefined):EntityKey|undefined{return r?("operation_id" in r?`operation:${r.operation_id}`:"id" in r?r.id:"status_id" in r?`status:${r.project_id??""}\0${r.status_id}`:"identity" in r?`association:${r.project_id}\0${r.kind}\0${r.identity}`:undefined):undefined;}
