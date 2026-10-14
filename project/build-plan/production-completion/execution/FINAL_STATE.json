@@ -208,34 +208,6 @@
       "journeys": "all application journeys"
     },
     {
-      "package": "F1 / project-local onboarding and guidance parity",
-      "owner": "Luna Extra High agent /root/f1_local_guidance",
-      "model": "GPT-6 Luna Extra High",
-      "worktree": "/Users/cybertron/.codex/worktrees/v4-f1-onboarding/boreal-work",
-      "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
-      "exclusive_paths": [
-        ".agents/skills/boreal-route/SKILL.md",
-        ".agents/skills/boreal-route/boreal.yaml",
-        ".agents/skills/boreal-claim/SKILL.md",
-        ".agents/skills/boreal-finish/SKILL.md",
-        "project/spec/workflows/onboarding.json"
-      ],
-      "read_only_references": [
-        "skills/boreal-route/SKILL.md",
-        "skills/boreal-route/boreal.yaml",
-        "skills/boreal-claim/SKILL.md",
-        "skills/boreal-finish/SKILL.md",
-        "skills/manifest.json"
-      ],
-      "journeys": [
-        "J1",
-        "J3",
-        "J4",
-        "J5",
-        "J9"
-      ]
-    },
-    {
       "package": "BW-S07-T03 / Global TUI capture provenance inspection",
       "owner": "Luna Extra High agent /root/v4_s07_provenance",
       "model": "GPT-6 Luna Extra High",
@@ -348,8 +320,8 @@
     "release_url": null,
     "channel_verification": "not_run"
   },
-  "note": "Integrated the versioned guidance action descriptors, Global TUI inbox hardening, bounded backup artifact continuity, F2 summary/review readbacks, mixed-revision context guard, release preparation, revision-bound container disposition CLI/service route, the missing store export needed by hierarchy callers, and strict candidate assembly plus machine-update rollback hardening. Focused machine-update, authority, release-assembly, shell, YAML, formatting and diff checks passed in the worker lane; target package smoke and full qualification remain unrun. A pre-migration Global database backup/readback seam is still required to prove paired package/Global recovery. Final-result binding and Global capture provenance remain active; BW-S13-T01 dates/waits has started on source 87c05ed5. F1 onboarding, remaining F3/F4 paths, S08/S09 intake receipts and Global Send, S10 scale qualification, S11 handover, S12-T05/T06, S13 TUI/reference workflow parity, T90 sprint gates, integrated qualification, safe installation activation, and release delivery remain open. No final qualification, installation activation, or release claim is implied. The S06 capture/provenance implementation and the S07 Personal Inbox status filter are now integrated; the combined Global TUI suite passes (97/97), while sprint-level acceptance and the remaining S07 lanes are still open. Current execution source is b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e after PR #22; this reconciles the ledger only and does not qualify any journey. Runtime S00-T01/T04 worker-stop confirmation is still unavailable, so their expiry recovery and dependent V4 dispatch remain untouched. The installed 0.2.0 binary is not current source and uses SQLite 3.43.2 below the declared 3.51.3 floor; do not activate a candidate until qualification and binding review are complete.",
-  "current_source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
+  "note": "Current source includes the PR #22 baseline, the coordinator finish-recipe grammar correction, and the integrated F1 project-local onboarding and guidance updates. The workflow and skill package validators pass; F1 journey acceptance and all sprint qualification remain open. The S07-T03 Global provenance inspector and S13-T02 schedule/wait TUI are active source lanes. Remaining work includes S07 bulk-triage CLI and sprint acceptance, S08 restore identity and Intake receipts, S09 Global Send, S10 scale qualification, S11 release journeys/handover, S12-T05/T06 integration and headless qualification, S13 date/wait parity and reusable mixed-work journeys, and the remaining sprint T90 gates. Integrated qualification, installation activation, and release delivery have not occurred. S00-T01/T04 worker-stop confirmation is still unavailable, so their expiry recovery and dependent runtime actions remain untouched. The installed 0.2.0 binary is not current source and uses SQLite 3.43.2 below the declared 3.51.3 floor; do not activate a candidate until qualification and binding review are complete.",
+  "current_source_commit": "adb2a33044a3f9167ef64159505c2450b09ca198",
   "environment_inventory": {
     "checked_date": "2026-10-14",
     "native_platform": "macOS ARM64",
@@ -506,7 +478,13 @@
       "date": "2026-10-14",
       "event": "F1_finish_recipe_cli_grammar_reconciled",
       "source_commit": "b646ad2dae8f9a1a77e2dc64fdf9f03b01d7b10e",
-      "summary": "Coordinator corrected the packaged finish workflow bind-result example to use the supported --expected-revision and --operation-id options, then recomputed the shared workflow asset identity. The full workflow-package validator passes on the current candidate state; onboarding changes remain in progress and will require one final identity recomputation."
+      "summary": "Coordinator corrected the packaged finish workflow bind-result example to use the supported --expected-revision and --operation-id options, then recomputed the shared workflow asset identity. The full workflow-package validator passes on the integrated candidate state."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "F1_local_guidance_integrated_with_workflow_package",
+      "source_commit": "adb2a33044a3f9167ef64159505c2450b09ca198",
+      "summary": "Integrated Luna XHigh F1 local route/claim/finish guidance and role-specific onboarding changes from d37ed447. Updated all three local adapter package versions to 1.3.0 and recalculated the shared workflow package identity to sha256:dd3b13120c1ee9b4b0d7e33ed08d0ce3e5e7e60d858d844a12385b7f62412c31. Workflow validator, skill package validator, and diff check pass. F1 journey and sprint acceptance remain unrun; project/spec/validate_contracts.py also has a separate existing workflow-manifest fixture revision mismatch."
     }
   ]
 }
