@@ -9,7 +9,7 @@ use boreal_domain::work_model_v3::{
 use boreal_domain::{ProjectId, TimestampMs, WorkItem};
 use boreal_store::{
     KnowledgeClaimRecord, KnowledgeClaimReviewRecord, KnowledgeDecisionRecord, MutationResult,
-    SqliteStore, V3MutationContext,
+    SqliteStore, StoreError, V3MutationContext,
 };
 use serde_json::{json, Value};
 
@@ -338,15 +338,7 @@ impl<'a> KnowledgeParityApplication<'a> {
             .ok_or_else(|| ApplicationError::Invalid("context capsule has no revision".into()))?;
         let work =
             crate::WorkApplication::new(self.store).show_work(&ProjectId::new(project), work_id)?;
-        let actual = self.store.project_revision(project)?.0;
-        if actual != revision {
-            return Err(ApplicationError::Store(
-                boreal_store::StoreError::StaleRevision {
-                    expected: revision,
-                    actual,
-                },
-            ));
-        }
+        self.ensure_context_revision(project, revision)?;
         let mut lineage = Vec::new();
         let mut parent = work.parent_id.clone();
         for _ in 0..16 {
@@ -372,8 +364,28 @@ impl<'a> KnowledgeParityApplication<'a> {
             .as_array()
             .and_then(|rows| rows.iter().find(|row| row["work_id"] == work_id))
             .cloned();
+        // Focus and lineage are fetched after the project snapshot in separate
+        // reads. Recheck after the final read so a concurrent hierarchy edit
+        // cannot produce a capsule whose stated revision differs from its
+        // focused work or ancestor data.
+        self.ensure_context_revision(project, revision)?;
         capsule["focus_work"] = json!({"work_id":work.work_id,"project_id":work.project_id,"kind":work.kind,"parent_id":work.parent_id,"parent_lineage":lineage,"lifecycle":work.lifecycle,"dispatch_policy":work.dispatch_policy,"priority":work.priority,"hard_holds":work.hard_holds.iter().map(|hold|hold.stable_code()).collect::<Vec<_>>(),"title":work.title,"description":work.description,"current_attempt":current_attempt,"snapshot_revision":revision,"status_authority":"live store"});
         Ok(capsule)
+    }
+
+    fn ensure_context_revision(
+        &self,
+        project: &str,
+        expected: u64,
+    ) -> Result<(), ApplicationError> {
+        let actual = self.store.project_revision(project)?.0;
+        if actual != expected {
+            return Err(ApplicationError::Store(StoreError::StaleRevision {
+                expected,
+                actual,
+            }));
+        }
+        Ok(())
     }
 
     pub fn update_intake_disposition(
@@ -819,6 +831,33 @@ impl<'a> KnowledgeParityApplication<'a> {
         Ok(
             json!({"project_id":project,"revision":revision,"document_count":document_count,"digest":digest,"rebuilt":true}),
         )
+    }
+}
+
+#[cfg(test)]
+mod focused_context_revision_tests {
+    use super::*;
+
+    #[test]
+    fn focused_context_revision_recheck_rejects_stale_capsules() {
+        let store = SqliteStore::open_in_memory(include_str!(
+            "../../../project/spec/schema-production.sql"
+        ))
+        .unwrap();
+        store.create_project("project-a", "unix-ms:0").unwrap();
+        let actual = store.project_revision("project-a").unwrap().0;
+        assert!(actual > 0, "project initialization should advance revision");
+        let stale = actual - 1;
+
+        let error = KnowledgeParityApplication::new(&store)
+            .ensure_context_revision("project-a", stale)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ApplicationError::Store(StoreError::StaleRevision { expected, actual: observed })
+                if expected == stale && observed == actual
+        ));
     }
 }
 
