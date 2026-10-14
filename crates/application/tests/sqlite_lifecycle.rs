@@ -4,13 +4,20 @@ use boreal_application::{
     RenewLeaseAttemptRequest, SqliteAttemptAdapter, SummaryPayload, WorkApplication,
 };
 use boreal_domain::{
-    AcceptanceProfile, ActorId, AttemptId, ConfigIdentity, DispatchPolicy, Fence, GateId, GateKind,
-    HarnessId, OperationId, PersistedLifecycle, ProfileId, ProjectId, ReceiptResult,
+    AcceptanceProfile, ActorId, ActorRole, AttemptId, ConfigIdentity, DispatchPolicy, Fence, GateId,
+    GateKind, HarnessId, OperationId, PersistedLifecycle, ProfileId, ProjectId, ReceiptResult,
     SourceVersionId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
-use boreal_store::SqliteStore;
+use boreal_store::{
+    SqliteStore,
+    acceptance::{AcceptanceStore, FinalResultBindingRequest},
+    identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
+    principals::PrincipalGrantRequest,
+    recovery::{IdentityBoundRecoveryResolutionInput, RecoveryResolutionInput},
+};
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 
 fn request(operation_id: &str, at: u64) -> AttemptRequest {
     AttemptRequest::new(
@@ -215,20 +222,81 @@ fn sqlite_adapter_persists_fenced_lifecycle_and_replays() {
 
 #[test]
 fn accepted_receipts_drive_durable_proof_gated_closeout() {
-    let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+    let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).unwrap();
     let app = WorkApplication::new(&store);
     let project = ProjectId::new("p-close");
-    app.init_project(
+    store.create_project("p-close", "unix-ms:0").unwrap();
+    IdentityStore::new(&store)
+        .install(
+            &DatabaseIdentity::new("sqlite-lifecycle-database", 1).unwrap(),
+            "unix-ms:1",
+        )
+        .unwrap();
+    IdentityStore::new(&store)
+        .bind_project(
+            "p-close",
+            &WorkspaceBinding::new(
+                "/tmp/sqlite-lifecycle",
+                "/tmp/sqlite-lifecycle",
+                "sha256:sqlite-lifecycle-workspace",
+            )
+            .unwrap(),
+            "unix-ms:1",
+        )
+        .unwrap();
+    store
+        .bootstrap_project_principal(&PrincipalGrantRequest {
+            project_id: "p-close".to_owned(),
+            actor_id: "close-operator".to_owned(),
+            session_id: None,
+            principal_actor_id: "close-operator".to_owned(),
+            role: ActorRole::Operator,
+            independent: true,
+            credential: format!("bwrk1_{}", "a".repeat(64)),
+            expires_at_ms: None,
+            display_name: "Closeout operator".to_owned(),
+            reason: "bootstrap sqlite lifecycle closeout fixture".to_owned(),
+            expected_revision: store.project_revision("p-close").unwrap().0,
+            operation_id: "op-close-bootstrap".to_owned(),
+            at: "unix-ms:2".to_owned(),
+        })
+        .unwrap();
+    store
+        .grant_principal(&PrincipalGrantRequest {
+            project_id: "p-close".to_owned(),
+            actor_id: "close-operator".to_owned(),
+            session_id: None,
+            principal_actor_id: "agent-1".to_owned(),
+            role: ActorRole::Agent,
+            independent: false,
+            credential: format!("bwrk1_{}", "b".repeat(64)),
+            expires_at_ms: None,
+            display_name: "Closeout agent".to_owned(),
+            reason: "grant closeout fixture agent".to_owned(),
+            expected_revision: store.project_revision("p-close").unwrap().0,
+            operation_id: "op-close-agent-grant".to_owned(),
+            at: "unix-ms:2".to_owned(),
+        })
+        .unwrap();
+    app.register_session_as(
         &project,
-        "agent-1",
-        "agent",
-        "cred",
-        "Agent",
-        "unix-ms:0",
-        "op-init-close",
+        "close-operator",
+        "luna",
+        "close-operator-session",
+        "unix-ms:3",
+        "op-close-operator-session",
     )
     .unwrap();
-    app.create_work(
+    app.register_session_as(
+        &project,
+        "agent-1",
+        "luna",
+        "close-agent-session",
+        "unix-ms:3",
+        "op-close-agent-session",
+    )
+    .unwrap();
+    app.create_work_as_session_checked(
         &WorkItem {
             id: WorkId::new("w-close"),
             project_id: project.clone(),
@@ -242,58 +310,145 @@ fn accepted_receipts_drive_durable_proof_gated_closeout() {
             hard_holds: Vec::new(),
             acceptance_profile: AcceptanceProfile::focused(),
         },
-        "unix-ms:0",
+        "close-operator",
+        "close-operator-session",
+        Some(store.project_revision("p-close").unwrap().0),
+        "unix-ms:4",
         "op-work-close",
-    )
-    .unwrap();
-    app.claim(
-        &project,
-        "w-close",
-        "agent-1",
-        "luna",
-        None,
-        "a-close",
-        "op-claim-close",
-        "sha256:claim-close",
-        None,
-        "unix-ms:0",
-        "unix-ms:1800000",
-        "unix-ms:7200000",
-    )
-    .unwrap();
-    let adapter = SqliteAttemptAdapter::new(&store);
-    app.accept(
-        &adapter,
-        request_for("p-close", "w-close", "a-close", "op-accept-close", 1),
-    )
-    .unwrap();
-    app.start(
-        &adapter,
-        request_for("p-close", "w-close", "a-close", "op-start-close", 2),
-    )
-    .unwrap();
-    app.submit(
-        &adapter,
-        request_for("p-close", "w-close", "a-close", "op-submit-close", 3),
     )
     .unwrap();
     store
         .execute_batch(
             "INSERT INTO source_version
-         (source_version_id, project_id, origin, access_scope, content_digest,
-          media_type, byte_count, captured_at, parser_identity, availability, citation_json)
-         VALUES ('source-1', 'p-close', 'fixture.md', 'project',
-                 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');",
+             (source_version_id, project_id, origin, access_scope, content_digest,
+              media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+             VALUES ('source-1', 'p-close', 'fixture.md', 'project',
+                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'text/markdown', 1, 'unix-ms:5', 'parser/1', 'available', '[]');",
         )
         .unwrap();
+    app.claim_with_context(
+        &project,
+        "w-close",
+        "agent-1",
+        "luna",
+        Some("close-agent-session"),
+        "a-close",
+        "op-claim-close",
+        "sha256:claim-close",
+        None,
+        "unix-ms:10",
+        "unix-ms:1800010",
+        "unix-ms:7200010",
+        Some("source-1"),
+        "config-1",
+    )
+    .unwrap();
+    let adapter = SqliteAttemptAdapter::new(&store);
+    app.accept(
+        &adapter,
+        request_for_session(
+            "p-close",
+            "w-close",
+            "a-close",
+            "close-agent-session",
+            "op-accept-close",
+            11,
+        ),
+    )
+    .unwrap();
+    app.start(
+        &adapter,
+        request_for_session(
+            "p-close",
+            "w-close",
+            "a-close",
+            "close-agent-session",
+            "op-start-close",
+            12,
+        ),
+    )
+    .unwrap();
+
+    let result_digest =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     store
-        .execute_batch(
-            "UPDATE attempt
-             SET source_version_id = 'source-1', config_identity = 'config-1'
-             WHERE attempt_id = 'a-close';",
+        .execute_batch(&format!(
+            "INSERT INTO source_version
+             (source_version_id, project_id, origin, access_scope, content_digest,
+              media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+             VALUES ('source-result', 'p-close', 'result.md', 'project', '{result_digest}',
+                     'text/markdown', 1, 'unix-ms:12', 'parser/1', 'available', '[]');"
+        ))
+        .unwrap();
+    let (entity_revision, proof_revision) = store.work_revisions("p-close", "w-close").unwrap();
+    AcceptanceStore::new(&store)
+        .bind_final_result(&FinalResultBindingRequest {
+            project_id: "p-close".to_owned(),
+            work_id: "w-close".to_owned(),
+            actor_id: "agent-1".to_owned(),
+            session_id: "close-agent-session".to_owned(),
+            attempt_id: "a-close".to_owned(),
+            fence: 1,
+            expected_project_revision: store.project_revision("p-close").unwrap().0,
+            expected_entity_revision: entity_revision,
+            expected_proof_revision: proof_revision,
+            source_version_id: "source-result".to_owned(),
+            content_digest: result_digest.to_owned(),
+            operation_id: "op-final-result-close".to_owned(),
+            at: "unix-ms:13".to_owned(),
+        })
+        .unwrap();
+    let summary = SummaryPayload {
+        summary_id: "summary-close".to_owned(),
+        work_id: WorkId::new("w-close"),
+        attempt_id: AttemptId::new("a-close"),
+        fence: Fence::new(1),
+        source_snapshot_hash: SourceVersionId::new("source-result"),
+        config_identity: ConfigIdentity::new("config-1"),
+        profile_id: ProfileId::new("focused"),
+        profile_version: "1".to_owned(),
+        body_digest: boreal_application::sha256_content_digest(b"x"),
+        body_size: 1,
+    };
+    let first_insert = app
+        .record_summary(
+            "agent-1",
+            Some("close-agent-session"),
+            &summary,
+            "op-summary-close",
+            None,
+            TimestampMs(14),
         )
         .unwrap();
+    app.record_summary_with_body(
+        "p-close",
+        "agent-1",
+        Some("close-agent-session"),
+        &summary,
+        "x",
+        "op-summary-close",
+        None,
+        TimestampMs(15),
+    )
+    .unwrap();
+    let summary_readback = app
+        .read_summary_artifact("p-close", "summary-close")
+        .unwrap();
+    assert_eq!(summary_readback.summary.source_version_id, "source-result");
+    assert_eq!(summary_readback.body.as_deref(), Some("x"));
+    app.submit(
+        &adapter,
+        request_for_session(
+            "p-close",
+            "w-close",
+            "a-close",
+            "close-agent-session",
+            "op-submit-close",
+            16,
+        ),
+    )
+    .unwrap();
 
     let receipts: Vec<_> = [
         ("checkpoint", GateKind::Checkpoint, "op-receipt-checkpoint"),
@@ -305,24 +460,72 @@ fn accepted_receipts_drive_durable_proof_gated_closeout() {
         ("summary", GateKind::Summary, "op-receipt-summary"),
     ]
     .into_iter()
-    .map(|(gate, kind, operation)| passed_receipt(gate, kind, operation))
+    .map(|(gate, kind, operation)| {
+        let mut receipt = passed_receipt(gate, kind, operation);
+        receipt.source_snapshot_hash = SourceVersionId::new("source-result");
+        receipt
+    })
     .collect();
     for receipt in &receipts {
-        app.record_receipt("agent-1", None, receipt, None, TimestampMs(4))
-            .unwrap();
+        app.record_receipt(
+            "agent-1",
+            Some("close-agent-session"),
+            receipt,
+            None,
+            TimestampMs(17),
+        )
+        .unwrap();
     }
     let intent = boreal_application::CloseIntent {
         work_id: WorkId::new("w-close"),
         attempt_id: AttemptId::new("a-close"),
         fence: Fence::new(1),
-        source_snapshot_hash: SourceVersionId::new("source-1"),
+        source_snapshot_hash: SourceVersionId::new("source-result"),
         config_identity: ConfigIdentity::new("config-1"),
         profile_id: ProfileId::new("focused"),
         profile_version: "1".to_owned(),
-        summary_id: None,
+        summary_id: Some("summary-close".to_owned()),
     };
-    app.request_close("agent-1", None, &intent, None, TimestampMs(5))
+    let close_request = app.request_close(
+        "agent-1",
+        Some("close-agent-session"),
+        &intent,
+        None,
+        TimestampMs(18),
+    )
+    .unwrap();
+    let recovery_obligation_id = format!(
+        "{}:recovery:submission",
+        close_request.close_intent.operation_id
+    );
+    let pending_recovery = store
+        .recovery_obligation("p-close", &recovery_obligation_id)
+        .unwrap()
+        .expect("submission records pending resource release");
+    assert_eq!(pending_recovery.state, "unresolved");
+    assert_eq!(pending_recovery.resource_state, "release_pending");
+    let recovery_resolution = IdentityBoundRecoveryResolutionInput {
+        context: IdentityStore::new(&store).context("p-close").unwrap(),
+        operation_id: "op-close-release-ack".to_owned(),
+        request_digest: "sha256:close-release-ack".to_owned(),
+        expected_project_revision: Some(store.project_revision("p-close").unwrap().0),
+        session_id: Some("close-agent-session".to_owned()),
+        resolution: RecoveryResolutionInput {
+            project_id: "p-close".to_owned(),
+            obligation_id: recovery_obligation_id,
+            resolution_id: "resolve-close-release".to_owned(),
+            actor_id: "agent-1".to_owned(),
+            outcome: "resource_released".to_owned(),
+            reason: "test harness confirmed the submitted attempt process had stopped".to_owned(),
+            resource_state: "released".to_owned(),
+            at: "unix-ms:18".to_owned(),
+        },
+    };
+    let resolved_recovery = app
+        .resolve_attempt_recovery_with_identity(&recovery_resolution)
         .unwrap();
+    assert_eq!(resolved_recovery.state, "resolved");
+    assert_eq!(resolved_recovery.resource_state, "released");
     let closeout = boreal_application::CloseoutInput {
         definition: AcceptanceDefinition::focused(),
         work_id: WorkId::new("w-close"),
@@ -332,74 +535,58 @@ fn accepted_receipts_drive_durable_proof_gated_closeout() {
             attempt_id: AttemptId::new("a-close"),
             actor_id: ActorId::new("agent-1"),
             harness_id: Some(HarnessId::new("luna")),
-            session_id: None,
+            session_id: Some(boreal_domain::SessionId::new("close-agent-session")),
             fence: Fence::new(1),
             phase: boreal_domain::AttemptPhase::Verifying,
-            claimed_at: TimestampMs(0),
-            accepted_at: Some(TimestampMs(1)),
-            lease_deadline: TimestampMs(1_800_000),
-            hard_deadline: TimestampMs(7_200_000),
+            claimed_at: TimestampMs(10),
+            accepted_at: Some(TimestampMs(11)),
+            lease_deadline: TimestampMs(1_800_010),
+            hard_deadline: TimestampMs(7_200_010),
             current: true,
         },
         expected_fence: Fence::new(1),
-        source_snapshot_hash: SourceVersionId::new("source-1"),
+        source_snapshot_hash: SourceVersionId::new("source-result"),
         config_identity: ConfigIdentity::new("config-1"),
         policy_version: "1".to_owned(),
         receipts,
         gates: Vec::new(),
         review: None,
-        summary: Some(SummaryPayload {
-            summary_id: "summary-close".to_owned(),
-            work_id: WorkId::new("w-close"),
-            attempt_id: AttemptId::new("a-close"),
-            fence: Fence::new(1),
-            source_snapshot_hash: SourceVersionId::new("source-1"),
-            config_identity: ConfigIdentity::new("config-1"),
-            profile_id: ProfileId::new("focused"),
-            profile_version: "1".to_owned(),
-            body_digest: boreal_application::sha256_content_digest(b"x"),
-            body_size: 1,
-        }),
+        summary: Some(summary.clone()),
         close_intent: Some(intent.clone()),
     };
-    let summary = closeout.summary.as_ref().unwrap();
-    let first_insert = app
-        .record_summary(
-            "agent-1",
-            None,
-            summary,
-            "op-summary-close",
-            None,
-            TimestampMs(5),
-        )
-        .unwrap();
     let replay = app
         .record_summary(
             "agent-1",
-            None,
-            summary,
+            Some("close-agent-session"),
+            &summary,
             "op-summary-close",
             None,
-            TimestampMs(6),
+            TimestampMs(19),
         )
         .unwrap();
     let replay_with_body = app
         .record_summary_with_body(
             "p-close",
             "agent-1",
-            None,
-            summary,
+            Some("close-agent-session"),
+            &summary,
             "x",
             "op-summary-close",
             None,
-            TimestampMs(7),
+            TimestampMs(20),
         )
         .unwrap();
     assert!(!first_insert.replayed);
     assert!(replay.replayed);
     assert!(replay_with_body.replayed);
     let finalized = app
-        .finalize_close_checked("agent-1", None, &closeout, None, TimestampMs(8))
+        .finalize_close_checked(
+            "agent-1",
+            Some("close-agent-session"),
+            &closeout,
+            None,
+            TimestampMs(21),
+        )
         .unwrap();
     assert_eq!(
         finalized.close_intent.state,
@@ -430,6 +617,19 @@ fn request_for(
         format!("sha256:{operation}"),
         TimestampMs(at),
     )
+}
+
+fn request_for_session(
+    project: &str,
+    work: &str,
+    attempt: &str,
+    session: &str,
+    operation: &str,
+    at: u64,
+) -> AttemptRequest {
+    let mut request = request_for(project, work, attempt, operation, at);
+    request.session_id = Some(boreal_domain::SessionId::new(session));
+    request
 }
 
 #[test]

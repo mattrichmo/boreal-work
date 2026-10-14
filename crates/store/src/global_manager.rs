@@ -25,7 +25,7 @@ pub mod global_restore;
 pub use global_restore::{restore_global_backup_package, GlobalRestoreReport};
 
 pub(super) const GLOBAL_SCHEMA_ID: &str = "boreal.global";
-pub(super) const GLOBAL_SCHEMA_VERSION: u64 = 2;
+pub(super) const GLOBAL_SCHEMA_VERSION: u64 = 3;
 const GLOBAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS global_manager_state (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS global_audit (
 );
 "#;
 
-const EMPTY_STATE: &str = r#"{"projects":[],"items":[],"notes":[],"statuses":[{"project_id":null,"status_id":"todo","label":"To do","category":"open","position":0},{"project_id":null,"status_id":"doing","label":"Doing","category":"active","position":1},{"project_id":null,"status_id":"waiting","label":"Waiting","category":"waiting","position":2},{"project_id":null,"status_id":"blocked","label":"Blocked","category":"blocked","position":3},{"project_id":null,"status_id":"done","label":"Done","category":"completed","position":4},{"project_id":null,"status_id":"cancelled","label":"Cancelled","category":"cancelled","position":5}],"relationships":[],"note_links":[],"associations":[],"status_history":[],"imported_history":[]}"#;
+const EMPTY_STATE: &str = r#"{"projects":[],"items":[],"notes":[],"statuses":[{"project_id":null,"status_id":"personal-inbox","label":"Inbox","category":"inbox","position":-1},{"project_id":null,"status_id":"todo","label":"To do","category":"open","position":0},{"project_id":null,"status_id":"doing","label":"Doing","category":"active","position":1},{"project_id":null,"status_id":"waiting","label":"Waiting","category":"waiting","position":2},{"project_id":null,"status_id":"blocked","label":"Blocked","category":"blocked","position":3},{"project_id":null,"status_id":"done","label":"Done","category":"completed","position":4},{"project_id":null,"status_id":"cancelled","label":"Cancelled","category":"cancelled","position":5}],"relationships":[],"note_links":[],"capture_witnesses":[],"associations":[],"status_history":[],"imported_history":[]}"#;
 
 static GLOBAL_MIGRATION_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 const GLOBAL_BOOTSTRAP_MIGRATION_RETRY_WINDOW: std::time::Duration =
@@ -372,10 +372,20 @@ impl GlobalManagerStore {
                 let current_revision = current.column_u64(0)?;
                 let current_state = current.column_text(1)?;
                 drop(current);
-                let mut history = inner
-                    .prepare("INSERT OR IGNORE INTO global_revision_snapshot VALUES(?1,?2,?3)")?;
+                let mut current_state = serde_json::from_str::<Value>(&current_state)
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                ensure_compatible_state(&mut current_state)?;
+                let encoded_current = serde_json::to_string(&current_state)
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                let mut state_update = inner
+                    .prepare("UPDATE global_manager_state SET state_json=?1 WHERE singleton=1")?;
+                state_update.bind_text(1, &encoded_current)?;
+                state_update.run()?;
+                let mut history = inner.prepare(
+                    "INSERT INTO global_revision_snapshot VALUES(?1,?2,?3) ON CONFLICT(revision) DO UPDATE SET state_json=excluded.state_json",
+                )?;
                 history.bind_i64(1, current_revision)?;
-                history.bind_text(2, &current_state)?;
+                history.bind_text(2, &encoded_current)?;
                 history.bind_text(3, &now())?;
                 history.run()?;
                 let mut version_update = inner
@@ -623,7 +633,8 @@ impl GlobalManagerStore {
             let next = revision
                 .checked_add(1)
                 .ok_or_else(|| StoreError::Corrupt("global revision overflow".into()))?;
-            let (state, value) = transition(before.clone(), next)?;
+            let (mut state, value) = transition(before.clone(), next)?;
+            ensure_compatible_state(&mut state)?;
             let before_json =
                 serde_json::to_string(&before).map_err(|e| StoreError::Corrupt(e.to_string()))?;
             let mut history = self
@@ -940,6 +951,40 @@ fn ensure_compatible_state(state: &mut Value) -> Result<(), StoreError> {
             ));
         }
     }
+    match object.get("capture_witnesses") {
+        None => {
+            object.insert("capture_witnesses".into(), json!([]));
+        }
+        Some(Value::Array(_)) => {}
+        Some(_) => {
+            return Err(StoreError::Corrupt(
+                "global manager capture_witnesses must be an array".into(),
+            ));
+        }
+    }
+    let statuses = object
+        .get_mut("statuses")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| StoreError::Corrupt("global manager statuses must be an array".into()))?;
+    let personal_inbox = statuses.iter().find(|status| {
+        status.get("project_id").is_some_and(Value::is_null)
+            && status.get("status_id").and_then(Value::as_str) == Some("personal-inbox")
+    });
+    match personal_inbox {
+        Some(status) if status.get("category").and_then(Value::as_str) == Some("inbox") => {}
+        Some(_) => {
+            return Err(StoreError::Corrupt(
+                "global personal-inbox status has an incompatible category".into(),
+            ));
+        }
+        None => statuses.push(json!({
+            "project_id": null,
+            "status_id": "personal-inbox",
+            "label": "Inbox",
+            "category": "inbox",
+            "position": -1
+        })),
+    }
     Ok(())
 }
 
@@ -985,7 +1030,7 @@ mod global_backup_tests {
 
         let error = GlobalManagerStore::open(&path).err().unwrap();
         assert!(matches!(error, crate::StoreError::Busy(_)));
-        assert!(error.to_string().contains("global-migration-v2."));
+        assert!(error.to_string().contains("global-migration-v3."));
         assert!(!path.exists());
 
         drop(active);
@@ -999,6 +1044,84 @@ mod global_backup_tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn schema_two_migration_adds_inbox_and_witness_ledger_without_fabricating_origins() {
+        let root = unique_test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("global.sqlite");
+        let store = GlobalManagerStore::open(&path).unwrap();
+        let legacy = json!({
+            "projects": [],
+            "items": [{
+                "id": "legacy-item",
+                "project_id": null,
+                "parent_id": null,
+                "kind": "task",
+                "title": "Legacy item",
+                "description": "",
+                "labels": [],
+                "status_id": "todo",
+                "priority": 0,
+                "due_at": null,
+                "archived": false,
+                "position": 0,
+                "created_at": "legacy-created",
+                "updated_at": "legacy-updated"
+            }],
+            "notes": [],
+            "statuses": [
+                {"project_id":null,"status_id":"todo","label":"To do","category":"open","position":0}
+            ],
+            "relationships": [],
+            "note_links": [],
+            "associations": [],
+            "status_history": [],
+            "imported_history": []
+        });
+        let encoded = serde_json::to_string(&legacy).unwrap();
+        store
+            .inner
+            .execute_batch("UPDATE global_schema SET schema_version=2,revision=7 WHERE singleton=1; DELETE FROM global_revision_snapshot;")
+            .unwrap();
+        let mut current = store
+            .inner
+            .prepare("UPDATE global_manager_state SET state_json=?1 WHERE singleton=1")
+            .unwrap();
+        current.bind_text(1, &encoded).unwrap();
+        current.run().unwrap();
+        let mut history = store
+            .inner
+            .prepare("INSERT INTO global_revision_snapshot VALUES(7,?1,'legacy-history-time')")
+            .unwrap();
+        history.bind_text(1, &encoded).unwrap();
+        history.run().unwrap();
+        drop(current);
+        drop(history);
+        drop(store);
+
+        let migrated = GlobalManagerStore::open(&path).unwrap();
+        assert_eq!(migrated.revision().unwrap(), 7);
+        let state = migrated.state().unwrap();
+        let old_item = &state["items"][0];
+        assert_eq!(old_item, &legacy["items"][0]);
+        assert_eq!(old_item["id"], "legacy-item");
+        assert!(old_item.get("capture_origin").is_none());
+        assert_eq!(state["capture_witnesses"], json!([]));
+        assert!(state["statuses"].as_array().unwrap().iter().any(|status| {
+            status["project_id"].is_null()
+                && status["status_id"] == "personal-inbox"
+                && status["category"] == "inbox"
+        }));
+        let history = migrated.revision_history().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["created_at"], "legacy-history-time");
+        assert!(history[0]["snapshot"]["items"][0]
+            .get("capture_origin")
+            .is_none());
+        drop(migrated);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn physical_backup_captures_committed_wal_state_and_history() {
@@ -1084,6 +1207,37 @@ mod global_backup_tests {
     }
 
     #[test]
+    fn backup_is_not_published_when_snapshot_validation_fails() {
+        let root = unique_test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("global.sqlite");
+        let package = root.join("invalid.global-backup");
+        let store = GlobalManagerStore::open(&source).unwrap();
+
+        // Keep SQLite structurally sound while making the copied Global state
+        // invalid, so this exercises package validation rather than I/O error
+        // handling.
+        store
+            .inner
+            .execute_batch("UPDATE global_manager_state SET state_json='{}' WHERE singleton=1")
+            .unwrap();
+
+        assert!(store.backup_package_to(&package).is_err());
+        assert!(
+            !package.exists(),
+            "an invalid snapshot must not be published"
+        );
+        assert!(fs::read_dir(&root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".global-backup.")));
+
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn manifest_validation_rejects_unsupported_and_tampered_packages() {
         let root = unique_test_dir();
         fs::create_dir_all(&root).unwrap();
@@ -1101,7 +1255,48 @@ mod global_backup_tests {
         unsupported["format_version"] = json!(99);
         assert!(validate_global_backup_manifest(&unsupported).is_err());
 
-        let mut missing_runtime = valid;
+        let mut invalid_manifests = Vec::new();
+
+        let mut unsupported_schema_id = valid.clone();
+        unsupported_schema_id["source_schema_id"] = json!("other.global");
+        invalid_manifests.push(("schema ID", unsupported_schema_id));
+
+        let mut unsupported_schema_version = valid.clone();
+        unsupported_schema_version["source_schema_version"] = json!(99);
+        invalid_manifests.push(("schema version", unsupported_schema_version));
+
+        let mut malformed_database_id = valid.clone();
+        malformed_database_id["database_id"] = json!("not-a-database-id");
+        invalid_manifests.push(("database ID", malformed_database_id));
+
+        let mut malformed_revision = valid.clone();
+        malformed_revision["revision"] = json!(-1);
+        invalid_manifests.push(("revision", malformed_revision));
+
+        let mut zero_database_size = valid.clone();
+        zero_database_size["database_bytes"] = json!(0);
+        invalid_manifests.push(("database size", zero_database_size));
+
+        let mut malformed_checksum = valid.clone();
+        malformed_checksum["database_checksum"] = json!("sha256:bad");
+        invalid_manifests.push(("checksum", malformed_checksum));
+
+        let mut empty_producer = valid.clone();
+        empty_producer["producer"]["name"] = json!(" ");
+        invalid_manifests.push(("producer", empty_producer));
+
+        let mut malformed_runtime = valid.clone();
+        malformed_runtime["sqlite_runtime"]["compile_options"] = json!([1]);
+        invalid_manifests.push(("SQLite runtime", malformed_runtime));
+
+        for (field, manifest) in invalid_manifests {
+            assert!(
+                validate_global_backup_manifest(&manifest).is_err(),
+                "invalid {field} should be rejected"
+            );
+        }
+
+        let mut missing_runtime = valid.clone();
         missing_runtime
             .as_object_mut()
             .unwrap()

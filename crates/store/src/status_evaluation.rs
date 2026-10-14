@@ -2,7 +2,10 @@
 //! Status and action policy remain in the domain decision API. No SQL WHERE
 //! clause, adapter, or persisted display field decides eligibility here.
 use super::*;
-use boreal_domain::work_model_v3::{DecompositionKind, ExecutionMode, WorkNode, WorkSchedule};
+use boreal_domain::work_model_v3::{
+    BusinessDate, BusinessSchedule, BusinessStatusContext, DecompositionKind, ExecutionMode,
+    WorkNode, WorkSchedule,
+};
 use boreal_domain::{
     evaluate_status, ActorContext, ActorId, ActorRole, Attempt, DeadlineSource, Fence, Revision,
     StatusContext, StatusDecision, TimestampMs,
@@ -437,14 +440,15 @@ impl SqliteStore {
 
     /// Caller must hold the write transaction. This does not open a nested
     /// transaction or use a previously displayed (possibly stale) decision.
-    pub(crate) fn status_decision_in_transaction(
+    pub(crate) fn status_decision_in_transaction_with_business_time(
         &self,
         project_id: &str,
         work_id: &str,
         actor_id: &str,
         as_of: TimestampMs,
+        business_time: Option<&BusinessStatusContext>,
     ) -> Result<StatusDecision, StoreError> {
-        self.work_policy_in_transaction(project_id, work_id, actor_id, None, as_of)
+        self.work_policy_in_transaction(project_id, work_id, actor_id, None, as_of, business_time)
             .map(|projection| projection.status)
     }
     /// Re-evaluate the same domain action policy used by status, under the
@@ -458,6 +462,26 @@ impl SqliteStore {
         as_of: TimestampMs,
         action: boreal_domain::actions::ActionKind,
     ) -> Result<boreal_domain::actions::ActionDescriptor, StoreError> {
+        self.authorize_work_action_in_transaction_with_business_time(
+            project_id,
+            work_id,
+            actor_id,
+            session_id,
+            as_of,
+            action,
+            None,
+        )
+    }
+    pub(crate) fn authorize_work_action_in_transaction_with_business_time(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        as_of: TimestampMs,
+        action: boreal_domain::actions::ActionKind,
+        business_time: Option<&BusinessStatusContext>,
+    ) -> Result<boreal_domain::actions::ActionDescriptor, StoreError> {
         self.principal_authority(project_id, actor_id)?;
         self.validate_project_session(
             project_id,
@@ -466,8 +490,14 @@ impl SqliteStore {
                 StoreError::Invalid("canonical action requires a project session".into())
             })?,
         )?;
-        let projection =
-            self.work_policy_in_transaction(project_id, work_id, actor_id, session_id, as_of)?;
+        let projection = self.work_policy_in_transaction(
+            project_id,
+            work_id,
+            actor_id,
+            session_id,
+            as_of,
+            business_time,
+        )?;
         let actions = projection.actions.ok_or_else(|| {
             StoreError::Corrupt("canonical status/action facts unavailable".into())
         })?;
@@ -493,9 +523,35 @@ impl SqliteStore {
         actor_id: &str,
         session_id: Option<&str>,
         as_of: TimestampMs,
+        business_time: Option<&BusinessStatusContext>,
     ) -> Result<WorkPolicyProjection, StoreError> {
         let (mut snapshot, pinned_requirements) =
             self.read_project_status_in_transaction(project_id)?;
+        if let Some(context) = business_time {
+            context
+                .time
+                .validate()
+                .map_err(|error| StoreError::Invalid(format!("invalid business-time context: {error}")))?;
+            let setting = snapshot.civil_time_setting.as_ref().ok_or_else(|| {
+                StoreError::Conflict("civil_time_context_stale: project setting is absent".into())
+            })?;
+            if context.time.project_id.as_str() != project_id
+                || context.time.as_of != as_of
+                || context.time.setting_revision != setting.revision
+                || context.time.timezone != setting.timezone
+                || context.time.tzdb_identity != setting.tzdb_identity
+            {
+                return Err(StoreError::Conflict(
+                    "civil_time_context_stale: project setting or evaluation clock changed".into(),
+                ));
+            }
+            if context.project_revision != snapshot.revision.0 {
+                return Err(StoreError::StaleRevision {
+                    expected: context.project_revision,
+                    actual: snapshot.revision.0,
+                });
+            }
+        }
         let actor = self.populate_status_action_facts_for_session(
             &mut snapshot,
             actor_id,
@@ -512,6 +568,14 @@ impl SqliteStore {
                     "not_claimable: work {work_id} is absent, foreign, or corrupt"
                 ))
             })?;
+        if let Some(context) = business_time {
+            let schedule_revision = row.business_schedule.as_ref().map(|record| record.revision);
+            if context.work_schedule_revision != schedule_revision {
+                return Err(StoreError::Conflict(
+                    "business_schedule_context_stale: schedule revision changed".into(),
+                ));
+            }
+        }
         let prerequisites = snapshot
             .dependencies
             .iter()
@@ -531,6 +595,21 @@ impl SqliteStore {
             .map(|edge| edge.dependent_id.clone())
             .collect::<Vec<_>>();
         let attempt = row.status_attempt()?;
+        let legacy_business_schedule = row
+            .legacy_due_at
+            .as_deref()
+            .map(BusinessDate::parse_legacy_due)
+            .transpose()
+            .map_err(|error| StoreError::Corrupt(format!("invalid legacy due value: {error}")))?
+            .map(|due| BusinessSchedule {
+                due: Some(due),
+                ..BusinessSchedule::default()
+            });
+        let business_schedule = row
+            .business_schedule
+            .as_ref()
+            .map(|record| &record.schedule)
+            .or(legacy_business_schedule.as_ref());
         let context = StatusContext {
             work: &row.work,
             prerequisites: &prerequisites,
@@ -541,6 +620,19 @@ impl SqliteStore {
             project_revision: Revision(snapshot.revision.0),
             retry_not_before: row.status_retry_not_before()?,
             schedule: row.schedule,
+            business_schedule,
+            business_schedule_revision: row.business_schedule.as_ref().map(|record| record.revision),
+            business_schedule_setting_revision: row
+                .business_schedule
+                .as_ref()
+                .and_then(|record| record.civil_time_setting_revision),
+            business_time: business_time.map(|context| &context.time),
+            business_not_before_at: business_time.and_then(|context| context.not_before_at),
+            business_schedule_next_change_at:
+                business_time.and_then(|context| context.schedule_next_change_at),
+            external_wait_next_change_at:
+                business_time.and_then(|context| context.external_wait_next_change_at),
+            external_waits: &row.external_waits,
             activation_at: row.activation_at,
             affected_dependents: &dependents,
         };

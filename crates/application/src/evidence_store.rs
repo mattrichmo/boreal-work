@@ -1,32 +1,533 @@
 //! Durable application façade for receipts, reviews, and proof-gated closeout.
 
 use boreal_domain::{
-    ActorId, AttemptId, ConfigIdentity, Fence, GateId, GateKind, ProfileId, ReceiptId,
-    ReceiptResult, SourceVersionId, TimestampMs, WorkId,
+    ActorId, AttemptId, AttemptPhase, ConfigIdentity, Fence, GateId, GateKind, ProfileId,
+    ReceiptId, ReceiptResult, SourceVersionId, TimestampMs, WorkId,
 };
 use boreal_store::{
-    identity::{IdentityContext, IdentityError, IdentityStore},
     AuditEventRecord, CloseIntentRequest, CloseIntentResult, EvidenceExecutionAdmissionRequest,
     EvidenceExecutionAdmissionResult, EvidenceExecutionRecord, OperationOutcome, OperationRecord,
     ReceiptAcceptanceExpectation, ReceiptAttestation, ReceiptInsertRequest, ReceiptInsertResult,
     ReceiptOutcome, ReceiptRecord, ReceiptSubmissionKind, ReviewDecision as StoreReviewDecision,
     ReviewInsertRequest, StoreError, SummaryInsertRequest, SummaryInsertResult,
+    identity::{IdentityContext, IdentityError, IdentityStore},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
-    canonical_request_digest, validate_review_decision, AcceptanceDefinition, AcceptanceEvaluation,
-    AcceptanceGateDefinition, ApplicationError, CloseIntent, CloseoutInput, EvidenceErrorCode,
-    EvidenceRunRequest, EvidenceRunResult, ExternalEffectAcquisition, ExternalEffectAdapter,
-    ExternalEffectReadback, ExternalEffectRequest, ExternalEffectResolution, ExternalJobKind,
-    ReceiptExpectation, ReceiptExpectationBase, ReceiptPayload, ReviewDecision,
-    ReviewDecisionRequest, SqliteStore, SummaryPayload, WorkApplication,
+    AcceptanceDefinition, AcceptanceEvaluation, AcceptanceGateDefinition, ApplicationError,
+    CloseIntent, CloseoutInput, EvidenceErrorCode, EvidenceRunRequest, EvidenceRunResult,
+    ExternalEffectAcquisition, ExternalEffectAdapter, ExternalEffectReadback,
+    ExternalEffectRequest, ExternalEffectResolution, ExternalJobKind, ReceiptExpectation,
+    ReceiptExpectationBase, ReceiptPayload, ReviewDecision, ReviewDecisionRequest, SqliteStore,
+    SummaryPayload, WorkApplication, canonical_request_digest, validate_review_decision,
+};
+use boreal_source::{
+    ArtifactProducer, ArtifactRelationshipInput, ArtifactRightsProvenance, ArtifactRole,
+    ArtifactScope, DEFAULT_MAX_ARTIFACT_BYTES, SourceCatalog, SourceIdentity,
 };
 use boreal_store::jobs::ExternalJobInput;
 
 const VERIFIER_JOB_PREFIX: &str = "verifier:";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseReadinessReadback {
+    pub project_revision: u64,
+    pub work_id: WorkId,
+    pub attempt_id: Option<String>,
+    pub fence: Option<u64>,
+    pub readiness: crate::CloseReadiness,
+}
+
 impl WorkApplication<'_> {
+    /// Project-scoped durable receipt readback. A receipt remains available
+    /// after its attempt is stale so failed and superseded evidence stays
+    /// inspectable, but callers cannot use this helper to cross project scope.
+    pub fn read_receipt(
+        &self,
+        project_id: &str,
+        receipt_id: &str,
+    ) -> Result<Option<ReceiptRecord>, ApplicationError> {
+        if project_id.trim().is_empty() || receipt_id.trim().is_empty() {
+            return Err(ApplicationError::Invalid(
+                "project and receipt ids are required".into(),
+            ));
+        }
+        let Some(receipt) = self.store().receipt(receipt_id)? else {
+            return Ok(None);
+        };
+        if receipt.project_id != project_id {
+            return Err(ApplicationError::Store(StoreError::WrongSubject {
+                expected: project_id.to_owned(),
+                actual: receipt.project_id,
+            }));
+        }
+        Ok(Some(receipt))
+    }
+
+    /// Exact sealed proof readback used when a client reconnects. The store
+    /// only returns the submission for the requested proof generation.
+    pub fn read_current_submission(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        proof_revision: u64,
+    ) -> Result<Option<boreal_store::acceptance::SubmissionRecord>, ApplicationError> {
+        if project_id.trim().is_empty() || work_id.trim().is_empty() || proof_revision == 0 {
+            return Err(ApplicationError::Invalid(
+                "project, work, and positive proof revision are required".into(),
+            ));
+        }
+        let acceptance = boreal_store::acceptance::AcceptanceStore::new(self.store_ref());
+        let binding = acceptance.current_final_result(project_id, work_id, proof_revision)?;
+        let submission =
+            self.store_ref()
+                .current_submission(project_id, work_id, proof_revision)?;
+        let requirements = boreal_store::profiles::ProfileStore::new(self.store_ref())
+            .current_pinned_requirements(project_id, work_id)?;
+        if requires_bound_final_result(&requirements) && binding.is_none() && submission.is_some() {
+            return Err(ApplicationError::Store(StoreError::Conflict(
+                "current software submission has no final-result binding".into(),
+            )));
+        }
+        if let (Some(binding), Some(submission)) = (&binding, &submission) {
+            if submission.attempt_id != binding.attempt_id
+                || submission.fence != binding.fence
+                || submission.entity_revision != binding.entity_revision
+                || submission.source_version_id != binding.source_version_id
+                || submission.config_identity != binding.config_identity
+                || submission.profile_id != binding.profile_id
+                || submission.profile_version != binding.profile_version
+                || submission.profile_digest != binding.profile_digest
+            {
+                return Err(ApplicationError::Store(StoreError::Corrupt(
+                    "submission does not match the current final-result binding".into(),
+                )));
+            }
+        }
+        Ok(submission)
+    }
+
+    /// Verify captured result bytes through the canonical source catalog,
+    /// then bind that exact source to the next proof generation. The immutable
+    /// SQLite binding is authoritative; the source relationship is a
+    /// rebuildable lineage projection and can be repaired from its receipt.
+    pub fn bind_final_result(
+        &self,
+        catalog: &SourceCatalog,
+        request: &crate::FinalResultCaptureRequest,
+    ) -> Result<crate::OperationResult<crate::FinalResultCaptureResult>, ApplicationError> {
+        validate_final_result_capture_request(request)?;
+        let source = SourceIdentity {
+            project_id: request.project_id.clone(),
+            source_version_id: request.source_version_id.clone(),
+            content_digest: request.content_digest.clone(),
+        };
+        let acceptance = boreal_store::acceptance::AcceptanceStore::new(self.store_ref());
+        let replay = acceptance
+            .final_result_for_operation(&request.project_id, &request.operation_id)?
+            .is_some();
+        if !replay {
+            catalog
+                .read_identity_bounded(&source, DEFAULT_MAX_ARTIFACT_BYTES)
+                .map_err(|error| {
+                    ApplicationError::Invalid(format!(
+                        "final result source bytes failed catalog verification: {error}"
+                    ))
+                })?;
+        }
+        let binding =
+            acceptance.bind_final_result(&boreal_store::acceptance::FinalResultBindingRequest {
+                project_id: request.project_id.clone(),
+                work_id: request.work_id.clone(),
+                actor_id: request.actor_id.clone(),
+                session_id: request.session_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                fence: request.fence,
+                expected_project_revision: request.expected_project_revision,
+                expected_entity_revision: request.expected_entity_revision,
+                expected_proof_revision: request.expected_proof_revision,
+                source_version_id: request.source_version_id.clone(),
+                content_digest: request.content_digest.clone(),
+                operation_id: request.operation_id.clone(),
+                at: request.at.clone(),
+            })?;
+        let lineage_pending = record_final_result_lineage(catalog, &binding).err();
+        Ok(crate::OperationResult {
+            operation_id: binding.operation_id.clone(),
+            snapshot_revision: binding.project_revision,
+            changed: !binding.replayed,
+            value: crate::FinalResultCaptureResult {
+                binding,
+                lineage_pending,
+            },
+        })
+    }
+
+    pub fn read_current_final_result(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        proof_revision: u64,
+    ) -> Result<Option<boreal_store::acceptance::FinalResultBindingRecord>, ApplicationError> {
+        Ok(
+            boreal_store::acceptance::AcceptanceStore::new(self.store_ref()).current_final_result(
+                project_id,
+                work_id,
+                proof_revision,
+            )?,
+        )
+    }
+
+    /// Evaluates close readiness from one revision-consistent projection of
+    /// persisted proof, review, summary, profile, and close-intent facts.
+    /// Callers provide only the subject identity; no proof facts are accepted
+    /// here, and this read never changes lifecycle state.
+    pub fn read_close_readiness(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<crate::CloseReadiness, ApplicationError> {
+        self.read_close_readiness_readback(project_id, work_id)
+            .map(|readback| readback.readiness)
+    }
+
+    /// Returns the evaluated readiness with its project revision, requested
+    /// work identity, and current attempt identity from the same store snapshot.
+    pub fn read_close_readiness_readback(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<CloseReadinessReadback, ApplicationError> {
+        let snapshot = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+            .close_readiness_snapshot(project_id, work_id)?;
+        let project_revision = snapshot.project_revision;
+        let requested_work_id = WorkId::new(snapshot.work_id.clone());
+        let current_attempt_id = snapshot
+            .current_attempt
+            .as_ref()
+            .map(|attempt| attempt.attempt_id.clone());
+        let current_fence = snapshot
+            .current_attempt
+            .as_ref()
+            .map(|attempt| attempt.fence);
+        let definition = close_readiness_definition(&snapshot.pinned_requirements)?;
+        let attempt = close_readiness_attempt_snapshot(&snapshot)?;
+        let source_snapshot_hash = close_readiness_source(&snapshot, &attempt);
+        let config_identity = ConfigIdentity::new(
+            snapshot
+                .proof_attempt
+                .as_ref()
+                .map(|attempt| attempt.config_identity.as_str())
+                .unwrap_or_default(),
+        );
+        let expected_fence = attempt.fence;
+
+        let receipts = snapshot
+            .ordered_receipts
+            .iter()
+            .filter(|record| {
+                snapshot.submission.as_ref().is_none_or(|submission| {
+                    submission
+                        .receipt_ids
+                        .iter()
+                        .any(|id| id == &record.receipt_id)
+                })
+            })
+            .map(|record| {
+                let mut receipt = receipt_payload_from_record(record)?;
+                if let Some(local_gate_id) = definition.gates.iter().find_map(|gate| {
+                    let local = gate.id.as_str();
+                    let scoped = format!("{}:{local}", snapshot.work_id);
+                    (receipt.gate_id.as_str() == scoped.as_str()
+                        || receipt.gate_id.as_str() == local)
+                        .then_some(gate.id.clone())
+                }) {
+                    receipt.gate_id = local_gate_id;
+                }
+                Ok(receipt)
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let review = snapshot
+            .required_review
+            .as_ref()
+            .map(|record| ReviewDecisionRequest {
+                review_id: record.review_id.clone(),
+                work_id: WorkId::new(record.work_id.clone()),
+                attempt_id: AttemptId::new(record.attempt_id.clone()),
+                fence: Fence::new(record.fence),
+                reviewer_actor_id: ActorId::new(record.reviewer_actor_id.clone()),
+                attempt_actor_id: attempt.actor_id.clone(),
+                reviewer_role: record
+                    .reviewer_role
+                    .unwrap_or(boreal_domain::ActorRole::Agent),
+                decision: match record.outcome.as_str() {
+                    "approved" | "accepted" => ReviewDecision::Accepted,
+                    _ => ReviewDecision::Rejected,
+                },
+                reason: record.reason.clone(),
+                source_snapshot_hash: source_snapshot_hash.clone(),
+                config_identity: config_identity.clone(),
+                policy_version: definition.version.clone(),
+            });
+        let summary = snapshot
+            .current_summary
+            .as_ref()
+            .map(|record| SummaryPayload {
+                summary_id: record.summary.summary_id.clone(),
+                work_id: WorkId::new(record.summary.work_id.clone()),
+                attempt_id: AttemptId::new(record.summary.attempt_id.clone()),
+                fence: Fence::new(record.summary.fence),
+                source_snapshot_hash: SourceVersionId::new(
+                    record.summary.source_version_id.clone(),
+                ),
+                config_identity: ConfigIdentity::new(record.summary.config_identity.clone()),
+                profile_id: ProfileId::new(record.summary.profile_id.clone()),
+                profile_version: record.summary.profile_version.to_string(),
+                body_digest: record.summary.body_digest.clone(),
+                body_size: record.summary.body_size,
+            });
+        let close_intent = snapshot.close_intent.as_ref().map(|record| CloseIntent {
+            work_id: WorkId::new(record.work_id.clone()),
+            attempt_id: AttemptId::new(record.attempt_id.clone()),
+            fence: Fence::new(record.fence),
+            source_snapshot_hash: SourceVersionId::new(
+                record.source_version_id.clone().unwrap_or_default(),
+            ),
+            config_identity: ConfigIdentity::new(record.config_identity.clone()),
+            profile_id: ProfileId::new(record.profile_id.clone()),
+            profile_version: record.profile_version.to_string(),
+            summary_id: record.summary_id.clone(),
+        });
+
+        let input = CloseoutInput {
+            definition: definition.clone(),
+            work_id: WorkId::new(snapshot.work_id.clone()),
+            attempt,
+            expected_fence,
+            source_snapshot_hash,
+            config_identity,
+            policy_version: definition.version.clone(),
+            receipts,
+            gates: Vec::new(),
+            review,
+            summary,
+            close_intent,
+        };
+        let mut readiness = crate::evaluate_close_readiness(&input)?;
+        if snapshot.final_result.is_none() {
+            if let Some(requirement) = snapshot
+                .pinned_requirements
+                .required_declarations()
+                .find(|declaration| declaration.kind == "verification")
+            {
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::GateUnsatisfied(GateId::new(
+                        requirement.gate_id.clone(),
+                    )));
+            }
+        }
+        match snapshot.typed_acceptance {
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::NotRequired
+            | boreal_store::acceptance::CloseReadinessTypedAcceptance::Ready => {}
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::ResultMissing => {
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::AcceptanceResultMissing);
+            }
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::ResultMismatch => {
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::AcceptanceResultMismatch);
+            }
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::ArtifactDecisionMissing => {
+                let gate_id = snapshot
+                    .pinned_requirements
+                    .declarations
+                    .iter()
+                    .find(|declaration| declaration.required && declaration.kind == "review")
+                    .map(|declaration| declaration.gate_id.as_str())
+                    .unwrap_or("artifact_review");
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::ReviewRequired(GateId::new(gate_id)));
+            }
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::ArtifactDecisionMismatch => {
+                let gate_id = snapshot
+                    .pinned_requirements
+                    .declarations
+                    .iter()
+                    .find(|declaration| declaration.required && declaration.kind == "review")
+                    .map(|declaration| declaration.gate_id.as_str())
+                    .unwrap_or("artifact_review");
+                readiness
+                    .gaps
+                    .push(crate::CloseoutGap::ReviewRejected(GateId::new(gate_id)));
+            }
+        }
+        let attempt_context = snapshot.proof_attempt.as_ref();
+        let binding_mismatch = snapshot.final_result.as_ref().is_some_and(|binding| {
+            let Some(attempt) = attempt_context else {
+                return true;
+            };
+            binding.project_id.as_str() != snapshot.project_id.as_str()
+                || binding.work_id.as_str() != snapshot.work_id.as_str()
+                || binding.attempt_id.as_str() != attempt.attempt_id.as_str()
+                || binding.fence != attempt.fence
+                || binding.entity_revision != snapshot.entity_revision
+                || binding.proof_revision != snapshot.proof_revision
+                || binding.config_identity.as_str() != attempt.config_identity.as_str()
+                || binding.profile_id.as_str()
+                    != snapshot.pinned_requirements.profile.profile_id.as_str()
+                || binding.profile_version != snapshot.pinned_requirements.profile.version
+                || binding.profile_digest.as_str()
+                    != snapshot.pinned_requirements.profile.policy_digest.as_str()
+        });
+        let submission_mismatch = snapshot.submission.as_ref().is_some_and(|submission| {
+            let Some(attempt) = attempt_context else {
+                return true;
+            };
+            submission.project_id.as_str() != snapshot.project_id.as_str()
+                || submission.work_id.as_str() != snapshot.work_id.as_str()
+                || submission.attempt_id.as_str() != attempt.attempt_id.as_str()
+                || submission.fence != attempt.fence
+                || submission.entity_revision != snapshot.entity_revision
+                || submission.proof_revision != snapshot.proof_revision
+                || submission.config_identity.as_str() != attempt.config_identity.as_str()
+                || submission.profile_id.as_str()
+                    != snapshot.pinned_requirements.profile.profile_id.as_str()
+                || submission.profile_version != snapshot.pinned_requirements.profile.version
+                || submission.profile_digest.as_str()
+                    != snapshot.pinned_requirements.profile.policy_digest.as_str()
+                || snapshot.final_result.as_ref().is_some_and(|binding| {
+                    submission.attempt_id != binding.attempt_id
+                        || submission.fence != binding.fence
+                        || submission.entity_revision != binding.entity_revision
+                        || submission.source_version_id != binding.source_version_id
+                        || submission.config_identity != binding.config_identity
+                        || submission.profile_id != binding.profile_id
+                        || submission.profile_version != binding.profile_version
+                        || submission.profile_digest != binding.profile_digest
+                })
+        });
+        if binding_mismatch || submission_mismatch {
+            readiness.gaps.push(crate::CloseoutGap::StaleFence);
+        }
+        if snapshot.submission.as_ref().is_some_and(|submission| {
+            !submission.receipt_ids.iter().all(|id| {
+                snapshot
+                    .ordered_receipts
+                    .iter()
+                    .any(|receipt| receipt.receipt_id == *id)
+            })
+        }) {
+            readiness.gaps.push(crate::CloseoutGap::StaleFence);
+        }
+        if snapshot.current_summary.as_ref().is_some_and(|record| {
+            record.body_integrity != boreal_store::acceptance::CloseReadinessSummaryIntegrity::Valid
+                || snapshot.submission.as_ref().is_some_and(|submission| {
+                    record.summary.summary_id != submission.summary_id
+                        || record.summary.body_digest != submission.summary_digest
+                })
+        }) {
+            readiness.gaps.push(crate::CloseoutGap::SummaryMismatch);
+        }
+        if snapshot
+            .close_intent
+            .as_ref()
+            .is_some_and(|record| record.state != boreal_store::CloseIntentState::Open)
+        {
+            readiness.gaps.push(crate::CloseoutGap::CloseIntentMismatch);
+        }
+        readiness.gaps.sort_by(|left, right| {
+            left.code()
+                .cmp(right.code())
+                .then_with(|| close_readiness_gap_id(left).cmp(close_readiness_gap_id(right)))
+        });
+        readiness.gaps.dedup();
+        readiness.ready = readiness.gaps.is_empty();
+        Ok(CloseReadinessReadback {
+            project_revision,
+            work_id: requested_work_id,
+            attempt_id: current_attempt_id,
+            fence: current_fence,
+            readiness,
+        })
+    }
+
+    pub fn read_final_result_for_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<boreal_store::acceptance::FinalResultBindingRecord>, ApplicationError> {
+        Ok(
+            boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+                .final_result_for_operation(project_id, operation_id)?,
+        )
+    }
+
+    /// Rebuild the non-authoritative ProducedDeliverable relationship from
+    /// the durable result binding after a restart or partial catalog write.
+    pub fn reconcile_final_result_lineage(
+        &self,
+        catalog: &SourceCatalog,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<boreal_store::acceptance::FinalResultBindingRecord, ApplicationError> {
+        let binding = self
+            .read_final_result_for_operation(project_id, operation_id)?
+            .ok_or_else(|| {
+                ApplicationError::Invalid(format!(
+                    "final result operation {operation_id} has no durable binding"
+                ))
+            })?;
+        record_final_result_lineage(catalog, &binding).map_err(ApplicationError::Invalid)?;
+        Ok(binding)
+    }
+
+    /// Canonical event and legacy decision history for public list/show paths.
+    /// Canonical rows preserve their submission ID and supersession chain;
+    /// legacy decisions are explicitly marked as legacy and keep their own
+    /// original identity.
+    pub fn review_history_list(
+        &self,
+        project_id: &str,
+        work_id: Option<&str>,
+        limit: u64,
+        offset: u64,
+    ) -> Result<boreal_store::completion::ReviewHistoryPage, ApplicationError> {
+        Ok(self
+            .store_ref()
+            .review_history_list(project_id, work_id, limit, offset)?)
+    }
+
+    pub fn review_history_show(
+        &self,
+        project_id: &str,
+        event_id: &str,
+    ) -> Result<Option<boreal_store::completion::ReviewHistoryRecord>, ApplicationError> {
+        Ok(self.store_ref().review_history_show(project_id, event_id)?)
+    }
+
+    /// Bounded exact attempt/fence receipt hydration. Absence is an empty page;
+    /// multiple receipts are preserved in insertion order, including failed
+    /// and rejected facts.
+    pub fn read_receipts_for_attempt(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        attempt_id: &str,
+        fence: u64,
+        limit: u64,
+        offset: u64,
+    ) -> Result<boreal_store::acceptance::ReceiptAttemptPage, ApplicationError> {
+        Ok(
+            boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+                .receipts_for_attempt(project_id, work_id, attempt_id, fence, limit, offset)?,
+        )
+    }
+
     pub fn record_receipt(
         &self,
         actor_id: &str,
@@ -46,6 +547,11 @@ impl WorkApplication<'_> {
         receipt
             .validate_for_import(&expected)
             .map_err(ApplicationError::from)?;
+        let missing_final_result = expected.gate.kind == GateKind::Verification
+            && self.verification_result_is_unbound(
+                expected.work_id.as_str(),
+                expected.attempt_id.as_str(),
+            )?;
 
         // An imported/self-reported passing payload is retained as a rejected
         // fact. It is never allowed to satisfy a gate merely because its JSON
@@ -56,6 +562,11 @@ impl WorkApplication<'_> {
                 (
                     ReceiptOutcome::Rejected,
                     Some(EvidenceErrorCode::ReceiptAttestationMissing.as_str()),
+                )
+            } else if receipt.result == ReceiptResult::Passed && missing_final_result {
+                (
+                    ReceiptOutcome::Rejected,
+                    Some(EvidenceErrorCode::ReceiptSourceMismatch.as_str()),
                 )
             } else {
                 (receipt_outcome(receipt.result), None)
@@ -105,6 +616,87 @@ impl WorkApplication<'_> {
             request.expectation.work_id.as_str(),
             request.expectation.gate.id.as_str(),
         )?;
+        let gate = self
+            .store()
+            .gate(&project_id, request.expectation.work_id.as_str(), &gate_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "gate",
+                id: gate_id.as_str().to_owned(),
+            })?;
+        if gate.kind == GateKind::Verification {
+            let attempt = self
+                .store()
+                .proof_attempt(&project_id, request.expectation.attempt_id.as_str())?;
+            if attempt.work_id != request.expectation.work_id.as_str()
+                || attempt.fence != request.expectation.fence.get()
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::StaleFence),
+                ));
+            }
+            if attempt.actor_id != actor_id || attempt.session_id.as_deref() != session_id {
+                return Err(ApplicationError::Store(StoreError::WrongOwner {
+                    expected: actor_id.to_owned(),
+                    actual: attempt.actor_id,
+                }));
+            }
+            if now.as_millis() >= parse_stamp(&attempt.hard_deadline)?.as_millis() {
+                return Err(ApplicationError::Store(StoreError::HardDeadlineElapsed));
+            }
+            if now.as_millis() >= parse_stamp(&attempt.lease_deadline)?.as_millis() {
+                return Err(ApplicationError::Store(StoreError::LeaseExpired));
+            }
+            let requirements = boreal_store::profiles::ProfileStore::new(self.store_ref())
+                .current_pinned_requirements(&project_id, request.expectation.work_id.as_str())?;
+            let binding = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+                .current_final_result_for_attempt(&attempt)?
+                .ok_or_else(|| {
+                    ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                        EvidenceErrorCode::ReceiptSourceMismatch,
+                    ))
+                })?;
+            if attempt.config_identity != request.expectation.config_identity.as_str()
+                || binding.source_version_id != request.expectation.source_snapshot_hash.as_str()
+                || binding.config_identity != request.expectation.config_identity.as_str()
+                || binding.profile_id != gate.profile_id
+                || binding.profile_version != gate.profile_version
+                || binding.profile_digest != requirements.profile.policy_digest
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptPolicyMismatch),
+                ));
+            }
+            let claim_source_id = attempt.source_version_id.as_deref().ok_or_else(|| {
+                ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                    EvidenceErrorCode::ReceiptSourceMismatch,
+                ))
+            })?;
+            let claim_source = self
+                .store()
+                .source_version(&project_id, claim_source_id)?
+                .ok_or_else(|| {
+                    ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                        EvidenceErrorCode::ReceiptSourceMismatch,
+                    ))
+                })?;
+            let result_source = self
+                .store()
+                .source_version(&project_id, &binding.source_version_id)?
+                .ok_or_else(|| {
+                    ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                        EvidenceErrorCode::ReceiptSourceMismatch,
+                    ))
+                })?;
+            if claim_source.source_version_id == result_source.source_version_id
+                || claim_source.content_digest == binding.content_digest
+                || result_source.content_digest != binding.content_digest
+                || result_source.availability != "available"
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptSourceMismatch),
+                ));
+            }
+        }
         let profile_version = request.expectation.profile_version.parse().map_err(|_| {
             ApplicationError::Evidence(crate::EvidenceValidationError::new(
                 EvidenceErrorCode::ReceiptPolicyMismatch,
@@ -488,11 +1080,21 @@ impl WorkApplication<'_> {
         receipt
             .validate_for_import(expected)
             .map_err(ApplicationError::from)?;
+        let missing_final_result = expected.gate.kind == GateKind::Verification
+            && self.verification_result_is_unbound(
+                expected.work_id.as_str(),
+                expected.attempt_id.as_str(),
+            )?;
         let (result, rejection_code) =
             if receipt.result == ReceiptResult::Passed && !receipt.attestation.is_gate_trusted() {
                 (
                     ReceiptOutcome::Rejected,
                     Some(EvidenceErrorCode::ReceiptAttestationMissing.as_str()),
+                )
+            } else if receipt.result == ReceiptResult::Passed && missing_final_result {
+                (
+                    ReceiptOutcome::Rejected,
+                    Some(EvidenceErrorCode::ReceiptSourceMismatch.as_str()),
                 )
             } else {
                 (receipt_outcome(receipt.result), None)
@@ -533,11 +1135,30 @@ impl WorkApplication<'_> {
                 crate::EvidenceValidationError::new(EvidenceErrorCode::StaleFence),
             ));
         }
-        let source_snapshot_hash = attempt.source_version_id.clone().ok_or_else(|| {
-            ApplicationError::Evidence(crate::EvidenceValidationError::new(
-                EvidenceErrorCode::ReceiptSourceMismatch,
-            ))
-        })?;
+        let current_final = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+            .current_final_result_for_attempt(&attempt)?;
+        let requirements = boreal_store::profiles::ProfileStore::new(self.store_ref())
+            .current_pinned_requirements(project_id, work_id.as_str())?;
+        if let Some(binding) = &current_final {
+            if binding.config_identity != attempt.config_identity
+                || binding.profile_id != definition.id.as_str()
+                || binding.profile_version.to_string() != definition.version
+                || binding.profile_digest != requirements.profile.policy_digest
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptPolicyMismatch),
+                ));
+            }
+        }
+        let source_snapshot_hash = current_final
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or_else(|| attempt.source_version_id.clone())
+            .ok_or_else(|| {
+                ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                    EvidenceErrorCode::ReceiptSourceMismatch,
+                ))
+            })?;
         let base = ReceiptExpectationBase {
             work_id: work_id.clone(),
             attempt_id: attempt_id.clone(),
@@ -586,7 +1207,18 @@ impl WorkApplication<'_> {
                 receipts.push(payload);
             }
         }
-        Ok(crate::evaluate_acceptance(definition, &receipts, &base)?)
+        let mut evaluation = crate::evaluate_acceptance(definition, &receipts, &base)?;
+        if requires_bound_final_result(&requirements) && current_final.is_none() {
+            for gate in evaluation
+                .gates
+                .iter_mut()
+                .filter(|gate| gate.kind == GateKind::Verification)
+            {
+                gate.state = boreal_domain::GateState::Failed;
+                gate.reason = Some(EvidenceErrorCode::ReceiptSourceMismatch);
+            }
+        }
+        Ok(evaluation)
     }
 
     fn current_receipt_expectation(
@@ -608,11 +1240,10 @@ impl WorkApplication<'_> {
                 actual: attempt.actor_id,
             }));
         }
-        let source_snapshot_hash = attempt.source_version_id.ok_or_else(|| {
-            ApplicationError::Evidence(crate::EvidenceValidationError::new(
-                EvidenceErrorCode::ReceiptSourceMismatch,
-            ))
-        })?;
+        let current_final = boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+            .current_final_result_for_attempt(&attempt)?;
+        let requirements = boreal_store::profiles::ProfileStore::new(self.store_ref())
+            .current_pinned_requirements(&project_id, receipt.work_id.as_str())?;
         let persisted_gate_id = self.store().gate_id_for_work(
             &project_id,
             receipt.work_id.as_str(),
@@ -624,6 +1255,26 @@ impl WorkApplication<'_> {
             .ok_or_else(|| StoreError::NotFound {
                 entity: "gate",
                 id: receipt.gate_id.as_str().to_owned(),
+            })?;
+        if let Some(binding) = &current_final {
+            if binding.config_identity != attempt.config_identity
+                || binding.profile_id != gate.profile_id
+                || binding.profile_version != gate.profile_version
+                || binding.profile_digest != requirements.profile.policy_digest
+            {
+                return Err(ApplicationError::Evidence(
+                    crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptPolicyMismatch),
+                ));
+            }
+        }
+        let source_snapshot_hash = current_final
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id)
+            .ok_or_else(|| {
+                ApplicationError::Evidence(crate::EvidenceValidationError::new(
+                    EvidenceErrorCode::ReceiptSourceMismatch,
+                ))
             })?;
         Ok(ReceiptExpectation {
             work_id: receipt.work_id.clone(),
@@ -642,6 +1293,20 @@ impl WorkApplication<'_> {
                 required_observables: Vec::new(),
             },
         })
+    }
+
+    fn verification_result_is_unbound(
+        &self,
+        work_id: &str,
+        attempt_id: &str,
+    ) -> Result<bool, ApplicationError> {
+        let project_id = self.project_for_work(work_id)?;
+        let attempt = self.store().proof_attempt(&project_id, attempt_id)?;
+        Ok(
+            boreal_store::acceptance::AcceptanceStore::new(self.store_ref())
+                .current_final_result_for_attempt(&attempt)?
+                .is_none(),
+        )
     }
 
     fn ensure_current_context(
@@ -1438,6 +2103,228 @@ fn receipt_outcome(value: boreal_domain::ReceiptResult) -> ReceiptOutcome {
     }
 }
 
+fn validate_final_result_capture_request(
+    request: &crate::FinalResultCaptureRequest,
+) -> Result<(), ApplicationError> {
+    for (name, value) in [
+        ("project_id", request.project_id.as_str()),
+        ("work_id", request.work_id.as_str()),
+        ("actor_id", request.actor_id.as_str()),
+        ("session_id", request.session_id.as_str()),
+        ("attempt_id", request.attempt_id.as_str()),
+        ("source_version_id", request.source_version_id.as_str()),
+        ("operation_id", request.operation_id.as_str()),
+        ("timestamp", request.at.as_str()),
+    ] {
+        if value.trim().is_empty() || value.len() > 255 || value.contains('\0') {
+            return Err(ApplicationError::Invalid(format!(
+                "final result {name} must contain 1..=255 valid bytes"
+            )));
+        }
+    }
+    if request.fence == 0
+        || request.expected_project_revision == 0
+        || request.expected_proof_revision == 0
+        || request.content_digest.len() != "sha256:".len() + 64
+        || !request.content_digest.starts_with("sha256:")
+        || !request.content_digest["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(ApplicationError::Invalid(
+            "final result fence, revisions, or source digest are invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn requires_bound_final_result(requirements: &boreal_store::profiles::PinnedRequirements) -> bool {
+    requirements.requires_kind("verification")
+}
+
+fn close_readiness_definition(
+    requirements: &boreal_store::profiles::PinnedRequirements,
+) -> Result<AcceptanceDefinition, ApplicationError> {
+    let gates = requirements
+        .declarations
+        .iter()
+        .map(|declaration| {
+            let kind = match declaration.kind.as_str() {
+                "Checkpoint" | "checkpoint" => GateKind::Checkpoint,
+                "Verification" | "verification" => GateKind::Verification,
+                "Review" | "review" => GateKind::Review,
+                "OperatorApproval" | "operator_approval" => GateKind::OperatorApproval,
+                "Summary" | "summary" => GateKind::Summary,
+                "Audit" | "audit" => GateKind::Audit,
+                other => {
+                    return Err(ApplicationError::Store(StoreError::Corrupt(format!(
+                        "pinned close-readiness gate has unknown kind {other}"
+                    ))));
+                }
+            };
+            Ok(AcceptanceGateDefinition {
+                id: GateId::new(declaration.gate_id.clone()),
+                kind,
+                required: declaration.required,
+                command: None,
+                requires_attestation: true,
+                required_observables: declaration.observable_rules.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+    Ok(AcceptanceDefinition {
+        id: ProfileId::new(requirements.profile.profile_id.clone()),
+        version: requirements.profile.version.to_string(),
+        gates,
+        close_requires_intent: true,
+    })
+}
+
+fn close_readiness_attempt_snapshot(
+    snapshot: &boreal_store::acceptance::CloseReadinessSnapshot,
+) -> Result<crate::AttemptSnapshot, ApplicationError> {
+    let Some(record) = snapshot.proof_attempt.as_ref() else {
+        return Ok(crate::AttemptSnapshot {
+            project_id: boreal_domain::ProjectId::new(snapshot.project_id.clone()),
+            work_id: WorkId::new(snapshot.work_id.clone()),
+            attempt_id: AttemptId::new(""),
+            actor_id: ActorId::new(""),
+            harness_id: None,
+            session_id: None,
+            fence: Fence::new(0),
+            phase: AttemptPhase::Failed,
+            claimed_at: TimestampMs::from_millis(0),
+            accepted_at: None,
+            lease_deadline: TimestampMs::from_millis(0),
+            hard_deadline: TimestampMs::from_millis(0),
+            current: false,
+        });
+    };
+    Ok(crate::AttemptSnapshot {
+        project_id: boreal_domain::ProjectId::new(record.project_id.clone()),
+        work_id: WorkId::new(record.work_id.clone()),
+        attempt_id: AttemptId::new(record.attempt_id.clone()),
+        actor_id: ActorId::new(record.actor_id.clone()),
+        harness_id: record
+            .harness_id
+            .as_deref()
+            .map(boreal_domain::HarnessId::new),
+        session_id: record
+            .session_id
+            .as_deref()
+            .map(boreal_domain::SessionId::new),
+        fence: Fence::new(record.fence),
+        phase: record.phase,
+        claimed_at: parse_stamp(&record.claimed_at)?,
+        accepted_at: record.accepted_at.as_deref().map(parse_stamp).transpose()?,
+        lease_deadline: parse_stamp(&record.lease_deadline)?,
+        hard_deadline: parse_stamp(&record.hard_deadline)?,
+        current: snapshot.current_attempt.as_ref().is_some_and(|current| {
+            current.attempt_id == record.attempt_id && current.fence == record.fence
+        }),
+    })
+}
+
+fn close_readiness_source(
+    snapshot: &boreal_store::acceptance::CloseReadinessSnapshot,
+    attempt: &crate::AttemptSnapshot,
+) -> SourceVersionId {
+    let binding_source = snapshot.final_result.as_ref().and_then(|binding| {
+        (binding.attempt_id == attempt.attempt_id.as_str()
+            && binding.fence == attempt.fence.get()
+            && binding.config_identity
+                == snapshot
+                    .proof_attempt
+                    .as_ref()
+                    .map(|record| record.config_identity.as_str())
+                    .unwrap_or_default()
+            && binding.profile_id == snapshot.pinned_requirements.profile.profile_id.as_str()
+            && binding.profile_version == snapshot.pinned_requirements.profile.version)
+            .then(|| binding.source_version_id.clone())
+    });
+    let submission_source = snapshot.submission.as_ref().and_then(|submission| {
+        (submission.attempt_id == attempt.attempt_id.as_str()
+            && submission.fence == attempt.fence.get()
+            && submission.config_identity
+                == snapshot
+                    .proof_attempt
+                    .as_ref()
+                    .map(|record| record.config_identity.as_str())
+                    .unwrap_or_default()
+            && submission.profile_id == snapshot.pinned_requirements.profile.profile_id.as_str()
+            && submission.profile_version == snapshot.pinned_requirements.profile.version)
+            .then(|| submission.source_version_id.clone())
+    });
+    SourceVersionId::new(
+        binding_source
+            .or(submission_source)
+            .or_else(|| {
+                snapshot
+                    .proof_attempt
+                    .as_ref()
+                    .and_then(|record| record.source_version_id.clone())
+            })
+            .unwrap_or_default(),
+    )
+}
+
+fn close_readiness_gap_id(gap: &crate::CloseoutGap) -> &str {
+    match gap {
+        crate::CloseoutGap::GateUnsatisfied(id)
+        | crate::CloseoutGap::ReviewRequired(id)
+        | crate::CloseoutGap::ReviewRejected(id) => id.as_str(),
+        _ => "",
+    }
+}
+
+fn record_final_result_lineage(
+    catalog: &SourceCatalog,
+    binding: &boreal_store::acceptance::FinalResultBindingRecord,
+) -> Result<(), String> {
+    let source = SourceIdentity {
+        project_id: binding.project_id.clone(),
+        source_version_id: binding.source_version_id.clone(),
+        content_digest: binding.content_digest.clone(),
+    };
+    catalog
+        .read_identity_bounded(&source, DEFAULT_MAX_ARTIFACT_BYTES)
+        .map_err(|error| format!("final result source readback failed: {error}"))?;
+    let digest = crate::canonical_request_digest(
+        "final-result.lineage-id/v1",
+        json!({
+            "project_id": binding.project_id,
+            "work_id": binding.work_id,
+            "attempt_id": binding.attempt_id,
+            "fence": binding.fence,
+            "binding_id": binding.binding_id,
+        }),
+    );
+    let relationship_suffix = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    let relationship_suffix = relationship_suffix
+        .get(..48)
+        .ok_or_else(|| "final result lineage digest is malformed".to_owned())?;
+    catalog
+        .record_artifact_relationship(ArtifactRelationshipInput {
+            relationship_id: format!("final-result-{relationship_suffix}"),
+            source,
+            role: ArtifactRole::ProducedDeliverable,
+            scope: ArtifactScope::Project,
+            requirement_key: None,
+            produced_by: Some(ArtifactProducer {
+                work_id: binding.work_id.clone(),
+                attempt_id: binding.attempt_id.clone(),
+                result_id: binding.binding_id.clone(),
+            }),
+            rights: ArtifactRightsProvenance::default(),
+            operation_id: format!(
+                "final-result-lineage-{}",
+                digest.strip_prefix("sha256:").unwrap_or(&digest)
+            ),
+        })
+        .map_err(|error| format!("final result lineage remains pending: {error}"))?;
+    Ok(())
+}
+
 fn receipt_payload_from_record(record: &ReceiptRecord) -> Result<ReceiptPayload, ApplicationError> {
     let argv = serde_json::from_str(&record.argv_json).map_err(|_| {
         ApplicationError::Evidence(crate::EvidenceValidationError::new(
@@ -1507,7 +2394,7 @@ fn parse_coverage(value: &str) -> Result<crate::ReceiptCoverage, ApplicationErro
         _ => {
             return Err(ApplicationError::Evidence(
                 crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptInvalid),
-            ))
+            ));
         }
     };
     let profile_id = value
@@ -1594,13 +2481,14 @@ mod tests {
     use super::*;
     use crate::CommandSpec;
     use boreal_domain::{
-        AcceptanceProfile, ActorRole, ConfigIdentity, DispatchPolicy, PersistedLifecycle,
-        ProjectId, WorkId, WorkItem, WorkKind,
+        AcceptanceProfile, ActorRole, ConfigIdentity, DispatchPolicy, GateRequirement,
+        PersistedLifecycle, ProjectId, WorkId, WorkItem, WorkKind,
     };
     use boreal_store::{
+        EvidenceExecutionState,
         identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
         principals::{PrincipalGrantRequest, PrincipalRevocationRequest},
-        EvidenceExecutionState,
+        SourceVersionRegistrationInput,
     };
 
     const FIXTURE_SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -1841,6 +2729,428 @@ mod tests {
         (store, project)
     }
 
+    fn bind_verifier_final_result(
+        store: &SqliteStore,
+        project: &ProjectId,
+        request: &mut EvidenceRunRequest,
+        binding_at: TimestampMs,
+    ) {
+        let attempt = store
+            .current_attempt_for_work(project.as_str(), request.expectation.work_id.as_str())
+            .expect("read current verifier attempt")
+            .expect("current verifier attempt exists");
+        let session_id = attempt
+            .session_id
+            .as_deref()
+            .expect("verifier attempt has a session");
+        let fixture_id = request.operation_id.as_str();
+        let origin = format!("{fixture_id}-final-result.txt");
+        let body = format!("final verifier result bytes for {fixture_id}");
+        let version = SourceCatalog::default()
+            .capture(project.as_str(), &origin, body.as_bytes(), "text/plain")
+            .expect("capture verifier final result");
+        store
+            .register_source_version(&SourceVersionRegistrationInput {
+                operation_id: format!("op-source-register-{fixture_id}"),
+                project_id: project.as_str().to_owned(),
+                actor_id: attempt.actor_id.clone(),
+                source_version_id: version.source_version_id.clone(),
+                origin,
+                access_scope: "project".to_owned(),
+                content_digest: version.content_digest.clone(),
+                media_type: version.media_type.clone(),
+                byte_count: version.byte_count as u64,
+                captured_at: stamp(TimestampMs::from_millis(
+                    binding_at.as_millis().saturating_sub(10),
+                )),
+                parser_identity: "verifier-test/1".to_owned(),
+                availability: "available".to_owned(),
+                citation_json: "[]".to_owned(),
+                request_digest: format!("sha256:source-register-{fixture_id}"),
+            })
+            .expect("register verifier final result source");
+        let (entity_revision, proof_revision) = store
+            .work_revisions(project.as_str(), request.expectation.work_id.as_str())
+            .expect("read verifier proof revisions");
+        boreal_store::acceptance::AcceptanceStore::new(store)
+            .bind_final_result(&boreal_store::acceptance::FinalResultBindingRequest {
+                project_id: project.as_str().to_owned(),
+                work_id: request.expectation.work_id.as_str().to_owned(),
+                actor_id: attempt.actor_id,
+                session_id: session_id.to_owned(),
+                attempt_id: request.expectation.attempt_id.as_str().to_owned(),
+                fence: request.expectation.fence.get(),
+                expected_project_revision: store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+                expected_entity_revision: entity_revision,
+                expected_proof_revision: proof_revision,
+                source_version_id: version.source_version_id.clone(),
+                content_digest: version.content_digest,
+                operation_id: format!("op-final-result-{fixture_id}"),
+                at: stamp(binding_at),
+            })
+            .expect("bind verifier final result");
+        request.expectation.source_snapshot_hash = SourceVersionId::new(version.source_version_id);
+    }
+
+    fn production_reviewed_verifier_work(
+        store: &SqliteStore,
+        project: &ProjectId,
+        work_id: &str,
+        attempt_id: &str,
+        session_id: &str,
+    ) {
+        let app = WorkApplication::new(store);
+        app.register_session_as(
+            project,
+            "agent-one",
+            "verifier-harness",
+            session_id,
+            "unix-ms:12",
+            &format!("op-session-{work_id}"),
+        )
+        .expect("register reviewed verifier agent session");
+        let mut work = verifier_work(project);
+        work.id = WorkId::new(work_id);
+        work.acceptance_profile = AcceptanceProfile::reviewed();
+        app.create_work_as_session_checked(
+            &work,
+            "verifier-operator",
+            VERIFIER_OPERATOR_SESSION,
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            "unix-ms:10",
+            &format!("op-create-{work_id}"),
+        )
+        .expect("create reviewed verifier work");
+        app.claim_with_context(
+            project,
+            work_id,
+            "agent-one",
+            "verifier-harness",
+            Some(session_id),
+            attempt_id,
+            &format!("op-claim-{work_id}"),
+            &format!("sha256:{work_id}-claim"),
+            None,
+            "unix-ms:1000",
+            "unix-ms:2000",
+            "unix-ms:3000",
+            Some("source-one"),
+            "config-one",
+        )
+        .expect("claim reviewed verifier work");
+        store
+            .execute_batch(&format!(
+                "UPDATE attempt SET state = 'running', accepted_at = 'unix-ms:1001'
+                 WHERE attempt_id = '{attempt_id}'"
+            ))
+            .expect("put reviewed verifier attempt in running phase");
+    }
+
+    fn production_general_attestation_work(
+        store: &SqliteStore,
+        project: &ProjectId,
+        work_id: &str,
+        attempt_id: &str,
+        session_id: &str,
+    ) {
+        let app = WorkApplication::new(store);
+        app.register_session_as(
+            project,
+            "agent-one",
+            "verifier-harness",
+            session_id,
+            "unix-ms:12",
+            &format!("op-session-{work_id}"),
+        )
+        .expect("register general-work agent session");
+        let mut work = verifier_work(project);
+        work.id = WorkId::new(work_id);
+        work.acceptance_profile = AcceptanceProfile {
+            id: ProfileId::new("general-attestation"),
+            version: "1".to_owned(),
+            gates: vec![GateRequirement::required(
+                GateId::new("summary"),
+                GateKind::Summary,
+            )],
+        };
+        app.create_work_as_session_checked(
+            &work,
+            "verifier-operator",
+            VERIFIER_OPERATOR_SESSION,
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            "unix-ms:10",
+            &format!("op-create-{work_id}"),
+        )
+        .expect("create general-attestation work");
+        app.claim_with_context(
+            project,
+            work_id,
+            "agent-one",
+            "verifier-harness",
+            Some(session_id),
+            attempt_id,
+            &format!("op-claim-{work_id}"),
+            &format!("sha256:{work_id}-claim"),
+            None,
+            "unix-ms:1000",
+            "unix-ms:2000",
+            "unix-ms:3000",
+            Some("source-one"),
+            "config-one",
+        )
+        .expect("claim general-attestation work");
+        store
+            .execute_batch(&format!(
+                "UPDATE attempt SET state = 'running', accepted_at = 'unix-ms:1001'
+                 WHERE attempt_id = '{attempt_id}'"
+            ))
+            .expect("put general-attestation attempt in running phase");
+    }
+
+    fn persist_open_close_intent(
+        store: &SqliteStore,
+        project: &ProjectId,
+        work_id: &str,
+        attempt_id: &str,
+        profile_id: &str,
+    ) -> String {
+        let app = WorkApplication::new(store);
+        let attempt = store
+            .current_attempt_for_work(project.as_str(), work_id)
+            .expect("read current attempt")
+            .expect("current attempt exists");
+        let session_id = attempt
+            .session_id
+            .as_deref()
+            .expect("test attempt has a session");
+        let mut final_result_source = attempt.source_version_id.clone();
+        if matches!(profile_id, "focused" | "reviewed") {
+            let catalog = SourceCatalog::default();
+            let origin = format!("{work_id}-final-result.txt");
+            let final_result_body = format!("final result bytes for {work_id}");
+            let version = catalog
+                .capture(
+                    project.as_str(),
+                    &origin,
+                    final_result_body.as_bytes(),
+                    "text/plain",
+                )
+                .expect("capture a fixture final result");
+            store
+                .register_source_version(&SourceVersionRegistrationInput {
+                    operation_id: format!("op-source-register-{work_id}"),
+                    project_id: project.as_str().to_owned(),
+                    actor_id: attempt.actor_id.clone(),
+                    source_version_id: version.source_version_id.clone(),
+                    origin,
+                    access_scope: "project".to_owned(),
+                    content_digest: version.content_digest.clone(),
+                    media_type: version.media_type.clone(),
+                    byte_count: version.byte_count as u64,
+                    captured_at: "unix-ms:1300".to_owned(),
+                    parser_identity: "close-readiness-test/1".to_owned(),
+                    availability: "available".to_owned(),
+                    citation_json: "[]".to_owned(),
+                    request_digest: format!("sha256:source-register-{work_id}"),
+                })
+                .expect("register fixture final result source");
+            let (entity_revision, proof_revision) = store
+                .work_revisions(project.as_str(), work_id)
+                .expect("read current software proof revisions");
+            final_result_source = Some(version.source_version_id.clone());
+            boreal_store::acceptance::AcceptanceStore::new(store)
+                .bind_final_result(&boreal_store::acceptance::FinalResultBindingRequest {
+                    project_id: project.as_str().to_owned(),
+                    work_id: work_id.to_owned(),
+                    actor_id: attempt.actor_id.clone(),
+                    session_id: session_id.to_owned(),
+                    attempt_id: attempt_id.to_owned(),
+                    fence: attempt.fence,
+                    expected_project_revision: store
+                        .project_revision(project.as_str())
+                        .expect("project revision")
+                        .0,
+                    expected_entity_revision: entity_revision,
+                    expected_proof_revision: proof_revision,
+                    source_version_id: version.source_version_id,
+                    content_digest: version.content_digest,
+                    operation_id: format!("op-final-result-{work_id}"),
+                    at: "unix-ms:1350".to_owned(),
+                })
+                .expect("bind a final result for the software-profile fixture");
+        }
+        store
+            .apply_attempt_mutation(boreal_store::AttemptMutationRequest {
+                project_id: project.as_str().to_owned(),
+                work_id: work_id.to_owned(),
+                attempt_id: attempt_id.to_owned(),
+                actor_id: "agent-one".to_owned(),
+                harness_id: Some("verifier-harness".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                fence: attempt.fence,
+                operation_id: format!("op-submit-{work_id}"),
+                request_digest: format!("sha256:submit-{work_id}"),
+                at: "unix-ms:1400".to_owned(),
+                expected_project_revision: None,
+                expected_work_revision: None,
+                expected_attempt_revision: Some(attempt.fence),
+                expected_phase: Some(AttemptPhase::Running),
+                expected_lease_deadline: None,
+                expected_hard_deadline: None,
+                mutation: boreal_store::AttemptMutationKind::Submit,
+                reason: None,
+            })
+            .expect("submit verifier attempt");
+
+        let body = format!("close readiness summary for {work_id}");
+        let summary_id = format!("summary-{work_id}");
+        let summary = SummaryPayload {
+            summary_id: summary_id.clone(),
+            work_id: WorkId::new(work_id),
+            attempt_id: AttemptId::new(attempt_id),
+            fence: Fence::new(attempt.fence),
+            source_snapshot_hash: SourceVersionId::new(
+                final_result_source.as_deref().unwrap_or(""),
+            ),
+            config_identity: ConfigIdentity::new("config-one"),
+            profile_id: ProfileId::new(profile_id),
+            profile_version: "1".to_owned(),
+            body_digest: crate::sha256_content_digest(body.as_bytes()),
+            body_size: body.len() as u64,
+        };
+        app.record_summary_with_body(
+            project.as_str(),
+            "agent-one",
+            Some(session_id),
+            &summary,
+            &body,
+            &format!("op-summary-{work_id}"),
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            TimestampMs::from_millis(1500),
+        )
+        .expect("persist typed summary and body");
+
+        let intent = CloseIntent {
+            work_id: WorkId::new(work_id),
+            attempt_id: AttemptId::new(attempt_id),
+            fence: Fence::new(attempt.fence),
+            source_snapshot_hash: SourceVersionId::new(
+                final_result_source.as_deref().unwrap_or(""),
+            ),
+            config_identity: ConfigIdentity::new("config-one"),
+            profile_id: ProfileId::new(profile_id),
+            profile_version: "1".to_owned(),
+            summary_id: Some(summary_id),
+        };
+        app.request_close(
+            "agent-one",
+            Some(session_id),
+            &intent,
+            Some(
+                store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+            ),
+            TimestampMs::from_millis(1600),
+        )
+        .expect("persist open close intent")
+        .close_intent
+        .close_intent_id
+    }
+
+    fn record_required_review(
+        store: &SqliteStore,
+        project: &ProjectId,
+        work_id: &str,
+        attempt_id: &str,
+        review_id: &str,
+        decision: ReviewDecision,
+        now: u64,
+    ) {
+        let requirements = boreal_store::profiles::ProfileStore::new(store)
+            .current_pinned_requirements(project.as_str(), work_id)
+            .expect("read reviewed profile pin");
+        let attempt = store
+            .attempt_record_by_id(project.as_str(), attempt_id)
+            .expect("read reviewed attempt")
+            .expect("reviewed attempt exists");
+        let revisions_before = store
+            .work_revisions(project.as_str(), work_id)
+            .expect("read reviewed proof revision");
+        let (_, proof_revision) = revisions_before;
+        let submission = store
+            .current_submission(project.as_str(), work_id, proof_revision)
+            .expect("read reviewed submission")
+            .expect("reviewed work has an immutable submission");
+        // This test targets close-readiness review readback only; it does not
+        // exercise review-write authorization. A software final-result
+        // submission has a produced source distinct from the immutable claim
+        // source, so do not route the fixture through the review action
+        // preflight (which evaluates the claim proof). Seed the legacy review
+        // row against the exact sealed submission instead.
+        let gate_id = store
+            .gate_id_for_work(project.as_str(), work_id, "review")
+            .expect("read exact reviewed gate id");
+        let decision = match decision {
+            ReviewDecision::Accepted => "accepted",
+            ReviewDecision::Rejected => "rejected",
+        };
+        let project_id = project.as_str();
+        let sql = format!(
+            "INSERT INTO review (
+                 review_id,work_id,attempt_id,fence,gate_id,reviewer_actor_id,
+                 decision,reason,source_version_id,policy_digest,created_at
+             ) VALUES (
+                 '{review_id}','{work_id}','{attempt_id}',{},'{gate_id}',
+                 'reviewer-one','{decision}','reviewed close-readiness test submission',
+                 '{}','{}','unix-ms:{now}'
+             );
+             UPDATE project
+             SET project_revision=project_revision+1,updated_at='unix-ms:{now}'
+             WHERE project_id='{project_id}';",
+            attempt.fence,
+            submission.source_version_id,
+            requirements.profile.policy_digest,
+        );
+        store
+            .execute_batch(&sql)
+            .expect("seed exact legacy review readback fixture");
+        assert_eq!(
+            store
+                .work_revisions(project.as_str(), work_id)
+                .expect("read work revisions after review fixture"),
+            revisions_before,
+            "recording a review must not advance entity or proof revisions",
+        );
+        assert_eq!(
+            store
+                .attempt_record_by_id(project.as_str(), attempt_id)
+                .expect("read attempt after review fixture")
+                .expect("reviewed attempt remains durable"),
+            attempt,
+            "recording a review must not mutate the immutable claim attempt",
+        );
+    }
+
     fn finished_production_execution<'a>(
         store: &'a SqliteStore,
         project: &ProjectId,
@@ -1863,6 +3173,12 @@ mod tests {
         let app = WorkApplication::new(store);
         let mut request = verifier_request(operation_id);
         request.expectation.gate.command = Some(CommandSpec::new("true", vec!["true".to_owned()]));
+        bind_verifier_final_result(
+            store,
+            project,
+            &mut request,
+            TimestampMs::from_millis(1_050),
+        );
         let admission = app
             .admit_witnessed_execution(
                 "agent-one",
@@ -1970,10 +3286,12 @@ mod tests {
         let application = WorkApplication::new(&store);
 
         assert!(!store.is_canonical_production());
-        assert!(application
-            .identity_context("fixture-project")
-            .expect("fixture identity lookup")
-            .is_none());
+        assert!(
+            application
+                .identity_context("fixture-project")
+                .expect("fixture identity lookup")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1982,10 +3300,12 @@ mod tests {
         assert_eq!(binding["mode"], "reference_only");
         assert_eq!(binding["content_bound"], false);
         assert_eq!(binding["reference"], "artifact://verifier-output");
-        assert!(binding["diagnostic"]
-            .as_str()
-            .expect("reference diagnostic")
-            .contains("not a content digest"));
+        assert!(
+            binding["diagnostic"]
+                .as_str()
+                .expect("reference diagnostic")
+                .contains("not a content digest")
+        );
         assert!(binding.get("artifact_digest").is_none());
     }
 
@@ -2006,29 +3326,44 @@ mod tests {
             error,
             Err(ApplicationError::Store(StoreError::HardDeadlineElapsed))
         ));
-        assert!(store
-            .evidence_execution(request.operation_id.as_str())
-            .expect("read execution")
-            .is_none());
-        assert!(store
-            .operation("verifier:op-verifier-admission-order")
-            .expect("read verifier operation")
-            .is_some());
-        assert!(store
-            .audit_event("verifier:op-verifier-admission-order")
-            .expect("read verifier audit")
-            .is_some());
-        assert!(store
-            .external_job(project.as_str(), "verifier:op-verifier-admission-order")
-            .expect("read verifier job")
-            .is_none());
+        assert!(
+            store
+                .evidence_execution(request.operation_id.as_str())
+                .expect("read execution")
+                .is_none()
+        );
+        assert!(
+            store
+                .operation("verifier:op-verifier-admission-order")
+                .expect("read verifier operation")
+                .is_none(),
+            "hard-deadline rejection happens before the admission journal is written"
+        );
+        assert!(
+            store
+                .audit_event("verifier:op-verifier-admission-order")
+                .expect("read verifier audit")
+                .is_none()
+        );
+        assert!(
+            store
+                .external_job(project.as_str(), "verifier:op-verifier-admission-order")
+                .expect("read verifier job")
+                .is_none()
+        );
     }
 
     #[test]
     fn verifier_admission_replay_repairs_either_durable_half_without_second_job() {
         let (store, project) = production_verifier_setup();
         let app = WorkApplication::new(&store);
-        let request = verifier_request("op-verifier-admission-repair");
+        let mut request = verifier_request("op-verifier-admission-repair");
+        bind_verifier_final_result(
+            &store,
+            &project,
+            &mut request,
+            TimestampMs::from_millis(1_050),
+        );
 
         let first = app
             .admit_witnessed_execution(
@@ -2096,10 +3431,12 @@ mod tests {
             )
             .expect("repair missing evidence execution");
         assert!(!repaired_execution.replayed);
-        assert!(store
-            .evidence_execution(request.operation_id.as_str())
-            .expect("read repaired evidence execution")
-            .is_some());
+        assert!(
+            store
+                .evidence_execution(request.operation_id.as_str())
+                .expect("read repaired evidence execution")
+                .is_some()
+        );
         assert_eq!(
             store
                 .external_job_with_identity(&context, job_id)
@@ -2114,7 +3451,13 @@ mod tests {
     fn verifier_unknown_outcome_remains_readback_required_after_atomic_admission() {
         let (store, project) = production_verifier_setup();
         let app = WorkApplication::new(&store);
-        let request = verifier_request("op-verifier-unknown-readback");
+        let mut request = verifier_request("op-verifier-unknown-readback");
+        bind_verifier_final_result(
+            &store,
+            &project,
+            &mut request,
+            TimestampMs::from_millis(1_050),
+        );
 
         app.admit_witnessed_execution(
             "agent-one",
@@ -2154,18 +3497,23 @@ mod tests {
         let (store, project) = production_verifier_setup();
         let (app, request, result) =
             finished_production_execution(&store, &project, "op-verifier-source-change");
-        store
-            .execute_batch(
-                "INSERT INTO source_version
-                 (source_version_id, project_id, origin, access_scope, content_digest,
-                  media_type, byte_count, captured_at, parser_identity, availability, citation_json)
-                 VALUES ('source-two', 'verifier-production-project', 'fixture', 'project',
-                         'sha256:source-two', 'text/plain', 0, 'unix-ms:1300',
-                         'verifier-test/1', 'available', '[]');
-                 UPDATE attempt SET source_version_id = 'source-two'
-                 WHERE attempt_id = 'verifier-attempt'",
-            )
-            .expect("change source context");
+        // A newer produced result supersedes the output this verifier ran
+        // against. The old receipt must fail its source-context preflight
+        // before the external job is reconciled.
+        let mut changed_result_request = request.clone();
+        changed_result_request.operation_id =
+            boreal_domain::OperationId::new("op-verifier-source-change-rebind");
+        bind_verifier_final_result(
+            &store,
+            &project,
+            &mut changed_result_request,
+            TimestampMs::from_millis(1_360),
+        );
+        assert_ne!(
+            changed_result_request.expectation.source_snapshot_hash,
+            request.expectation.source_snapshot_hash,
+            "the newer final-result binding must supersede the verifier's source"
+        );
 
         let error = app.record_witnessed_execution(
             "agent-one",
@@ -2177,15 +3525,15 @@ mod tests {
         );
         assert!(matches!(
             error,
-            Err(ApplicationError::Evidence(
-                crate::EvidenceValidationError { .. }
-            )) | Err(ApplicationError::Store(StoreError::Conflict(_)))
-                | Err(ApplicationError::Store(StoreError::Invalid(_)))
+            Err(ApplicationError::Evidence(error))
+                if error.code() == EvidenceErrorCode::ReceiptPolicyMismatch
         ));
-        assert!(store
-            .receipt(request.receipt_id.as_str())
-            .expect("read receipt")
-            .is_none());
+        assert!(
+            store
+                .receipt(request.receipt_id.as_str())
+                .expect("read receipt")
+                .is_none()
+        );
         let context = IdentityStore::new(&store)
             .context(project.as_str())
             .expect("read production identity");
@@ -2223,10 +3571,12 @@ mod tests {
             Err(ApplicationError::Evidence(error))
                 if error.code() == EvidenceErrorCode::ExecutionResultInvalid
         ));
-        assert!(store
-            .receipt(request.receipt_id.as_str())
-            .expect("read mismatched verifier receipt")
-            .is_none());
+        assert!(
+            store
+                .receipt(request.receipt_id.as_str())
+                .expect("read mismatched verifier receipt")
+                .is_none()
+        );
 
         let identity = IdentityStore::new(&store)
             .context(project.as_str())
@@ -2267,10 +3617,12 @@ mod tests {
             error,
             Err(ApplicationError::Store(StoreError::StaleRevision { .. }))
         ));
-        assert!(store
-            .receipt(request.receipt_id.as_str())
-            .expect("read pending receipt")
-            .is_none());
+        assert!(
+            store
+                .receipt(request.receipt_id.as_str())
+                .expect("read pending receipt")
+                .is_none()
+        );
         let context = IdentityStore::new(&store)
             .context(project.as_str())
             .expect("read production identity");
@@ -2298,10 +3650,12 @@ mod tests {
             )
             .expect("retry persists receipt after readback");
         assert!(!recorded.replayed);
-        assert!(store
-            .receipt(request.receipt_id.as_str())
-            .expect("read recorded receipt")
-            .is_some());
+        assert!(
+            store
+                .receipt(request.receipt_id.as_str())
+                .expect("read recorded receipt")
+                .is_some()
+        );
         let reconciled = ExternalEffectAdapter::new_with_identity(&store, &context)
             .readback(
                 project.as_str(),
@@ -2346,16 +3700,18 @@ mod tests {
         second_request.receipt_id = first_request.receipt_id.clone();
         second_result.receipt.receipt_id = second_request.receipt_id.clone();
 
-        assert!(second_app
-            .record_witnessed_execution(
-                "agent-one",
-                Some(VERIFIER_SESSION),
-                &second_request,
-                &second_result,
-                None,
-                TimestampMs::from_millis(1_500),
-            )
-            .is_err());
+        assert!(
+            second_app
+                .record_witnessed_execution(
+                    "agent-one",
+                    Some(VERIFIER_SESSION),
+                    &second_request,
+                    &second_result,
+                    None,
+                    TimestampMs::from_millis(1_500),
+                )
+                .is_err()
+        );
 
         let execution = store
             .evidence_execution(second_request.operation_id.as_str())
@@ -2363,9 +3719,384 @@ mod tests {
             .expect("second execution remains durable");
         assert_eq!(execution.state, EvidenceExecutionState::Exited);
         assert!(execution.receipt_id.is_none());
-        assert!(store
-            .operation(second_request.operation_id.as_str())
-            .expect("read failed receipt operation")
-            .is_none());
+        assert!(
+            store
+                .operation(second_request.operation_id.as_str())
+                .expect("read failed receipt operation")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn close_readiness_reports_gaps_from_persisted_inputs() {
+        let (store, project) = production_verifier_setup();
+        let readiness = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read canonical close readiness");
+        let codes = readiness
+            .gaps
+            .iter()
+            .map(crate::CloseoutGap::code)
+            .collect::<Vec<_>>();
+        assert!(!readiness.ready);
+        assert!(codes.contains(&"attempt_not_verifying"));
+        assert!(codes.contains(&"gate_unsatisfied"));
+        assert!(codes.contains(&"summary_missing"));
+        assert!(codes.contains(&"close_intent_missing"));
+        assert!(!codes.contains(&"attempt_not_current"));
+    }
+
+    #[test]
+    fn close_readiness_blocks_missing_or_mismatched_typed_acceptance_results() {
+        let (store, project) = production_verifier_setup();
+        production_general_attestation_work(
+            &store,
+            &project,
+            "attested-work",
+            "attested-attempt",
+            "attested-session",
+        );
+        let app = WorkApplication::new(&store);
+        let missing = app
+            .read_close_readiness(project.as_str(), "attested-work")
+            .expect("read missing typed acceptance readiness");
+        assert!(!missing.ready);
+        assert!(
+            missing
+                .gaps
+                .contains(&crate::CloseoutGap::AcceptanceResultMissing)
+        );
+
+        let attempt = store
+            .current_attempt_for_work(project.as_str(), "attested-work")
+            .expect("read current typed acceptance attempt")
+            .expect("typed acceptance attempt exists");
+        let (entity_revision, proof_revision) = store
+            .work_revisions(project.as_str(), "attested-work")
+            .expect("read typed acceptance revisions");
+        let bind_request = boreal_store::acceptance::AcceptanceResultBindRequest {
+            project_id: project.as_str().to_owned(),
+            work_id: "attested-work".to_owned(),
+            actor_id: "agent-one".to_owned(),
+            session_id: "attested-session".to_owned(),
+            attempt_id: attempt.attempt_id.clone(),
+            fence: attempt.fence,
+            expected_project_revision: store
+                .project_revision(project.as_str())
+                .expect("project revision")
+                .0,
+            expected_entity_revision: entity_revision,
+            expected_proof_revision: proof_revision,
+            result_id: "result-attested-work".to_owned(),
+            contract_revision: 0,
+            outputs: Vec::new(),
+            attestation: Some(boreal_store::acceptance::CompletionAttestationInput {
+                statement: "Completed bounded general work".to_owned(),
+            }),
+            operation_id: "op-bind-attested-work".to_owned(),
+            at: "unix-ms:1300".to_owned(),
+        };
+        boreal_store::acceptance::AcceptanceStore::new(&store)
+            .bind_result(&bind_request)
+            .expect("bind general-attestation result");
+        persist_open_close_intent(
+            &store,
+            &project,
+            "attested-work",
+            "attested-attempt",
+            "general-attestation",
+        );
+
+        let valid_snapshot = boreal_store::acceptance::AcceptanceStore::new(&store)
+            .close_readiness_snapshot(project.as_str(), "attested-work")
+            .expect("read exact typed acceptance snapshot");
+        assert_eq!(
+            valid_snapshot
+                .acceptance_result
+                .as_ref()
+                .map(|record| record.result_id.as_str()),
+            Some("result-attested-work")
+        );
+        assert_eq!(
+            valid_snapshot.typed_acceptance,
+            boreal_store::acceptance::CloseReadinessTypedAcceptance::Ready
+        );
+
+        store
+            .execute_batch(
+                "DROP TRIGGER boreal_submission_acceptance_immutable_update;
+                 UPDATE boreal_submission_acceptance_v1
+                 SET result_digest='sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+                 WHERE work_id='attested-work';",
+            )
+            .expect("tamper only the result binding digest fixture");
+        let mismatched = app
+            .read_close_readiness(project.as_str(), "attested-work")
+            .expect("read mismatched typed acceptance readiness");
+        assert!(!mismatched.ready);
+        assert!(
+            mismatched
+                .gaps
+                .contains(&crate::CloseoutGap::AcceptanceResultMismatch)
+        );
+    }
+
+    #[test]
+    fn close_readiness_distinguishes_a_stale_attempt_from_the_current_attempt() {
+        let (store, project) = production_verifier_setup();
+        let app = WorkApplication::new(&store);
+        let current = app
+            .read_close_readiness_readback(project.as_str(), "verifier-work")
+            .expect("read current attempt readiness");
+        assert_eq!(
+            current.project_revision,
+            store.project_revision(project.as_str()).unwrap().0
+        );
+        assert_eq!(current.work_id, WorkId::new("verifier-work"));
+        assert_eq!(current.attempt_id.as_deref(), Some("verifier-attempt"));
+        assert_eq!(current.fence, Some(1));
+        assert!(
+            !current
+                .readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "attempt_not_current")
+        );
+
+        store
+            .execute_batch(
+                "UPDATE attempt
+                 SET current=0, state='released', terminal_at='unix-ms:1600',
+                     terminal_reason='test_stale_readback'
+                 WHERE attempt_id='verifier-attempt'",
+            )
+            .expect("stale the persisted attempt for projection test");
+        let stale = app
+            .read_close_readiness_readback(project.as_str(), "verifier-work")
+            .expect("read stale attempt readiness");
+        assert_eq!(stale.attempt_id, None);
+        assert_eq!(stale.fence, None);
+        assert!(
+            stale
+                .readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "attempt_not_current")
+        );
+    }
+
+    #[test]
+    fn close_readiness_reports_summary_body_integrity_mismatch() {
+        let (store, project) = production_verifier_setup();
+        persist_open_close_intent(
+            &store,
+            &project,
+            "verifier-work",
+            "verifier-attempt",
+            "focused",
+        );
+        store
+            .execute_batch(
+                "DROP TRIGGER summary_body_v1_no_update;
+                 UPDATE summary_body_v1 SET body_text='tampered summary bytes'
+                 WHERE summary_id='summary-verifier-work';",
+            )
+            .expect("tamper with stored body integrity fixture");
+
+        let readiness = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read tampered summary readiness");
+        assert!(
+            readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "summary_mismatch")
+        );
+    }
+
+    #[test]
+    fn close_readiness_reports_mismatched_close_intent() {
+        let (store, project) = production_verifier_setup();
+        persist_open_close_intent(
+            &store,
+            &project,
+            "verifier-work",
+            "verifier-attempt",
+            "focused",
+        );
+        store
+            .execute_batch(
+                "UPDATE close_intent SET config_identity='config-mismatch'
+                 WHERE work_id='verifier-work';",
+            )
+            .expect("mismatch persisted close intent context");
+
+        let readiness = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read mismatched close intent readiness");
+        assert!(
+            readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "close_intent_invalid")
+        );
+    }
+
+    #[test]
+    fn close_readiness_reports_non_open_close_intent() {
+        let (store, project) = production_verifier_setup();
+        persist_open_close_intent(
+            &store,
+            &project,
+            "verifier-work",
+            "verifier-attempt",
+            "focused",
+        );
+        store
+            .execute_batch(
+                "UPDATE close_intent
+                 SET state='invalidated', invalidated_at='unix-ms:1700',
+                     invalidation_code='test.invalidated'
+                 WHERE work_id='verifier-work';",
+            )
+            .expect("invalidate persisted close intent fixture");
+
+        let readiness = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "verifier-work")
+            .expect("read invalidated close intent readiness");
+        assert!(
+            readiness
+                .gaps
+                .iter()
+                .any(|gap| gap.code() == "close_intent_invalid")
+        );
+    }
+
+    #[test]
+    fn close_readiness_accepts_and_rejects_required_reviews() {
+        let (store, project) = production_verifier_setup();
+        store
+            .grant_principal(&PrincipalGrantRequest {
+                project_id: project.as_str().to_owned(),
+                actor_id: "verifier-operator".to_owned(),
+                session_id: None,
+                principal_actor_id: "reviewer-one".to_owned(),
+                role: ActorRole::Reviewer,
+                independent: true,
+                credential: format!("bwrk1_{}", "c".repeat(64)),
+                expires_at_ms: None,
+                display_name: "Independent verifier reviewer".to_owned(),
+                reason: "grant independent reviewer for close-readiness test".to_owned(),
+                expected_revision: store
+                    .project_revision(project.as_str())
+                    .expect("project revision")
+                    .0,
+                operation_id: "op-verifier-reviewer-grant".to_owned(),
+                at: "unix-ms:10".to_owned(),
+            })
+            .expect("grant independent reviewer");
+        WorkApplication::new(&store)
+            .register_session_as(
+                &project,
+                "reviewer-one",
+                "verifier-harness",
+                "reviewer-session",
+                "unix-ms:11",
+                "op-verifier-reviewer-session",
+            )
+            .expect("register independent reviewer session");
+
+        production_reviewed_verifier_work(
+            &store,
+            &project,
+            "reviewed-accepted-work",
+            "reviewed-accepted-attempt",
+            "reviewed-accepted-session",
+        );
+        persist_open_close_intent(
+            &store,
+            &project,
+            "reviewed-accepted-work",
+            "reviewed-accepted-attempt",
+            "reviewed",
+        );
+        record_required_review(
+            &store,
+            &project,
+            "reviewed-accepted-work",
+            "reviewed-accepted-attempt",
+            "review-accepted",
+            ReviewDecision::Accepted,
+            1800,
+        );
+        let accepted = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "reviewed-accepted-work")
+            .expect("read accepted review readiness");
+        assert!(
+            !accepted
+                .gaps
+                .iter()
+                .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRequired(_)))
+        );
+        assert!(
+            !accepted
+                .gaps
+                .iter()
+                .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRejected(_)))
+        );
+
+        production_reviewed_verifier_work(
+            &store,
+            &project,
+            "reviewed-rejected-work",
+            "reviewed-rejected-attempt",
+            "reviewed-rejected-session",
+        );
+        persist_open_close_intent(
+            &store,
+            &project,
+            "reviewed-rejected-work",
+            "reviewed-rejected-attempt",
+            "reviewed",
+        );
+        record_required_review(
+            &store,
+            &project,
+            "reviewed-rejected-work",
+            "reviewed-rejected-attempt",
+            "review-rejected",
+            ReviewDecision::Rejected,
+            1900,
+        );
+        let rejected = WorkApplication::new(&store)
+            .read_close_readiness(project.as_str(), "reviewed-rejected-work")
+            .expect("read rejected review readiness");
+        assert!(
+            !rejected
+                .gaps
+                .iter()
+                .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRequired(_)))
+        );
+        assert!(
+            rejected
+                .gaps
+                .iter()
+                .any(|gap| matches!(gap, crate::CloseoutGap::ReviewRejected(_)))
+        );
+    }
+
+    #[test]
+    fn close_readiness_rejects_a_work_item_from_another_project() {
+        let (store, _project) = production_verifier_setup();
+        store
+            .create_project("other-project", "unix-ms:5")
+            .expect("create other project");
+        let error = WorkApplication::new(&store)
+            .read_close_readiness("other-project", "verifier-work")
+            .expect_err("cross-project work read must fail");
+        assert!(matches!(
+            error,
+            ApplicationError::Store(StoreError::WrongSubject { .. })
+        ));
     }
 }

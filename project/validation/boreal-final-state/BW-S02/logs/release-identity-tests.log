@@ -1,0 +1,6 @@
+PASS test_manifest_is_reproducible
+PASS test_check_detects_asset_drift
+PASS test_check_rejects_manifest_path_escape
+PASS test_simulation_is_temp_only_and_rolls_back
+PASS test_simulation_refuses_non_temp_target
+PASS: 5 release identity tests

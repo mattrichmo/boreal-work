@@ -25,6 +25,34 @@ pub const MAX_TEXT_LENGTH: usize = 4_096;
 pub const MAX_OBSERVABLES: usize = 32;
 pub const MAX_EXTERNAL_IDENTITY_BYTES: usize = 4_096;
 
+/// Request to bind one captured produced source to a new immutable proof
+/// generation. The service fills the operation identity and trusted time;
+/// profile/configuration are read from authoritative stored state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalResultCaptureRequest {
+    pub project_id: String,
+    pub work_id: String,
+    pub actor_id: String,
+    pub session_id: String,
+    pub attempt_id: String,
+    pub fence: u64,
+    pub expected_project_revision: u64,
+    pub expected_entity_revision: u64,
+    pub expected_proof_revision: u64,
+    pub source_version_id: String,
+    pub content_digest: String,
+    pub operation_id: String,
+    pub at: String,
+}
+
+/// Result of binding a final source. Catalog relationship repair is separate
+/// from the authoritative proof binding and is reported for safe replay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalResultCaptureResult {
+    pub binding: boreal_store::acceptance::FinalResultBindingRecord,
+    pub lineage_pending: Option<String>,
+}
+
 /// The supported external-job categories share one durable identity and
 /// readback protocol. The adapter remains agnostic about how a verifier,
 /// backup, publication, or update performs its side effect.
@@ -1606,6 +1634,8 @@ pub enum CloseoutGap {
     GateUnsatisfied(GateId),
     ReviewRequired(GateId),
     ReviewRejected(GateId),
+    AcceptanceResultMissing,
+    AcceptanceResultMismatch,
     SummaryMissing,
     SummaryMismatch,
     CloseIntentMissing,
@@ -1621,6 +1651,8 @@ impl CloseoutGap {
             Self::GateUnsatisfied(_) => "gate_unsatisfied",
             Self::ReviewRequired(_) => "review_required",
             Self::ReviewRejected(_) => "review_rejected",
+            Self::AcceptanceResultMissing => "acceptance_result_missing",
+            Self::AcceptanceResultMismatch => "acceptance_result_mismatch",
             Self::SummaryMissing => "summary_missing",
             Self::SummaryMismatch => "summary_mismatch",
             Self::CloseIntentMissing => "close_intent_missing",

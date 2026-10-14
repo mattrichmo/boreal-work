@@ -36,6 +36,12 @@ pub const DEFAULT_MAX_RETRIEVAL_EXCERPT_BYTES: usize = 4 * 1024;
 /// Larger inputs remain capturable/searchable by an explicitly configured
 /// adapter, but are never expanded into an unbounded context response.
 pub const DEFAULT_MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+pub const SOURCE_BUNDLE_FORMAT_V1: &str = "boreal.source.bundle.v1";
+/// Exported source bundles are intentionally bounded so backup/restore cannot
+/// turn a catalog with unexpectedly large blobs into an unbounded allocation.
+pub const MAX_SOURCE_BUNDLE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_SOURCE_BUNDLE_METADATA_BYTES: usize = 64 * 1024 * 1024;
+const SOURCE_BUNDLE_MAGIC: &[u8] = b"boreal.source.bundle.v1\0";
 pub const MAX_ARTIFACT_RELATIONSHIPS: usize = 100_000;
 pub const MAX_ARTIFACT_PROVENANCE_FIELD_BYTES: usize = 4 * 1024;
 const CATALOG_LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -152,6 +158,29 @@ pub struct SourceReadback {
     pub media_type: String,
     pub byte_count: usize,
     pub bytes: Vec<u8>,
+}
+
+/// Versioned, project-scoped backup payload. `bytes` is a deterministic
+/// binary envelope containing catalog metadata and verified content blobs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceCatalogBundle {
+    pub format: String,
+    pub project_id: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Authoritative counts returned after an idempotent source-bundle restore.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceBundleReadback {
+    pub format: String,
+    pub project_id: String,
+    pub source_versions: usize,
+    pub artifact_relationships: usize,
+    pub capture_operations: usize,
+    pub artifact_operations: usize,
+    pub blobs: usize,
+    pub bytes: usize,
+    pub duplicate: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -386,6 +415,9 @@ pub enum SourceError {
     TooManyArtifactRelationships,
     InvalidMaterializationPath,
     MaterializedArtifactConflict,
+    InvalidBundle(String),
+    BundleConflict,
+    BundleTooLarge { actual: usize, limit: usize },
     Storage(String),
 }
 
@@ -436,6 +468,14 @@ impl fmt::Display for SourceError {
             Self::MaterializedArtifactConflict => {
                 f.write_str("artifact destination already contains different bytes")
             }
+            Self::InvalidBundle(message) => write!(f, "source backup bundle is invalid: {message}"),
+            Self::BundleConflict => {
+                f.write_str("source backup restore conflicts with existing project metadata")
+            }
+            Self::BundleTooLarge { actual, limit } => write!(
+                f,
+                "source backup bundle is {actual} bytes, above the configured {limit} byte bound"
+            ),
             Self::Storage(message) => write!(f, "blob storage error: {message}"),
         }
     }
@@ -674,6 +714,18 @@ struct PersistedCatalogState {
     index_revision: u64,
     #[serde(default)]
     artifact_revision: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SourceBundleMetadata {
+    format: String,
+    project_id: String,
+    catalog: PersistedCatalogState,
+}
+
+struct SourceBundleBlob {
+    digest: String,
+    bytes: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1733,6 +1785,189 @@ impl SourceCatalog {
         self.versions_for(project_id)
     }
 
+    /// Export one project's canonical source provenance and the exact bytes it
+    /// references. Rebuildable search indexes are deliberately omitted.
+    pub fn export_bundle(&self, project_id: &str) -> Result<SourceCatalogBundle, SourceError> {
+        validate_project_id(project_id)?;
+        let _mutation_guard = lock(&self.mutation_lock)?;
+        let _catalog_lock = self.acquire_persistent_lock()?;
+        self.reload_persistent_state()?;
+
+        let state = lock(&self.state)?.clone();
+        let project_state = project_state(&state, project_id);
+        let mut persisted = persisted_state(&project_state);
+        persisted.indexes.clear();
+        for version in &mut persisted.versions {
+            // Export has just verified the backing bytes, so the portable
+            // snapshot records their actual restorable state.
+            version.availability = Availability::Available;
+        }
+        let metadata = SourceBundleMetadata {
+            format: SOURCE_BUNDLE_FORMAT_V1.to_owned(),
+            project_id: project_id.to_owned(),
+            catalog: persisted,
+        };
+        let metadata_bytes = serde_json::to_vec(&metadata).map_err(|error| {
+            SourceError::Storage(format!(
+                "source bundle metadata serialization failed: {error}"
+            ))
+        })?;
+        if metadata_bytes.len() > MAX_SOURCE_BUNDLE_METADATA_BYTES {
+            return Err(SourceError::BundleTooLarge {
+                actual: metadata_bytes.len(),
+                limit: MAX_SOURCE_BUNDLE_METADATA_BYTES,
+            });
+        }
+
+        let mut versions = project_state.versions.values().cloned().collect::<Vec<_>>();
+        versions.sort_by(|left, right| left.content_digest.cmp(&right.content_digest));
+        let mut blobs = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut total_bytes = SOURCE_BUNDLE_MAGIC.len() + 8 + metadata_bytes.len() + 4;
+        for version in versions {
+            if !seen.insert(version.content_digest.clone()) {
+                continue;
+            }
+            let bytes = self
+                .blobs
+                .read_verified(&version.content_digest, version.byte_count)?;
+            let record_size = 2usize
+                .checked_add(version.content_digest.len())
+                .and_then(|size| size.checked_add(8))
+                .and_then(|size| size.checked_add(bytes.len()))
+                .ok_or(SourceError::BundleTooLarge {
+                    actual: usize::MAX,
+                    limit: MAX_SOURCE_BUNDLE_BYTES,
+                })?;
+            total_bytes =
+                total_bytes
+                    .checked_add(record_size)
+                    .ok_or(SourceError::BundleTooLarge {
+                        actual: usize::MAX,
+                        limit: MAX_SOURCE_BUNDLE_BYTES,
+                    })?;
+            if total_bytes > MAX_SOURCE_BUNDLE_BYTES {
+                return Err(SourceError::BundleTooLarge {
+                    actual: total_bytes,
+                    limit: MAX_SOURCE_BUNDLE_BYTES,
+                });
+            }
+            blobs.push(SourceBundleBlob {
+                digest: version.content_digest,
+                bytes,
+            });
+        }
+        let bytes = encode_source_bundle(&metadata_bytes, &blobs)?;
+        Ok(SourceCatalogBundle {
+            format: SOURCE_BUNDLE_FORMAT_V1.to_owned(),
+            project_id: project_id.to_owned(),
+            bytes,
+        })
+    }
+
+    /// Restore a bundle into the requested project scope. Existing metadata is
+    /// accepted only when it is identical; blobs are always digest-verified.
+    pub fn restore_bundle(
+        &self,
+        bundle: &SourceCatalogBundle,
+        expected_project_id: &str,
+    ) -> Result<SourceBundleReadback, SourceError> {
+        validate_project_id(expected_project_id)?;
+        if bundle.format != SOURCE_BUNDLE_FORMAT_V1 || bundle.project_id != expected_project_id {
+            return Err(SourceError::InvalidBundle(
+                "bundle format or project scope does not match the request".to_owned(),
+            ));
+        }
+        if bundle.bytes.len() > MAX_SOURCE_BUNDLE_BYTES {
+            return Err(SourceError::BundleTooLarge {
+                actual: bundle.bytes.len(),
+                limit: MAX_SOURCE_BUNDLE_BYTES,
+            });
+        }
+        let (metadata, blobs, total_blob_bytes) = decode_source_bundle(&bundle.bytes)?;
+        if metadata.format != SOURCE_BUNDLE_FORMAT_V1
+            || metadata.project_id != expected_project_id
+            || !metadata.catalog.indexes.is_empty()
+        {
+            return Err(SourceError::InvalidBundle(
+                "catalog metadata format, project scope, or derived-index policy is invalid"
+                    .to_owned(),
+            ));
+        }
+        let imported =
+            restore_catalog_state(&serde_json::to_vec(&metadata.catalog).map_err(|error| {
+                SourceError::InvalidBundle(format!("catalog metadata cannot be encoded: {error}"))
+            })?)
+            .map_err(|error| SourceError::InvalidBundle(error.to_string()))?;
+        validate_bundle_project_state(&imported, expected_project_id)?;
+        validate_bundle_blobs(&imported, &blobs)?;
+
+        let _mutation_guard = lock(&self.mutation_lock)?;
+        let _catalog_lock = self.acquire_persistent_lock()?;
+        self.reload_persistent_state()?;
+        let mut state = lock(&self.state)?;
+        let existing = project_state(&state, expected_project_id);
+        let imported_normalized = project_metadata_bytes(&imported, expected_project_id)?;
+        if project_scope_is_populated(&existing) {
+            if project_metadata_bytes(&existing, expected_project_id)? != imported_normalized {
+                return Err(SourceError::BundleConflict);
+            }
+            drop(state);
+            for blob in &blobs {
+                self.blobs
+                    .read_verified(&blob.digest, blob.bytes.len())
+                    .map(|stored| {
+                        if stored == blob.bytes {
+                            Ok(())
+                        } else {
+                            Err(SourceError::DigestMismatch)
+                        }
+                    })??;
+            }
+            return Ok(bundle_readback(
+                expected_project_id,
+                &imported,
+                blobs.len(),
+                total_blob_bytes,
+                true,
+            ));
+        }
+
+        // Operation IDs are catalog-wide. Refuse to overwrite another
+        // project's idempotency record even though source rows are scoped.
+        if imported
+            .capture_operations
+            .keys()
+            .any(|operation_id| state.capture_operations.contains_key(operation_id))
+            || imported
+                .artifact_operations
+                .keys()
+                .any(|operation_id| state.artifact_operations.contains_key(operation_id))
+        {
+            return Err(SourceError::OperationConflict);
+        }
+        for blob in &blobs {
+            self.blobs.put(&blob.digest, &blob.bytes)?;
+        }
+
+        let before = state.clone();
+        merge_project_state(&mut state, imported);
+        drop(state);
+        if let Err(error) = self.persist_state() {
+            *lock(&self.state)? = before;
+            return Err(error);
+        }
+        Ok(bundle_readback(
+            expected_project_id,
+            &restore_catalog_state(&serde_json::to_vec(&metadata.catalog).map_err(|error| {
+                SourceError::InvalidBundle(format!("catalog metadata cannot be encoded: {error}"))
+            })?)?,
+            blobs.len(),
+            total_blob_bytes,
+            false,
+        ))
+    }
+
     pub fn version_count(&self) -> Result<usize, SourceError> {
         Ok(lock(&self.state)?.versions.len())
     }
@@ -2095,6 +2330,316 @@ fn unique_stamp() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn project_state(state: &CatalogState, project_id: &str) -> CatalogState {
+    let mut project = CatalogState {
+        versions: state.versions.clone(),
+        artifact_relationships: state.artifact_relationships.clone(),
+        parse_records: state.parse_records.clone(),
+        indexes: state.indexes.clone(),
+        capture_operations: state.capture_operations.clone(),
+        artifact_operations: state.artifact_operations.clone(),
+        source_revision: state.source_revision,
+        index_revision: state.index_revision,
+        artifact_revision: state.artifact_revision,
+    };
+    project.versions.retain(|(owner, _), _| owner == project_id);
+    project
+        .artifact_relationships
+        .retain(|(owner, _), _| owner == project_id);
+    project
+        .parse_records
+        .retain(|(owner, _), _| owner == project_id);
+    project.indexes.retain(|(owner, _), _| owner == project_id);
+    project
+        .capture_operations
+        .retain(|_, record| record.project_id == project_id);
+    project
+        .artifact_operations
+        .retain(|_, record| record.project_id == project_id);
+    project
+}
+
+fn project_scope_is_populated(state: &CatalogState) -> bool {
+    !state.versions.is_empty()
+        || !state.artifact_relationships.is_empty()
+        || !state.parse_records.is_empty()
+        || !state.indexes.is_empty()
+        || !state.capture_operations.is_empty()
+        || !state.artifact_operations.is_empty()
+}
+
+fn project_metadata_bytes(state: &CatalogState, project_id: &str) -> Result<Vec<u8>, SourceError> {
+    let mut persisted = persisted_state(&project_state(state, project_id));
+    persisted.indexes.clear();
+    persisted.source_revision = 0;
+    persisted.index_revision = 0;
+    persisted.artifact_revision = 0;
+    for version in &mut persisted.versions {
+        version.availability = Availability::Available;
+    }
+    serde_json::to_vec(&persisted)
+        .map_err(|error| SourceError::Storage(format!("catalog serialization failed: {error}")))
+}
+
+fn merge_project_state(target: &mut CatalogState, imported: CatalogState) {
+    target.versions.extend(imported.versions);
+    target
+        .artifact_relationships
+        .extend(imported.artifact_relationships);
+    target.parse_records.extend(imported.parse_records);
+    target.indexes.extend(imported.indexes);
+    target
+        .capture_operations
+        .extend(imported.capture_operations);
+    target
+        .artifact_operations
+        .extend(imported.artifact_operations);
+    target.source_revision = target.source_revision.max(imported.source_revision);
+    target.index_revision = target.index_revision.max(imported.index_revision);
+    target.artifact_revision = target.artifact_revision.max(imported.artifact_revision);
+}
+
+fn validate_bundle_project_state(
+    state: &CatalogState,
+    project_id: &str,
+) -> Result<(), SourceError> {
+    if state.versions.values().any(|version| {
+        version.project_id != project_id
+            || validate_project_id(&version.project_id).is_err()
+            || validate_origin(&version.origin).is_err()
+            || version.media_type.trim().is_empty()
+            || digest_hex(&version.content_digest).is_none()
+            || version.source_version_id
+                != format!("sv_{}_{}", version.project_id, version.content_digest)
+    }) || state
+        .artifact_relationships
+        .values()
+        .any(|relationship| relationship.source.project_id != project_id)
+        || state
+            .parse_records
+            .keys()
+            .any(|(owner, _)| owner != project_id)
+        || state.indexes.keys().any(|(owner, _)| owner != project_id)
+        || state
+            .capture_operations
+            .values()
+            .any(|record| record.project_id != project_id)
+        || state
+            .artifact_operations
+            .values()
+            .any(|record| record.project_id != project_id)
+    {
+        return Err(SourceError::InvalidBundle(
+            "catalog contains an invalid or cross-project identity".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bundle_blobs(
+    state: &CatalogState,
+    blobs: &[SourceBundleBlob],
+) -> Result<(), SourceError> {
+    let expected = state
+        .versions
+        .values()
+        .map(|version| (version.content_digest.clone(), version.byte_count))
+        .collect::<BTreeMap<_, _>>();
+    if expected.len() != blobs.len() {
+        return Err(SourceError::InvalidBundle(
+            "blob set does not match the catalog source versions".to_owned(),
+        ));
+    }
+    for blob in blobs {
+        if expected.get(&blob.digest) != Some(&blob.bytes.len())
+            || content_digest(&blob.bytes) != blob.digest
+        {
+            return Err(SourceError::InvalidBundle(
+                "blob digest or declared size does not match catalog metadata".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn bundle_readback(
+    project_id: &str,
+    state: &CatalogState,
+    blobs: usize,
+    bytes: usize,
+    duplicate: bool,
+) -> SourceBundleReadback {
+    SourceBundleReadback {
+        format: SOURCE_BUNDLE_FORMAT_V1.to_owned(),
+        project_id: project_id.to_owned(),
+        source_versions: state.versions.len(),
+        artifact_relationships: state.artifact_relationships.len(),
+        capture_operations: state.capture_operations.len(),
+        artifact_operations: state.artifact_operations.len(),
+        blobs,
+        bytes,
+        duplicate,
+    }
+}
+
+fn encode_source_bundle(
+    metadata: &[u8],
+    blobs: &[SourceBundleBlob],
+) -> Result<Vec<u8>, SourceError> {
+    if metadata.len() > MAX_SOURCE_BUNDLE_METADATA_BYTES || blobs.len() > u32::MAX as usize {
+        return Err(SourceError::BundleTooLarge {
+            actual: metadata.len(),
+            limit: MAX_SOURCE_BUNDLE_METADATA_BYTES,
+        });
+    }
+    let mut output = Vec::new();
+    output.extend_from_slice(SOURCE_BUNDLE_MAGIC);
+    output.extend_from_slice(&(metadata.len() as u64).to_be_bytes());
+    output.extend_from_slice(metadata);
+    output.extend_from_slice(content_digest(metadata).as_bytes());
+    output.extend_from_slice(&(blobs.len() as u32).to_be_bytes());
+    for blob in blobs {
+        if blob.digest.len() > u16::MAX as usize {
+            return Err(SourceError::InvalidBundle(
+                "digest field is too long".to_owned(),
+            ));
+        }
+        output.extend_from_slice(&(blob.digest.len() as u16).to_be_bytes());
+        output.extend_from_slice(blob.digest.as_bytes());
+        output.extend_from_slice(&(blob.bytes.len() as u64).to_be_bytes());
+        output.extend_from_slice(&blob.bytes);
+        if output.len() > MAX_SOURCE_BUNDLE_BYTES {
+            return Err(SourceError::BundleTooLarge {
+                actual: output.len(),
+                limit: MAX_SOURCE_BUNDLE_BYTES,
+            });
+        }
+    }
+    Ok(output)
+}
+
+fn decode_source_bundle(
+    bytes: &[u8],
+) -> Result<(SourceBundleMetadata, Vec<SourceBundleBlob>, usize), SourceError> {
+    if bytes.len() > MAX_SOURCE_BUNDLE_BYTES {
+        return Err(SourceError::BundleTooLarge {
+            actual: bytes.len(),
+            limit: MAX_SOURCE_BUNDLE_BYTES,
+        });
+    }
+    let mut cursor = 0usize;
+    if take_bundle_bytes(bytes, &mut cursor, SOURCE_BUNDLE_MAGIC.len())? != SOURCE_BUNDLE_MAGIC {
+        return Err(SourceError::InvalidBundle(
+            "unknown bundle signature".to_owned(),
+        ));
+    }
+    let metadata_len = take_bundle_u64(bytes, &mut cursor)?;
+    let metadata_len = usize::try_from(metadata_len).map_err(|_| {
+        SourceError::InvalidBundle("metadata length overflows this platform".into())
+    })?;
+    if metadata_len > MAX_SOURCE_BUNDLE_METADATA_BYTES {
+        return Err(SourceError::BundleTooLarge {
+            actual: metadata_len,
+            limit: MAX_SOURCE_BUNDLE_METADATA_BYTES,
+        });
+    }
+    let metadata_bytes = take_bundle_bytes(bytes, &mut cursor, metadata_len)?;
+    let metadata_digest = take_bundle_bytes(bytes, &mut cursor, "sha256:".len() + 64)?;
+    if metadata_digest != content_digest(metadata_bytes).as_bytes() {
+        return Err(SourceError::InvalidBundle(
+            "catalog metadata checksum failed".to_owned(),
+        ));
+    }
+    let metadata: SourceBundleMetadata =
+        serde_json::from_slice(metadata_bytes).map_err(|error| {
+            SourceError::InvalidBundle(format!("catalog metadata is invalid: {error}"))
+        })?;
+    let count = take_bundle_u32(bytes, &mut cursor)? as usize;
+    if count > 1_000_000 {
+        return Err(SourceError::InvalidBundle(
+            "blob count exceeds the supported limit".into(),
+        ));
+    }
+    let mut blobs = Vec::with_capacity(count);
+    let mut last_digest = None::<String>;
+    let mut total_blob_bytes = 0usize;
+    for _ in 0..count {
+        let digest_len = take_bundle_u16(bytes, &mut cursor)? as usize;
+        let digest = std::str::from_utf8(take_bundle_bytes(bytes, &mut cursor, digest_len)?)
+            .map_err(|_| SourceError::InvalidBundle("blob digest is not UTF-8".into()))?
+            .to_owned();
+        if digest_hex(&digest).is_none() || last_digest.as_ref().is_some_and(|last| last >= &digest)
+        {
+            return Err(SourceError::InvalidBundle(
+                "blob digests are invalid, duplicated, or not sorted".to_owned(),
+            ));
+        }
+        let length = take_bundle_u64(bytes, &mut cursor)?;
+        let length = usize::try_from(length).map_err(|_| {
+            SourceError::InvalidBundle("blob length overflows this platform".into())
+        })?;
+        let blob_bytes = take_bundle_bytes(bytes, &mut cursor, length)?.to_vec();
+        total_blob_bytes = total_blob_bytes.checked_add(length).ok_or_else(|| {
+            SourceError::InvalidBundle("total blob length overflows this platform".into())
+        })?;
+        if content_digest(&blob_bytes) != digest {
+            return Err(SourceError::InvalidBundle(
+                "blob checksum failed".to_owned(),
+            ));
+        }
+        last_digest = Some(digest.clone());
+        blobs.push(SourceBundleBlob {
+            digest,
+            bytes: blob_bytes,
+        });
+    }
+    if cursor != bytes.len() {
+        return Err(SourceError::InvalidBundle(
+            "bundle contains trailing bytes".to_owned(),
+        ));
+    }
+    Ok((metadata, blobs, total_blob_bytes))
+}
+
+fn take_bundle_bytes<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    count: usize,
+) -> Result<&'a [u8], SourceError> {
+    let end = cursor
+        .checked_add(count)
+        .ok_or_else(|| SourceError::InvalidBundle("bundle offset overflow".into()))?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| SourceError::InvalidBundle("bundle is truncated".into()))?;
+    *cursor = end;
+    Ok(value)
+}
+
+fn take_bundle_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16, SourceError> {
+    Ok(u16::from_be_bytes(
+        take_bundle_bytes(bytes, cursor, 2)?
+            .try_into()
+            .expect("fixed-width bundle read"),
+    ))
+}
+
+fn take_bundle_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, SourceError> {
+    Ok(u32::from_be_bytes(
+        take_bundle_bytes(bytes, cursor, 4)?
+            .try_into()
+            .expect("fixed-width bundle read"),
+    ))
+}
+
+fn take_bundle_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, SourceError> {
+    Ok(u64::from_be_bytes(
+        take_bundle_bytes(bytes, cursor, 8)?
+            .try_into()
+            .expect("fixed-width bundle read"),
+    ))
 }
 
 fn persisted_state(state: &CatalogState) -> PersistedCatalogState {

@@ -7,43 +7,406 @@
   "source_investigation": "completed_by_coordinator_and_three_agents",
   "plan_review": "three_agent_review_completed_and_amendments_integrated",
   "first_integration_contract": "fenced_final_result_capture_and_binding_before_verification",
-  "implementation_started": false,
+  "implementation_started": true,
   "packages": {
-    "F1": {"title": "Agent onboarding and guidance", "owner": "agent_a", "state": "ready", "evidence": []},
-    "F2": {"title": "Final-result binding, lifecycle and canonical review readback", "owner": "agent_a", "state": "ready", "evidence": []},
-    "F3": {"title": "Planning, intake, context and memory", "owner": "agent_b", "state": "ready", "evidence": []},
-    "F4": {"title": "Operational dashboard", "owner": "agent_c", "state": "ready", "evidence": []},
-    "F5": {"title": "Shared service and CLI integration", "owner": "coordinator", "state": "ready", "evidence": []},
-    "F6": {"title": "Data continuity and release preparation", "owner": "agent_b", "state": "ready", "evidence": []},
-    "F7": {"title": "Final qualification and repair loop", "owner": "coordinator_and_agents", "state": "ready", "entry_requires": ["F1", "F2", "F3", "F4", "F5", "F6"], "evidence": []},
-    "F8": {"title": "Activation and supported release delivery", "owner": "coordinator", "state": "ready", "entry_requires": ["native_artifact_qualified"], "evidence": []}
+    "F1": {
+      "title": "Agent onboarding and guidance",
+      "owner": "agent_a",
+      "state": "in_progress",
+      "evidence": []
+    },
+    "F2": {
+      "title": "Final-result binding, lifecycle and canonical review readback",
+      "owner": "agent_a",
+      "state": "in_progress",
+      "evidence": []
+    },
+    "F3": {
+      "title": "Planning, intake, context and memory",
+      "owner": "agent_b",
+      "state": "in_progress",
+      "evidence": []
+    },
+    "F4": {
+      "title": "Operational dashboard",
+      "owner": "agent_c",
+      "state": "in_progress",
+      "evidence": []
+    },
+    "F5": {
+      "title": "Shared service and CLI integration",
+      "owner": "coordinator",
+      "state": "in_progress",
+      "evidence": []
+    },
+    "F6": {
+      "title": "Data continuity and release preparation",
+      "owner": "agent_b",
+      "state": "in_progress",
+      "evidence": []
+    },
+    "F7": {
+      "title": "Final qualification and repair loop",
+      "owner": "coordinator_and_agents",
+      "state": "ready",
+      "entry_requires": [
+        "F1",
+        "F2",
+        "F3",
+        "F4",
+        "F5",
+        "F6"
+      ],
+      "evidence": []
+    },
+    "F8": {
+      "title": "Activation and supported release delivery",
+      "owner": "coordinator",
+      "state": "ready",
+      "entry_requires": [
+        "native_artifact_qualified"
+      ],
+      "evidence": []
+    }
   },
   "acceptance": {
-    "J1": {"state": "not_run", "evidence": []},
-    "J2": {"state": "not_run", "evidence": []},
-    "J3": {"state": "not_run", "evidence": []},
-    "J4": {"state": "not_run", "evidence": []},
-    "J5": {"state": "not_run", "evidence": []},
-    "J6": {"state": "not_run", "evidence": []},
-    "J7": {"state": "not_run", "evidence": []},
-    "J8": {"state": "not_run", "evidence": []},
-    "J9": {"state": "not_run", "evidence": []},
-    "J10": {"state": "not_run", "evidence": []},
-    "J11": {"state": "not_run", "evidence": []},
-    "J12": {"state": "not_run", "evidence": []},
-    "J13": {"state": "not_run", "evidence": []}
+    "J1": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J2": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J3": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J4": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J5": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J6": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J7": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J8": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J9": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J10": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J11": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J12": {
+      "state": "not_run",
+      "evidence": []
+    },
+    "J13": {
+      "state": "not_run",
+      "evidence": []
+    }
   },
-  "active_assignments": [],
-  "exclusive_write_owners": {},
+  "active_assignments": [
+    {
+      "package": "F2 / J3-J4 final-result binding",
+      "owner": "Luna Extra High agent /root/f2_binding",
+      "model": "GPT-6 Luna Extra High",
+      "worktree": "/Users/cybertron/.codex/worktrees/v4-f2-binding-current/boreal-work",
+      "source_commit": "2fa9bf3ed717ae9f917688b6a6b0fb944a6c5b65",
+      "exclusive_paths": [
+        "crates/application/src/evidence_store.rs final-result binding/verification",
+        "crates/application/src/evidence.rs final-result proof applicability",
+        "crates/store/src/final_result.rs",
+        "crates/store/src/acceptance.rs final-result binding sections",
+        "crates/application/tests final-result binding tests"
+      ],
+      "journeys": [
+        "J3",
+        "J4"
+      ]
+    },
+    {
+      "package": "F3 / BW-S06 capture provenance and logical transfer",
+      "owner": "Luna Extra High agent /root/s06_capture_origin",
+      "model": "GPT-6 Luna Extra High",
+      "worktree": "/Users/cybertron/.codex/worktrees/v4-s06-provenance-current/boreal-work",
+      "source_commit": "2fa9bf3ed717ae9f917688b6a6b0fb944a6c5b65",
+      "exclusive_paths": [
+        "crates/application/src/global_capture.rs",
+        "crates/domain/src/global_manager.rs",
+        "crates/store/src/global_manager.rs capture provenance schema/persistence",
+        "crates/application/src/global_manager.rs",
+        "crates/cli/src/global_commands.rs",
+        "crates/cli/src/command_registry.rs",
+        "apps/global-tui/src/interaction.ts quick-capture/task-add callsite",
+        "focused Global capture/transfer tests"
+      ],
+      "journeys": [
+        "J7",
+        "J9",
+        "BW-S06-T03",
+        "BW-S06-T06"
+      ]
+    },
+    {
+      "package": "F6 / BW-S02 and BW-S03 package/update recovery",
+      "owner": "Luna Extra High agent /root/s02_s03_update",
+      "model": "GPT-6 Luna Extra High",
+      "worktree": "/Users/cybertron/.codex/worktrees/v4-s03-update-current/boreal-work",
+      "source_commit": "2fa9bf3ed717ae9f917688b6a6b0fb944a6c5b65",
+      "exclusive_paths": [
+        "crates/cli/src/update.rs",
+        "crates/cli/src/machine_update.rs",
+        "crates/cli/tests focused update tests",
+        "scripts/release/**",
+        "scripts/validation/**",
+        ".github/workflows/release.yml",
+        "docs/INSTALL.md"
+      ],
+      "journeys": [
+        "J8",
+        "J10",
+        "J11",
+        "J12",
+        "J13",
+        "BW-S02-T90",
+        "BW-S03-T90"
+      ]
+    },
+    {
+      "package": "F5 / F7 integration",
+      "owner": "Coordinator",
+      "model": "GPT-6 Luna Extra High",
+      "worktree": "/Users/cybertron/.codex/worktrees/v4-coordinator/boreal-work",
+      "source_commit": "94669ceb",
+      "exclusive_paths": [
+        "crates/cli/src/main.rs",
+        "crates/cli/src/service.rs",
+        "crates/cli/src/command_registry.rs except active S06 lease",
+        "crates/cli/src/setup.rs",
+        "shared protocol models and schema wiring",
+        "crates/store/src/lib.rs",
+        "project/build-plan/production-completion/execution/FINAL_STATE.json"
+      ],
+      "journeys": "all application journeys"
+    }
+  ],
+  "exclusive_write_owners": {
+    "crates/application/src/runtime.rs": "F2 / Agent A",
+    "crates/application/src/evidence_store.rs": "F2 / Luna Extra High agent /root/f2_binding, final-result binding sections",
+    "crates/application/src/evidence.rs": "F2 / Luna Extra High agent /root/f2_binding, final-result proof applicability sections",
+    "crates/store/src/completion.rs": "F2 / Agent A",
+    "crates/store/src/acceptance.rs": "F2 / Luna Extra High agent /root/f2_binding, final-result binding sections",
+    "crates/store/src/recovery.rs": "F2 / Agent A",
+    "crates/application/src/hierarchy.rs": "F3/F5 coordinator; container disposition application route integrated at 0a585b5a",
+    "crates/application/src/planning_v3.rs": "F3 / Agent B",
+    "crates/application/src/cycle_runtime.rs": "F3 / Agent B",
+    "crates/application/src/intake.rs": "F3 / Agent B",
+    "crates/application/src/knowledge.rs": "F3 / Agent B",
+    "crates/store/src/work_model_v3.rs": "F3 coordinator; container disposition readback helper integrated at 2fa9bf3e",
+    "crates/store/src/cycle_commands.rs": "F3 / Agent B",
+    "crates/store/src/knowledge.rs": "F3 / Agent B",
+    "crates/store/src/memory.rs": "F3 / Agent B",
+    "crates/source/": "F3 / Agent B",
+    "crates/memory/": "F3 / Agent B",
+    "apps/tui/src/": "F4 / Agent C",
+    "crates/cli/src/main.rs": "F5 coordinator",
+    "crates/cli/src/service.rs": "F5 / Coordinator",
+    "crates/cli/src/command_registry.rs": "F5 coordinator except the BW-S06 capture command entry leased to /root/s06_capture_origin",
+    "crates/cli/src/setup.rs": "F5 / Coordinator",
+    "crates/store/src/lib.rs": "F5 coordinator; backup/restore artifact bundle seam integrated at bd9c5ec2",
+    "crates/application/src/lib.rs": "F5 / Coordinator",
+    "crates/protocol/src/lib.rs": "F5 / Coordinator",
+    "workspace manifests and schema wiring": "F5 / Coordinator",
+    "project/build-plan/production-completion/execution/FINAL_STATE.json": "Coordinator",
+    "crates/protocol/src/models.rs": "F5 coordinator",
+    "crates/store/src/final_result.rs": "F2 / Luna Extra High agent /root/f2_binding",
+    "crates/application/src/global_capture.rs": "BW-S06 / Luna Extra High agent /root/s06_capture_origin",
+    "crates/domain/src/global_manager.rs": "BW-S06 / Luna Extra High agent /root/s06_capture_origin",
+    "crates/store/src/global_manager.rs": "BW-S06 / Luna Extra High agent /root/s06_capture_origin, capture-origin schema/persistence sections",
+    "crates/application/src/global_manager.rs": "BW-S06 / Luna Extra High agent /root/s06_capture_origin",
+    "crates/cli/src/global_commands.rs": "BW-S06 / Luna Extra High agent /root/s06_capture_origin",
+    "apps/global-tui/src/interaction.ts": "F4 coordinator except the quick-capture/task-add callsite leased to BW-S06 /root/s06_capture_origin",
+    "crates/cli/src/update.rs": "BW-S02/BW-S03 / Luna Extra High agent /root/s02_s03_update",
+    "crates/cli/src/machine_update.rs": "BW-S03 / Luna Extra High agent /root/s02_s03_update",
+    "scripts/release/": "BW-S02/BW-S03 / Luna Extra High agent /root/s02_s03_update",
+    "scripts/validation/": "BW-S02/BW-S03 / Luna Extra High agent /root/s02_s03_update"
+  },
   "repair_queue": [],
   "external_blockers": [],
-  "candidate": {"source_identity": null, "version": null, "archive": null, "sha256": null},
-  "activation": {"state": "not_installed", "prefix": null, "binding_resolution": "required_before_live_activation", "evidence": []},
+  "candidate": {
+    "source_identity": null,
+    "version": null,
+    "archive": null,
+    "sha256": null
+  },
+  "activation": {
+    "state": "not_installed",
+    "prefix": null,
+    "binding_resolution": "required_before_live_activation",
+    "evidence": []
+  },
   "distribution": {
     "state": "not_published",
-    "targets": {"aarch64-apple-darwin": "not_run", "x86_64-apple-darwin": "not_run", "x86_64-unknown-linux-gnu": "not_run"},
+    "targets": {
+      "aarch64-apple-darwin": "not_run",
+      "x86_64-apple-darwin": "not_run",
+      "x86_64-unknown-linux-gnu": "not_run"
+    },
     "release_url": null,
     "channel_verification": "not_run"
   },
-  "note": "Planning/source inspection only. Prior implementation claims are preserved in historical documents and do not pre-fill final qualification. No product test suite was run to create this plan."
+  "note": "Integrated the versioned guidance action descriptors, Global TUI inbox hardening, bounded backup artifact continuity, F2 summary/review readbacks, mixed-revision context guard, release preparation, revision-bound container disposition CLI/service route, the missing store export needed by hierarchy callers, and strict candidate assembly plus machine-update rollback hardening. Focused machine-update, authority, release-assembly, shell, YAML, formatting and diff checks passed in the worker lane; target package smoke and full qualification remain unrun. A pre-migration Global database backup/readback seam is still required to prove paired package/Global recovery. Final-result binding and Global capture provenance remain active; BW-S13-T01 dates/waits has started on source 87c05ed5. F1 onboarding, remaining F3/F4 paths, S08/S09 intake receipts and Global Send, S10 scale qualification, S11 handover, S12-T05/T06, S13 TUI/reference workflow parity, T90 sprint gates, integrated qualification, safe installation activation, and release delivery remain open. No final qualification, installation activation, or release claim is implied. The S06 capture/provenance implementation and the S07 Personal Inbox status filter are now integrated; the combined Global TUI suite passes (97/97), while sprint-level acceptance and the remaining S07 lanes are still open.",
+  "current_source_commit": "990b109a",
+  "environment_inventory": {
+    "checked_date": "2026-10-13",
+    "native_platform": "macOS ARM64",
+    "codex_cli_available": true,
+    "claude_cli_available": true,
+    "github_cli_authenticated": true,
+    "git_remote": "github.com/mattrichmo/boreal-work",
+    "actual_installation_and_project_binding": {
+      "status": "identified_read_only",
+      "binary": "/Users/cybertron/.local/bin/bwrk (0.2.0)",
+      "project_root": "/Users/cybertron/Code/boreal-work",
+      "project_id": "boreal-work",
+      "database": "/Users/cybertron/Code/boreal-work/.boreal/boreal.sqlite",
+      "read_only_doctor": "schema 3, revision 99, quick_check ok, no foreign-key violations",
+      "preservation": "no live binding, database, service, or installation changes made",
+      "runtime_process_inventory": "no bwrk/boreal service process visible at inspection; preserve existing runtime lock metadata file until qualified activation preflight"
+    }
+  },
+  "execution_events": [
+    {
+      "date": "2026-10-13",
+      "event": "dispatch_started",
+      "source_commit": "88b867a3340deab073ec15772c261fbc58504540",
+      "summary": "F2, F3, and F4 dispatched to isolated Luna Extra High worktrees; coordinator began F5 and environment inventory."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "integration_contracts_resolved",
+      "source_commit": "88b867a3340deab073ec15772c261fbc58504540",
+      "summary": "F5 added the additive final-result binding schema contract. F2 confirmed exact-proof readback and proof-generation advancement; F3 identified atomic v3 hierarchy projection as required for create/promotion; F4 implemented typed service-client entrypoints and field-labeled workspace views. Packages remain in progress pending integration and qualification."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "F5_daily_filters_and_intake_compatibility_integrated",
+      "source_commit": "a718215806536e380b539c217977ccf9b2aaf8ce",
+      "summary": "Restored direct Intake current-revision fallback while retaining required service DTO revisions; integrated application-backed global daily todo filters with bounded paging. Focused daily-filter and global-service checks passed in the worker lane; full F7 qualification remains pending."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "F2_audit_and_F6_backup_gap_confirmed",
+      "source_commit": "a718215806536e380b539c217977ccf9b2aaf8ce",
+      "summary": "Exact-source F2 audit found service finish summary-body persistence loss, oversized summary readbacks with non-durable operation references, and review list/show reading only legacy decisions. F6 found backup packages omit referenced source artifacts and published memory. Repairs are dispatched in isolated Luna Extra High worktrees; none is qualified yet. F6 implementation commit 52ab6e2f has now been integrated and pushed; its source-side checks passed, while acceptance remains open."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "F6_release_preparation_integrated",
+      "source_commit": "c0df01fbd1cdcb174e62fdbbbe6c1cd86981cff1",
+      "summary": "Integrated absolute installed-binary fingerprinting through the full-suite gates, real public capture/enrollment and verifier assertions in guided smoke, release-version identity checks, per-target archive smoke, and rollback/update documentation. Static checks passed; acceptance and target qualification remain open."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "F2_summary_review_readback_integrated",
+      "source_commit": "c0c4e8aa",
+      "summary": "Integrated durable summary-body preservation, bounded paged body readback with stable references, and canonical plus legacy review history. Application pagination and CLI readback checks passed in the worker lane; corrected service regression fixture still requires a focused rerun."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "F3_context_revision_guard_integrated",
+      "source_commit": "d989c879",
+      "summary": "Integrated a final project revision check after focused context/ancestor reads with a stale-revision regression case. Formatting and diff checks passed; focused Cargo test remains to be run."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "F6_backup_artifact_continuity_integrated",
+      "source_commit": "bd9c5ec2",
+      "summary": "Integrated backup package v3 with a content-addressed referenced-blob bundle, digest/byte-count validation, isolated restore sidecars and path rewriting, fail-closed handling for missing/mismatched blobs, and continued artifact-free v2 restore. Worker store tests passed before a final path-scrubbing edit; rerun affected focused cases during F7."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "S07_quick_capture_personal_inbox_integrated",
+      "source_commit": "ca07ab4a",
+      "summary": "Integrated the Global TUI fix making n and palette Quick Capture always target Personal Inbox while preserving project-aware detailed and child creation. Global TUI build and 41 interaction tests passed in the worker lane; additional inbox selection/refresh and grouped Today/Open work is assigned."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "F4_global_tui_inbox_followup_committed",
+      "source_commit": "861219866f8db7c6aadc2ccd33c1015ee9900c57",
+      "summary": "Inbox triage now advances selection by stable ID after successful refresh, preserves selection and reports saved state on refresh failure, and Today/Open has explicit Overdue, Due today, Waiting, Unscheduled and Later headings. Build and 79 focused tests passed in the agent lane; integration and final qualification remain pending."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "F1_agent_action_descriptor_integrated",
+      "source_commit": "6562f28697b6072c4516e857b3bf2e09f342d4d2",
+      "summary": "Integrated additive versioned typed action descriptors in guide/next; existing v1 IDs retained, read actions carry safe argv and mutations request structured agent input. Rustfmt and diff checks passed; Cargo checks and journey qualification remain pending."
+    },
+    {
+      "date": "2026-10-13",
+      "event": "F4_global_tui_inbox_followup_integrated",
+      "source_commit": "2614b1fe",
+      "summary": "Integrated stable-ID Inbox selection after triage, truthful saved-but-refresh-failed state with retry, and explicit Today/Open groups. Agent build and 79 focused tests passed; this integration awaits exact-tree qualification."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "container_disposition_public_route_integrated",
+      "source_commit": "0a585b5a",
+      "summary": "Integrated revision-bound container disposition application/store support with direct and service CLI command registration, parser validation, and an end-to-end public CLI replay test. Focused application, store, parser, and public command tests pass; full S02/S03 sprint qualification remains pending."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "release_identity_prepared",
+      "source_commit": "94669ceb",
+      "summary": "Prepared candidate version 0.2.2 across workspace package identity, installer examples, and test-project expectations. This is a source preparation identity only; archives and release qualification have not been built."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "container_rollup_export_unblocked",
+      "source_commit": "2b01e1e980ed12fee33a5d55f17c325cccfbbe01",
+      "summary": "Re-exported ContainerRollupSnapshotV3 from boreal-store so the application hierarchy module can resolve its public type. This addresses the existing compile blocker reported independently by the F2 and S03 lanes; integrated verification is pending."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S02_S03_candidate_assembly_and_machine_update_hardening_integrated",
+      "source_commit": "46c8d6be",
+      "summary": "Integrated strict release-artifact assembly for the declared target matrix, native-host qualification guards, a mismatched-package recovery regression, and arbitrary-cwd machine update authority coverage. Worker-focused checks passed; target package smoke and final paired Global migration rollback qualification remain open."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "BW_S13_T01_dispatched",
+      "source_commit": "87c05ed5b692ed37ed90ef7bf3168b670faa5349",
+      "summary": "Started the dates and external-waits lane after confirming S12-T01 and S05-T01 are integrated. The worker has exclusive domain/work-model, decision-input, application/Intake, and store/work-model files; shared migration/status/protocol/CLI integration remains coordinator-owned."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "current_v4_implementation_lanes_dispatched",
+      "source_commit": "2fa9bf3ed717ae9f917688b6a6b0fb944a6c5b65",
+      "summary": "Dispatched three isolated Luna Extra High implementation lanes: F2 final-result binding, BW-S06 capture provenance/logical transfer, and BW-S02/S03 package plus machine update recovery. Each assignment has a scoped file lease and current-source basis; qualification remains coordinator-owned."
+    },
+    {
+      "date": "2026-10-14",
+      "event": "S06_capture_provenance_and_personal_inbox_status_integrated",
+      "source_commit": "990b109a",
+      "summary": "Integrated schema-3 Personal Inbox status and explicit capture-origin witness, legacy migration without fabricated origins, schema-3 metadata round-trip, and status-based Global TUI Inbox filtering. The combined Global TUI typecheck and all 97 tests pass. S06-T90/S07-T90 acceptance remains open."
+    }
+  ]
 }

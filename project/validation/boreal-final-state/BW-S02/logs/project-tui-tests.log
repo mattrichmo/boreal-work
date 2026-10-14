@@ -1,0 +1,13 @@
+
+> test
+> tsc && node dist/test.js && node --test tests/*.test.mjs
+
+file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/tui/dist/test.js:11
+        throw new Error(message);
+              ^
+
+Error: mounted controller rehydrates a durable receipt after restart/navigation
+    at assert (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/tui/dist/test.js:11:15)
+    at file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/tui/dist/test.js:1413:1
+
+Node.js v26.8.2

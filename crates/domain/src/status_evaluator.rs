@@ -6,6 +6,10 @@ use crate::{
     GateRequirement, GateState, PersistedLifecycle, ReasonCode, StatusContext, StatusDecision,
     WorkItem, WorkKind,
 };
+use crate::decision_inputs::ExternalWaitPersistedState;
+use crate::work_model_v3::{
+    evaluate_business_schedule, BusinessDate, BusinessDateBoundary, BusinessScheduleView,
+};
 
 type PrimaryDecision = (DerivedStatus, bool, Option<DomainAction>, ReasonCode);
 
@@ -92,14 +96,167 @@ fn evaluate_status_inner(
     } else {
         context.activation_at.filter(|at| *at > context.as_of)
     };
-    let scheduled_at = [work_schedule_at, activation_at]
-        .into_iter()
-        .flatten()
-        .min();
     let schedule_next_change_at = schedule_decision
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .and_then(|decision| decision.next_change_at);
+
+    let business_schedule_decision = context.business_schedule.map(|schedule| {
+        schedule.validate()?;
+        if context.business_schedule_revision == Some(0)
+            || (context.business_schedule_revision.is_some()
+                && schedule_has_local_dates(schedule)
+                && context.business_schedule_setting_revision.is_none())
+        {
+            return Err(crate::work_model_v3::ModelError::InvalidSchedule(
+                "revisioned date-only schedule is missing its setting revision",
+            ));
+        }
+        if let Some(business_time) = context.business_time {
+            if business_time.as_of != context.as_of
+                || business_time.project_id != work.project_id
+                || context
+                    .business_schedule_setting_revision
+                    .is_some_and(|revision| revision > business_time.setting_revision)
+            {
+                return Err(crate::work_model_v3::ModelError::InvalidSchedule(
+                    "business schedule context does not match the current project clock",
+                ));
+            }
+            evaluate_business_schedule(schedule, business_time, work.lifecycle.is_terminal())
+        } else if schedule_requires_project_clock(schedule) {
+            Err(crate::work_model_v3::ModelError::InvalidSchedule(
+                "date-only not-before schedule requires a validated project civil-time context",
+            ))
+        } else {
+            let instant = |value: &Option<BusinessDate>| match value {
+                Some(BusinessDate::Instant(at)) => Some(*at),
+                Some(BusinessDate::ResolvedLocal(value)) => Some(value.utc_instant),
+                _ => None,
+            };
+            let not_before = instant(&schedule.not_before);
+            let due = instant(&schedule.due);
+            Ok(BusinessScheduleView {
+                available: not_before.is_none_or(|at| context.as_of >= at),
+                due_today: false,
+                overdue: !work.lifecycle.is_terminal()
+                    && due.is_some_and(|at| context.as_of >= at),
+                next_changes: [
+                    not_before.filter(|at| *at > context.as_of),
+                    (!work.lifecycle.is_terminal())
+                        .then(|| due.filter(|at| *at > context.as_of))
+                        .flatten(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(BusinessDateBoundary::Instant)
+                .collect(),
+            })
+        }
+    });
+    let business_schedule_invalid = business_schedule_decision
+        .as_ref()
+        .is_some_and(Result::is_err);
+    let business_schedule_view = business_schedule_decision
+        .as_ref()
+        .and_then(|result| result.as_ref().ok());
+    let business_schedule_available = business_schedule_view.is_none_or(|view| view.available);
+    let business_not_before_at = if business_schedule_available || work.lifecycle.is_terminal() {
+        None
+    } else {
+        context
+            .business_schedule
+            .and_then(|schedule| schedule.not_before.as_ref())
+            .and_then(|value| match value {
+                BusinessDate::LocalDate(_) => context.business_not_before_at,
+                BusinessDate::Instant(at) => Some(*at),
+                BusinessDate::ResolvedLocal(value) => Some(value.utc_instant),
+            })
+            .filter(|at| *at > context.as_of)
+    };
+    let business_schedule_next_change_at = context
+        .business_schedule_next_change_at
+        .or_else(|| {
+            business_schedule_view.and_then(|view| {
+                view.next_changes
+                    .iter()
+                    .filter_map(|boundary| match boundary {
+                        BusinessDateBoundary::Instant(at) if *at > context.as_of => Some(*at),
+                        _ => None,
+                    })
+                    .min()
+            })
+        });
+
+    let mut blocking_external_wait_ids = Vec::new();
+    let mut follow_up_due_wait_ids = Vec::new();
+    let mut external_wait_invalid = false;
+    for wait in context
+        .external_waits
+        .iter()
+        .filter(|wait| wait.affected_work_id == work.id)
+    {
+        if wait.project_id != work.project_id {
+            external_wait_invalid = true;
+            continue;
+        }
+        match wait.state {
+            ExternalWaitPersistedState::Open | ExternalWaitPersistedState::Unknown => {
+                blocking_external_wait_ids.push(wait.wait_id.clone());
+                if wait.state == ExternalWaitPersistedState::Unknown {
+                    external_wait_invalid = true;
+                    continue;
+                }
+                if let Some(follow_up) = &wait.follow_up {
+                    let date_only = matches!(follow_up, BusinessDate::LocalDate(_));
+                    if follow_up.validate().is_err()
+                        || date_only != wait.civil_time_setting_revision.is_some()
+                    {
+                        external_wait_invalid = true;
+                        continue;
+                    }
+                    if let Some(business_time) = context.business_time {
+                        if business_time.as_of != context.as_of
+                            || business_time.project_id != work.project_id
+                            || wait
+                                .civil_time_setting_revision
+                                .is_some_and(|revision| revision > business_time.setting_revision)
+                        {
+                            external_wait_invalid = true;
+                            continue;
+                        }
+                        let due = match follow_up {
+                            BusinessDate::LocalDate(date) => business_time.civil_date >= *date,
+                            BusinessDate::Instant(at) => *at <= context.as_of,
+                            BusinessDate::ResolvedLocal(value) => {
+                                value.utc_instant <= context.as_of
+                            }
+                        };
+                        if due {
+                            follow_up_due_wait_ids.push(wait.wait_id.clone());
+                        }
+                    } else if date_only {
+                        external_wait_invalid = true;
+                    } else if matches!(follow_up,
+                        BusinessDate::Instant(at) if *at <= context.as_of
+                    ) || matches!(follow_up,
+                        BusinessDate::ResolvedLocal(value) if value.utc_instant <= context.as_of
+                    ) {
+                        follow_up_due_wait_ids.push(wait.wait_id.clone());
+                    }
+                }
+            }
+            ExternalWaitPersistedState::Resolved | ExternalWaitPersistedState::Cancelled => {}
+        }
+    }
+    blocking_external_wait_ids.sort();
+    blocking_external_wait_ids.dedup();
+    follow_up_due_wait_ids.sort();
+    follow_up_due_wait_ids.dedup();
+    let scheduled_at = [work_schedule_at, activation_at, business_not_before_at]
+        .into_iter()
+        .flatten()
+        .min();
 
     let exception_satisfies = |gate_id: &crate::GateId| {
         facts.is_some_and(|facts| {
@@ -154,6 +311,12 @@ fn evaluate_status_inner(
     if schedule_invalid {
         hard_reasons.push(ReasonCode::HardHold("schedule_invalid".into()));
     }
+    if business_schedule_invalid {
+        hard_reasons.push(ReasonCode::HardHold("business_schedule_invalid".into()));
+    }
+    if external_wait_invalid {
+        hard_reasons.push(ReasonCode::HardHold("external_wait_invalid".into()));
+    }
 
     let mut prerequisites = match facts.and_then(|facts| facts.dependencies.as_present()) {
         Some(dependencies) => dependencies
@@ -169,6 +332,12 @@ fn evaluate_status_inner(
             .map(|item| ReasonCode::PrerequisiteOpen(item.id.clone()))
             .collect::<Vec<_>>(),
     };
+    prerequisites.extend(
+        blocking_external_wait_ids
+            .iter()
+            .cloned()
+            .map(ReasonCode::ExternalWaitOpen),
+    );
     sort_reasons(&mut prerequisites);
 
     if attempt.is_some_and(|current| current.work_id != work.id || work.kind != WorkKind::Task) {
@@ -429,6 +598,8 @@ fn evaluate_status_inner(
             .chain(retry_at)
             .chain(scheduled_at)
             .chain(schedule_next_change_at)
+            .chain(business_schedule_next_change_at)
+            .chain(context.external_wait_next_change_at)
             .filter(|at| *at > context.as_of)
             .min()
     };
@@ -441,6 +612,10 @@ fn evaluate_status_inner(
         project_revision: context.project_revision,
         as_of: context.as_of,
         next_status_change_at,
+        due_today: business_schedule_view.is_some_and(|view| view.due_today),
+        overdue: business_schedule_view.is_some_and(|view| view.overdue),
+        blocking_external_wait_ids,
+        follow_up_due_wait_ids,
         display_status,
         primary_reason: primary,
         reason_codes: reasons,
@@ -454,6 +629,22 @@ fn evaluate_status_inner(
         gate_gaps: gaps,
         affected_dependents: dependents,
     }
+}
+
+fn schedule_has_local_dates(schedule: &crate::work_model_v3::BusinessSchedule) -> bool {
+    [
+        schedule.not_before.as_ref(),
+        schedule.due.as_ref(),
+        schedule.planned_start.as_ref(),
+        schedule.planned_end.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| matches!(value, BusinessDate::LocalDate(_)))
+}
+
+fn schedule_requires_project_clock(schedule: &crate::work_model_v3::BusinessSchedule) -> bool {
+    matches!(schedule.not_before.as_ref(), Some(BusinessDate::LocalDate(_)))
 }
 
 fn sort_reasons(reasons: &mut Vec<ReasonCode>) {
@@ -559,5 +750,152 @@ fn proof_decision(gates: &[GateRequirement], gaps: &[GateId]) -> PrimaryDecision
             Some(DomainAction::ProvideEvidence),
             ReasonCode::VerificationRequired,
         )
+    }
+}
+
+#[cfg(test)]
+mod business_status_tests {
+    use super::*;
+    use crate::decision_inputs::{ExternalWaitPersistedState, ExternalWaitScopeInput};
+    use crate::work_model_v3::{BusinessDate, BusinessSchedule, BusinessTimeContext, LocalDate};
+    use crate::{AcceptanceProfile, ActorId, ProjectId, Revision, TimestampMs};
+
+    fn work() -> WorkItem {
+        WorkItem {
+            id: "work-1".into(),
+            project_id: ProjectId::new("project-1"),
+            kind: WorkKind::Task,
+            parent_id: None,
+            title: "Prepare release".into(),
+            description: String::new(),
+            lifecycle: PersistedLifecycle::Open,
+            priority: 0,
+            dispatch_policy: DispatchPolicy::Automatic,
+            hard_holds: Vec::new(),
+            acceptance_profile: AcceptanceProfile::focused(),
+        }
+    }
+
+    fn actor() -> ActorContext {
+        ActorContext {
+            actor_id: ActorId::new("agent-1"),
+            role: ActorRole::Agent,
+        }
+    }
+
+    fn business_time() -> BusinessTimeContext {
+        BusinessTimeContext {
+            project_id: ProjectId::new("project-1"),
+            setting_revision: 3,
+            as_of: TimestampMs(1_800_000_000_000),
+            civil_date: LocalDate::new(2027, 1, 15),
+            timezone: "Etc/UTC".into(),
+            tzdb_identity: "sha256:test-zone".into(),
+        }
+    }
+
+    #[test]
+    fn date_only_deadlines_and_waits_use_project_local_day() {
+        let work = work();
+        let actor = actor();
+        let time = business_time();
+        let schedule = BusinessSchedule {
+            due: Some(BusinessDate::LocalDate(LocalDate::new(2027, 1, 15))),
+            ..BusinessSchedule::default()
+        };
+        let waits = [ExternalWaitScopeInput {
+            project_id: work.project_id.clone(),
+            wait_id: "decision-1".into(),
+            affected_work_id: work.id.clone(),
+            state: ExternalWaitPersistedState::Open,
+            follow_up: Some(BusinessDate::LocalDate(LocalDate::new(2027, 1, 15))),
+            civil_time_setting_revision: Some(3),
+        }];
+        let mut context = StatusContext::new(
+            &work,
+            &[],
+            None,
+            &work.acceptance_profile.gates,
+            &actor,
+            time.as_of,
+            Revision(12),
+        );
+        context.business_schedule = Some(&schedule);
+        context.business_schedule_revision = Some(4);
+        context.business_schedule_setting_revision = Some(2);
+        context.business_time = Some(&time);
+        context.external_waits = &waits;
+
+        let decision = evaluate_status(context);
+
+        assert!(decision.due_today);
+        assert!(!decision.overdue);
+        assert_eq!(decision.blocking_external_wait_ids, ["decision-1"]);
+        assert_eq!(decision.follow_up_due_wait_ids, ["decision-1"]);
+        assert_eq!(decision.display_status, DerivedStatus::Queued);
+        assert!(decision.reason_codes.contains(&ReasonCode::ExternalWaitOpen(
+            "decision-1".into()
+        )));
+    }
+
+    #[test]
+    fn date_only_schedule_without_project_clock_fails_closed() {
+        let work = work();
+        let actor = actor();
+        let schedule = BusinessSchedule {
+            not_before: Some(BusinessDate::LocalDate(LocalDate::new(2027, 1, 16))),
+            ..BusinessSchedule::default()
+        };
+        let mut context = StatusContext::new(
+            &work,
+            &[],
+            None,
+            &work.acceptance_profile.gates,
+            &actor,
+            TimestampMs(1_800_000_000_000),
+            Revision(12),
+        );
+        context.business_schedule = Some(&schedule);
+        context.business_schedule_revision = Some(4);
+        context.business_schedule_setting_revision = Some(3);
+
+        let decision = evaluate_status(context);
+
+        assert_eq!(decision.display_status, DerivedStatus::Blocked);
+        assert!(!decision.claimable_for_actor);
+        assert!(decision
+            .reason_codes
+            .contains(&ReasonCode::HardHold("business_schedule_invalid".into())));
+    }
+
+    #[test]
+    fn date_only_due_without_project_clock_stays_informational() {
+        let work = work();
+        let actor = actor();
+        let schedule = BusinessSchedule {
+            due: Some(BusinessDate::LocalDate(LocalDate::new(2027, 1, 16))),
+            ..BusinessSchedule::default()
+        };
+        let mut context = StatusContext::new(
+            &work,
+            &[],
+            None,
+            &work.acceptance_profile.gates,
+            &actor,
+            TimestampMs(1_800_000_000_000),
+            Revision(12),
+        );
+        context.business_schedule = Some(&schedule);
+        context.business_schedule_revision = Some(4);
+        context.business_schedule_setting_revision = Some(3);
+
+        let decision = evaluate_status(context);
+
+        assert!(decision.claimable_for_actor);
+        assert!(!decision.due_today);
+        assert!(!decision.overdue);
+        assert!(!decision
+            .reason_codes
+            .contains(&ReasonCode::HardHold("business_schedule_invalid".into())));
     }
 }

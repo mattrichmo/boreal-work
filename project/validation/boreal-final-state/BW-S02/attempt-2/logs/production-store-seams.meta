@@ -1,0 +1,2 @@
+$ cargo test --locked -p boreal-store --test production_store_seams
+exit=0

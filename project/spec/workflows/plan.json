@@ -1,6 +1,6 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.2.0",
+  "asset_version": "1.3.0",
   "ref": "boreal.workflow.plan.v1",
   "kind": "plan",
   "title": "Plan milestone, sprint, and task work with acceptance context",
@@ -10,19 +10,19 @@
     "health": "boreal.workflow.health.v1"
   },
   "allowed_commands": [
-    "bwrk work list --json",
-    "bwrk work create <project_id> <work_id> <title> --expected-revision <revision> --json",
-    "bwrk work edit <work_id> --title <title> --expected-revision <revision> --json",
-    "bwrk dep tree --json",
-    "bwrk dep cycles --json",
-    "bwrk cycle list --json",
-    "bwrk cycle board <cycle_id> --json",
-    "bwrk cycle create --input <input_path> --expected-revision <revision> --reason <reason> --yes --json",
-    "bwrk work ready --json",
-    "bwrk cycle current --json",
-    "bwrk template list --json",
-    "bwrk template run <template_id> --json",
-    "bwrk template run <template_id> --apply --prefix <prefix> --expected-revision <revision> --yes --json"
+    "bwrk work list --project <project_id> --json",
+    "bwrk work create --project <project_id> <work_id> <title> --expected-revision <revision> --json",
+    "bwrk work edit <project_id> <work_id> --title <title> --expected-revision <revision> --json",
+    "bwrk dep tree <project_id> --json",
+    "bwrk dep cycles <project_id> --json",
+    "bwrk cycle list --project <project_id> --json",
+    "bwrk cycle board --project <project_id> <cycle_id> --json",
+    "bwrk cycle create --project <project_id> --input <input_path> --expected-revision <revision> --reason <reason> --yes --json",
+    "bwrk work ready --project <project_id> --json",
+    "bwrk cycle current --project <project_id> --json",
+    "bwrk template list --project <project_id> --json",
+    "bwrk template run --project <project_id> <template_id> --json",
+    "bwrk template run --project <project_id> <template_id> --apply --prefix <prefix> --expected-revision <revision> --yes --json"
   ],
   "typed_inputs": [
     {

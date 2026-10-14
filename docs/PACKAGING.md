@@ -10,17 +10,17 @@ From the repository root, with Rust, Node.js, npm, and `tsc` available:
 
 ```sh
 python3 scripts/release/build_release.py \
-  --version 0.2.1 \
+  --version 0.2.2 \
   --target aarch64-apple-darwin \
   --output-dir /tmp/boreal-release
 ```
 
-The builder runs the locked Rust release build and `npm run build` for both
-TUI packages, then stages this runtime and source layout:
+The builder runs the locked Rust release build and compiles both TUI packages
+to fresh temporary output directories. It stages only the executable, required
+runtime JavaScript modules derived from current TypeScript sources, and authored
+release metadata:
 
 ```text
-apps/tui/...
-apps/global-tui/...
 bin/bwrk
 lib/boreal/tui/...
 lib/boreal/global-tui/...
@@ -28,6 +28,12 @@ share/boreal/release.json
 share/boreal/LICENSE
 share/boreal/install.sh
 ```
+
+The archive excludes TypeScript source trees, `node_modules`, compiler caches,
+checked-in `dist/` output, and runtime files that no longer have a source
+module. The manifest lists every packaged file with its size and SHA-256.
+`verify_release_package.py` checks the staged file set and identities before
+the normalized archive is written.
 
 It creates a normalized `bwrk-vX.Y.Z-TARGET.tar.gz`, a per-target release
 manifest, and `SHA256SUMS`. The checksum file contains only the target archives
@@ -43,6 +49,10 @@ The complete local build/install check is:
 ```sh
 scripts/release/package-smoke.sh
 ```
+
+The archive version must match the `version` reported by its embedded CLI.
+`--version` selects a package filename and manifest version; it cannot relabel
+a binary built with another workspace version.
 
 The release helper in `scripts/release/release_identity.py` is a dependency-
 light, standard-library-only boundary for the checked-in v2 contract assets.
@@ -120,11 +130,21 @@ boundary; it intentionally does not hash generated binaries or TUI output.
 `build_release.py` adds those generated assets, records Rust/Node/TypeScript
 toolchain versions, and creates the archive. The current process still does
 not sign artifacts, contact a registry, pause active attempts during an
-upgrade, or migrate a project database. No checked-in workflow publishes
-release archives or a rendered Homebrew formula. The formula can be rendered
-locally from reviewed archives with `scripts/release/render_homebrew_formula.py`;
-publishing it to a tap is a separate manual release step. The remaining
-behaviors are part of the P4/P5 compatibility and cutover gates.
+upgrade, or migrate a project database. The direct installer runs Global
+bootstrap after publishing package files and can restore the previous package
+on failure, but it does not yet pair package rollback with restoration of a
+matching physical Global database backup. Keep a verified Global backup for
+updates that may require a Global schema migration. No checked-in workflow
+publishes release archives or a rendered Homebrew formula. The formula can be
+rendered locally from reviewed archives with
+`scripts/release/render_homebrew_formula.py`; publishing it to a tap is a
+separate manual release step. These remaining behaviors are release-gate work.
+
+The direct installer downloads `SHA256SUMS` from the same GitHub Release as
+the selected archive and verifies the archive digest. This detects transfer or
+artifact mismatches but does not authenticate the release with an independent
+signature. The `.github/workflows/release.yml` workflow creates retained
+qualification artifacts; it does not publish them as GitHub Releases.
 
 The identity simulation is deliberately not a live installer: its target and
 rollback backup are synthetic directories inside a caller-created temp

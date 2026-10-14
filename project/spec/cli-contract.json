@@ -309,7 +309,8 @@
     "errors": "protocol/error-registry.json"
   },
   "bw_s12_t01_callable_contract": {
-    "contract_revision": "BW-S12-T01.v1",
+    "contract_revision": "BW-S12-T01.v2",
+    "general_work_contract_revision": "4",
     "protocol_version": "2",
     "envelope_schema": "boreal.protocol.envelope.v1",
     "status_values": ["implemented", "partial", "unavailable", "unsupported"],
@@ -326,22 +327,52 @@
       "artifacts_acceptance": "workflows/artifacts-acceptance.json.fixture",
       "operation_readback_paging_outcomes": "workflows/operations.json.fixture"
     },
+    "contract_only_general_work_schemas": {
+      "callable": false,
+      "unknown_fields": "strictly rejected by the frozen payload DTOs",
+      "schemas": {
+        "deliverable_requirement": "boreal.deliverable_requirement.v1",
+        "accepted_input_bundle": "boreal.accepted_input_bundle.v1",
+        "artifact_submission": "boreal.artifact_submission.v1",
+        "artifact_inspection": "boreal.artifact_inspection.v1",
+        "artifact_acceptance_request_and_readback": "boreal.artifact_acceptance.v1"
+      },
+      "v2_planning_schemas": {
+        "deliverable_requirement": "boreal.deliverable_requirement.v2",
+        "accepted_input_bundle": "boreal.accepted_input_bundle.v2",
+        "reason": "V2 preserves semantic deliverable type, the complete registered criterion set, domain input roles/scopes, and exact producer attempt/result identity while v1 remains frozen."
+      },
+      "handoff": {
+        "BW-S12-T02": ["deliverable_requirement.v2", "accepted_input_bundle.v2"],
+        "BW-S12-T03": ["artifact_submission.v1", "artifact_inspection.v1", "artifact_acceptance.v1"],
+        "BW-S12-T04": ["project-scoped immutable artifact identity", "portable source/blob bytes"]
+      },
+      "authority_rule": "The authenticated service session supplies actor and role. Artifact inspection is an observation, never a command execution receipt or human decision."
+    },
     "route_inventory": [
       {"path": "work create", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::create_work_as_session_checked", "callable_fields": ["project_id", "kind", "parent_id", "title", "description", "priority", "dispatch", "hold", "profile", "profile_version", "actor_id", "session_id", "expected_revision"]},
       {"path": "work edit", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::edit_work_as", "callable_fields": ["project_id", "work_id", "actor_id", "parent_id", "title", "description", "priority", "dispatch_policy", "expected_revision"]},
       {"path": "work claim", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::claim_with_context", "callable_fields": ["project_id", "work_id", "actor_id", "harness_id", "session_id", "attempt_id", "operation_id", "expected_revision", "source_version_id", "config_identity", "lease_ttl_ms", "hard_time_limit_ms"]},
       {"path": "source add", "status": "implemented", "direct_cli": true, "service": true, "application": "source capture and registration", "result_identity": ["project_id", "source_version_id", "content_digest", "media_type", "byte_count", "availability", "parser_identity"]},
       {"path": "source list", "status": "implemented", "direct_cli": true, "service": true, "paging": ["limit", "offset", "total", "has_more"]},
-      {"path": "source show", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05", "reason": "The command registry marks this route unavailable to service dispatch."},
-      {"path": "source verify", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05", "reason": "The command registry marks this route unavailable to service dispatch."},
+      {"path": "source show", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "request_schema": "boreal.source_lookup.v1", "request_fields": ["source_version_id"], "readback_schema": "boreal.source_show_readback.v1", "service_readback_fields": ["source", "sqlite_registration"], "host_catalog_root_in_service_payload": false},
+      {"path": "source verify", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "request_schema": "boreal.source_lookup.v1", "request_fields": ["source_version_id"], "readback_schema": "boreal.source_verify_readback.v1", "service_readback_fields": ["source_version_id", "availability", "verified_digest", "byte_count", "verified"], "host_catalog_root_in_service_payload": false},
       {"path": "evidence add", "status": "implemented", "direct_cli": true, "service": true, "result_identity": ["work_id", "attempt_id", "fence", "gate_id", "operation_id", "receipt_id"]},
       {"path": "evidence run", "status": "implemented", "direct_cli": true, "service": true, "result_identity": ["work_id", "attempt_id", "fence", "gate_id", "operation_id", "receipt_id"]},
       {"path": "review approve", "status": "implemented", "direct_cli": true, "service": true, "application": "WorkApplication::complete", "required_decision_revisions": ["expected_revision", "expected_entity_revision", "expected_proof_revision"]},
       {"path": "operation show", "status": "implemented", "direct_cli": true, "service": true, "readback": ["operation", "execution", "external_job", "recovery_obligations", "receipt", "readback_required"]},
-      {"path": "intake capture", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05"},
-      {"path": "intake bucket", "status": "partial", "direct_cli": true, "service": false, "owner": "BW-S12-T05"},
+      {"path": "intake capture", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "request_schema": "boreal.intake_capture.v1", "required_fields": ["expected_revision", "intake_id", "bucket_id", "kind", "content"], "readback_schema": "boreal.intake_capture_readback.v1", "service_expected_revision": "required", "direct_cli_expected_revision": "optional_defaults_to_current_intake_revision", "service_old_schema": "reject_service_unavailable_without_migration_or_mutation", "direct_old_schema": "preserve_existing_additive_work_model_v3_ensure"},
+      {"path": "intake bucket", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "request_schema": "boreal.intake_bucket_create.v1", "required_fields": ["expected_revision", "bucket_id", "name"], "readback_schema": "boreal.intake_bucket_readback.v1", "service_expected_revision": "required", "direct_cli_expected_revision": "optional_defaults_to_current_intake_revision", "service_old_schema": "reject_service_unavailable_without_migration_or_mutation", "direct_old_schema": "preserve_existing_additive_work_model_v3_ensure"},
       {"path": "general-work deliverable requirements", "status": "unavailable", "reason": "Callable create/edit request schemas contain no requirement collection."},
-      {"behavior": "general-work artifact submission and typed inspection", "status": "unavailable", "reason": "No public submission or typed output-inspection route is registered."}
+      {"behavior": "general-work artifact submission and typed inspection", "status": "partial", "direct_cli": true, "service": true, "owner": "BW-S12-T05", "routes": ["artifact result bind", "artifact result attempt", "artifact result operation"], "request_schema": "boreal.artifact_result_bind.v1", "required_fields": ["work_id", "attempt_id", "fence", "expected_project_revision", "expected_entity_revision", "expected_proof_revision", "result_id", "contract_revision", "outputs"], "bounded_reads": ["exact_attempt_fence", "project_operation_id"], "identity_authority": "project_actor_session_operation_trusted_time_from_envelope_or_server", "inspection_authority": "application_revalidates_exact_source_versions_and_computes_inspection_facts", "host_catalog_path_in_payload": false, "direct_old_schema": "reject_unavailable_without_migration_or_mutation", "service_old_schema": "reject_service_unavailable_without_migration_or_mutation", "reason": "Typed output binding, inspection readback and exact result reads are callable; generic artifact_submission and human artifact-decision DTO routes remain unavailable."},
+      {"path": "project civil-time set", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S13-T01", "request_schema": "boreal.project_civil_time_update.v1", "required_fields": ["expected_project_revision", "expected_setting_revision", "timezone"], "readback_schema": "boreal.project_civil_time_readback.v1", "store_contract": "append-only project_civil_time_v1", "timezone_identity": "derived from installed TZif bytes; caller cannot provide identity", "authority": "authenticated Operator; actor/session/operation/timestamp from envelope or server"},
+      {"path": "project civil-time show", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S13-T01", "readback_schema": "boreal.project_civil_time_readback.v1", "readback_fields": ["project_revision", "setting_revision", "timezone", "tzdb_identity", "changed_by", "changed_at_ms"]},
+      {"path": "work schedule set", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S13-T01", "request_schema": "boreal.work_schedule_update.v1", "required_fields": ["expected_project_revision", "expected_schedule_revision", "schedule.not_before", "schedule.due", "schedule.planned_start", "schedule.planned_end"], "readback_schema": "boreal.work_schedule_readback.v1", "clear_semantics": "all four fields are required; null explicitly clears; four nulls append a durable clear revision", "authority": "authenticated Operator; transaction checks project and schedule revisions"},
+      {"path": "work schedule show", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S13-T01", "readback_schema": "boreal.work_schedule_readback.v1", "readback_fields": ["project_revision", "work_id", "schedule_revision", "schedule", "legacy_due_at"], "absence_semantics": "revision 0 and null schedule means no v3 row; a positive revision and four null fields means explicitly cleared"},
+      {"path": "wait create", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S13-T01", "request_schema": "boreal.external_wait_create.v1", "required_fields": ["expected_project_revision", "expected_wait_revision", "wait_id", "source_work_id", "affected_work_ids", "category", "reason", "accountable", "expected_decision", "expected_output", "follow_up"], "readback_schema": "boreal.external_wait_readback.v1", "authority": "authenticated Operator; immutable affected-work scope and project/wait revisions checked by application/store"},
+      {"path": "wait resolve", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S13-T01", "request_schema": "boreal.external_wait_resolve.v1", "required_fields": ["expected_project_revision", "expected_wait_revision", "wait_id", "next_state", "outcome", "detail", "output_ref", "supplied_by"], "readback_schema": "boreal.external_wait_readback.v1", "authority": "resolution attributed to authenticated Operator; state and immutable scope checked transactionally"},
+      {"path": "wait list", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S13-T01", "readback_schema": "boreal.external_wait_readback.v1", "readback_fields": ["project_revision", "waits"]},
+      {"path": "wait show", "status": "implemented", "direct_cli": true, "service": true, "owner": "BW-S13-T01", "readback_schema": "boreal.external_wait_readback.v1", "readback_fields": ["project_revision", "waits"], "selector": "wait_id"}
     ],
     "authority_boundaries": {
       "project_work": "The project application/store owns work transitions, expected project revisions, session binding and attempt fencing.",
@@ -355,7 +386,7 @@
       "accepted_input_bundle_schema": "partial",
       "source_version_identity": "implemented",
       "generic_output_submission_identity": "unavailable",
-      "typed_output_inspection": "unavailable",
+      "typed_output_inspection": "implemented",
       "gate_receipt_proof": "implemented",
       "review_decision": "implemented",
       "generic_human_deliverable_acceptance": "unavailable"
@@ -371,7 +402,7 @@
       {"owner": "BW-S12-T03", "scope": "Define requirement coverage, immutable submissions, typed inspection proof and acceptance/review binding."},
       {"owner": "BW-S12-T04", "scope": "Define portable input/output artifact identity, storage, access scope and recovery."},
       {"owner": "BW-S12-T05", "scope": "Restore service parity and guidance for direct-only source show/verify and intake capture/bucket routes; reconcile current command fixtures with callable routes."},
-      {"owner": "BW-S13-T01", "scope": "Define date/wait planning contracts, which are not part of these callable general-work schemas."},
+      {"owner": "BW-S13-T01", "scope": "Expose strict date and external-wait application contracts through direct CLI and versioned service routes."},
       {"owner": "BW-S13-T02", "scope": "Consume versioned service contracts from the TUI; this task adds no separate TUI DTO."}
     ]
   }

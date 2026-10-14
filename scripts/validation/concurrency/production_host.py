@@ -159,7 +159,7 @@ def verify_agent_cli(
     except OSError as error:
         raise RuntimeError("Agent preflight CLI is unavailable") from error
     if (
-        binary.resolve() != (ROOT / "target/debug/bwrk").resolve()
+        not binary.is_absolute()
         or stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISREG(metadata.st_mode)
         or not metadata.st_mode & 0o111

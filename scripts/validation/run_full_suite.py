@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ORACLE_MANIFEST_ENV = "BOREAL_PRODUCTION_ORACLE_MANIFEST"
 ORACLE_MANIFEST_GENERATOR = ROOT / "crates/domain/tests/generate_production_oracle_manifest.py"
 IDENTITY_HELPER = ROOT / "scripts/validation/global-tui/identity.py"
+RELEASE_BUILDER = ROOT / "scripts/release/build_release.py"
 
 
 def collect_validation_identity(binary: Path) -> dict[str, Any]:
@@ -313,31 +314,64 @@ def markdown(report: dict[str, Any]) -> str:
 
 
 def binary_freshness(binary: Path) -> dict[str, Any]:
-    """Reject black-box evidence from a binary older than its source inputs."""
-    if not binary.exists():
+    """Require the selected executable to report the current CLI source identity."""
+    binary = binary.expanduser().resolve()
+    if not binary.is_file() or not os.access(binary, os.X_OK):
         return {
             "label": "binary-freshness",
-            "command": [],
+            "command": [str(binary), "--version", "--json"],
             "exit_code": 2,
             "status": "fail",
-            "reason": f"validation binary is missing: {binary}",
+            "reason": f"validation binary is missing or not executable: {binary}",
             "duration_ms": 0.0,
             "timeout_seconds": None,
             "stdout_log": None,
             "stderr_log": None,
         }
-    source_paths = [ROOT / "Cargo.toml", ROOT / "Cargo.lock"]
-    source_paths.extend((ROOT / "crates").glob("**/*.rs"))
-    source_paths.extend((ROOT / "apps/tui/src").glob("**/*.ts"))
-    source_paths.extend((ROOT / "apps/global-tui/src").glob("**/*.ts"))
-    newest = max((path.stat().st_mtime for path in source_paths if path.exists()), default=0.0)
-    if binary.stat().st_mtime < newest:
+    command = [str(binary), "--version", "--json"]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        envelope = json.loads(lines[-1]) if lines else {}
+        data = envelope.get("data") if isinstance(envelope, dict) else None
+        reported_source = data.get("build_source_id") if isinstance(data, dict) else None
+        if completed.returncode != 0 or not isinstance(reported_source, str):
+            raise ValueError("version response has no build_source_id")
+        spec = importlib.util.spec_from_file_location("boreal_release_builder", RELEASE_BUILDER)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load release identity helper: {RELEASE_BUILDER}")
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        expected_source = builder.source_identity(ROOT)
+    except (OSError, subprocess.SubprocessError, IndexError, ValueError, json.JSONDecodeError, RuntimeError) as error:
         return {
             "label": "binary-freshness",
-            "command": [],
+            "command": command,
+            "exit_code": completed.returncode if "completed" in locals() else 2,
+            "status": "fail",
+            "reason": f"selected binary identity could not be read: {error}",
+            "duration_ms": 0.0,
+            "timeout_seconds": None,
+            "stdout_log": None,
+            "stderr_log": None,
+        }
+    if reported_source != expected_source:
+        return {
+            "label": "binary-freshness",
+            "command": command,
             "exit_code": 2,
             "status": "fail",
-            "reason": "validation binary is older than current Rust/TypeScript source; rebuild before black-box checks",
+            "reason": (
+                "selected binary was built from different CLI inputs: "
+                f"binary={reported_source}, source={expected_source}"
+            ),
             "duration_ms": 0.0,
             "timeout_seconds": None,
             "stdout_log": None,
@@ -345,7 +379,7 @@ def binary_freshness(binary: Path) -> dict[str, Any]:
         }
     return {
         "label": "binary-freshness",
-        "command": [],
+        "command": command,
         "exit_code": 0,
         "status": "pass",
         "reason": None,
@@ -435,7 +469,7 @@ def main() -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="release-style gate: require the current binary, benchmark, SQLite floor, and no skips",
+        help="release-style gate: require an explicit absolute --bin, current source identity, benchmark, SQLite floor, and no skips",
     )
     parser.add_argument(
         "--require-no-skips",
@@ -450,7 +484,7 @@ def main() -> int:
     parser.add_argument(
         "--require-current-binary",
         action="store_true",
-        help="use and require target/debug/bwrk for black-box validation",
+        help="require the selected binary to match current CLI source; builds target/debug/bwrk only when --bin is omitted",
     )
     parser.add_argument(
         "--require-sqlite-floor",
@@ -487,6 +521,10 @@ def main() -> int:
     if args.strict:
         if args.profile != "full":
             parser.error("--strict requires --profile full")
+        if args.bin is None:
+            parser.error("--strict requires --bin with the absolute path to the candidate executable")
+        if not args.bin.is_absolute():
+            parser.error("--strict requires --bin to be an absolute path")
         args.require_no_skips = True
         args.require_current_binary = True
         args.require_sqlite_floor = True
@@ -497,9 +535,11 @@ def main() -> int:
     started_at = now_iso()
     current_binary = ROOT / "target/debug/bwrk"
     packaged_binary = ROOT / "test-project/.boreal/bin/bwrk-v2"
-    binary = args.bin or (current_binary if current_binary.exists() else packaged_binary)
-    if args.require_current_binary:
-        binary = args.bin or current_binary
+    binary = (
+        args.bin.expanduser().resolve()
+        if args.bin is not None
+        else current_binary if current_binary.exists() else packaged_binary
+    )
 
     checks: list[dict[str, Any]] = []
     cargo_network_args = [] if args.online else ["--offline"]
@@ -510,12 +550,9 @@ def main() -> int:
             timeout_seconds=args.timeout_seconds,
         )
     )
-    if args.require_current_binary:
-        # `cargo test --workspace` does not guarantee that the bwrk binary
-        # target is rebuilt. Build it explicitly after the test pass so the
-        # executable used by every black-box gate is current and inherits the
-        # caller's release-link configuration (including RUSTFLAGS for the
-        # declared SQLite floor).
+    if args.require_current_binary and args.bin is None:
+        # Source-only convenience mode builds a local executable. Qualification
+        # passes --bin explicitly and exercises those exact installed bytes.
         checks.append(
             run_check(
                 "binary-build",
@@ -524,20 +561,7 @@ def main() -> int:
                 timeout_seconds=args.timeout_seconds,
             )
         )
-        binary_path_ok = binary.resolve() == current_binary.resolve() and binary.exists()
-        checks.append(
-            {
-                "label": "binary-identity",
-                "command": [],
-                "exit_code": 0 if binary_path_ok else 2,
-                "status": "pass" if binary_path_ok else "fail",
-                "reason": None if binary_path_ok else f"strict validation requires {current_binary}",
-                "duration_ms": 0.0,
-                "timeout_seconds": None,
-                "stdout_log": None,
-                "stderr_log": None,
-            }
-        )
+        binary = current_binary.resolve()
     checks.append(binary_freshness(binary))
     if args.require_sqlite_floor:
         checks.append(
@@ -626,6 +650,8 @@ def main() -> int:
                 [
                     "python3",
                     "scripts/validation/forensic_audit.py",
+                    "--bin",
+                    str(binary),
                     "--output",
                     str(log_dir / "forensic-audit.json"),
                     "--report",
@@ -781,7 +807,7 @@ def main() -> int:
         checks.append(
             run_check(
                 "guided-closeout",
-                ["bash", "scripts/guided-closeout-smoke.sh"],
+                ["bash", "scripts/guided-closeout-smoke.sh", "--bin", str(binary)],
                 log_dir,
                 timeout_seconds=args.timeout_seconds,
             )

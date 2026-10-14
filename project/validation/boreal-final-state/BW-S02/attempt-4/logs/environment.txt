@@ -1,0 +1,13 @@
+captured_utc=2026-10-14T15:47:30Z
+source=d1f8ae0b5d42c1886df5bba04930f3692d63e6ef
+parent=d6ca9c457c96ec6f9e794567702d88de4a5032be
+status=dirty
+?? project/validation/boreal-final-state/BW-S02/attempt-4/
+host=Darwin Saturn-Air.local 24.2.0 Darwin Kernel Version 24.2.0: Fri Dec  6 19:00:33 PST 2024; root:xnu-11215.61.5~2/RELEASE_ARM64_T8122 arm64
+node=v26.8.2
+npm=11.19.1
+rustc=rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)
+cargo=cargo 1.99.0 (5f94df478 2026-08-27) (Homebrew)
+python=Python 3.14.3
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   460Gi   407Gi    27Gi    94%    3.3M  280M    1%   /System/Volumes/Data

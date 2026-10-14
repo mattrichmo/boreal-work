@@ -1,0 +1,20 @@
+
+  BOREAL / WORK
+  Machine installation · project data stays untouched
+
+  [1/4] Resolve installation source
+
+  [2/4] Verify and inspect the release archive
+
+  [3/4] Stage selected components
+bwrk 0.2.1 (api 2; source sha256:149d8b2e53f1ef7965847ae12bdf0e8ca25a120aa3f869b21fa7966d903f44b3)
+
+  [4/4] Publish installation
+bwrk 0.2.1 (api 2; source sha256:149d8b2e53f1ef7965847ae12bdf0e8ca25a120aa3f869b21fa7966d903f44b3)
+Boreal 0.2.1 installed to /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-target-smoke.piluBU/prefix
+  binary: /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-target-smoke.piluBU/prefix/bin/bwrk
+  TUI:    not selected (a previous installed dashboard was removed)
+  global: provisioned (run bwrk dashboard global)
+  add /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-target-smoke.piluBU/prefix/bin to PATH to invoke bwrk
+  Next: run bwrk dashboard global; for code projects run bwrk init, then bwrk dashboard.
+package target smoke: PASS (aarch64-apple-darwin)

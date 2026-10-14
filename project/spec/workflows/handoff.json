@@ -1,6 +1,6 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.2.0",
+  "asset_version": "1.3.0",
   "ref": "boreal.workflow.handoff.v1",
   "kind": "handoff",
   "title": "Prepare a bounded resume, replacement, or session handoff capsule",
@@ -11,15 +11,15 @@
     "memory": "boreal.workflow.memory.v1"
   },
   "allowed_commands": [
-    "bwrk agent guide --json",
+    "bwrk agent guide --project <project_id> --work <work_id> --json",
     "bwrk work checkpoint --work <work_id> --input <input_path> --expected-revision <revision> --reason <reason> --yes --json",
-    "bwrk work release <work_id> --attempt <attempt_id> --fence <fence> --json",
-    "bwrk operation show <operation_id> --json",
-    "bwrk memory readback <operation_id> --json",
-    "bwrk handoff compose --work <work_id> --json",
-    "bwrk summary compose --work <work_id> --json",
-    "bwrk summary list --work <work_id> --json",
-    "bwrk summary show <summary_id> --json"
+    "bwrk work release <project_id> <work_id> --attempt <attempt_id> --fence <fence> --json",
+    "bwrk operation show <project_id> <operation_id> --json",
+    "bwrk memory readback --project <project_id> <operation_id> --json",
+    "bwrk handoff compose --project <project_id> --work <work_id> --json",
+    "bwrk summary compose --project <project_id> --work <work_id> --json",
+    "bwrk summary list --project <project_id> --work <work_id> --json",
+    "bwrk summary show --project <project_id> <summary_id> --json"
   ],
   "typed_inputs": [
     {

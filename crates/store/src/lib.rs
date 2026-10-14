@@ -4,12 +4,15 @@
 //! persistence primitives. It deliberately does not decide lifecycle status;
 //! that belongs to the domain/application layer.
 
-use boreal_domain::work_model_v3::WorkSchedule;
+use boreal_domain::work_model_v3::{
+    ExternalWaitState, ProjectCivilTimeSetting, WorkSchedule, WorkScheduleRecord,
+};
 use boreal_domain::{
     AcceptanceProfile, AttemptPhase, BlockingDependency, DependencyPolicy, DispatchPolicy,
     GateKind, GateRequirement, GateState, PersistedLifecycle, ProfileId, ProjectId, ReasonCode,
     Reservation, TimestampMs, WorkId, WorkItem, WorkKind,
 };
+use boreal_domain::decision_inputs::{ExternalWaitPersistedState, ExternalWaitScopeInput};
 use libsqlite3_sys::{
     sqlite3_compileoption_get, sqlite3_libversion, sqlite3_libversion_number, sqlite3_sourceid,
 };
@@ -19,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, NulError};
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -30,12 +34,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use profiles::{PinnedRequirements, ProfileStore, ProfileVersion, RequirementSubjectKind};
 
 pub mod acceptance;
+mod backup_bundle;
 pub mod completion;
 mod completion_migrations;
 pub mod cycle_commands;
+pub use cycle_commands::ContainerRollupSnapshotV3;
 pub mod deliverables;
 pub mod execution;
+pub mod final_result;
 pub mod identity;
+mod intake_delivery;
 pub mod jobs;
 mod knowledge;
 pub mod maintenance;
@@ -49,6 +57,7 @@ mod status_facts;
 pub mod transactions;
 mod work_model_v3;
 pub use deliverables::*;
+pub use intake_delivery::*;
 pub use knowledge::*;
 pub use maintenance::{MaintenanceJobInput, MaintenanceJobRecord, MaintenanceJobTransition};
 pub use migrations::{
@@ -93,10 +102,17 @@ const MISSING_CLOSE_COMPLETED_AUDIT_EVENT: &str =
 const PRODUCTION_SCHEMA_SQL: &str = include_str!("../../../project/spec/schema-production.sql");
 const LEGACY_SCHEMA_V2_SQL: &str = include_str!("../../../project/spec/schema-v2.sql");
 const WORK_MODEL_SCHEMA_V3_SQL: &str = include_str!("../../../project/spec/schema-v3.sql");
+const SCHEDULING_SCHEMA_V1_SQL: &str = include_str!("../../../project/spec/scheduling-v1.sql");
 const BACKUP_MANIFEST_FILE: &str = "manifest.json";
 const BACKUP_DATABASE_FILE: &str = "database.sqlite";
-const BACKUP_FORMAT_VERSION: u64 = 2;
+const BACKUP_FORMAT_VERSION: u64 = 3;
+const LEGACY_BACKUP_FORMAT_VERSION: u64 = 2;
 const BACKUP_PACKAGE_KIND: &str = "boreal.sqlite.backup";
+const RESTORE_IDENTITY_INTENT_FILE: &str = "restore-identity.json";
+const RESTORE_IDENTITY_INTENT_TEMP_FILE: &str = "restore-identity.tmp";
+const RESTORE_IDENTITY_APPLYING_MARKER: &str = "restore-identity-applying";
+const RESTORE_IDENTITY_APPLYING_TEMP_FILE: &str = "restore-identity-applying.tmp";
+const RESTORE_IDENTITY_INTENT_FORMAT: &str = "boreal.project-restore-identity/1";
 
 const PRODUCTION_EXTERNAL_JOB_IDENTITY_TRIGGER_SQL: &str = r#"
 CREATE TRIGGER IF NOT EXISTS boreal_external_job_identity_guard
@@ -645,6 +661,16 @@ pub struct StatusWorkRecord {
     /// available. Retry timing is deliberately not converted into a work
     /// schedule.
     pub schedule: Option<WorkSchedule>,
+    /// Latest typed business schedule, when the additive schedule schema is
+    /// installed. An explicit empty schedule remains present and shadows the
+    /// legacy `due_at` column.
+    pub business_schedule: Option<WorkScheduleRecord>,
+    /// Untouched legacy `due_at` value, present only when no typed schedule
+    /// revision exists. The status adapter accepts only strict ISO dates,
+    /// explicitly zoned timestamps, or canonical unix-ms values.
+    pub legacy_due_at: Option<String>,
+    /// Exact scoped wait facts for this work item from the same snapshot.
+    pub external_waits: Vec<ExternalWaitScopeInput>,
     /// Earliest live cycle-assignment activation instant for this work, when
     /// the v3 planning projection provides one.
     pub activation_at: Option<TimestampMs>,
@@ -779,6 +805,8 @@ pub struct ProjectStatusRead {
     pub works: Vec<StatusWorkRecord>,
     pub diagnostics: Vec<StatusRecordDiagnostic>,
     pub dependencies: Vec<StatusDependencyRecord>,
+    /// Current project civil-time setting read with the same project snapshot.
+    pub civil_time_setting: Option<ProjectCivilTimeSetting>,
 }
 
 #[derive(Clone, Debug)]
@@ -932,6 +960,29 @@ pub struct SqliteBackupPackageReport {
     pub referenced_blob_count: u64,
     pub published_memory_count: u64,
     pub restore_supported: bool,
+    pub restore_disposition: SqliteBackupPackageDisposition,
+}
+
+/// Explicit backup disposition for artifacts that the store cannot safely
+/// carry or restore. Published curated memory still belongs to its Git
+/// repository, which is not represented authoritatively in the SQLite store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SqliteBackupPackageDisposition {
+    Restorable,
+    SourceBlobBundleIncomplete(Vec<SqliteBackupArtifactIssue>),
+    PublishedMemoryRequiresExternalGitRepository {
+        publication_count: u64,
+    },
+    IncompleteSourceBlobsAndPublishedMemoryRequiresExternalGitRepository {
+        issues: Vec<SqliteBackupArtifactIssue>,
+        publication_count: u64,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteBackupArtifactIssue {
+    pub blob_digest: String,
+    pub reason: String,
 }
 
 /// Result of replacing a destination database from a validated backup
@@ -948,6 +999,32 @@ pub struct SqliteRestorePackageReport {
     pub current_database_instance_id: String,
     pub current_restore_epoch: u64,
     pub backup: SqliteBackupReport,
+}
+
+/// Durable intent for one restore operation. It is written before the staged
+/// database is created, so an interrupted backup can resume with the same
+/// physical identity and restore epoch.
+#[derive(Clone, Debug)]
+struct RestoreIdentityIntent {
+    operation_id: String,
+    package_path: String,
+    destination_path: String,
+    request_digest: String,
+    source_database_digest: String,
+    source_database_instance_id: String,
+    source_restore_epoch: u64,
+    current_database_instance_id: String,
+    current_restore_epoch: u64,
+    previous_database_path: Option<String>,
+    previous_database_instance_id: Option<String>,
+    previous_restore_epoch: Option<u64>,
+    previous_database_digest: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct RestoreDatabaseState {
+    identity: identity::DatabaseIdentity,
+    digest: String,
 }
 
 /// The durable session state values accepted by schema v2.
@@ -1548,8 +1625,10 @@ impl SqliteStore {
                 orchestration_runtime::ORCHESTRATION_RUNTIME_SCHEMA_SQL,
             )?;
             store.ensure_deliverables_schema()?;
+            store.ensure_intake_delivery_schema()?;
             store.ensure_summary_body_schema()?;
             store.ensure_legacy_summary_schema()?;
+            store.install_feature_schema("scheduling", 1, SCHEDULING_SCHEMA_V1_SQL)?;
         }
         Ok(store)
     }
@@ -2220,7 +2299,7 @@ impl SqliteStore {
                 StoreError::Unavailable(format!("cannot create package SQLite snapshot: {error}"))
             })?;
             let snapshot =
-                Self::open_read_only(&database_path).map_err(|error| {
+                Self::open(&database_path, PRODUCTION_SCHEMA_SQL).map_err(|error| {
                     StoreError::Unavailable(format!(
                     "cannot reopen package SQLite snapshot {} (exists={}, metadata={:?}): {error}",
                     database_path.display(),
@@ -2228,7 +2307,50 @@ impl SqliteStore {
                     fs::metadata(&database_path).ok().map(|metadata| metadata.len())
                 ))
                 })?;
+            let blob_sources = snapshot.backup_blob_references()?;
+            let source_references = snapshot.backup_source_references()?;
+            let mut blob_bundle = backup_bundle::package_blobs(&staging, &blob_sources)?;
+            for issue in source_blob_reference_issues(&source_references, &blob_sources) {
+                if !blob_bundle
+                    .issues
+                    .iter()
+                    .any(|existing| existing.digest == issue.digest)
+                {
+                    blob_bundle.issues.push(issue);
+                }
+            }
+            snapshot.rewrite_backup_blob_paths(&blob_sources)?;
             let mut manifest = snapshot.backup_manifest()?;
+            manifest["artifact_bundle"] = json!({
+                "format": backup_bundle::FORMAT,
+                "blobs": blob_bundle.files,
+                "unavailable_blobs": blob_bundle.issues.iter().map(|issue| issue.as_json()).collect::<Vec<_>>(),
+            });
+            manifest["restore_policy"]["source_blobs_packaged"] =
+                Value::Bool(blob_bundle.issues.is_empty());
+            manifest["restore_policy"]["external_artifacts_packaged"] = Value::Bool(
+                blob_bundle.issues.is_empty()
+                    && manifest["published_memory"]
+                        .as_array()
+                        .is_none_or(Vec::is_empty),
+            );
+            manifest["restore_policy"]["published_memory_disposition"] = Value::String(
+                if manifest["published_memory"]
+                    .as_array()
+                    .is_some_and(|rows| !rows.is_empty())
+                {
+                    "external_git_repository_required".to_owned()
+                } else {
+                    "no_published_memory".to_owned()
+                },
+            );
+            snapshot.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            snapshot.execute_batch("PRAGMA journal_mode=DELETE")?;
+            if !snapshot.journal_mode()?.eq_ignore_ascii_case("delete") {
+                return Err(StoreError::Busy(
+                    "package SQLite snapshot still has an active WAL connection".into(),
+                ));
+            }
             let database_digest = checksum(&fs::read(&database_path).map_err(|error| {
                 StoreError::Unavailable(format!(
                     "cannot read package SQLite snapshot {}: {error}",
@@ -2258,7 +2380,32 @@ impl SqliteStore {
                 .get("published_memory")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len) as u64;
-            let restore_supported = referenced_blob_count == 0 && published_memory_count == 0;
+            let issues = blob_bundle
+                .issues
+                .iter()
+                .map(|issue| SqliteBackupArtifactIssue {
+                    blob_digest: issue.digest.clone(),
+                    reason: issue.reason.clone(),
+                })
+                .collect::<Vec<_>>();
+            let restore_disposition = match (issues.is_empty(), published_memory_count) {
+                (true, 0) => SqliteBackupPackageDisposition::Restorable,
+                (false, 0) => {
+                    SqliteBackupPackageDisposition::SourceBlobBundleIncomplete(issues)
+                }
+                (true, count) => {
+                    SqliteBackupPackageDisposition::PublishedMemoryRequiresExternalGitRepository {
+                        publication_count: count,
+                    }
+                }
+                (false, count) => SqliteBackupPackageDisposition::
+                    IncompleteSourceBlobsAndPublishedMemoryRequiresExternalGitRepository {
+                        issues,
+                        publication_count: count,
+                    },
+            };
+            let restore_supported =
+                restore_disposition == SqliteBackupPackageDisposition::Restorable;
             drop(snapshot);
             fs::rename(&staging, destination).map_err(|error| {
                 StoreError::Unavailable(format!(
@@ -2275,6 +2422,7 @@ impl SqliteStore {
                 referenced_blob_count,
                 published_memory_count,
                 restore_supported,
+                restore_disposition,
             })
         })();
         if result.is_err() {
@@ -2334,16 +2482,12 @@ impl SqliteStore {
             ));
         }
         if manifest
-            .get("referenced_blobs")
+            .get("published_memory")
             .and_then(Value::as_array)
             .is_some_and(|values| !values.is_empty())
-            || manifest
-                .get("published_memory")
-                .and_then(Value::as_array)
-                .is_some_and(|values| !values.is_empty())
         {
             return Err(StoreError::Conflict(
-                "backup package references external blobs or published Git memory; an artifact bundle is required before restore"
+                "backup package references published Git memory; restore requires the authoritative external Git repository, which is not included in a store-owned backup"
                     .to_owned(),
             ));
         }
@@ -2356,9 +2500,21 @@ impl SqliteStore {
                     "restore maintenance receipt does not match its database and package".into(),
                 ));
             }
+            for (field, value) in [
+                ("operation_id", job.operation_id.as_str()),
+                ("request_digest", job.request_digest.as_str()),
+                ("created_at", job.created_at.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(StoreError::Invalid(format!(
+                        "restore maintenance job requires non-empty {field}"
+                    )));
+                }
+            }
         }
         let source = Self::open_read_only(&database_path)?;
         source.validate_backup_manifest(&manifest)?;
+        let verified_blobs = backup_bundle::verify_package_blobs(package, &manifest)?;
         let source_identity = manifest_database_identity(&manifest)?;
         let source_runtime = source.sqlite_runtime_identity();
         if !source_runtime.at_least((3, 8, 0)) {
@@ -2368,6 +2524,12 @@ impl SqliteStore {
             )));
         }
 
+        if let Some(job) = job {
+            if let Some(receipt) = Self::reconcile_restore_maintenance_job(destination, job)? {
+                return restore_package_report_from_receipt(package, destination, &receipt);
+            }
+        }
+
         let parent = destination.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent).map_err(|error| {
             StoreError::Unavailable(format!(
@@ -2375,7 +2537,7 @@ impl SqliteStore {
                 parent.display()
             ))
         })?;
-        let existing_identity = if destination.exists() {
+        let existing_target = if destination.exists() {
             let existing = Self::open(destination, PRODUCTION_SCHEMA_SQL)?;
             let mut checkpoint = existing.prepare("PRAGMA wal_checkpoint(TRUNCATE)")?;
             if checkpoint.step()? != SQLITE_ROW {
@@ -2409,77 +2571,122 @@ impl SqliteStore {
                 .map_err(|error| StoreError::Corrupt(error.to_string()))?;
             drop(existing);
             remove_checkpointed_restore_sidecars(destination)?;
-            Some(identity)
+            let bytes = fs::read(destination).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot read restore destination {} for identity intent: {error}",
+                    destination.display()
+                ))
+            })?;
+            Some(RestoreDatabaseState {
+                identity,
+                digest: checksum(&bytes),
+            })
         } else {
             None
         };
-        let current_epoch =
-            existing_identity
-                .as_ref()
-                .map_or(source_identity.restore_epoch.get(), |identity| {
-                    identity
-                        .restore_epoch
-                        .get()
-                        .max(source_identity.restore_epoch.get())
-                });
-        let next_epoch = current_epoch
-            .checked_add(1)
-            .ok_or_else(|| StoreError::Invalid("restore epoch overflow".to_owned()))?;
         let staging = if let Some(job) = job {
             maintenance_restore_staging_path(destination, &job.operation_id)?
         } else {
             backup_staging_path(destination, "restore")?
         };
-        if staging.exists() {
-            return Err(StoreError::Conflict(format!(
-                "restore staging exists and must be reconciled before retry: {}",
-                staging.display()
-            )));
-        }
-        let current_database_instance_id = identity::IdentityStore::new(&source)
-            .fresh_restore_database_instance_id()
-            .map_err(|error| {
-                StoreError::Unavailable(format!(
-                    "cannot generate a fresh restore database identity: {error}"
-                ))
-            })?
-            .to_string();
+        let intent = if staging.exists() {
+            reject_symlink(&staging)?;
+            if job.is_none() {
+                return Err(StoreError::Conflict(format!(
+                    "restore staging exists and cannot be matched to an operation: {}",
+                    staging.display()
+                )));
+            }
+            match read_restore_identity_intent(&staging)? {
+                Some(intent) => {
+                    validate_restore_identity_intent_request(
+                        &intent,
+                        job.expect("maintenance job was checked"),
+                        package,
+                        destination,
+                        &source_identity,
+                        &actual_database_digest,
+                    )?;
+                    validate_restore_identity_intent_target(
+                        &intent,
+                        destination,
+                        existing_target.as_ref(),
+                    )?;
+                    clear_uncommitted_restore_staging(&staging, true)?;
+                    intent
+                }
+                None => {
+                    if restore_identity_applying_marker_exists(&staging)? {
+                        return Err(StoreError::Corrupt(
+                            "restore staging has an application marker but no identity intent"
+                                .into(),
+                        ));
+                    }
+                    clear_uncommitted_restore_staging(&staging, false)?;
+                    fs::remove_dir(&staging).map_err(|error| {
+                        StoreError::Unavailable(format!(
+                            "cannot remove unjournaled restore staging directory {}: {error}",
+                            staging.display()
+                        ))
+                    })?;
+                    create_restore_identity_intent(
+                        &source,
+                        package,
+                        destination,
+                        Some(job.expect("maintenance job was checked")),
+                        &source_identity,
+                        &actual_database_digest,
+                        existing_target.as_ref(),
+                        &staging,
+                    )?
+                }
+            }
+        } else {
+            create_restore_identity_intent(
+                &source,
+                package,
+                destination,
+                job,
+                &source_identity,
+                &actual_database_digest,
+                existing_target.as_ref(),
+                &staging,
+            )?
+        };
         let staging_database = staging.join(BACKUP_DATABASE_FILE);
-        fs::create_dir(&staging).map_err(|error| {
-            StoreError::Unavailable(format!(
-                "cannot create restore staging directory {}: {error}",
-                staging.display()
-            ))
-        })?;
+        let artifact_staging = staging.join(backup_bundle::RESTORE_STAGING_DIRECTORY);
+        let artifact_root =
+            restore_artifact_root(destination, intent.current_restore_epoch, &verified_blobs)?;
+        let mut created_artifact_root = false;
         let result = (|| {
+            backup_bundle::materialize_blobs(&artifact_staging.join("blobs"), &verified_blobs)?;
             let backup = source.backup_to(&staging_database)?;
             let restored = Self::open(&staging_database, PRODUCTION_SCHEMA_SQL)?;
-            let previous_database_path = if destination.exists() {
-                Some(restore_previous_path(destination, next_epoch)?)
-            } else {
-                None
-            };
             if job.is_some() {
                 restored.ensure_maintenance_job_schema()?;
+                write_restore_identity_applying_marker(&staging)?;
             }
             restored.execute_batch("BEGIN IMMEDIATE")?;
             let restore_result = (|| {
                 identity::IdentityStore::new(&restored)
                     .restore(
-                        current_database_instance_id.clone(),
-                        next_epoch,
+                        intent.current_database_instance_id.clone(),
+                        intent.current_restore_epoch,
                         &production_now(),
                     )
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                if let Some(artifact_root) = artifact_root.as_deref() {
+                    rewrite_restored_blob_paths(&restored, artifact_root, &verified_blobs)?;
+                }
                 if let Some(job) = job {
                     let receipt = json!({
                         "package_path": package,
                         "destination_path": destination,
-                        "previous_database_path": previous_database_path.clone(),
+                        "previous_database_path": intent.previous_database_path.clone(),
                         "source_database_instance_id": source_identity.database_instance_id.as_str(),
                         "source_restore_epoch": source_identity.restore_epoch.get(),
-                        "current_database_instance_id": current_database_instance_id.clone(),
-                        "current_restore_epoch": next_epoch,
+                        "current_database_instance_id": intent.current_database_instance_id.clone(),
+                        "current_restore_epoch": intent.current_restore_epoch,
                         "source_page_count": backup.source_page_count,
                         "pages_copied": backup.pages_copied,
                         "busy_retries": backup.busy_retries,
@@ -2503,16 +2710,40 @@ impl SqliteStore {
             let _ = fs::remove_file(staged_wal);
             let _ = fs::remove_file(staged_shm);
 
+            if let Some(artifact_root) = artifact_root.as_deref() {
+                created_artifact_root =
+                    publish_restore_artifacts(&artifact_staging, artifact_root, &verified_blobs)?;
+            }
+
+            let previous_database_path =
+                intent.previous_database_path.as_deref().map(PathBuf::from);
+            let mut retained_previous_now = false;
             if let Some(previous) = previous_database_path.as_ref() {
-                fs::rename(destination, previous).map_err(|error| {
-                    StoreError::Unavailable(format!(
-                        "cannot retain previous database {}: {error}",
-                        previous.display()
-                    ))
-                })?;
+                if destination.exists() {
+                    if previous.exists() {
+                        return Err(StoreError::Conflict(format!(
+                            "restore retention path already exists: {}",
+                            previous.display()
+                        )));
+                    }
+                    fs::rename(destination, previous).map_err(|error| {
+                        StoreError::Unavailable(format!(
+                            "cannot retain previous database {}: {error}",
+                            previous.display()
+                        ))
+                    })?;
+                    retained_previous_now = true;
+                } else if !previous.exists() {
+                    return Err(StoreError::Corrupt(
+                        "restore target and its retained previous database are both missing".into(),
+                    ));
+                }
             }
             if let Err(error) = fs::rename(&staging_database, destination) {
-                if let Some(previous) = previous_database_path.as_ref() {
+                if retained_previous_now {
+                    let previous = previous_database_path
+                        .as_ref()
+                        .expect("a retained database path was selected");
                     let _ = fs::rename(previous, destination);
                 }
                 return Err(StoreError::Unavailable(format!(
@@ -2527,12 +2758,17 @@ impl SqliteStore {
                 previous_database_path,
                 source_database_instance_id: source_identity.database_instance_id.to_string(),
                 source_restore_epoch: source_identity.restore_epoch.get(),
-                current_database_instance_id,
-                current_restore_epoch: next_epoch,
+                current_database_instance_id: intent.current_database_instance_id.clone(),
+                current_restore_epoch: intent.current_restore_epoch,
                 backup,
             })
         })();
-        if result.is_err() {
+        if result.is_err() && job.is_none() {
+            if created_artifact_root {
+                if let Some(artifact_root) = artifact_root.as_deref() {
+                    let _ = fs::remove_dir_all(artifact_root);
+                }
+            }
             let _ = fs::remove_dir_all(&staging);
         }
         drop(source);
@@ -2555,6 +2791,41 @@ impl SqliteStore {
         }
         ensure_backup_package_path_exists(Path::new(&job.package_path))?;
         reject_symlink(destination)?;
+        let package = Path::new(&job.package_path);
+        let manifest_path = package.join(BACKUP_MANIFEST_FILE);
+        let package_database_path = package.join(BACKUP_DATABASE_FILE);
+        reject_symlink(&manifest_path)?;
+        reject_symlink(&package_database_path)?;
+        let manifest = read_backup_manifest(&manifest_path)?;
+        validate_backup_manifest(&manifest)?;
+        let package_database_digest =
+            checksum(&fs::read(&package_database_path).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot read restore package database during reconciliation: {error}"
+                ))
+            })?);
+        if manifest.get("database_digest").and_then(Value::as_str)
+            != Some(package_database_digest.as_str())
+        {
+            return Err(StoreError::Conflict(
+                "restore package changed after its staged operation was admitted".into(),
+            ));
+        }
+        if manifest
+            .get("published_memory")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+        {
+            return Err(StoreError::Conflict(
+                "restore requires the authoritative external Git repository for published memory"
+                    .into(),
+            ));
+        }
+        let package_store = Self::open_read_only(&package_database_path)?;
+        package_store.validate_backup_manifest(&manifest)?;
+        let verified_blobs = backup_bundle::verify_package_blobs(package, &manifest)?;
+        drop(package_store);
+        let source_identity = manifest_database_identity(&manifest)?;
         let read_receipt = |path: &Path| -> Result<Option<MaintenanceJobRecord>, StoreError> {
             if !path.exists() {
                 return Ok(None);
@@ -2590,6 +2861,13 @@ impl SqliteStore {
                     .database_identity()
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?
             };
+            if let Some(artifact_root) =
+                restore_artifact_root(destination, identity.restore_epoch.get(), &verified_blobs)?
+            {
+                backup_bundle::verify_materialized_blobs(&artifact_root, &verified_blobs)?;
+                let restored = Self::open_read_only_for_diagnostics(destination)?;
+                validate_restored_blob_paths(&restored, &artifact_root, &verified_blobs)?;
+            }
             if result.get("package_path").and_then(Value::as_str) != Some(job.package_path.as_str())
                 || result.get("destination_path").and_then(Value::as_str)
                     != Some(job.database_path.as_str())
@@ -2599,6 +2877,12 @@ impl SqliteStore {
                     != Some(identity.database_instance_id.as_str())
                 || result.get("current_restore_epoch").and_then(Value::as_u64)
                     != Some(identity.restore_epoch.get())
+                || result
+                    .get("source_database_instance_id")
+                    .and_then(Value::as_str)
+                    != Some(source_identity.database_instance_id.as_str())
+                || result.get("source_restore_epoch").and_then(Value::as_u64)
+                    != Some(source_identity.restore_epoch.get())
             {
                 return Err(StoreError::Conflict(
                     "published restore receipt does not match its database identity".into(),
@@ -2609,9 +2893,36 @@ impl SqliteStore {
 
         let staging = maintenance_restore_staging_path(destination, &job.operation_id)?;
         reject_symlink(&staging)?;
+        let staged_intent = read_restore_identity_intent(&staging)?;
+        if let Some(intent) = staged_intent.as_ref() {
+            validate_restore_identity_intent_request(
+                intent,
+                job,
+                package,
+                destination,
+                &source_identity,
+                &package_database_digest,
+            )?;
+        }
+        let applying_marker = if staging.exists() {
+            restore_identity_applying_marker_exists(&staging)?
+        } else {
+            false
+        };
         let staged_database = staging.join(BACKUP_DATABASE_FILE);
         reject_symlink(&staged_database)?;
-        let Some(receipt) = read_receipt(&staged_database)? else {
+        let staged_receipt = match read_receipt(&staged_database) {
+            Ok(receipt) => receipt,
+            Err(_error) if staged_intent.is_some() && !applying_marker => {
+                // The durable intent is written before the backup starts and
+                // the applying marker is published before the identity/receipt
+                // transaction. Without that marker, an unreadable staged file
+                // cannot contain a committed activation receipt.
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(receipt) = staged_receipt else {
             return Ok(None);
         };
         let result_json = receipt.result_json.as_deref().ok_or_else(|| {
@@ -2631,6 +2942,15 @@ impl SqliteStore {
             .get("current_restore_epoch")
             .and_then(Value::as_u64)
             .ok_or_else(|| StoreError::Corrupt("restore receipt omitted its epoch".into()))?;
+        let artifact_root = restore_artifact_root(destination, epoch, &verified_blobs)?;
+        if let Some(artifact_root) = artifact_root.as_deref() {
+            let artifact_staging = staging.join(backup_bundle::RESTORE_STAGING_DIRECTORY);
+            if artifact_staging.exists() {
+                backup_bundle::verify_materialized_blobs(&artifact_staging, &verified_blobs)?;
+            } else if !artifact_root.exists() {
+                backup_bundle::materialize_blobs(&artifact_staging.join("blobs"), &verified_blobs)?;
+            }
+        }
         let staged_identity = {
             let staged = Self::open_read_only_for_diagnostics(&staged_database)?;
             identity::IdentityStore::new(&staged)
@@ -2647,27 +2967,6 @@ impl SqliteStore {
                 "staged restore receipt does not match the staged database identity".into(),
             ));
         }
-        let package = Path::new(&job.package_path);
-        let manifest_path = package.join(BACKUP_MANIFEST_FILE);
-        let package_database_path = package.join(BACKUP_DATABASE_FILE);
-        reject_symlink(&manifest_path)?;
-        reject_symlink(&package_database_path)?;
-        let manifest = read_backup_manifest(&manifest_path)?;
-        validate_backup_manifest(&manifest)?;
-        let package_database_digest =
-            checksum(&fs::read(&package_database_path).map_err(|error| {
-                StoreError::Unavailable(format!(
-                    "cannot read restore package database during reconciliation: {error}"
-                ))
-            })?);
-        if manifest.get("database_digest").and_then(Value::as_str)
-            != Some(package_database_digest.as_str())
-        {
-            return Err(StoreError::Conflict(
-                "restore package changed after its staged operation was admitted".into(),
-            ));
-        }
-        let source_identity = manifest_database_identity(&manifest)?;
         if result
             .get("source_database_instance_id")
             .and_then(Value::as_str)
@@ -2678,6 +2977,16 @@ impl SqliteStore {
             return Err(StoreError::Conflict(
                 "staged restore receipt does not match its package manifest".into(),
             ));
+        }
+        if let Some(artifact_root) = artifact_root.as_deref() {
+            let staged = Self::open_read_only_for_diagnostics(&staged_database)?;
+            validate_restored_blob_paths(&staged, artifact_root, &verified_blobs)?;
+            drop(staged);
+            publish_restore_artifacts(
+                &staging.join(backup_bundle::RESTORE_STAGING_DIRECTORY),
+                artifact_root,
+                &verified_blobs,
+            )?;
         }
         let expected_previous_path = restore_previous_path_value(destination, epoch)?;
         let recorded_previous = result
@@ -2811,6 +3120,94 @@ impl SqliteStore {
         report
     }
 
+    fn backup_blob_references(&self) -> Result<Vec<Value>, StoreError> {
+        let mut blobs = Vec::new();
+        let mut statement = self.prepare(
+            "SELECT blob_digest, byte_count, media_type, path, verified_at, created_at
+             FROM blob ORDER BY blob_digest",
+        )?;
+        while statement.step()? == SQLITE_ROW {
+            blobs.push(json!({
+                "blob_digest": statement.column_text(0)?,
+                "byte_count": statement.column_u64(1)?,
+                "media_type": statement.column_text(2)?,
+                "path": statement.column_text(3)?,
+                "verified_at": statement.column_optional_text(4)?,
+                "created_at": statement.column_text(5)?,
+            }));
+        }
+        Ok(blobs)
+    }
+
+    /// Package database rows use package-relative paths, so the backup does
+    /// not embed machine-specific source paths in the manifest or snapshot.
+    fn rewrite_backup_blob_paths(&self, references: &[Value]) -> Result<(), StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            for reference in references {
+                let Some(digest) = reference.get("blob_digest").and_then(Value::as_str) else {
+                    continue;
+                };
+                // Invalid digests cannot name a bundle member. Keep their
+                // machine-specific source paths out of incomplete packages;
+                // the bundle issue makes this placeholder non-restorable.
+                let path = backup_bundle::canonical_package_path(digest)
+                    .unwrap_or_else(|| "artifacts/unavailable".to_owned());
+                let mut update = self.prepare("UPDATE blob SET path=?1 WHERE blob_digest=?2")?;
+                update.bind_text(1, &path)?;
+                update.bind_text(2, digest)?;
+                update.run()?;
+            }
+            Ok::<(), StoreError>(())
+        })();
+        if let Err(error) = result {
+            let _ = self.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+        self.execute_batch("COMMIT")
+    }
+
+    fn backup_published_memory(&self) -> Result<Vec<Value>, StoreError> {
+        let mut published_memory = Vec::new();
+        let mut statement = self.prepare(
+            "SELECT publication_id, project_id, memory_entry_id, manifest_path,
+                    git_revision, content_digest, updated_at
+             FROM memory_publication
+             WHERE state = 'published'
+             ORDER BY publication_id",
+        )?;
+        while statement.step()? == SQLITE_ROW {
+            published_memory.push(json!({
+                "publication_id": statement.column_text(0)?,
+                "project_id": statement.column_text(1)?,
+                "memory_entry_id": statement.column_text(2)?,
+                "manifest_path": statement.column_text(3)?,
+                "git_revision": statement.column_optional_text(4)?,
+                "content_digest": statement.column_text(5)?,
+                "updated_at": statement.column_text(6)?,
+            }));
+        }
+        Ok(published_memory)
+    }
+
+    fn backup_source_references(&self) -> Result<Vec<Value>, StoreError> {
+        let mut sources = Vec::new();
+        let mut statement = self.prepare(
+            "SELECT source_version_id, project_id, content_digest, byte_count, availability
+             FROM source_version ORDER BY project_id, source_version_id",
+        )?;
+        while statement.step()? == SQLITE_ROW {
+            sources.push(json!({
+                "source_version_id": statement.column_text(0)?,
+                "project_id": statement.column_text(1)?,
+                "content_digest": statement.column_text(2)?,
+                "byte_count": statement.column_u64(3)?,
+                "availability": statement.column_text(4)?,
+            }));
+        }
+        Ok(sources)
+    }
+
     fn backup_manifest(&self) -> Result<Value, StoreError> {
         let database = identity::IdentityStore::new(self)
             .database_identity()
@@ -2828,41 +3225,9 @@ impl SqliteStore {
             }));
         }
 
-        let mut blobs = Vec::new();
-        let mut blob_statement = self.prepare(
-            "SELECT blob_digest, byte_count, media_type, path, verified_at, created_at
-             FROM blob ORDER BY blob_digest",
-        )?;
-        while blob_statement.step()? == SQLITE_ROW {
-            blobs.push(json!({
-                "blob_digest": blob_statement.column_text(0)?,
-                "byte_count": blob_statement.column_u64(1)?,
-                "media_type": blob_statement.column_text(2)?,
-                "path": blob_statement.column_text(3)?,
-                "verified_at": blob_statement.column_optional_text(4)?,
-                "created_at": blob_statement.column_text(5)?,
-            }));
-        }
-
-        let mut published_memory = Vec::new();
-        let mut memory_statement = self.prepare(
-            "SELECT publication_id, project_id, memory_entry_id, manifest_path,
-                    git_revision, content_digest, updated_at
-             FROM memory_publication
-             WHERE state = 'published'
-             ORDER BY publication_id",
-        )?;
-        while memory_statement.step()? == SQLITE_ROW {
-            published_memory.push(json!({
-                "publication_id": memory_statement.column_text(0)?,
-                "project_id": memory_statement.column_text(1)?,
-                "memory_entry_id": memory_statement.column_text(2)?,
-                "manifest_path": memory_statement.column_text(3)?,
-                "git_revision": memory_statement.column_optional_text(4)?,
-                "content_digest": memory_statement.column_text(5)?,
-                "updated_at": memory_statement.column_text(6)?,
-            }));
-        }
+        let blobs = self.backup_blob_references()?;
+        let sources = self.backup_source_references()?;
+        let published_memory = self.backup_published_memory()?;
 
         Ok(json!({
             "kind": BACKUP_PACKAGE_KIND,
@@ -2880,9 +3245,12 @@ impl SqliteStore {
             },
             "projects": projects,
             "referenced_blobs": blobs,
+            "referenced_sources": sources,
             "published_memory": published_memory,
             "restore_policy": {
                 "external_artifacts_packaged": false,
+                "source_blobs_packaged": true,
+                "published_memory_packaged": false,
                 "requires_new_restore_epoch": true,
                 "retains_previous_database": true,
             },
@@ -2957,6 +3325,26 @@ impl SqliteStore {
                     "backup manifest workspace binding does not match project {project_id}"
                 )));
             }
+        }
+        if manifest.get("referenced_blobs") != Some(&Value::Array(self.backup_blob_references()?)) {
+            return Err(StoreError::Conflict(
+                "backup manifest blob references do not match the SQLite snapshot".to_owned(),
+            ));
+        }
+        if manifest.get("format_version").and_then(Value::as_u64) == Some(BACKUP_FORMAT_VERSION)
+            && manifest.get("referenced_sources")
+                != Some(&Value::Array(self.backup_source_references()?))
+        {
+            return Err(StoreError::Conflict(
+                "backup manifest source references do not match the SQLite snapshot".to_owned(),
+            ));
+        }
+        if manifest.get("published_memory") != Some(&Value::Array(self.backup_published_memory()?))
+        {
+            return Err(StoreError::Conflict(
+                "backup manifest published-memory references do not match the SQLite snapshot"
+                    .to_owned(),
+            ));
         }
         Ok(())
     }
@@ -5582,6 +5970,68 @@ impl SqliteStore {
         } else {
             self.status_planning_facts_for_project(project_id)?
         };
+        // Scheduling is an additive feature. Read its facts from this same
+        // SQLite transaction when the feature is installed; old databases
+        // retain the legacy status projection without probing absent tables.
+        let mut civil_time_error = None;
+        let civil_time_setting = if self.table_exists("project_civil_time_v1")? {
+            match self.project_civil_time_v1(project_id) {
+                Ok(setting) => setting,
+                Err(error) => {
+                    civil_time_error = Some(error.to_string());
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let schedule_table_installed = self.table_exists("work_schedule_v3")?;
+        let mut schedule_read_error = None;
+        let business_schedules = if schedule_table_installed {
+            match self.work_schedules_v3(project_id) {
+                Ok(records) => records
+                    .into_iter()
+                    .map(|record| (record.work_id.to_string(), record))
+                    .collect::<BTreeMap<_, _>>(),
+                Err(error) => {
+                    schedule_read_error = Some(error.to_string());
+                    BTreeMap::new()
+                }
+            }
+        } else {
+            BTreeMap::new()
+        };
+        let mut wait_read_error = None;
+        let mut external_waits_by_work = BTreeMap::<String, Vec<ExternalWaitScopeInput>>::new();
+        match self.external_wait_schema_installed() {
+            Ok(true) => match self.external_waits_v1(project_id) {
+                Ok(waits) => {
+                    for wait in waits {
+                        let state = match wait.state {
+                            ExternalWaitState::Open => ExternalWaitPersistedState::Open,
+                            ExternalWaitState::Resolved => ExternalWaitPersistedState::Resolved,
+                            ExternalWaitState::Cancelled => ExternalWaitPersistedState::Cancelled,
+                        };
+                        for affected_work_id in wait.affected_work_ids {
+                            external_waits_by_work
+                                .entry(affected_work_id.to_string())
+                                .or_default()
+                                .push(ExternalWaitScopeInput {
+                                    project_id: wait.project_id.clone(),
+                                    wait_id: wait.id.to_string(),
+                                    affected_work_id,
+                                    state,
+                                    follow_up: wait.follow_up.clone(),
+                                    civil_time_setting_revision: wait.civil_time_setting_revision,
+                                });
+                        }
+                    }
+                }
+                Err(error) => wait_read_error = Some(error.to_string()),
+            },
+            Ok(false) => {}
+            Err(error) => wait_read_error = Some(error.to_string()),
+        }
         let activation_projection = if inline_planning {
             "(SELECT MIN(CASE ca.activation_policy
                            WHEN 'explicit_not_before' THEN ca.activation_at_utc_ms
@@ -5628,12 +6078,20 @@ impl SqliteStore {
         } else {
             ("", "NULL, NULL, 0, 0")
         };
+        let schedule_presence_projection = if schedule_table_installed {
+            "EXISTS (SELECT 1 FROM work_schedule_v3 schedule
+                    WHERE schedule.project_id = wi.project_id
+                      AND schedule.work_id = wi.work_id)"
+        } else {
+            "0"
+        };
         let work_query = format!(
             "SELECT wi.work_id, wi.project_id, wi.kind, wi.parent_id, wi.lifecycle,
                     wi.dispatch_policy, wi.retry_not_before, wi.priority,
                     wi.acceptance_profile_id, wi.acceptance_profile_version,
                     wi.title, wi.description, wi.rowid, {activation_projection},
-                    {canonical_seed_projection}
+                    {canonical_seed_projection}, wi.due_at,
+                    {schedule_presence_projection}
              FROM work_item wi {status_cursor_join}
              WHERE wi.project_id = ?1 ORDER BY wi.work_id"
         );
@@ -5726,6 +6184,9 @@ impl SqliteStore {
                 };
                 let mut hard_holds = active_holds.get(&work_id).cloned().unwrap_or_default();
                 if requirement_diagnostics.contains_key(&work_id)
+                    || civil_time_error.is_some()
+                    || schedule_read_error.is_some()
+                    || wait_read_error.is_some()
                     || scoped_diagnostics
                         .iter()
                         .any(|diagnostic| diagnostic.work_id == work_id)
@@ -5758,6 +6219,29 @@ impl SqliteStore {
             })();
             match work {
                 Ok((work, schedule, activation_at, retry_not_before)) => {
+                    let business_schedule = business_schedules.get(&work_id).cloned();
+                    let legacy_due_at = if business_schedule.is_none()
+                        && !rows.column_bool(19)?
+                    {
+                        rows.column_optional_text(18)?
+                    } else {
+                        None
+                    };
+                    let mut work_diagnostics = Vec::new();
+                    for (code, detail) in [
+                        ("civil_time_setting_corrupt", civil_time_error.as_ref()),
+                        ("business_schedule_corrupt", schedule_read_error.as_ref()),
+                        ("external_wait_corrupt", wait_read_error.as_ref()),
+                    ] {
+                        if let Some(detail) = detail {
+                            work_diagnostics.push(StatusRecordDiagnostic {
+                                work_id: work_id.clone(),
+                                title: Some(work.title.clone()),
+                                code: code.to_owned(),
+                                detail: detail.clone(),
+                            });
+                        }
+                    }
                     let canonical_seed = if self.canonical_production {
                         // Cursor values are also read by the per-row canonical
                         // evaluator below. Keep malformed seed values out of
@@ -5793,12 +6277,18 @@ impl SqliteStore {
                         work,
                         retry_not_before,
                         schedule,
+                        business_schedule,
+                        legacy_due_at,
+                        external_waits: external_waits_by_work
+                            .remove(&work_id)
+                            .unwrap_or_default(),
                         activation_at,
                         current_attempt,
                         gate_diagnostics: diagnostics,
                         canonical_seed,
                         action_facts: StatusActionFacts::unavailable(),
-                    })
+                    });
+                    row_diagnostics.extend(work_diagnostics);
                 }
                 Err(error) => row_diagnostics.push(StatusRecordDiagnostic {
                     work_id,
@@ -5869,6 +6359,7 @@ impl SqliteStore {
             works,
             diagnostics: record_diagnostics,
             dependencies,
+            civil_time_setting,
         };
         let v3_nodes = if work_model_v3_enabled {
             Some(self.work_nodes_v3(project_id)?)
@@ -5934,6 +6425,47 @@ impl SqliteStore {
         max_attempt_deadline: &str,
         source_version_id: Option<&str>,
         config_identity: &str,
+    ) -> Result<ClaimResult, StoreError> {
+        self.claim_work_with_context_and_business_time(
+            project_id,
+            work_id,
+            actor_id,
+            harness_id,
+            session_id,
+            attempt_id,
+            operation_id,
+            request_digest,
+            expected_revision,
+            claimed_at,
+            lease_deadline,
+            max_attempt_deadline,
+            source_version_id,
+            config_identity,
+            None,
+        )
+    }
+
+    /// Claim with an application-validated project civil-time context. The
+    /// write transaction rechecks that its setting identity and evaluation
+    /// instant still match before using the context in canonical policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_work_with_context_and_business_time(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        actor_id: &str,
+        harness_id: &str,
+        session_id: Option<&str>,
+        attempt_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_revision: Option<u64>,
+        claimed_at: &str,
+        lease_deadline: &str,
+        max_attempt_deadline: &str,
+        source_version_id: Option<&str>,
+        config_identity: &str,
+        business_time: Option<&boreal_domain::work_model_v3::BusinessStatusContext>,
     ) -> Result<ClaimResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
@@ -6018,13 +6550,14 @@ impl SqliteStore {
                 ));
             }
             if self.canonical_production {
-                self.authorize_work_action_in_transaction(
+                self.authorize_work_action_in_transaction_with_business_time(
                     project_id,
                     work_id,
                     actor_id,
                     session_id,
                     claimed_at_ms,
                     boreal_domain::actions::ActionKind::Claim,
+                    business_time,
                 )?;
             } else {
                 // Compatibility schemas have no complete canonical action
@@ -6032,11 +6565,12 @@ impl SqliteStore {
                 // not rerun a session-less projection after the production
                 // action check: that would discard the authenticated session
                 // and could contradict the descriptor just authorized above.
-                let decision = self.status_decision_in_transaction(
+                let decision = self.status_decision_in_transaction_with_business_time(
                     project_id,
                     work_id,
                     actor_id,
                     claimed_at_ms,
+                    business_time,
                 )?;
                 if !decision.claimable_for_actor {
                     return Err(StoreError::Conflict(format!(
@@ -6961,22 +7495,39 @@ impl SqliteStore {
                         );
                         let review_satisfied = row.kind == GateKind::Review
                             && reviews.get(&review_key).copied().unwrap_or(false);
-                        let summary_satisfied = row.kind == GateKind::Summary
-                            && summaries.get(&row.work_id).is_some_and(|summary| {
-                                let Some(attempt) = current_attempts.get(&row.work_id) else {
-                                    return false;
-                                };
-                                summary.attempt_id == attempt_id
-                                    && summary.fence == fence
-                                    && summary.source_version_id
-                                        == attempt.source_version_id.clone().unwrap_or_default()
-                                    && summary.config_identity == attempt.config_identity
-                                    && summary.profile_id == row.profile_id
-                                    && summary.profile_version == row.profile_version
-                                    && summary.body_size > 0
-                                    && summary.body_size <= MAX_SUMMARY_BODY_BYTES
-                                    && valid_sha256_digest(&summary.body_digest)
-                            });
+                        let summary_satisfied = if row.kind == GateKind::Summary {
+                            match (
+                                summaries.get(&row.work_id),
+                                current_attempts.get(&row.work_id),
+                            ) {
+                                (Some(summary), Some(attempt)) => {
+                                    let binding = self.current_final_result_for_attempt(attempt)?;
+                                    let source = binding
+                                        .as_ref()
+                                        .map(|binding| binding.source_version_id.clone())
+                                        .or(attempt.source_version_id.clone())
+                                        .unwrap_or_default();
+                                    summary.attempt_id == attempt_id
+                                        && summary.fence == fence
+                                        && summary.source_version_id == source
+                                        && summary.config_identity == attempt.config_identity
+                                        && summary.profile_id == row.profile_id
+                                        && summary.profile_version == row.profile_version
+                                        && binding.as_ref().is_none_or(|binding| {
+                                            binding.config_identity == summary.config_identity
+                                                && binding.profile_id == summary.profile_id
+                                                && binding.profile_version
+                                                    == summary.profile_version
+                                        })
+                                        && summary.body_size > 0
+                                        && summary.body_size <= MAX_SUMMARY_BODY_BYTES
+                                        && valid_sha256_digest(&summary.body_digest)
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
                         if review_satisfied || summary_satisfied {
                             (GateState::Satisfied, None, None)
                         } else if row.kind == GateKind::Review
@@ -7123,7 +7674,19 @@ impl SqliteStore {
         request: impl Borrow<AttemptMutationRequest>,
     ) -> Result<AttemptMutationResult, StoreError> {
         let request = request.borrow();
-        self.apply_attempt_mutation_with_recover_descriptor(request, None)
+        self.apply_attempt_mutation_with_business_time(request, None)
+    }
+
+    /// Applies a fenced attempt mutation with a business-time context derived
+    /// for the mutation timestamp. The context is revalidated under the same
+    /// writer transaction as the attempt and canonical action checks.
+    pub fn apply_attempt_mutation_with_business_time(
+        &self,
+        request: impl Borrow<AttemptMutationRequest>,
+        business_time: Option<&boreal_domain::work_model_v3::BusinessStatusContext>,
+    ) -> Result<AttemptMutationResult, StoreError> {
+        let request = request.borrow();
+        self.apply_attempt_mutation_with_recover_descriptor(request, None, business_time)
     }
 
     /// Submit the versioned Recover action as a descriptor-bound expiry. The
@@ -7165,13 +7728,14 @@ impl SqliteStore {
                 recovery::recover_action_disposition_name(input.disposition)
             )),
         };
-        self.apply_attempt_mutation_with_recover_descriptor(&request, Some(input))
+        self.apply_attempt_mutation_with_recover_descriptor(&request, Some(input), None)
     }
 
     fn apply_attempt_mutation_with_recover_descriptor(
         &self,
         request: &AttemptMutationRequest,
         recover_action: Option<&recovery::RecoverActionInput>,
+        business_time: Option<&boreal_domain::work_model_v3::BusinessStatusContext>,
     ) -> Result<AttemptMutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
@@ -7255,13 +7819,14 @@ impl SqliteStore {
                     | AttemptMutationKind::RenewLease { .. } => None,
                 };
                 if let Some(action) = action {
-                    let descriptor = self.authorize_work_action_in_transaction(
+                    let descriptor = self.authorize_work_action_in_transaction_with_business_time(
                         &request.project_id,
                         &request.work_id,
                         &request.actor_id,
                         request.session_id.as_deref(),
                         status_evaluation::canonical_status_timestamp(&request.at)?,
                         action,
+                        business_time,
                     )?;
                     if let Some(input) = recover_action {
                         validate_recover_action_descriptor(&input.descriptor, &descriptor)?;
@@ -8981,9 +9546,7 @@ impl SqliteStore {
         {
             return Err(StoreError::LeaseExpired);
         }
-        if attempt.source_version_id != request.source_version_id
-            || attempt.config_identity != request.config_identity
-        {
+        if attempt.config_identity != request.config_identity {
             return Err(StoreError::Conflict(
                 "evidence execution context no longer matches the current attempt".to_owned(),
             ));
@@ -8998,6 +9561,69 @@ impl SqliteStore {
         {
             return Err(StoreError::Conflict(
                 "evidence execution policy no longer matches the work profile".to_owned(),
+            ));
+        }
+
+        // Verification runs against a produced final result when the current
+        // proof generation has one. Keep the attempt's original input source
+        // immutable, and independently prove that the verifier request names
+        // the bound output and its recorded source lineage. Unbound legacy
+        // verification admissions continue to use the attempt input identity.
+        let current_final = if gate.kind == GateKind::Verification {
+            self.current_final_result_for_attempt(&attempt)?
+        } else {
+            None
+        };
+        if let Some(binding) = current_final {
+            let pinned = ProfileStore::new(self)
+                .current_pinned_requirements(&request.project_id, &request.work_id)?;
+            let requested_source = request.source_version_id.as_deref().ok_or_else(|| {
+                StoreError::Conflict(
+                    "bound verification admission requires the final-result source identity"
+                        .to_owned(),
+                )
+            })?;
+            let claim_source_id = attempt.source_version_id.as_deref().ok_or_else(|| {
+                StoreError::Conflict(
+                    "claim input source is unavailable for final-result verification".to_owned(),
+                )
+            })?;
+            let claim_source = self
+                .source_version(&request.project_id, claim_source_id)?
+                .ok_or_else(|| {
+                    StoreError::Conflict(
+                        "claim input source is unavailable for final-result verification"
+                            .to_owned(),
+                    )
+                })?;
+            let result_source = self
+                .source_version(&request.project_id, requested_source)?
+                .ok_or_else(|| {
+                    StoreError::Conflict(
+                        "bound final-result source is unavailable for verifier admission"
+                            .to_owned(),
+                    )
+                })?;
+            if !pinned.requires_kind("verification")
+                || binding.source_version_id != requested_source
+                || binding.config_identity != attempt.config_identity
+                || binding.profile_id != pinned.profile.profile_id
+                || binding.profile_version != pinned.profile.version
+                || binding.profile_digest != pinned.profile.policy_digest
+                || binding.profile_id != request.profile_id
+                || binding.profile_version != request.profile_version
+                || claim_source.source_version_id == result_source.source_version_id
+                || claim_source.content_digest == binding.content_digest
+                || result_source.content_digest != binding.content_digest
+                || result_source.availability != "available"
+            {
+                return Err(StoreError::Conflict(
+                    "evidence execution source no longer matches the current final-result binding and source lineage".to_owned(),
+                ));
+            }
+        } else if attempt.source_version_id != request.source_version_id {
+            return Err(StoreError::Conflict(
+                "evidence execution context no longer matches the current attempt".to_owned(),
             ));
         }
 
@@ -10411,7 +11037,12 @@ impl SqliteStore {
                 actual: attempt.session_id.unwrap_or_default(),
             });
         }
-        if attempt.source_version_id.as_deref() != Some(request.source_version_id.as_str()) {
+        let final_binding = self.current_final_result_for_attempt(&attempt)?;
+        let expected_source = final_binding
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id.clone());
+        if expected_source.as_deref() != Some(request.source_version_id.as_str()) {
             return Err(StoreError::Invalid(
                 "summary source context mismatch".to_owned(),
             ));
@@ -10439,6 +11070,15 @@ impl SqliteStore {
         {
             return Err(StoreError::Invalid(
                 "summary profile context mismatch".to_owned(),
+            ));
+        }
+        if final_binding.as_ref().is_some_and(|binding| {
+            binding.config_identity != request.config_identity
+                || binding.profile_id != request.profile_id
+                || binding.profile_version != request.profile_version
+        }) {
+            return Err(StoreError::Invalid(
+                "summary context does not match the bound final result".to_owned(),
             ));
         }
         Ok(())
@@ -10470,10 +11110,15 @@ impl SqliteStore {
         let Some(summary) = self.current_summary(&request.project_id, &request.work_id)? else {
             return Ok(false);
         };
+        let final_binding = self.current_final_result_for_attempt(attempt)?;
+        let expected_source = final_binding
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id.clone());
         Ok(summary.attempt_id == request.attempt_id
             && summary.fence == request.fence
-            && summary.source_version_id
-                == request.source_version_id.as_deref().unwrap_or_default()
+            && summary.source_version_id == expected_source.as_deref().unwrap_or_default()
+            && request.source_version_id == expected_source
             && summary.config_identity == request.config_identity
             && summary.profile_id == request.profile_id
             && summary.profile_version == request.profile_version
@@ -10487,7 +11132,11 @@ impl SqliteStore {
             && (attempt.current || self.attempt_has_current_submission(attempt)?)
             && attempt.actor_id == request.actor_id
             && attempt.session_id == request.session_id
-            && attempt.source_version_id == request.source_version_id
+            && final_binding.as_ref().is_none_or(|binding| {
+                binding.config_identity == request.config_identity
+                    && binding.profile_id == request.profile_id
+                    && binding.profile_version == request.profile_version
+            })
             && attempt.config_identity == request.config_identity)
     }
 
@@ -10608,8 +11257,18 @@ impl SqliteStore {
                 actual: request.fence,
             }));
         }
+        let final_binding = self.current_final_result_for_attempt(&attempt)?;
+        let current_source = final_binding
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id.clone());
         if request.source_version_id != expected.source_version_id
-            || attempt.source_version_id != expected.source_version_id
+            || expected.source_version_id != current_source
+            || final_binding.as_ref().is_some_and(|binding| {
+                binding.config_identity != expected.config_identity
+                    || binding.profile_id != expected.profile_id
+                    || binding.profile_version != expected.profile_version
+            })
         {
             return Ok(Some(receipt_rejected("receipt_source_mismatch")));
         }
@@ -10995,12 +11654,23 @@ impl SqliteStore {
         let Some(gate) = self.gate(project_id, work_id, gate_id)? else {
             return Ok(false);
         };
+        let binding = self.current_final_result_for_attempt(&attempt)?;
+        let source = binding
+            .as_ref()
+            .map(|binding| binding.source_version_id.clone())
+            .or(attempt.source_version_id.clone())
+            .unwrap_or_default();
         Ok(summary.attempt_id == attempt_id
             && summary.fence == fence
-            && summary.source_version_id == attempt.source_version_id.clone().unwrap_or_default()
+            && summary.source_version_id == source
             && summary.config_identity == attempt.config_identity
             && summary.profile_id == gate.profile_id
             && summary.profile_version == gate.profile_version
+            && binding.as_ref().is_none_or(|binding| {
+                binding.config_identity == summary.config_identity
+                    && binding.profile_id == summary.profile_id
+                    && binding.profile_version == summary.profile_version
+            })
             && summary.body_size > 0
             && summary.body_size <= MAX_SUMMARY_BODY_BYTES
             && valid_sha256_digest(&summary.body_digest))
@@ -11334,6 +12004,18 @@ impl SqliteStore {
 
     fn table_exists(&self, table: &str) -> Result<bool, StoreError> {
         self.schema_object_exists("table", table)
+    }
+
+    fn external_wait_schema_installed(&self) -> Result<bool, StoreError> {
+        let waits = self.table_exists("external_wait_v1")?;
+        let scopes = self.table_exists("external_wait_scope_v1")?;
+        match (waits, scopes) {
+            (true, true) => Ok(true),
+            (false, false) => Ok(false),
+            _ => Err(StoreError::Corrupt(
+                "external-wait schema is partially installed".to_owned(),
+            )),
+        }
     }
 
     fn table_has_column(&self, table: &str, column: &str) -> Result<bool, StoreError> {
@@ -12445,6 +13127,609 @@ fn remove_checkpointed_restore_sidecars(destination: &Path) -> Result<(), StoreE
     Ok(())
 }
 
+impl RestoreIdentityIntent {
+    fn as_json(&self) -> Value {
+        json!({
+            "format": RESTORE_IDENTITY_INTENT_FORMAT,
+            "operation_id": self.operation_id,
+            "package_path": self.package_path,
+            "destination_path": self.destination_path,
+            "request_digest": self.request_digest,
+            "source_database_digest": self.source_database_digest,
+            "source_database_instance_id": self.source_database_instance_id,
+            "source_restore_epoch": self.source_restore_epoch,
+            "current_database_instance_id": self.current_database_instance_id,
+            "current_restore_epoch": self.current_restore_epoch,
+            "previous_database_path": self.previous_database_path,
+            "previous_database_instance_id": self.previous_database_instance_id,
+            "previous_restore_epoch": self.previous_restore_epoch,
+            "previous_database_digest": self.previous_database_digest,
+        })
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, StoreError> {
+        let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+            StoreError::Corrupt(format!("restore identity intent is invalid JSON: {error}"))
+        })?;
+        let string = |field: &str| -> Result<String, StoreError> {
+            value
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    StoreError::Corrupt(format!("restore identity intent is missing {field}"))
+                })
+        };
+        let optional_string = |field: &str| -> Result<Option<String>, StoreError> {
+            match value.get(field) {
+                Some(Value::Null) => Ok(None),
+                Some(Value::String(value)) => Ok(Some(value.clone())),
+                _ => Err(StoreError::Corrupt(format!(
+                    "restore identity intent has invalid {field}"
+                ))),
+            }
+        };
+        let number = |field: &str| -> Result<u64, StoreError> {
+            value.get(field).and_then(Value::as_u64).ok_or_else(|| {
+                StoreError::Corrupt(format!("restore identity intent has invalid {field}"))
+            })
+        };
+        let optional_number = |field: &str| -> Result<Option<u64>, StoreError> {
+            match value.get(field) {
+                Some(Value::Null) => Ok(None),
+                Some(value) => value.as_u64().map(Some).ok_or_else(|| {
+                    StoreError::Corrupt(format!("restore identity intent has invalid {field}"))
+                }),
+                None => Err(StoreError::Corrupt(format!(
+                    "restore identity intent is missing {field}"
+                ))),
+            }
+        };
+
+        if value.get("format").and_then(Value::as_str) != Some(RESTORE_IDENTITY_INTENT_FORMAT) {
+            return Err(StoreError::Corrupt(
+                "unsupported restore identity intent format".into(),
+            ));
+        }
+        let intent = Self {
+            operation_id: string("operation_id")?,
+            package_path: string("package_path")?,
+            destination_path: string("destination_path")?,
+            request_digest: string("request_digest")?,
+            source_database_digest: string("source_database_digest")?,
+            source_database_instance_id: string("source_database_instance_id")?,
+            source_restore_epoch: number("source_restore_epoch")?,
+            current_database_instance_id: string("current_database_instance_id")?,
+            current_restore_epoch: number("current_restore_epoch")?,
+            previous_database_path: optional_string("previous_database_path")?,
+            previous_database_instance_id: optional_string("previous_database_instance_id")?,
+            previous_restore_epoch: optional_number("previous_restore_epoch")?,
+            previous_database_digest: optional_string("previous_database_digest")?,
+        };
+        identity::DatabaseIdentity::new(
+            intent.source_database_instance_id.clone(),
+            intent.source_restore_epoch,
+        )
+        .and_then(|_| {
+            identity::DatabaseIdentity::new(
+                intent.current_database_instance_id.clone(),
+                intent.current_restore_epoch,
+            )
+        })
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if intent.operation_id.trim().is_empty()
+            || intent.package_path.trim().is_empty()
+            || intent.destination_path.trim().is_empty()
+            || intent.request_digest.trim().is_empty()
+            || intent.source_database_digest.trim().is_empty()
+            || intent.current_restore_epoch <= intent.source_restore_epoch
+        {
+            return Err(StoreError::Corrupt(
+                "restore identity intent contains incomplete or non-monotonic identity data".into(),
+            ));
+        }
+        let has_previous = intent.previous_database_path.is_some();
+        if intent.previous_database_instance_id.is_some() != has_previous
+            || intent.previous_restore_epoch.is_some() != has_previous
+            || intent.previous_database_digest.is_some() != has_previous
+        {
+            return Err(StoreError::Corrupt(
+                "restore identity intent has incomplete previous-database provenance".into(),
+            ));
+        }
+        if let (Some(previous_id), Some(previous_epoch)) = (
+            intent.previous_database_instance_id.as_ref(),
+            intent.previous_restore_epoch,
+        ) {
+            identity::DatabaseIdentity::new(previous_id.clone(), previous_epoch)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            if intent.current_restore_epoch <= previous_epoch {
+                return Err(StoreError::Corrupt(
+                    "restore identity intent does not advance the previous restore epoch".into(),
+                ));
+            }
+        }
+        Ok(intent)
+    }
+}
+
+fn read_restore_identity_intent(
+    staging: &Path,
+) -> Result<Option<RestoreIdentityIntent>, StoreError> {
+    reject_symlink(staging)?;
+    let metadata = match fs::symlink_metadata(staging) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(StoreError::Unavailable(format!(
+                "cannot inspect restore staging directory {}: {error}",
+                staging.display()
+            )))
+        }
+    };
+    if !metadata.is_dir() {
+        return Err(StoreError::Conflict(format!(
+            "restore staging path is not a directory: {}",
+            staging.display()
+        )));
+    }
+    let path = staging.join(RESTORE_IDENTITY_INTENT_FILE);
+    reject_symlink(&path)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(StoreError::Unavailable(format!(
+                "cannot inspect restore identity intent {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return Err(StoreError::Corrupt(
+            "restore identity intent is not a bounded regular file".into(),
+        ));
+    }
+    let bytes = fs::read(&path).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot read restore identity intent {}: {error}",
+            path.display()
+        ))
+    })?;
+    RestoreIdentityIntent::parse(&bytes).map(Some)
+}
+
+fn validate_restore_identity_intent_request(
+    intent: &RestoreIdentityIntent,
+    job: &MaintenanceJobInput,
+    package: &Path,
+    destination: &Path,
+    source_identity: &identity::DatabaseIdentity,
+    source_database_digest: &str,
+) -> Result<(), StoreError> {
+    if intent.operation_id != job.operation_id
+        || intent.package_path != job.package_path
+        || intent.destination_path != job.database_path
+        || intent.request_digest != job.request_digest
+        || Path::new(&intent.package_path) != package
+        || Path::new(&intent.destination_path) != destination
+        || intent.source_database_digest != source_database_digest
+        || intent.source_database_instance_id != source_identity.database_instance_id.as_str()
+        || intent.source_restore_epoch != source_identity.restore_epoch.get()
+    {
+        return Err(StoreError::Conflict(
+            "restore staging intent is already bound to another package, database, or source identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn create_restore_identity_intent(
+    source: &SqliteStore,
+    package: &Path,
+    destination: &Path,
+    job: Option<&MaintenanceJobInput>,
+    source_identity: &identity::DatabaseIdentity,
+    source_database_digest: &str,
+    existing_target: Option<&RestoreDatabaseState>,
+    staging: &Path,
+) -> Result<RestoreIdentityIntent, StoreError> {
+    let current_epoch = existing_target.map_or(source_identity.restore_epoch.get(), |target| {
+        target
+            .identity
+            .restore_epoch
+            .get()
+            .max(source_identity.restore_epoch.get())
+    });
+    let current_restore_epoch = current_epoch
+        .checked_add(1)
+        .ok_or_else(|| StoreError::Invalid("restore epoch overflow".into()))?;
+    let current_database_instance_id = identity::IdentityStore::new(source)
+        .fresh_restore_database_instance_id()
+        .map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot generate a fresh restore database identity: {error}"
+            ))
+        })?
+        .to_string();
+    let previous_database_path = if existing_target.is_some() {
+        Some(
+            restore_previous_path(destination, current_restore_epoch)?
+                .to_string_lossy()
+                .into_owned(),
+        )
+    } else {
+        None
+    };
+    let intent = RestoreIdentityIntent {
+        operation_id: job.map_or_else(String::new, |job| job.operation_id.clone()),
+        package_path: job.map_or_else(
+            || package.to_string_lossy().into_owned(),
+            |job| job.package_path.clone(),
+        ),
+        destination_path: job.map_or_else(
+            || destination.to_string_lossy().into_owned(),
+            |job| job.database_path.clone(),
+        ),
+        request_digest: job.map_or_else(String::new, |job| job.request_digest.clone()),
+        source_database_digest: source_database_digest.to_owned(),
+        source_database_instance_id: source_identity.database_instance_id.as_str().to_owned(),
+        source_restore_epoch: source_identity.restore_epoch.get(),
+        current_database_instance_id,
+        current_restore_epoch,
+        previous_database_path,
+        previous_database_instance_id: existing_target
+            .map(|target| target.identity.database_instance_id.as_str().to_owned()),
+        previous_restore_epoch: existing_target.map(|target| target.identity.restore_epoch.get()),
+        previous_database_digest: existing_target.map(|target| target.digest.clone()),
+    };
+    fs::create_dir(staging).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot create restore staging directory {}: {error}",
+            staging.display()
+        ))
+    })?;
+    if job.is_some() {
+        sync_restore_directory(staging.parent().unwrap_or(Path::new(".")))?;
+        write_restore_identity_intent(staging, &intent)?;
+    }
+    Ok(intent)
+}
+
+fn write_restore_identity_intent(
+    staging: &Path,
+    intent: &RestoreIdentityIntent,
+) -> Result<(), StoreError> {
+    let path = staging.join(RESTORE_IDENTITY_INTENT_FILE);
+    let temporary = staging.join(RESTORE_IDENTITY_INTENT_TEMP_FILE);
+    reject_symlink(&path)?;
+    reject_symlink(&temporary)?;
+    if path.exists() {
+        return Err(StoreError::Conflict(
+            "restore identity intent already exists".into(),
+        ));
+    }
+    if temporary.exists() {
+        fs::remove_file(&temporary).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot remove stale restore identity intent temporary file: {error}"
+            ))
+        })?;
+    }
+    let bytes = serde_json::to_vec(&intent.as_json()).map_err(|error| {
+        StoreError::Invalid(format!("cannot encode restore identity intent: {error}"))
+    })?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            StoreError::Unavailable(format!("cannot create restore identity intent: {error}"))
+        })?;
+    file.write_all(&bytes).map_err(|error| {
+        StoreError::Unavailable(format!("cannot write restore identity intent: {error}"))
+    })?;
+    file.sync_all().map_err(|error| {
+        StoreError::Unavailable(format!("cannot sync restore identity intent: {error}"))
+    })?;
+    drop(file);
+    fs::rename(&temporary, &path).map_err(|error| {
+        StoreError::Unavailable(format!("cannot publish restore identity intent: {error}"))
+    })?;
+    sync_restore_directory(staging)
+}
+
+fn write_restore_identity_applying_marker(staging: &Path) -> Result<(), StoreError> {
+    let path = staging.join(RESTORE_IDENTITY_APPLYING_MARKER);
+    let temporary = staging.join(RESTORE_IDENTITY_APPLYING_TEMP_FILE);
+    reject_symlink(&path)?;
+    reject_symlink(&temporary)?;
+    if path.exists() {
+        return Ok(());
+    }
+    if temporary.exists() {
+        fs::remove_file(&temporary).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot remove stale restore application marker temporary file: {error}"
+            ))
+        })?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            StoreError::Unavailable(format!("cannot create restore application marker: {error}"))
+        })?;
+    file.write_all(b"boreal.project-restore-applying/1")
+        .map_err(|error| {
+            StoreError::Unavailable(format!("cannot write restore application marker: {error}"))
+        })?;
+    file.sync_all().map_err(|error| {
+        StoreError::Unavailable(format!("cannot sync restore application marker: {error}"))
+    })?;
+    drop(file);
+    fs::rename(&temporary, &path).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot publish restore application marker: {error}"
+        ))
+    })?;
+    sync_restore_directory(staging)
+}
+
+fn restore_identity_applying_marker_exists(staging: &Path) -> Result<bool, StoreError> {
+    let path = staging.join(RESTORE_IDENTITY_APPLYING_MARKER);
+    reject_symlink(&path)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(StoreError::Corrupt(
+            "restore application marker is not a regular file".into(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(StoreError::Unavailable(format!(
+            "cannot inspect restore application marker: {error}"
+        ))),
+    }
+}
+
+fn sync_restore_directory(path: &Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot sync restore staging directory {}: {error}",
+                    path.display()
+                ))
+            })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn inspect_restore_database_state(path: &Path) -> Result<RestoreDatabaseState, StoreError> {
+    reject_symlink(path)?;
+    let store = SqliteStore::open_read_only_for_diagnostics(path)?;
+    let identity = identity::IdentityStore::new(&store)
+        .database_identity()
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    drop(store);
+    let bytes = fs::read(path).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot read restore database {} for identity validation: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(RestoreDatabaseState {
+        identity,
+        digest: checksum(&bytes),
+    })
+}
+
+fn validate_restore_identity_intent_target(
+    intent: &RestoreIdentityIntent,
+    destination: &Path,
+    existing_target: Option<&RestoreDatabaseState>,
+) -> Result<(), StoreError> {
+    let expected_previous_path =
+        restore_previous_path_value(destination, intent.current_restore_epoch)?;
+    let Some(previous_path) = intent.previous_database_path.as_deref().map(PathBuf::from) else {
+        if existing_target.is_some() {
+            return Err(StoreError::Conflict(
+                "restore target appeared after an empty-destination restore was staged".into(),
+            ));
+        }
+        return Ok(());
+    };
+    if previous_path != expected_previous_path {
+        return Err(StoreError::Corrupt(
+            "restore identity intent has an unexpected previous database path".into(),
+        ));
+    }
+    let state = if let Some(state) = existing_target {
+        if previous_path.exists() {
+            return Err(StoreError::Conflict(
+                "restore target and its retained previous database both exist".into(),
+            ));
+        }
+        state.clone()
+    } else {
+        if !previous_path.exists() {
+            return Err(StoreError::Corrupt(
+                "restore target and its retained previous database are both missing".into(),
+            ));
+        }
+        inspect_restore_database_state(&previous_path)?
+    };
+    if intent.previous_database_instance_id.as_deref()
+        != Some(state.identity.database_instance_id.as_str())
+        || intent.previous_restore_epoch != Some(state.identity.restore_epoch.get())
+        || intent.previous_database_digest.as_deref() != Some(state.digest.as_str())
+    {
+        return Err(StoreError::Conflict(
+            "restore target changed after its identity intent was recorded".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn clear_uncommitted_restore_staging(
+    staging: &Path,
+    preserve_identity_intent: bool,
+) -> Result<(), StoreError> {
+    let allowed = [
+        BACKUP_DATABASE_FILE,
+        "database.sqlite-wal",
+        "database.sqlite-shm",
+        "database.sqlite-journal",
+        RESTORE_IDENTITY_INTENT_FILE,
+        RESTORE_IDENTITY_INTENT_TEMP_FILE,
+        RESTORE_IDENTITY_APPLYING_MARKER,
+        RESTORE_IDENTITY_APPLYING_TEMP_FILE,
+        backup_bundle::RESTORE_STAGING_DIRECTORY,
+    ];
+    for entry in fs::read_dir(staging).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot inspect interrupted restore staging directory {}: {error}",
+            staging.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot inspect interrupted restore staging entry: {error}"
+            ))
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !allowed.contains(&name.as_ref()) {
+            return Err(StoreError::Conflict(format!(
+                "restore staging contains an unexpected entry: {}",
+                entry.path().display()
+            )));
+        }
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot inspect interrupted restore staging entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(StoreError::Conflict(format!(
+                "restore staging entry is not a regular file: {}",
+                entry.path().display()
+            )));
+        }
+        if name == backup_bundle::RESTORE_STAGING_DIRECTORY {
+            if !metadata.is_dir() {
+                return Err(StoreError::Conflict(format!(
+                    "restore artifact staging entry is not a directory: {}",
+                    entry.path().display()
+                )));
+            }
+            fs::remove_dir_all(entry.path()).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot clear interrupted restore artifact staging directory {}: {error}",
+                    entry.path().display()
+                ))
+            })?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(StoreError::Conflict(format!(
+                "restore staging entry is not a regular file: {}",
+                entry.path().display()
+            )));
+        }
+        if preserve_identity_intent && name == RESTORE_IDENTITY_INTENT_FILE {
+            continue;
+        }
+        fs::remove_file(entry.path()).map_err(|error| {
+            StoreError::Unavailable(format!(
+                "cannot clear interrupted restore staging entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+    }
+    sync_restore_directory(staging)
+}
+
+fn restore_package_report_from_receipt(
+    package: &Path,
+    destination: &Path,
+    receipt: &MaintenanceJobRecord,
+) -> Result<SqliteRestorePackageReport, StoreError> {
+    if receipt.kind != "restore" || receipt.stage != "committed" {
+        return Err(StoreError::Corrupt(
+            "restore readback is not a committed restore receipt".into(),
+        ));
+    }
+    let result_json = receipt
+        .result_json
+        .as_deref()
+        .ok_or_else(|| StoreError::Corrupt("committed restore has no result receipt".into()))?;
+    let result: Value = serde_json::from_str(result_json)
+        .map_err(|_| StoreError::Corrupt("restore receipt is invalid JSON".into()))?;
+    let string = |field: &str| -> Result<String, StoreError> {
+        result
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| StoreError::Corrupt(format!("restore receipt omitted {field}")))
+    };
+    let number = |field: &str| -> Result<u64, StoreError> {
+        result
+            .get(field)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| StoreError::Corrupt(format!("restore receipt omitted {field}")))
+    };
+    let previous_database_path = match result.get("previous_database_path") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(PathBuf::from(value)),
+        _ => {
+            return Err(StoreError::Corrupt(
+                "restore receipt has invalid previous_database_path".into(),
+            ))
+        }
+    };
+    if string("package_path")? != package.to_string_lossy()
+        || string("destination_path")? != destination.to_string_lossy()
+    {
+        return Err(StoreError::Conflict(
+            "restore receipt does not match its package and destination".into(),
+        ));
+    }
+    let source_database_instance_id = string("source_database_instance_id")?;
+    let source_restore_epoch = number("source_restore_epoch")?;
+    let current_database_instance_id = string("current_database_instance_id")?;
+    let current_restore_epoch = number("current_restore_epoch")?;
+    identity::DatabaseIdentity::new(source_database_instance_id.clone(), source_restore_epoch)
+        .and_then(|_| {
+            identity::DatabaseIdentity::new(
+                current_database_instance_id.clone(),
+                current_restore_epoch,
+            )
+        })
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    Ok(SqliteRestorePackageReport {
+        package_path: package.to_path_buf(),
+        destination_path: destination.to_path_buf(),
+        previous_database_path,
+        source_database_instance_id,
+        source_restore_epoch,
+        current_database_instance_id,
+        current_restore_epoch,
+        backup: SqliteBackupReport {
+            source_page_count: number("source_page_count")?,
+            pages_copied: number("pages_copied")?,
+            busy_retries: number("busy_retries")?,
+        },
+    })
+}
+
 fn backup_staging_path(destination: &Path, label: &str) -> Result<PathBuf, StoreError> {
     let file_name = destination
         .file_name()
@@ -12512,6 +13797,164 @@ fn restore_previous_path_value(destination: &Path, epoch: u64) -> Result<PathBuf
         .join(format!("{name}.pre-restore-{epoch}")))
 }
 
+fn source_blob_reference_issues(
+    sources: &[Value],
+    blobs: &[Value],
+) -> Vec<backup_bundle::BlobIssue> {
+    let blob_sizes = blobs
+        .iter()
+        .filter_map(|blob| {
+            Some((
+                blob.get("blob_digest")?.as_str()?.to_owned(),
+                blob.get("byte_count")?.as_u64()?,
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut issues = Vec::new();
+    for source in sources {
+        if source.get("availability").and_then(Value::as_str) != Some("available") {
+            continue;
+        }
+        let digest = source
+            .get("content_digest")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let source_bytes = source.get("byte_count").and_then(Value::as_u64);
+        let Some(blob_bytes) = blob_sizes.get(digest).copied() else {
+            issues.push(backup_bundle::BlobIssue {
+                digest: digest.to_owned(),
+                reason: "available_source_blob_missing_from_store".to_owned(),
+            });
+            continue;
+        };
+        if backup_bundle::canonical_package_path(digest).is_none() {
+            issues.push(backup_bundle::BlobIssue {
+                digest: digest.to_owned(),
+                reason: "available_source_blob_has_invalid_digest".to_owned(),
+            });
+        } else if source_bytes != Some(blob_bytes) {
+            issues.push(backup_bundle::BlobIssue {
+                digest: digest.to_owned(),
+                reason: "source_and_blob_byte_counts_differ".to_owned(),
+            });
+        }
+    }
+    issues
+}
+
+fn restore_artifact_root(
+    destination: &Path,
+    epoch: u64,
+    blobs: &[backup_bundle::VerifiedBlob],
+) -> Result<Option<PathBuf>, StoreError> {
+    if blobs.is_empty() {
+        return Ok(None);
+    }
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            StoreError::Invalid("restore destination must have a UTF-8 filename".into())
+        })?;
+    Ok(Some(
+        destination
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(format!("{name}.artifacts.restore-{epoch}")),
+    ))
+}
+
+fn restored_blob_path(root: &Path, digest: &str) -> Result<PathBuf, StoreError> {
+    let relative = backup_bundle::canonical_package_path(digest).ok_or_else(|| {
+        StoreError::Corrupt("restore artifact has an invalid content digest".into())
+    })?;
+    let file_name = Path::new(&relative)
+        .file_name()
+        .ok_or_else(|| StoreError::Corrupt("restore artifact path has no filename".into()))?;
+    Ok(root.join("blobs").join(file_name))
+}
+
+fn rewrite_restored_blob_paths(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    blobs: &[backup_bundle::VerifiedBlob],
+) -> Result<(), StoreError> {
+    for blob in blobs {
+        let path = restored_blob_path(artifact_root, &blob.digest)?;
+        let path = path.to_str().ok_or_else(|| {
+            StoreError::Invalid("restored artifact path is not valid UTF-8".into())
+        })?;
+        let mut update =
+            store.prepare("UPDATE blob SET path=?1 WHERE blob_digest=?2 AND byte_count=?3")?;
+        update.bind_text(1, path)?;
+        update.bind_text(2, &blob.digest)?;
+        update.bind_i64(3, blob.bytes.len() as u64)?;
+        update.run()?;
+    }
+    validate_restored_blob_paths(store, artifact_root, blobs)
+}
+
+fn validate_restored_blob_paths(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    blobs: &[backup_bundle::VerifiedBlob],
+) -> Result<(), StoreError> {
+    for blob in blobs {
+        let expected_path = restored_blob_path(artifact_root, &blob.digest)?;
+        let expected_path = expected_path.to_str().ok_or_else(|| {
+            StoreError::Invalid("restored artifact path is not valid UTF-8".into())
+        })?;
+        let mut query = store.prepare("SELECT path, byte_count FROM blob WHERE blob_digest=?1")?;
+        query.bind_text(1, &blob.digest)?;
+        if query.step()? != SQLITE_ROW
+            || query.column_text(0)? != expected_path
+            || query.column_u64(1)? != blob.bytes.len() as u64
+        {
+            return Err(StoreError::Conflict(format!(
+                "restored database blob reference {} does not point to its verified artifact",
+                blob.digest
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Publish the verified artifact directory before exposing its database. An
+/// existing path is reused only when every expected byte matches exactly.
+/// The returned flag identifies a newly published directory for ordinary
+/// error cleanup; maintenance restore keeps it available for reconciliation.
+fn publish_restore_artifacts(
+    staging: &Path,
+    destination: &Path,
+    blobs: &[backup_bundle::VerifiedBlob],
+) -> Result<bool, StoreError> {
+    if blobs.is_empty() {
+        return Ok(false);
+    }
+    reject_symlink(destination)?;
+    if destination.exists() {
+        backup_bundle::verify_materialized_blobs(destination, blobs)?;
+        if staging.exists() {
+            backup_bundle::verify_materialized_blobs(staging, blobs)?;
+            fs::remove_dir_all(staging).map_err(|error| {
+                StoreError::Unavailable(format!(
+                    "cannot remove duplicate restore artifact staging directory {}: {error}",
+                    staging.display()
+                ))
+            })?;
+        }
+        return Ok(false);
+    }
+    backup_bundle::verify_materialized_blobs(staging, blobs)?;
+    fs::rename(staging, destination).map_err(|error| {
+        StoreError::Unavailable(format!(
+            "cannot publish restored artifact directory {}: {error}",
+            destination.display()
+        ))
+    })?;
+    Ok(true)
+}
+
 fn read_backup_manifest(path: &Path) -> Result<Value, StoreError> {
     let bytes = fs::read(path).map_err(|error| {
         StoreError::Unavailable(format!(
@@ -12529,7 +13972,11 @@ fn validate_backup_manifest(manifest: &Value) -> Result<(), StoreError> {
             "unsupported Boreal backup package kind".to_owned(),
         ));
     }
-    if manifest.get("format_version").and_then(Value::as_u64) != Some(BACKUP_FORMAT_VERSION) {
+    let format_version = manifest
+        .get("format_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| StoreError::Corrupt("backup format version is missing".into()))?;
+    if ![LEGACY_BACKUP_FORMAT_VERSION, BACKUP_FORMAT_VERSION].contains(&format_version) {
         return Err(StoreError::Invalid(
             "unsupported Boreal backup package format version".to_owned(),
         ));
@@ -12573,6 +14020,66 @@ fn validate_backup_manifest(manifest: &Value) -> Result<(), StoreError> {
             return Err(StoreError::Corrupt(format!(
                 "backup manifest {key} is not an array"
             )));
+        }
+    }
+    if format_version == BACKUP_FORMAT_VERSION {
+        if !manifest
+            .get("referenced_sources")
+            .is_some_and(Value::is_array)
+        {
+            return Err(StoreError::Corrupt(
+                "backup manifest referenced_sources is not an array".into(),
+            ));
+        }
+        let bundle = manifest
+            .get("artifact_bundle")
+            .and_then(Value::as_object)
+            .ok_or_else(|| StoreError::Corrupt("backup artifact_bundle is missing".into()))?;
+        if bundle.get("format").and_then(Value::as_str) != Some(backup_bundle::FORMAT)
+            || !bundle.get("blobs").is_some_and(Value::is_array)
+            || !bundle.get("unavailable_blobs").is_some_and(Value::is_array)
+        {
+            return Err(StoreError::Corrupt(
+                "backup artifact_bundle has an unsupported or incomplete shape".into(),
+            ));
+        }
+        if manifest
+            .get("restore_policy")
+            .and_then(Value::as_object)
+            .and_then(|policy| policy.get("published_memory_packaged"))
+            .and_then(Value::as_bool)
+            != Some(false)
+        {
+            return Err(StoreError::Corrupt(
+                "backup manifest must not claim published Git memory is packaged".into(),
+            ));
+        }
+        let source_blobs_packaged = bundle
+            .get("unavailable_blobs")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+        if manifest
+            .get("restore_policy")
+            .and_then(Value::as_object)
+            .and_then(|policy| policy.get("source_blobs_packaged"))
+            .and_then(Value::as_bool)
+            != Some(source_blobs_packaged)
+            || manifest
+                .get("restore_policy")
+                .and_then(Value::as_object)
+                .and_then(|policy| policy.get("external_artifacts_packaged"))
+                .and_then(Value::as_bool)
+                != Some(
+                    source_blobs_packaged
+                        && manifest
+                            .get("published_memory")
+                            .and_then(Value::as_array)
+                            .is_some_and(Vec::is_empty),
+                )
+        {
+            return Err(StoreError::Corrupt(
+                "backup manifest artifact disposition does not match its references".into(),
+            ));
         }
     }
     if manifest
@@ -14082,6 +15589,92 @@ impl SqliteStore {
 }
 
 #[cfg(test)]
+mod scheduling_feature_schema_tests {
+    use super::{SqliteStore, StoreError, PRODUCTION_SCHEMA_SQL, SQLITE_ROW};
+
+    #[test]
+    fn canonical_open_installs_immutable_scheduling_feature_contract() {
+        let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA_SQL)
+            .expect("canonical schema and additive scheduling feature open");
+        let mut feature = store
+            .prepare(
+                "SELECT version, sql FROM boreal_feature_schema WHERE feature = 'scheduling'",
+            )
+            .expect("feature registry query prepares");
+        assert_eq!(feature.step().expect("feature registry reads"), SQLITE_ROW);
+        assert_eq!(feature.column_u64(0).expect("feature version reads"), 1);
+        assert_eq!(
+            feature.column_text(1).expect("feature SQL reads"),
+            super::SCHEDULING_SCHEMA_V1_SQL
+        );
+
+        for table in [
+            "project_civil_time_v1",
+            "work_schedule_v3",
+            "external_wait_v1",
+            "external_wait_scope_v1",
+        ] {
+            assert!(
+                store.table_exists(table).expect("table probe succeeds"),
+                "{table}"
+            );
+        }
+
+        store
+            .execute_batch(
+                "INSERT INTO project
+                     (project_id, schema_version, status_contract_version,
+                      project_revision, created_at, updated_at)
+                 VALUES ('p1', 2, 'boreal.work-status/2', 0, 't0', 't0');
+                 INSERT INTO actor
+                     (actor_id, role, credential_ref, display_name, created_at)
+                 VALUES ('operator-1', 'operator', 'credential-1', 'Operator', 't0');
+                 INSERT INTO project_civil_time_v1
+                     (project_id, setting_revision, timezone, tzdb_identity,
+                      changed_by, changed_at_ms, created_project_revision,
+                      operation_id, request_digest)
+                 VALUES ('p1', 1, 'Etc/UTC', 'tzdb-test', 'operator-1', 0,
+                         0, 'op-civil-1', 'sha256:request');",
+            )
+            .expect("valid immutable civil-time setting inserts");
+
+        for sql in [
+            "UPDATE project_civil_time_v1 SET timezone = 'America/Regina' WHERE project_id = 'p1'",
+            "DELETE FROM project_civil_time_v1 WHERE project_id = 'p1'",
+        ] {
+            let error = store
+                .execute_batch(sql)
+                .expect_err("persisted civil-time history cannot be rewritten");
+            assert!(matches!(error, StoreError::Constraint { .. }), "{error:?}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("project_civil_time_revisions_are_immutable"),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_external_wait_schema_is_reported_as_corrupt() {
+        for table in ["external_wait_v1", "external_wait_scope_v1"] {
+            let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA_SQL)
+                .expect("canonical schema opens");
+            store
+                .execute_batch(&format!("DROP TABLE {table}"))
+                .expect("one optional external-wait table can be removed for the fixture");
+
+            let error = store
+                .external_wait_schema_installed()
+                .expect_err("a partially installed wait schema is not treated as absent");
+
+            assert!(matches!(error, StoreError::Corrupt(_)), "{error:?}");
+            assert!(error.to_string().contains("partially installed"));
+        }
+    }
+}
+
+#[cfg(test)]
 mod sqlite_release_floor_tests {
     use super::{
         ensure_sqlite_runtime_release_floor, sqlite_version_number_text, SqliteStore,
@@ -14145,10 +15738,396 @@ mod sqlite_release_floor_tests {
 }
 
 #[cfg(test)]
+mod backup_bundle_restore_tests {
+    use super::{
+        backup_bundle, checksum,
+        identity::{IdentityStore, WorkspaceBinding},
+        SqliteBackupPackageDisposition, SqliteStore, PRODUCTION_SCHEMA_SQL, SQLITE_ROW,
+    };
+    use serde_json::Value;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn versioned_package_restores_verified_source_blob_without_changing_original() {
+        let source_path = unique_path("source.sqlite");
+        let original_blob_path = unique_path("original-source-blob");
+        let package_path = unique_path("package");
+        let target_path = unique_path("isolated.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_file(&original_blob_path);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let bytes = b"source artifact bytes preserved through backup and restore\n";
+        fs::write(&original_blob_path, bytes).expect("source blob writes");
+        let digest = checksum(bytes);
+        let source = initialize(&source_path, "source-project");
+        let mut source_version = source
+            .prepare(
+                "INSERT INTO source_version
+                 (source_version_id,project_id,origin,access_scope,content_digest,media_type,
+                  byte_count,captured_at,parser_identity,availability,citation_json)
+                 VALUES ('source-artifact','source-project','fixture.txt','project',?1,
+                         'text/plain',?2,'unix-ms:2','fixture/1','available','[]')",
+            )
+            .expect("source version insert prepares");
+        source_version
+            .bind_text(1, &digest)
+            .expect("source digest binds");
+        source_version
+            .bind_i64(2, bytes.len() as u64)
+            .expect("source byte count binds");
+        source_version.run().expect("source version registers");
+        let mut blob = source
+            .prepare(
+                "INSERT INTO blob
+                 (blob_digest,byte_count,media_type,path,verified_at,created_at)
+                 VALUES (?1,?2,'text/plain',?3,'unix-ms:2','unix-ms:2')",
+            )
+            .expect("blob insert prepares");
+        blob.bind_text(1, &digest).expect("blob digest binds");
+        blob.bind_i64(2, bytes.len() as u64)
+            .expect("blob byte count binds");
+        blob.bind_text(3, original_blob_path.to_str().unwrap())
+            .expect("blob path binds");
+        blob.run().expect("blob registers");
+        drop(blob);
+        drop(source_version);
+
+        let package = source
+            .backup_package_to(&package_path)
+            .expect("backup includes referenced blob");
+        assert!(package.restore_supported);
+        assert_eq!(
+            package.restore_disposition,
+            SqliteBackupPackageDisposition::Restorable
+        );
+        assert_eq!(package.referenced_blob_count, 1);
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(&package.manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["format_version"], 3);
+        assert_eq!(manifest["artifact_bundle"]["format"], backup_bundle::FORMAT);
+        assert_eq!(
+            manifest["referenced_blobs"][0]["path"],
+            format!("artifacts/blobs/{}", &digest[7..])
+        );
+        assert_eq!(
+            fs::read(package_path.join("artifacts/blobs").join(&digest[7..])).unwrap(),
+            bytes
+        );
+        drop(source);
+
+        let old_target = initialize(&target_path, "old-project");
+        drop(old_target);
+        let restored = SqliteStore::restore_package_to(&package_path, &target_path)
+            .expect("isolated restore includes source blob");
+        let restored_store =
+            SqliteStore::open(&target_path, PRODUCTION_SCHEMA_SQL).expect("restored store opens");
+        let mut path_query = restored_store
+            .prepare("SELECT path FROM blob WHERE blob_digest=?1")
+            .expect("restored blob path query prepares");
+        path_query.bind_text(1, &digest).unwrap();
+        assert_eq!(path_query.step().unwrap(), SQLITE_ROW);
+        let restored_blob_path = PathBuf::from(path_query.column_text(0).unwrap());
+        assert_ne!(restored_blob_path, original_blob_path);
+        assert_eq!(fs::read(&restored_blob_path).unwrap(), bytes);
+        assert_eq!(
+            restored_store.list_project_ids().unwrap(),
+            vec!["source-project"]
+        );
+        assert!(restored.previous_database_path.as_ref().unwrap().exists());
+        drop(path_query);
+        drop(restored_store);
+
+        let original =
+            SqliteStore::open(&source_path, PRODUCTION_SCHEMA_SQL).expect("original source opens");
+        let mut original_path_query = original
+            .prepare("SELECT path FROM blob WHERE blob_digest=?1")
+            .expect("original blob path query prepares");
+        original_path_query.bind_text(1, &digest).unwrap();
+        assert_eq!(original_path_query.step().unwrap(), SQLITE_ROW);
+        assert_eq!(
+            original_path_query.column_text(0).unwrap(),
+            original_blob_path.to_str().unwrap()
+        );
+        assert_eq!(fs::read(&original_blob_path).unwrap(), bytes);
+        drop(original_path_query);
+        drop(original);
+
+        let artifact_root = target_path.parent().unwrap().join(format!(
+            "{}.artifacts.restore-{}",
+            target_path.file_name().unwrap().to_string_lossy(),
+            restored.current_restore_epoch
+        ));
+        let _ = fs::remove_dir_all(artifact_root);
+        let _ = fs::remove_dir_all(&package_path);
+        let _ = fs::remove_file(&original_blob_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+        if let Some(previous) = restored.previous_database_path {
+            let _ = fs::remove_file(previous);
+        }
+    }
+
+    #[test]
+    fn corrupted_packaged_blob_is_rejected_before_destination_creation() {
+        let source_path = unique_path("corrupt-source.sqlite");
+        let original_blob_path = unique_path("corrupt-original-blob");
+        let package_path = unique_path("corrupt-package");
+        let target_path = unique_path("corrupt-target.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_file(&original_blob_path);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let bytes = b"valid source content";
+        fs::write(&original_blob_path, bytes).unwrap();
+        let digest = checksum(bytes);
+        let source = initialize(&source_path, "corrupt-project");
+        let mut blob = source
+            .prepare(
+                "INSERT INTO blob
+                 (blob_digest,byte_count,media_type,path,verified_at,created_at)
+                 VALUES (?1,?2,'text/plain',?3,'unix-ms:2','unix-ms:2')",
+            )
+            .unwrap();
+        blob.bind_text(1, &digest).unwrap();
+        blob.bind_i64(2, bytes.len() as u64).unwrap();
+        blob.bind_text(3, original_blob_path.to_str().unwrap())
+            .unwrap();
+        blob.run().unwrap();
+        drop(blob);
+        source.backup_package_to(&package_path).unwrap();
+        drop(source);
+
+        let artifact_path = package_path.join("artifacts/blobs").join(&digest[7..]);
+        fs::write(&artifact_path, b"Xalid source content").unwrap();
+        let error = SqliteStore::restore_package_to(&package_path, &target_path)
+            .expect_err("corrupt blob must reject restore");
+        assert!(
+            error.to_string().contains("integrity check"),
+            "unexpected error: {error}"
+        );
+        assert!(!target_path.exists());
+
+        let _ = fs::remove_dir_all(&package_path);
+        let _ = fs::remove_file(&original_blob_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+    }
+
+    #[test]
+    fn published_memory_has_an_explicit_non_restorable_git_disposition() {
+        let source_path = unique_path("memory-source.sqlite");
+        let package_path = unique_path("memory-package");
+        let target_path = unique_path("memory-target.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let source = initialize(&source_path, "memory-project");
+        source
+            .execute_batch(
+                "INSERT INTO source_version
+                 (source_version_id,project_id,origin,access_scope,content_digest,media_type,
+                  byte_count,captured_at,parser_identity,availability,citation_json)
+                 VALUES ('memory-source','memory-project','memory.txt','project',
+                         'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                         'text/plain',1,'unix-ms:1','fixture/1','missing','[]');
+                 INSERT INTO memory_publication
+                 (publication_id,project_id,memory_entry_id,source_version_id,state,
+                  manifest_path,git_revision,content_digest,created_at,updated_at)
+                 VALUES ('publication-1','memory-project','entry-1','memory-source','published',
+                         '/memory/.boreal/memory.json','git-revision-1',
+                         'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                         'unix-ms:1','unix-ms:2');",
+            )
+            .expect("published memory reference inserts");
+        let package = source
+            .backup_package_to(&package_path)
+            .expect("database snapshot is still packaged");
+        assert!(!package.restore_supported);
+        assert_eq!(
+            package.restore_disposition,
+            SqliteBackupPackageDisposition::PublishedMemoryRequiresExternalGitRepository {
+                publication_count: 1
+            }
+        );
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(&package.manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest["restore_policy"]["published_memory_disposition"],
+            "external_git_repository_required"
+        );
+        drop(source);
+
+        let error = SqliteStore::restore_package_to(&package_path, &target_path)
+            .expect_err("published Git memory cannot be restored from SQLite alone");
+        assert!(error
+            .to_string()
+            .contains("authoritative external Git repository"));
+        assert!(!target_path.exists());
+
+        let _ = fs::remove_dir_all(&package_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+    }
+
+    #[test]
+    fn legacy_v2_package_without_external_artifacts_remains_restorable() {
+        let source_path = unique_path("legacy-v2-source.sqlite");
+        let package_path = unique_path("legacy-v2-package");
+        let target_path = unique_path("legacy-v2-target.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_dir_all(&package_path);
+        let source = initialize(&source_path, "legacy-v2-project");
+        source.backup_package_to(&package_path).unwrap();
+        drop(source);
+
+        let manifest_path = package_path.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["format_version"] = Value::from(2);
+        manifest.as_object_mut().unwrap().remove("artifact_bundle");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        SqliteStore::restore_package_to(&package_path, &target_path)
+            .expect("legacy artifact-free v2 package remains restorable");
+        let restored = SqliteStore::open(&target_path, PRODUCTION_SCHEMA_SQL).unwrap();
+        assert_eq!(
+            restored.list_project_ids().unwrap(),
+            vec!["legacy-v2-project"]
+        );
+        drop(restored);
+
+        let _ = fs::remove_dir_all(&package_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let previous = target_path.with_file_name(format!(
+            "{}.pre-restore-2",
+            target_path.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = fs::remove_file(previous);
+    }
+
+    #[test]
+    fn maintenance_restore_readback_keeps_blob_bundle_available() {
+        let source_path = unique_path("maintenance-source.sqlite");
+        let original_blob_path = unique_path("maintenance-original-blob");
+        let package_path = unique_path("maintenance-package");
+        let target_path = unique_path("maintenance-target.sqlite");
+        remove_database(&source_path);
+        remove_database(&target_path);
+        let _ = fs::remove_file(&original_blob_path);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let bytes = b"maintenance restore artifact";
+        fs::write(&original_blob_path, bytes).unwrap();
+        let digest = checksum(bytes);
+        let source = initialize(&source_path, "maintenance-project");
+        let mut blob = source
+            .prepare(
+                "INSERT INTO blob
+                 (blob_digest,byte_count,media_type,path,verified_at,created_at)
+                 VALUES (?1,?2,'text/plain',?3,'unix-ms:2','unix-ms:2')",
+            )
+            .unwrap();
+        blob.bind_text(1, &digest).unwrap();
+        blob.bind_i64(2, bytes.len() as u64).unwrap();
+        blob.bind_text(3, original_blob_path.to_str().unwrap())
+            .unwrap();
+        blob.run().unwrap();
+        drop(blob);
+        source.backup_package_to(&package_path).unwrap();
+        drop(source);
+
+        let job = super::MaintenanceJobInput {
+            operation_id: "restore-artifact-job".into(),
+            kind: "restore".into(),
+            database_path: target_path.to_string_lossy().into_owned(),
+            package_path: package_path.to_string_lossy().into_owned(),
+            request_digest: "sha256:restore-artifact-job".into(),
+            created_at: "unix-ms:3".into(),
+        };
+        let restored = SqliteStore::restore_package_to_with_maintenance_job(
+            &package_path,
+            &target_path,
+            Some(&job),
+        )
+        .expect("maintenance restore publishes database and artifact bundle");
+        let readback = SqliteStore::reconcile_restore_maintenance_job(&target_path, &job)
+            .expect("restore operation reconciles")
+            .expect("restore receipt is committed");
+        assert_eq!(readback.stage, "committed");
+        let store = SqliteStore::open(&target_path, PRODUCTION_SCHEMA_SQL).unwrap();
+        let mut query = store
+            .prepare("SELECT path FROM blob WHERE blob_digest=?1")
+            .unwrap();
+        query.bind_text(1, &digest).unwrap();
+        assert_eq!(query.step().unwrap(), SQLITE_ROW);
+        let restored_blob_path = PathBuf::from(query.column_text(0).unwrap());
+        assert_eq!(fs::read(restored_blob_path).unwrap(), bytes);
+        drop(query);
+        drop(store);
+
+        let artifact_root = target_path.parent().unwrap().join(format!(
+            "{}.artifacts.restore-{}",
+            target_path.file_name().unwrap().to_string_lossy(),
+            restored.current_restore_epoch
+        ));
+        let _ = fs::remove_dir_all(artifact_root);
+        let _ = fs::remove_dir_all(&package_path);
+        let _ = fs::remove_file(&original_blob_path);
+        remove_database(&source_path);
+        remove_database(&target_path);
+    }
+
+    fn initialize(path: &Path, project_id: &str) -> SqliteStore {
+        let store = SqliteStore::open(path, PRODUCTION_SCHEMA_SQL).expect("store opens");
+        store.create_project(project_id, "unix-ms:1").unwrap();
+        let binding = WorkspaceBinding::new(
+            "/tmp/boreal-backup-bundle",
+            "/tmp/boreal-backup-bundle/worktree",
+            "sha256:backup-bundle-binding",
+        )
+        .unwrap();
+        IdentityStore::new(&store)
+            .bind_project(project_id, &binding, "unix-ms:1")
+            .unwrap();
+        store
+    }
+
+    fn unique_path(name: &str) -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "boreal-backup-bundle-{}-{timestamp}-{name}",
+            std::process::id()
+        ))
+    }
+
+    fn remove_database(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+}
+
+#[cfg(test)]
 mod production_restore_identity_tests {
     use super::{
+        checksum, create_restore_identity_intent,
         identity::{IdentityStore, WorkspaceBinding},
-        MaintenanceJobInput, SqliteStore, PRODUCTION_SCHEMA_SQL,
+        maintenance_restore_staging_path, MaintenanceJobInput, SqliteStore, PRODUCTION_SCHEMA_SQL,
     };
     use serde_json::Value;
     use std::fs;
@@ -14273,6 +16252,91 @@ mod production_restore_identity_tests {
         remove_database(&source_path);
         remove_database(&first_destination);
         remove_database(&second_destination);
+    }
+
+    #[test]
+    fn unreceipted_restore_retry_reuses_durable_identity_and_epoch() {
+        let source_path = unique_path("retry-source.sqlite");
+        let package_path = unique_path("retry-package");
+        let destination = unique_path("retry-destination.sqlite");
+        remove_database(&source_path);
+        remove_database(&destination);
+        let _ = fs::remove_dir_all(&package_path);
+
+        let source = SqliteStore::open(&source_path, PRODUCTION_SCHEMA_SQL)
+            .expect("production source opens");
+        source
+            .create_project("restore-retry-project", "unix-ms:1")
+            .expect("project creates");
+        let binding = WorkspaceBinding::new(
+            "/tmp/boreal-restore-retry-root",
+            "/tmp/boreal-restore-retry-root/worktree",
+            "sha256:restore-retry-binding",
+        )
+        .expect("workspace binding validates");
+        IdentityStore::new(&source)
+            .bind_project("restore-retry-project", &binding, "unix-ms:1")
+            .expect("project binds");
+        let source_identity = IdentityStore::new(&source)
+            .database_identity()
+            .expect("source identity reads");
+        let package = source
+            .backup_package_to(&package_path)
+            .expect("source backup package is created");
+        let package_database_digest =
+            checksum(&fs::read(&package.database_path).expect("backup database can be read"));
+        let job = restore_job(&package_path, &destination, "restore-retry");
+        let staging = maintenance_restore_staging_path(&destination, &job.operation_id)
+            .expect("operation staging path resolves");
+        let intent = create_restore_identity_intent(
+            &source,
+            &package_path,
+            &destination,
+            Some(&job),
+            &source_identity,
+            &package_database_digest,
+            None,
+            &staging,
+        )
+        .expect("durable restore identity intent is written");
+        fs::write(
+            staging.join(super::BACKUP_DATABASE_FILE),
+            b"interrupted backup",
+        )
+        .expect("interrupted staging is represented");
+        drop(source);
+
+        let restored = SqliteStore::restore_package_to_with_maintenance_job(
+            &package_path,
+            &destination,
+            Some(&job),
+        )
+        .expect("retry resumes the unreceipted staging operation");
+        assert_eq!(
+            restored.current_database_instance_id,
+            intent.current_database_instance_id
+        );
+        assert_eq!(restored.current_restore_epoch, intent.current_restore_epoch);
+        assert_eq!(
+            restored.current_restore_epoch,
+            source_identity.restore_epoch.get() + 1
+        );
+        assert!(
+            !staging.exists(),
+            "published restore cleans its staging area"
+        );
+
+        let repeated = SqliteStore::restore_package_to_with_maintenance_job(
+            &package_path,
+            &destination,
+            Some(&job),
+        )
+        .expect("committed retry reads back the original restore result");
+        assert_eq!(repeated, restored);
+
+        let _ = fs::remove_dir_all(&package_path);
+        remove_database(&source_path);
+        remove_database(&destination);
     }
 
     fn restore_job(package: &Path, destination: &Path, operation_id: &str) -> MaintenanceJobInput {

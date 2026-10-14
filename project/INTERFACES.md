@@ -169,24 +169,68 @@ receipts bind work, attempt, fence and gate; operation IDs remain the mutation
 readback key.
 
 `work create`, `work edit`, `work claim`, source intake/list, evidence add/run,
-review approval and operation readback have checked direct and service paths
-as recorded in the CLI contract. Source show/verify and intake capture/bucket
-are direct CLI routes without service parity. Source and status list routes use
-`limit`/`offset` paging; the legacy cursor spelling above is not the current
-callable paging shape. `operation show` can return operation, execution,
-external-job, recovery and receipt details; the sections are optional, and a
-finish-close recovery may be partial.
+review history reads and operation readback have direct and service paths as
+recorded in the callable registry. Source `show` and `verify` now also have
+service routes with versioned request/readback DTOs. `intake bucket` and
+`intake capture` use versioned service DTOs and require `--expected-revision`;
+when work-model/3 is unavailable on an older store, the service rejects these
+routes without migrating or mutating that store. Their direct CLI behavior is
+unchanged. `evidence bind-result` has a typed service request/readback DTO
+whose work/attempt/fence, project/entity/proof revisions, source version and
+digest must match the current application state. Source and status list routes
+use `limit`/`offset` paging; the legacy cursor spelling above is not the
+current callable paging shape. `operation show` can return operation,
+execution, external-job, recovery and receipt details; the sections are
+optional, and a finish-close recovery may be partial.
 
-Current source-version identity and gate-receipt proof are callable. Review
-approval has a typed decision DTO with project, entity and proof revision
-bindings; actor authorization comes from the authenticated service session.
-General-work create/edit does not expose deliverable requirement schemas,
-artifact submission identity or typed output inspection. A claim binds one
-source version and config identity, but there is no accepted-input bundle
-schema. These V4 additions remain unavailable or partial until the named
-BW-S12-T02/T03/T04 owners implement their contracts and the BW-S12-T05 owner
-restores service parity for direct-only source and intake routes. S13 owns
-date/wait and TUI contract work.
+`work close-readiness` reads the application-owned close-readiness snapshot
+through both the direct CLI and service. Its versioned readback includes the
+snapshot project revision, work ID, current attempt/fence when present, gate
+states and exact blockers; callers cannot submit readiness facts. A schema-v2
+service rejects the route as unavailable without migration or mutation.
+
+Current source-version identity and gate-receipt proof are callable. A claim
+binds one source version and config identity, but there is no callable
+accepted-input bundle. The strict T01 examples for generic requirement,
+submission, inspection and acceptance payloads remain contract-only: those
+schemas are not registered routes and do not imply public adapter support.
+Typed producer output inspection now uses `artifact result bind` with the
+versioned `boreal.artifact_result_bind.v1` request, plus exact attempt-fence
+and project-operation readbacks. The application revalidates each project-
+scoped source identity and computes inspection facts; request DTOs exclude
+caller-supplied inspection facts and host catalog paths. The bind readback
+preserves result, actor/session, pinned profile/contract, output criteria,
+replay and lineage outcomes. Schema-v2 stores return explicit unavailable
+without migration. This callable result binding does not make the frozen T01
+generic submission or human artifact-decision DTOs callable. The final-result
+source binding remains a separate proof-generation operation.
+
+BW-S13-T01 exposes the typed date and external-wait boundary through direct
+CLI and the local service. `project civil-time set/show` uses the append-only
+`project_civil_time_v1` history and derives the TZif identity from the
+installed timezone database; set requests bind expected project and setting
+revisions. `work schedule set/show` replaces all four business-date fields
+at expected project and schedule revisions. Each update request must include
+all fields, using JSON `null` to clear one; four nulls create a durable clear
+revision that shadows the untouched legacy due value. Reads distinguish no
+schedule row (`schedule_revision: 0`, `schedule: null`) from a cleared row.
+Date-only values are retained as civil dates and require the current project
+setting revision. `wait create/resolve/list/show` reads and writes immutable
+wait scope and revision history, binds expected project and wait revisions,
+and attributes resolution to the authenticated Operator. The service supplies
+actor, session, operation ID and trusted timestamps. Strict v1 DTOs reject
+unknown fields; schema-v2 stores return unavailable without migration.
+
+These routes expose planning facts and obligations. They do not write lifecycle
+state or status/attention projections; coordinator status integration and the
+TUI consumer are separate S13 lanes.
+
+Artifact inspections are attributable observations over an exact submitted
+artifact-set digest. They are not command receipts and do not establish
+subjective quality or human acceptance. Acceptance requests bind expected
+project, work, requirement and proof revisions plus the exact submission;
+actor and role are supplied by the authenticated service session, and
+authoritative readback records the resulting identity and time.
 
 The `create_work` service request decoder is private to the CLI service. The
 general-work fixture checks its JSON shape and observed fields but is not

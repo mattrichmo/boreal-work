@@ -3,19 +3,92 @@
   "routes": [
     {"path": "source add", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
     {"path": "source list", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
-    {"path": "source show", "direct_cli": "implemented", "service_dispatch": "unavailable", "contract_status": "partial"},
-    {"path": "source verify", "direct_cli": "implemented", "service_dispatch": "unavailable", "contract_status": "partial"},
+    {"path": "source show", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "source verify", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "intake bucket", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "intake capture", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "evidence bind-result", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "artifact result bind", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "artifact result attempt", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "artifact result operation", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
+    {"path": "work close-readiness", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
     {"path": "evidence add", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
     {"path": "evidence run", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
     {"path": "review approve", "direct_cli": "implemented", "service_dispatch": "implemented", "contract_status": "implemented"},
     {"behavior": "general-work deliverable artifact submission", "public_route": "unavailable", "contract_status": "unavailable"}
   ],
+  "contract_only_schemas": {
+    "callable": false,
+    "status": "frozen_contract_not_callable",
+    "reason": "BW-S12-T01 freezes these generic deliverable request and outcome shapes. S12-T02/T03/T04 provide narrower application behavior, but these generic schemas are still not registered public routes and do not imply callable storage, validation or authorization.",
+    "artifact_submission": {
+      "schema_version": "boreal.artifact_submission.v1",
+      "submission_id": "submission_01",
+      "project_id": "project_demo",
+      "work_id": "work_task_01",
+      "attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+      "fence": 7,
+      "requirement_revision": 3,
+      "profile_id": "validated-deliverables",
+      "profile_version": "1",
+      "requirement_key": "final_brief",
+      "artifacts": [{
+        "project_id": "project_demo",
+        "source_version_id": "source_version_02",
+        "content_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "media_type": "text/markdown",
+        "byte_count": 512,
+        "availability": "available"
+      }],
+      "artifact_set_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "artifact_inspection": {
+      "schema_version": "boreal.artifact_inspection.v1",
+      "inspection_id": "inspection_01",
+      "submission_id": "submission_01",
+      "artifact_set_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "requirement_revision": 3,
+      "validator_id": "boreal.structural-inspector",
+      "validator_version": "1",
+      "outcome": "passed",
+      "observed_artifact_count": 1,
+      "checks": [{"criterion_id":"non_empty","outcome":"passed","reason_code":null}]
+    },
+    "acceptance_request": {
+      "schema_version": "boreal.artifact_acceptance.v1",
+      "work_id": "work_task_01",
+      "expected_project_revision": 47,
+      "expected_work_revision": 13,
+      "expected_requirement_revision": 3,
+      "expected_proof_revision": 10,
+      "submission_id": "submission_01",
+      "artifact_set_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "decision": "approved",
+      "reason": "The exact submitted brief meets the agreed review criteria."
+    },
+    "acceptance_readback": {
+      "schema_version": "boreal.artifact_acceptance.v1",
+      "decision_id": "decision_01",
+      "work_id": "work_task_01",
+      "submission_id": "submission_01",
+      "artifact_set_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "requirement_revision": 3,
+      "decision": "approved",
+      "actor_id": "reviewer_01",
+      "actor_role": "reviewer",
+      "reviewer_independent": true,
+      "decided_at": "2026-10-13T16:00:00Z",
+      "reason": "The exact submitted brief meets the agreed review criteria."
+    }
+  },
   "profile_registry": {
     "contract_revision": "boreal.acceptance_profile_registry.v1",
+    "availability": "focused_and_reviewed_are_existing_profiles; remaining profiles are frozen contract-only profiles",
     "profiles": [
       {
         "id": "focused",
         "version": "1",
+        "availability": "existing_callable_profile",
         "required_gates": [
           {"id": "checkpoint", "kind": "checkpoint"},
           {"id": "verification", "kind": "verification"},
@@ -26,6 +99,7 @@
       {
         "id": "reviewed",
         "version": "1",
+        "availability": "existing_callable_profile",
         "required_gates": [
           {"id": "checkpoint", "kind": "checkpoint"},
           {"id": "verification", "kind": "verification"},
@@ -37,6 +111,7 @@
       {
         "id": "general-attestation",
         "version": "1",
+        "availability": "frozen_contract_not_callable",
         "required_gates": [{"id": "summary", "kind": "summary"}],
         "required_typed_facts": ["completion_attestation/1"],
         "deliverable_rule": "No required deliverables may be declared; optional outputs may be absent and remain visible.",
@@ -45,6 +120,7 @@
       {
         "id": "validated-deliverables",
         "version": "1",
+        "availability": "frozen_contract_not_callable",
         "required_gates": [{"id": "summary", "kind": "summary"}],
         "required_typed_facts": ["artifact_inspection/1"],
         "deliverable_rule": "Every required deliverable must have exact current-attempt submission coverage and pass its declared type, cardinality, availability, and bounded criteria.",
@@ -53,6 +129,7 @@
       {
         "id": "reviewed-artifacts",
         "version": "1",
+        "availability": "frozen_contract_not_callable",
         "required_gates": [
           {"id": "summary", "kind": "summary"},
           {"id": "artifact_review", "kind": "review"}
@@ -77,6 +154,76 @@
     "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "availability": "available",
     "parser_identity": null
+  },
+  "typed_service_routes": {
+    "source_show": {
+      "request_schema": "boreal.source_lookup.v1",
+      "request_required": ["source_version_id"],
+      "readback_schema": "boreal.source_show_readback.v1",
+      "readback_fields": ["source", "sqlite_registration"],
+      "host_catalog_root_in_payload": false
+    },
+    "source_verify": {
+      "request_schema": "boreal.source_lookup.v1",
+      "request_required": ["source_version_id"],
+      "readback_schema": "boreal.source_verify_readback.v1",
+      "readback_fields": ["source_version_id", "availability", "verified_digest", "byte_count", "verified"]
+    },
+    "intake_bucket": {
+      "request_schema": "boreal.intake_bucket_create.v1",
+      "request_required": ["expected_revision", "bucket_id", "name"],
+      "readback_schema": "boreal.intake_bucket_readback.v1",
+      "readback_fields": ["bucket_id", "name", "archived", "replayed"],
+      "old_schema": "reject_service_unavailable_without_migration_or_mutation"
+    },
+    "intake_capture": {
+      "request_schema": "boreal.intake_capture.v1",
+      "request_required": ["expected_revision", "intake_id", "bucket_id", "kind", "content"],
+      "readback_schema": "boreal.intake_capture_readback.v1",
+      "readback_fields": ["intake_id", "bucket_id", "kind", "lifecycle", "content_revision", "content_digest", "replayed"],
+      "old_schema": "reject_service_unavailable_without_migration_or_mutation"
+    },
+    "artifact_result": {
+      "bind_request_schema": "boreal.artifact_result_bind.v1",
+      "bind_request_required": ["work_id", "attempt_id", "fence", "expected_project_revision", "expected_entity_revision", "expected_proof_revision", "result_id", "contract_revision", "outputs"],
+      "bind_readback_schema": "boreal.artifact_result_bind_readback.v1",
+      "durable_readback_schema": "boreal.artifact_result_readback.v1",
+      "bounded_reads": ["exact_attempt_fence", "project_operation_id"],
+      "host_catalog_path_in_payload": false,
+      "caller_inspection_facts_accepted": false,
+      "replay": "same operation and same payload returns the durable record; changed payload is rejected",
+      "old_schema": "reject_service_unavailable_without_migration_or_mutation"
+    },
+    "close_readiness": {
+      "request_fields": ["work_id"],
+      "project_actor_session_operation": "envelope_owned",
+      "readback_schema": "boreal.close_readiness_readback.v1",
+      "readback_fields": ["project_revision", "work_id", "current_attempt_id", "current_fence", "ready", "gates", "gaps"],
+      "read_source": "atomic_application_close_readiness_snapshot",
+      "caller_readiness_facts_accepted": false,
+      "old_schema": "reject_service_unavailable_without_migration_or_mutation"
+    },
+    "final_result_binding": {
+      "request_schema": "boreal.final_result_capture.v1",
+      "request_required": ["work_id", "attempt_id", "fence", "expected_project_revision", "expected_entity_revision", "expected_proof_revision", "source_version_id", "content_digest"],
+      "readback_schema": "boreal.final_result_capture_readback.v1",
+      "readback_fields": ["binding_id", "work_id", "attempt_id", "fence", "source_version_id", "content_digest", "config_identity", "profile_id", "profile_version", "profile_digest", "entity_revision", "prior_proof_revision", "proof_revision", "request_digest", "project_revision", "created_at", "lineage_pending", "replayed"]
+    },
+    "artifact_result_binding": {
+      "request_schema": "boreal.artifact_result_bind.v1",
+      "request_required": ["work_id", "attempt_id", "fence", "expected_project_revision", "expected_entity_revision", "expected_proof_revision", "result_id", "contract_revision", "outputs"],
+      "output_request_fields": ["requirement_key", "source.project_id", "source.source_version_id", "source.content_digest", "relationship_id", "rights.attribution", "rights.rights_statement", "rights.license"],
+      "bind_readback_schema": "boreal.artifact_result_bind_readback.v1",
+      "readback_schema": "boreal.artifact_result_readback.v1",
+      "readback_fields": ["result_id", "project_id", "work_id", "attempt_id", "fence", "entity_revision", "proof_revision", "actor_id", "session_id", "source_version_id", "config_identity", "profile_id", "profile_version", "profile_digest", "contract_revision", "result_digest", "outputs", "attestation", "operation_id", "request_digest", "project_revision", "created_at", "replayed"],
+      "bind_additional_fields": ["source_relationship_ids", "lineage_pending"],
+      "bounded_reads": ["exact_attempt_fence", "project_operation_id"],
+      "identity_source": "project_actor_session_operation_trusted_time_from_authenticated_envelope_or_server",
+      "host_catalog_path_in_payload": false,
+      "caller_inspection_facts_accepted": false,
+      "replay": "same operation and same payload returns durable record; changed payload is rejected by the application journal",
+      "old_schema": "reject_service_unavailable_without_migration_or_mutation"
+    }
   },
   "receipt": {
     "schema_version": "boreal.receipt.v1",
@@ -122,9 +269,9 @@
   "v4_optional_contracts": {
     "immutable_source_input_identity": "implemented",
     "gate_receipt_and_attempt_proof": "implemented",
-    "generic_deliverable_submission_identity": "unavailable",
-    "typed_output_inspection": "unavailable",
-    "requirement_coverage_for_deliverables": "unavailable",
-    "generic_human_acceptance_of_deliverables": "unavailable"
+    "generic_deliverable_submission_identity": {"status":"partial","schema_status":"typed_artifact_result_binding_only","reason":"Exact producer result and output identities are bindable, but the generic frozen T01 submission schema is not a callable route."},
+    "typed_output_inspection": {"status":"implemented","request_schema":"boreal.artifact_result_bind.v1","bind_readback_schema":"boreal.artifact_result_bind_readback.v1","readback_schema":"boreal.artifact_result_readback.v1"},
+    "requirement_coverage_for_deliverables": "implemented_by_registered_application_profile_and_exact_output_binding",
+    "generic_human_acceptance_of_deliverables": {"status":"unavailable","schema_status":"frozen_contract_not_callable"}
   }
 }

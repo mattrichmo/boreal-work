@@ -1,0 +1,363 @@
+
+> test
+> tsc && node --test tests/*.test.mjs
+
+✔ client exposes pollable linked-detail jobs and note backlinks (8.564292ms)
+✔ malformed post-delivery envelopes freeze mutations with the original operation id (17.087208ms)
+✔ valid conflict and rejection envelopes are known outcomes, not uncertain writes (3.765458ms)
+✔ launch options expose all implemented color themes and reject unknown themes (0.569667ms)
+✔ client validates the outer framing and both versioned correlation envelopes (5.673709ms)
+✔ client rejects mismatched versions and does not replay an unknown mutation (5.471ms)
+✔ controller binds writes to snapshot revision and board/list render the same item records (10.423667ms)
+✔ linked rollups stay paired with their own workspace under one management project (12.519875ms)
+✔ snapshot validation, terminal escaping, clipping, and unknown writes fail closed (1.37175ms)
+✔ keyboard flow creates a project, custom status, task, completes and reopens it, then restores terminal (240.562ms)
+✔ unknown mutation is reconciled through operation show without replay (0.443083ms)
+✔ stream decoder preserves split UTF-8/escape and brackets clipboard data away from actions (1.464667ms)
+✔ paste payload cannot trigger archive and Ctrl-C safely restores terminal (30.831208ms)
+✔ quick capture retains Unicode and commas in its title and submits once (67.08825ms)
+✔ command palette quick capture performs the selected action (64.169417ms)
+✔ rejected form save keeps the form and shows the error for correction (28.835709ms)
+✔ searchable picker keeps a selection beyond the first terminal page visible (188.520625ms)
+✔ refresh retains selected record identity when another client updates the snapshot (2.703458ms)
+✔ workflow editor offers semantic backend categories and submits selected category (28.996875ms)
+✔ archive recovery dispatches the item unarchive command for a selected archived item (6.26875ms)
+✔ focus navigation follows shared route order and inspector arrows change tabs and scroll (12.449709ms)
+✖ selection styling stays within the focused work pane (4.174042ms)
+✔ history reader pages through server history and reports page counts (27.127791ms)
+✔ linked workspace reader labels partial detail and loads later pages on Enter (16.502041ms)
+✔ linked detail polls a refreshing page job and reports failed jobs without hiding cached rows (157.979417ms)
+✔ selected work links and unlinks a note through one service mutation (21.355792ms)
+✔ note reader shows linked work backlinks from full note readback (3.895125ms)
+✔ bulk triage collects marked rows and sends one atomic changes command (39.0405ms)
+✔ planning collapse, parent navigation, and breadcrumb use the selected hierarchy (19.890416ms)
+✔ J jumps to a related item with dependency wording and Esc restores prior scope and selection (59.497791ms)
+✔ card reorder asks backend to move relative to its adjacent sibling (6.41ms)
+✔ successful linked handoff restores the full global screen and raw mode (14.486625ms)
+✔ failed linked handoff restores the full global screen and raw mode (15.004959ms)
+✔ help stays visible and reports actionable controls at narrow terminal width (5.940709ms)
+✔ labeled form preserves commas and exposes late active fields on short terminals (0.50625ms)
+✔ multiline viewport pins title and recovery hints while following the wrapped cursor (0.189667ms)
+✔ form date and optional priority rules reject invalid input and explain valid ranges (0.371375ms)
+✔ blank optional priority is omitted for detailed create and project edit (74.279125ms)
+✔ line parser removes quotes, handles escaped quotes and backslashes, and preserves Unicode and commas (3.9655ms)
+✔ line interface preserves complete add, search, and note arguments (8.310334ms)
+✔ line parser reports unmatched quotes and continues to the next command (4.840958ms)
+✔ known commit with failed refresh consumes the form and retry reads only (21.888541ms)
+✔ uncertain save receipt not_committed with refresh failure false retains only uncommitted drafts (38.118875ms)
+✔ uncertain save receipt committed with refresh failure false retains only uncommitted drafts (34.950083ms)
+✔ uncertain save receipt committed with refresh failure true retains only uncommitted drafts (35.0995ms)
+✔ revision conflict refreshes safely while retaining form text for deliberate reapply (18.862ms)
+✔ global detailed capture defaults to Personal inbox and exposes destination, parent and workflow mapping (10.623791ms)
+✔ Escape from a searchable form picker returns to the retained form draft (87.386459ms)
+✔ unscoped quick capture stores in Personal inbox with no project owner (21.304292ms)
+✔ initial service failure leaves a retryable screen and blocks writes until read succeeds (26.179709ms)
+✔ moving an item requires explicit target status and deliberate parent mapping despite reused status IDs (93.472792ms)
+✔ board selection stays visible across every status at narrow terminal widths (5.024291ms)
+✔ list viewport keeps selected row visible when descriptions wrap into many lines (2.682583ms)
+✖ All projects scope exposes portfolio work and a selected project retains stable ID after refresh (27.90725ms)
+✔ planning preserves nested records and inspector shows relationships and linked progress (19.751208ms)
+✖ overdue calculation is date based and archive route retains archived records (0.516458ms)
+✔ deep board card is selected and visible after vertical scrolling (4.941542ms)
+✔ inspector can take over a narrow screen on focus (3.3755ms)
+✔ history route shows retained status transitions (3.37925ms)
+✖ all record routes preserve a deep selection across 50+ rows (49.992875ms)
+✖ todo views filter Today, overdue, waiting, and all open independently (4.745041ms)
+✔ archive respects project scope and keeps archived project children reachable (0.92325ms)
+✔ inspector tabs show distinct details, relationship, history, and execution content (14.854292ms)
+✔ narrow navigation focus shows a reachable window in shared route order (1.008375ms)
+✔ Tab focus wraps between work, inspector and navigation (0.062417ms)
+✔ scope toggle returns to the last explicit project and route changes keep the chosen scope (0.240875ms)
+✔ search is shared by projects, notes, and planning retains matching child ancestors (0.371542ms)
+✔ archived project hides active children from Home and active views while archive keeps independent records (0.202542ms)
+✔ bodyless note summaries render their titles in Archive, Notes, and the inspector across project restore (6.395584ms)
+✔ Home uses its selectable rows for project summaries and mixed rows show project origin (99.773708ms)
+✔ committed mutation reports a refresh failure without retrying the saved command (0.436ms)
+✖ Home search with no matches leaves rendered and selectable rows empty (1.247084ms)
+✔ search loads complete server matches and visible note detail on demand (0.927708ms)
+✖ waiting follow-up date stays distinct from obligation due date and unscheduled has its own filter (0.721833ms)
+✖ date-only obligations and RFC3339 timestamps use UTC calendar-day boundaries (0.15775ms)
+✔ route paging appends rows without changing the selected record (0.403375ms)
+✔ refresh rehydrates the selected item detail after it falls outside the capped summary (0.390458ms)
+✔ linked refresh keeps last-good execution sample stale and drops it after unlink (1.525ms)
+✖ authoritative project attention supplies full-state action and milestone summaries (0.974417ms)
+✔ planning collapse, breadcrumbs, milestone progress and bulk selection share row order (2.897625ms)
+✔ all-project board retains empty project workflows and labels every status by project (5.001917ms)
+✔ linked page polls async job, caches rows and keeps pagination offset (2.345625ms)
+✖ responsive layouts preserve selected row, scope, freshness and bounded lines (8.76175ms)
+✔ bulk selection marker is visible on ordinary item rows (1.788167ms)
+✔ Home labels missing project activity as absent from the recent sample (4.211583ms)
+✔ search uses server-filtered revision-pinned pages and retains selection through paging and refresh (2.956042ms)
+✔ complete project, status, and parent choices page through capped summaries at one revision (0.519541ms)
+✔ failed complete-choice reads retain a visible page error instead of returning a partial picker (0.306875ms)
+✔ detailed item form searches and selects project, parent, and status choices on page 101 (415.154375ms)
+✔ dependency picker can search and choose an item beyond the snapshot sample (71.820625ms)
+✔ detailPage forwards its expected revision to the versioned service request (3.193458ms)
+ℹ tests 91
+ℹ suites 0
+ℹ pass 81
+ℹ fail 10
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1401.18225
+
+✖ failing tests:
+
+test at tests/interaction.test.mjs:113:1
+✖ selection styling stays within the focused work pane (4.174042ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /\x1b\[7;1m[^\n]*▸ To do · UNSCHEDULED  A task/. Input:
+  
+  '\x1B[?1049h\x1B[?2004h\x1B[?25l\x1B[2J\x1B[2J\x1B[1;1H\x1B[1mBOREAL  Life  /  List                                                                                                                       \x1B[0m\x1B[K\x1B[2;1H\x1B[90mProject: Life · rev 1 · civil time unavailable · visible sample 1 open · 0 overdue · 1 projects · fresh · 0s ago                            \x1B[0m\x1B[K\x1B[3;1H\x1B[90m↑↓ move · PgDn more · Enter inspect · ? help                                                                                                \x1B[0m\x1B[K\x1B[4;1H\x1B[0m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\x1B[0m\x1B[K\x1B[5;1H\x1B[0mGLOBAL             \x1B[90m │ \x1B[0mList  1 loaded                                                                       \x1B[90m │ \x1B[0mINSPECT ·                     \x1B[0m\x1B[K\x1B[6;1H\x1B[0m  Home             \x1B[90m │ \x1B[0m─────────────────────────────────────────────────────────────────────────────────────\x1B[90m │ \x1B[0m[Details]  Links  History  Ex…\x1B[0m\x1B[K\x1B[7;1H\x1B[0m  Projects         \x1B[90m │ \x1B[7;1m▸ To do · CLASSIFICATION UNAVAILABLE  A task                                         \x1B[90m │ \x1B[0m──────────────────────────────\x1B[0m\x1B[K\x1B[8;1H\x1B[0m  Today / open     \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mA task                        \x1B[0m\x1B[K\x1B[9;1H\x1B[0m  Inbox            \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mStatus: To do                 \x1B[0m\x1B[K\x1B[10;1H\x1B[0mCURRENT PROJECT    \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mProject: Life                 \x1B[0m\x1B[K\x1B[11;1H\x1B[0m  Board            \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mKind: task · i1               \x1B[0m\x1B[K\x1B[12;1H\x1B[90m› List             \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mPriority: none                \x1B[0m\x1B[K\x1B[13;1H\x1B[0m  Notes            \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mDue: none                     \x1B[0m\x1B[K\x1B[14;1H\x1B[0m  Workflow         \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mParent: none                  \x1B[0m\x1B[K\x1B[15;1H\x1B[0m  Plan             \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mPath: top level               \x1B[0m\x1B[K\x1B[16;1H\x1B[0mPROJECT CONTEXT    \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[17;1H\x1B[0m  Linked           \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mNo description.               \x1B[0m\x1B[K\x1B[18;1H\x1B[0mSECONDARY          \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[19;1H\x1B[0m  Archive          \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[20;1H\x1B[0m  History          \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[21;1H\x1B[0m                   \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[22;1H\x1B[0mPROJECT SCOPE      \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[23;1H\x1B[90m› Life             \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[24;1H\x1B[0m  Space · change s…\x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[25;1H\x1B[0m                   \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[26;1H\x1B[0m                   \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[27;1H\x1B[0m                   \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[28;1H\x1B[0mUpdated 3:13:38 PM · rev 1                                                                                                                  \x1B[0m\x1B[K\x1B[29;1H\x1B[36;1mTab focus · Space scope · : commands · ? help · list:n capture Enter inspect e edit y mark Y triage J related · e edit m status c complete b\x1B[0m\x1B[K\x1B[30;1H\x1B[0m                                                                                                                                            \x1B[0m\x1B[K'
+  
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/interaction.test.mjs:116:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: '\x1B[?1049h\x1B[?2004h\x1B[?25l\x1B[2J\x1B[2J\x1B[1;1H\x1B[1mBOREAL  Life  /  List                                                                                                                       \x1B[0m\x1B[K\x1B[2;1H\x1B[90mProject: Life · rev 1 · civil time unavailable · visible sample 1 open · 0 overdue · 1 projects · fresh · 0s ago                            \x1B[0m\x1B[K\x1B[3;1H\x1B[90m↑↓ move · PgDn more · Enter inspect · ? help                                                                                                \x1B[0m\x1B[K\x1B[4;1H\x1B[0m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\x1B[0m\x1B[K\x1B[5;1H\x1B[0mGLOBAL             \x1B[90m │ \x1B[0mList  1 loaded                                                                       \x1B[90m │ \x1B[0mINSPECT ·                     \x1B[0m\x1B[K\x1B[6;1H\x1B[0m  Home             \x1B[90m │ \x1B[0m─────────────────────────────────────────────────────────────────────────────────────\x1B[90m │ \x1B[0m[Details]  Links  History  Ex…\x1B[0m\x1B[K\x1B[7;1H\x1B[0m  Projects         \x1B[90m │ \x1B[7;1m▸ To do · CLASSIFICATION UNAVAILABLE  A task                                         \x1B[90m │ \x1B[0m──────────────────────────────\x1B[0m\x1B[K\x1B[8;1H\x1B[0m  Today / open     \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mA task                        \x1B[0m\x1B[K\x1B[9;1H\x1B[0m  Inbox            \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mStatus: To do                 \x1B[0m\x1B[K\x1B[10;1H\x1B[0mCURRENT PROJECT    \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mProject: Life                 \x1B[0m\x1B[K\x1B[11;1H\x1B[0m  Board            \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mKind: task · i1               \x1B[0m\x1B[K\x1B[12;1H\x1B[90m› List             \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mPriority: none                \x1B[0m\x1B[K\x1B[13;1H\x1B[0m  Notes            \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mDue: none                     \x1B[0m\x1B[K\x1B[14;1H\x1B[0m  Workflow         \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mParent: none                  \x1B[0m\x1B[K\x1B[15;1H\x1B[0m  Plan             \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mPath: top level               \x1B[0m\x1B[K\x1B[16;1H\x1B[0mPROJECT CONTEXT    \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[17;1H\x1B[0m  Linked           \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0mNo description.               \x1B[0m\x1B[K\x1B[18;1H\x1B[0mSECONDARY          \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[19;1H\x1B[0m  Archive          \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[20;1H\x1B[0m  History          \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[21;1H\x1B[0m                   \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[22;1H\x1B[0mPROJECT SCOPE      \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[23;1H\x1B[90m› Life             \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[24;1H\x1B[0m  Space · change s…\x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[25;1H\x1B[0m                   \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[26;1H\x1B[0m                   \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[27;1H\x1B[0m                   \x1B[90m │ \x1B[0m                                                                                     \x1B[90m │ \x1B[0m                              \x1B[0m\x1B[K\x1B[28;1H\x1B[0mUpdated 3:13:38 PM · rev 1                                                                                                                  \x1B[0m\x1B[K\x1B[29;1H\x1B[36;1mTab focus · Space scope · : commands · ? help · list:n capture Enter inspect e edit y mark Y triage J related · e edit m status c complete b\x1B[0m\x1B[K\x1B[30;1H\x1B[0m                                                                                                                                            \x1B[0m\x1B[K',
+    expected: /\x1b\[7;1m[^\n]*▸ To do · UNSCHEDULED  A task/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at tests/model-view.test.mjs:25:1
+✖ All projects scope exposes portfolio work and a selected project retains stable ID after refresh (27.90725ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /OVERDUE/. Input:
+  
+  'BOREAL  Portfolio  /  Home                                                                                              \n' +
+    'All projects · rev 6 · civil time unavailable · visible sample 49 open · 0 overdue · 2 projects · fresh · 0s ago        \n' +
+    '↑↓ move · PgDn more · Enter inspect · ? help                                                                            \n' +
+    '────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n' +
+    'GLOBAL              │ Home · 51 loaded records and project summaries                    │ INSPECT ·                     \n' +
+    '› Home              │ SYSTEM DAY · civil time unavailable                               │ [Details]  Links  History  Ex…\n' +
+    '  Projects          │ MANAGEMENT · attention unavailable                                │ ──────────────────────────────\n' +
+    '  Today / open      │ PERSONAL · open ? · overdue ? · due today ? · waiting ? · unsche… │ Task 3                        \n' +
+    '  Inbox             │ ───────────────────────────────────────────────────────────────── │ Status: Status 3              \n' +
+    'CURRENT PROJECT     │ ▸ CLASSIFICATION UNAVAILABLE · Task 3 · Life · Status 3 · P3      │ Project: Life                 \n' +
+    '  Board             │   CLASSIFICATION UNAVAILABLE · Task 7 · Life · Status 7 · P3      │ Kind: task · item3            \n' +
+    '  List              │   CLASSIFICATION UNAVAILABLE · Task 11 · Life · Status 2 · P3     │ Priority: 3                   \n' +
+    '  Notes             │   CLASSIFICATION UNAVAILABLE · Task 15 · Life · Status 6 · P3     │ Due: Dec 31, 2000, 6:00 PM    \n' +
+    '  Workflow          │   CLASSIFICATION UNAVAILABLE · Task 19 · Life · Status 1 · P3     │ Parent: none                  \n' +
+    '  Plan              │   CLASSIFICATION UNAVAILABLE · Task 23 · Life · Status 5 · P3     │ Path: top level               \n' +
+    'PROJECT CONTEXT     │   CLASSIFICATION UNAVAILABLE · Task 27 · Life · Status 0 · P3     │                               \n' +
+    '  Linked            │   CLASSIFICATION UNAVAILABLE · Task 31 · Life · Status 4 · P3     │ No description.               \n' +
+    'SECONDARY           │   CLASSIFICATION UNAVAILABLE · Task 39 · Life · Status 3 · P3     │                               \n' +
+    '  Archive           │   CLASSIFICATION UNAVAILABLE · Task 43 · Life · Status 7 · P3     │                               \n' +
+    '  History           │   CLASSIFICATION UNAVAILABLE · Task 47 · Life · Status 2 · P3     │                               \n' +
+    '                    │   CLASSIFICATION UNAVAILABLE · Task 51 · Life · Status 6 · P3     │                               \n' +
+    'PROJECT SCOPE       │   CLASSIFICATION UNAVAILABLE · Task 2 · Business · Status 2 · P2  │                               \n' +
+    '› All projects      │   CLASSIFICATION UNAVAILABLE · Task 6 · Business · Status 6 · P2  │                               \n' +
+    '  Life              │   CLASSIFICATION UNAVAILABLE · Task 10 · Business · Status 1 · P2 │                               \n' +
+    '  Business          │   CLASSIFICATION UNAVAILABLE · Task 14 · Business · Status 5 · P2 │                               \n' +
+    '                    │   CLASSIFICATION UNAVAILABLE · Task 18 · Business · Status 0 · P2 │                               \n' +
+    '                    │   CLASSIFICATION UNAVAILABLE · Task 22 · Business · Status 4 · P2 │                               \n' +
+    '                    │   CLASSIFICATION UNAVAILABLE · Task 30 · Business · Status 3 · P2 │                               \n' +
+    '                    │   CLASSIFICATION UNAVAILABLE · Task 34 · Business · Status 7 · P2 │                               '
+  
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/model-view.test.mjs:27:124)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'BOREAL  Portfolio  /  Home                                                                                              \nAll projects · rev 6 · civil time unavailable · visible sample 49 open · 0 overdue · 2 projects · fresh · 0s ago        \n↑↓ move · PgDn more · Enter inspect · ? help                                                                            \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\nGLOBAL              │ Home · 51 loaded records and project summaries                    │ INSPECT ·                     \n› Home              │ SYSTEM DAY · civil time unavailable                               │ [Details]  Links  History  Ex…\n  Projects          │ MANAGEMENT · attention unavailable                                │ ──────────────────────────────\n  Today / open      │ PERSONAL · open ? · overdue ? · due today ? · waiting ? · unsche… │ Task 3                        \n  Inbox             │ ───────────────────────────────────────────────────────────────── │ Status: Status 3              \nCURRENT PROJECT     │ ▸ CLASSIFICATION UNAVAILABLE · Task 3 · Life · Status 3 · P3      │ Project: Life                 \n  Board             │   CLASSIFICATION UNAVAILABLE · Task 7 · Life · Status 7 · P3      │ Kind: task · item3            \n  List              │   CLASSIFICATION UNAVAILABLE · Task 11 · Life · Status 2 · P3     │ Priority: 3                   \n  Notes             │   CLASSIFICATION UNAVAILABLE · Task 15 · Life · Status 6 · P3     │ Due: Dec 31, 2000, 6:00 PM    \n  Workflow          │   CLASSIFICATION UNAVAILABLE · Task 19 · Life · Status 1 · P3     │ Parent: none                  \n  Plan              │   CLASSIFICATION UNAVAILABLE · Task 23 · Life · Status 5 · P3     │ Path: top level               \nPROJECT CONTEXT     │   CLASSIFICATION UNAVAILABLE · Task 27 · Life · Status 0 · P3     │                               \n  Linked            │   CLASSIFICATION UNAVAILABLE · Task 31 · Life · Status 4 · P3     │ No description.               \nSECONDARY           │   CLASSIFICATION UNAVAILABLE · Task 39 · Life · Status 3 · P3     │                               \n  Archive           │   CLASSIFICATION UNAVAILABLE · Task 43 · Life · Status 7 · P3     │                               \n  History           │   CLASSIFICATION UNAVAILABLE · Task 47 · Life · Status 2 · P3     │                               \n                    │   CLASSIFICATION UNAVAILABLE · Task 51 · Life · Status 6 · P3     │                               \nPROJECT SCOPE       │   CLASSIFICATION UNAVAILABLE · Task 2 · Business · Status 2 · P2  │                               \n› All projects      │   CLASSIFICATION UNAVAILABLE · Task 6 · Business · Status 6 · P2  │                               \n  Life              │   CLASSIFICATION UNAVAILABLE · Task 10 · Business · Status 1 · P2 │                               \n  Business          │   CLASSIFICATION UNAVAILABLE · Task 14 · Business · Status 5 · P2 │                               \n                    │   CLASSIFICATION UNAVAILABLE · Task 18 · Business · Status 0 · P2 │                               \n                    │   CLASSIFICATION UNAVAILABLE · Task 22 · Business · Status 4 · P2 │                               \n                    │   CLASSIFICATION UNAVAILABLE · Task 30 · Business · Status 3 · P2 │                               \n                    │   CLASSIFICATION UNAVAILABLE · Task 34 · Business · Status 7 · P2 │                               ',
+    expected: /OVERDUE/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at tests/model-view.test.mjs:35:1
+✖ overdue calculation is date based and archive route retains archived records (0.516458ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  false !== true
+  
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/model-view.test.mjs:36:89)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/model-view.test.mjs:50:1
+✖ all record routes preserve a deep selection across 50+ rows (49.992875ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /Personal capture 59/. Input:
+  
+  'BOREAL  Personal inbox  /  Inbox                                                \n' +
+    'Personal inbox + all project inboxes · rev 6 · civil time unavailable · fresh ·…\n' +
+    '↑↓ move · PgDn more · Enter inspect · ? help                                    \n' +
+    'GLOBAL              │ Inbox  60 loaded                                          \n' +
+    '  Home              │ ──────────────────────────────────────────────────────────\n' +
+    '  Projects          │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n' +
+    '  Today / open      │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n' +
+    '› Inbox             │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n' +
+    'CURRENT PROJECT     │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n' +
+    '  Board             │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n' +
+    '  List              │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n' +
+    '  Notes             │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n' +
+    '  Workflow          │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n' +
+    '  Plan              │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n' +
+    '↓ More views        │ ▸ todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…'
+  
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/model-view.test.mjs:70:113)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'BOREAL  Personal inbox  /  Inbox                                                \nPersonal inbox + all project inboxes · rev 6 · civil time unavailable · fresh ·…\n↑↓ move · PgDn more · Enter inspect · ? help                                    \nGLOBAL              │ Inbox  60 loaded                                          \n  Home              │ ──────────────────────────────────────────────────────────\n  Projects          │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n  Today / open      │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n› Inbox             │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\nCURRENT PROJECT     │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n  Board             │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n  List              │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n  Notes             │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n  Workflow          │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n  Plan              │   todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…\n↓ More views        │ ▸ todo · CLASSIFICATION UNAVAILABLE · Personal inbox  Per…',
+    expected: /Personal capture 59/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at tests/model-view.test.mjs:72:1
+✖ todo views filter Today, overdue, waiting, and all open independently (4.745041ms)
+  AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
+  
+    assert.ok(c.rows().some(x=>x.id==="due-today"))
+  
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/model-view.test.mjs:81:30)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at tests/model-view.test.mjs:139:1
+✖ Home search with no matches leaves rendered and selectable rows empty (1.247084ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /Home · 0 actionable records/. Input:
+  
+  'BOREAL  Portfolio  /  Home                                                                          \n' +
+    'All projects · rev 6 · civil time unavailable · fresh · 0s ago                                      \n' +
+    '↑↓ move · PgDn more · Enter inspect · ? help · Filter: no such record                               \n' +
+    'GLOBAL              │ Home · 0 loaded records and project summaries                                 \n' +
+    '› Home              │ SYSTEM DAY · civil time unavailable                                           \n' +
+    '  Projects          │ MANAGEMENT · attention unavailable                                            \n' +
+    '  Today / open      │ PERSONAL · open ? · overdue ? · due today ? · waiting ? · unscheduled ? · lat…\n' +
+    '  Inbox             │ ──────────────────────────────────────────────────────────────────────────────\n' +
+    'CURRENT PROJECT     │                                                                               \n' +
+    '  Board             │                                                                               \n' +
+    '  List              │                                                                               \n' +
+    '  Notes             │                                                                               \n' +
+    '  Workflow          │                                                                               \n' +
+    '  Plan              │                                                                               \n' +
+    'PROJECT CONTEXT     │                                                                               \n' +
+    '  Linked            │                                                                               \n' +
+    'SECONDARY           │                                                                               \n' +
+    '  Archive           │                                                                               \n' +
+    '  History           │                                                                               \n' +
+    '                    │                                                                               \n' +
+    'PROJECT SCOPE       │                                                                               \n' +
+    '› All projects      │                                                                               \n' +
+    '↓ More views        │                                                                               '
+  
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/model-view.test.mjs:140:213)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'BOREAL  Portfolio  /  Home                                                                          \nAll projects · rev 6 · civil time unavailable · fresh · 0s ago                                      \n↑↓ move · PgDn more · Enter inspect · ? help · Filter: no such record                               \nGLOBAL              │ Home · 0 loaded records and project summaries                                 \n› Home              │ SYSTEM DAY · civil time unavailable                                           \n  Projects          │ MANAGEMENT · attention unavailable                                            \n  Today / open      │ PERSONAL · open ? · overdue ? · due today ? · waiting ? · unscheduled ? · lat…\n  Inbox             │ ──────────────────────────────────────────────────────────────────────────────\nCURRENT PROJECT     │                                                                               \n  Board             │                                                                               \n  List              │                                                                               \n  Notes             │                                                                               \n  Workflow          │                                                                               \n  Plan              │                                                                               \nPROJECT CONTEXT     │                                                                               \n  Linked            │                                                                               \nSECONDARY           │                                                                               \n  Archive           │                                                                               \n  History           │                                                                               \n                    │                                                                               \nPROJECT SCOPE       │                                                                               \n› All projects      │                                                                               \n↓ More views        │                                                                               ',
+    expected: /Home · 0 actionable records/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at tests/model-view.test.mjs:149:1
+✖ waiting follow-up date stays distinct from obligation due date and unscheduled has its own filter (0.721833ms)
+  TypeError: Cannot read properties of undefined (reading 'id')
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/model-view.test.mjs:151:208)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+
+test at tests/model-view.test.mjs:154:1
+✖ date-only obligations and RFC3339 timestamps use UTC calendar-day boundaries (0.15775ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  false !== true
+  
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/model-view.test.mjs:155:54)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/model-view.test.mjs:170:1
+✖ authoritative project attention supplies full-state action and milestone summaries (0.974417ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + undefined
+  - 'off-page-action'
+  
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/model-view.test.mjs:172:111)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: 'off-page-action',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/model-view.test.mjs:187:1
+✖ responsive layouts preserve selected row, scope, freshness and bounded lines (8.76175ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /fresh/. Input:
+  
+  'BOREAL  Life  /  List                                                                               \n' +
+    'Project: Life · rev 6 · civil time unavailable · visible sample 24 open · 0 overdue · 2 projects · …\n' +
+    '↑↓ move · PgDn more · Enter inspect · ? help                                                        \n' +
+    '────────────────────────────────────────────────────────────────────────────────────────────────────\n' +
+    'GLOBAL              │ List  27 loaded                                                               \n' +
+    '  Home              │ ──────────────────────────────────────────────────────────────────────────────\n' +
+    '  Projects          │   Status 3 · CLASSIFICATION UNAVAILABLE · P3  Task 3                          \n' +
+    '  Today / open      │   Status 5 · CLASSIFICATION UNAVAILABLE · P1  Task 5                          \n' +
+    '  Inbox             │   Status 7 · CLASSIFICATION UNAVAILABLE · P3  Task 7                          \n' +
+    'CURRENT PROJECT     │   Status 0 · CLASSIFICATION UNAVAILABLE · P1  Task 9                          \n' +
+    '  Board             │   Status 2 · CLASSIFICATION UNAVAILABLE · P3  Task 11                         \n' +
+    '› List              │   Status 4 · CLASSIFICATION UNAVAILABLE · P1  Task 13                         \n' +
+    '  Notes             │   Status 6 · CLASSIFICATION UNAVAILABLE · P3  Task 15                         \n' +
+    '  Workflow          │   Status 8 · CLASSIFICATION UNAVAILABLE · P1  Task 17                         \n' +
+    '  Plan              │   Status 1 · CLASSIFICATION UNAVAILABLE · P3  Task 19                         \n' +
+    'PROJECT CONTEXT     │   Status 3 · CLASSIFICATION UNAVAILABLE · P1  Task 21                         \n' +
+    '  Linked            │   Status 5 · CLASSIFICATION UNAVAILABLE · P3  Task 23                         \n' +
+    'SECONDARY           │ ▸ Status 7 · CLASSIFICATION UNAVAILABLE · P1  Task 25                         \n' +
+    '  Archive           │    Long detail Long detail Long detail Long detail Long detail Long detail    \n' +
+    '  History           │ Long detail Long detail Long detail Long detail Long detail Long detail Long  \n' +
+    '                    │ detail Long detail Long detail Long detail Long detail Long detail Long detail\n' +
+    'PROJECT SCOPE       │ Long detail Long detail Long detail Long detail Long detail                   \n' +
+    '› Life              │   Status 0 · CLASSIFICATION UNAVAILABLE · P3  Task 27                         \n' +
+    '  Space · change s… │   Status 2 · CLASSIFICATION UNAVAILABLE · P1  Task 29                         \n' +
+    '                    │   Status 4 · CLASSIFICATION UNAVAILABLE · P3  Task 31                         \n' +
+    '                    │   Status 6 · CLASSIFICATION UNAVAILABLE · P1  Task 33                         \n' +
+    '                    │   Status 8 · CLASSIFICATION UNAVAILABLE · P3  Task 35                         \n' +
+    '                    │   Status 1 · CLASSIFICATION UNAVAILABLE · P1  Task 37                         \n' +
+    '                    │   Status 3 · CLASSIFICATION UNAVAILABLE · P3  Task 39                         '
+  
+      at TestContext.<anonymous> (file:///Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui/tests/model-view.test.mjs:188:415)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'BOREAL  Life  /  List                                                                               \nProject: Life · rev 6 · civil time unavailable · visible sample 24 open · 0 overdue · 2 projects · …\n↑↓ move · PgDn more · Enter inspect · ? help                                                        \n────────────────────────────────────────────────────────────────────────────────────────────────────\nGLOBAL              │ List  27 loaded                                                               \n  Home              │ ──────────────────────────────────────────────────────────────────────────────\n  Projects          │   Status 3 · CLASSIFICATION UNAVAILABLE · P3  Task 3                          \n  Today / open      │   Status 5 · CLASSIFICATION UNAVAILABLE · P1  Task 5                          \n  Inbox             │   Status 7 · CLASSIFICATION UNAVAILABLE · P3  Task 7                          \nCURRENT PROJECT     │   Status 0 · CLASSIFICATION UNAVAILABLE · P1  Task 9                          \n  Board             │   Status 2 · CLASSIFICATION UNAVAILABLE · P3  Task 11                         \n› List              │   Status 4 · CLASSIFICATION UNAVAILABLE · P1  Task 13                         \n  Notes             │   Status 6 · CLASSIFICATION UNAVAILABLE · P3  Task 15                         \n  Workflow          │   Status 8 · CLASSIFICATION UNAVAILABLE · P1  Task 17                         \n  Plan              │   Status 1 · CLASSIFICATION UNAVAILABLE · P3  Task 19                         \nPROJECT CONTEXT     │   Status 3 · CLASSIFICATION UNAVAILABLE · P1  Task 21                         \n  Linked            │   Status 5 · CLASSIFICATION UNAVAILABLE · P3  Task 23                         \nSECONDARY           │ ▸ Status 7 · CLASSIFICATION UNAVAILABLE · P1  Task 25                         \n  Archive           │    Long detail Long detail Long detail Long detail Long detail Long detail    \n  History           │ Long detail Long detail Long detail Long detail Long detail Long detail Long  \n                    │ detail Long detail Long detail Long detail Long detail Long detail Long detail\nPROJECT SCOPE       │ Long detail Long detail Long detail Long detail Long detail                   \n› Life              │   Status 0 · CLASSIFICATION UNAVAILABLE · P3  Task 27                         \n  Space · change s… │   Status 2 · CLASSIFICATION UNAVAILABLE · P1  Task 29                         \n                    │   Status 4 · CLASSIFICATION UNAVAILABLE · P3  Task 31                         \n                    │   Status 6 · CLASSIFICATION UNAVAILABLE · P1  Task 33                         \n                    │   Status 8 · CLASSIFICATION UNAVAILABLE · P3  Task 35                         \n                    │   Status 1 · CLASSIFICATION UNAVAILABLE · P1  Task 37                         \n                    │   Status 3 · CLASSIFICATION UNAVAILABLE · P3  Task 39                         ',
+    expected: /fresh/,
+    operator: 'match',
+    diff: 'simple'
+  }

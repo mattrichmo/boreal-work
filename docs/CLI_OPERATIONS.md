@@ -28,6 +28,30 @@ incomplete entries through `maintenance show`. Showing a manifest does not
 revalidate every byte of the packaged database; restore performs those checks.
 Existing explicit `backup` and `restore` own artifact creation and restoration.
 
+Create a project backup in a new package directory before import, upgrade, or
+recovery work:
+
+```sh
+bwrk backup --project PROJECT /path/to/backups/project-2026-10-13 --json
+bwrk snapshot list --json
+bwrk snapshot show SNAPSHOT_ID --json
+```
+
+Restore the package to a separate database path when rehearsing recovery. The
+original database remains available for comparison and rollback:
+
+```sh
+bwrk restore /path/to/backups/project-2026-10-13 --db /path/to/recovery/boreal.sqlite --json
+bwrk maintenance show --project PROJECT OPERATION_ID \
+  --input /path/to/backups/project-2026-10-13 --json
+```
+
+Restore verifies the package before publishing it and records a durable
+operation result. The package manifest reports referenced source blobs and
+published-memory entries. When `restore_supported` is false, the package does
+not contain those external artifacts; archive them separately and treat the
+restore as incomplete until their matching artifact bundle is available.
+
 ## Diagnostic log rotation
 
 ```sh

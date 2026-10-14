@@ -183,19 +183,27 @@ fn commands_report_dependency_reads_as_service_capable() {
 }
 
 #[test]
-fn commands_catalogue_lists_the_implemented_intake_capture_route_as_available() {
+fn commands_catalogue_lists_typed_intake_routes_with_revision_fences() {
     let (success, envelope) = invoke(&["commands", "intake", "--json"]);
     assert!(success);
     let available = envelope["data"]["available"].as_array().unwrap();
-    assert!(available.iter().any(|route| {
-        route["path"] == "intake capture"
-            && route["availability"] == "available"
-            && route["adapters"]["direct"] == true
-    }));
+    for path in ["intake capture", "intake bucket"] {
+        let route = available
+            .iter()
+            .find(|route| route["path"] == path)
+            .unwrap_or_else(|| panic!("missing route {path}"));
+        assert_eq!(route["availability"], "available", "{path}");
+        assert_eq!(route["adapters"]["direct"], true, "{path}");
+        assert_eq!(route["adapters"]["service"], true, "{path}");
+        assert!(route["syntax"]
+            .as_str()
+            .unwrap()
+            .contains("--expected-revision N"));
+    }
     let unavailable = envelope["data"]["unavailable_routes"].as_array().unwrap();
     assert!(!unavailable
         .iter()
-        .any(|route| route["path"] == "intake capture"));
+        .any(|route| { route["path"] == "intake capture" || route["path"] == "intake bucket" }));
 }
 
 #[test]
@@ -355,8 +363,8 @@ fn commands_report_source_route_adapters_accurately() {
         ("source add", true),
         ("source list", true),
         ("source search", true),
-        ("source show", false),
-        ("source verify", false),
+        ("source show", true),
+        ("source verify", true),
     ] {
         let route = routes
             .iter()
@@ -365,6 +373,9 @@ fn commands_report_source_route_adapters_accurately() {
         assert_eq!(route["availability"], "available", "{path}");
         assert_eq!(route["adapters"]["direct"], true, "{path}");
         assert_eq!(route["adapters"]["service"], service_supported, "{path}");
+        if matches!(path, "source show" | "source verify") {
+            assert!(route["syntax"].as_str().unwrap().contains("--socket PATH"));
+        }
         if path == "source list" {
             assert_eq!(
                 route["syntax"],

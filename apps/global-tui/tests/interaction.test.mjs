@@ -6,13 +6,42 @@ import { runInteractive, runLineInterface } from '../dist/interaction.js';
 import { StreamingKeyDecoder } from '../dist/terminal/keys.js';
 import { form, editField, validateForm, parseLabels, renderForm } from '../dist/forms.js';
 
-const snapshot = () => ({ schema_version: 2, revision: 1,
+const SYSTEM_CIVIL_DATE = '2026-09-30';
+const CIVIL_TIME = { observed_at_unix_ms: Date.parse(`${SYSTEM_CIVIL_DATE}T12:00:00Z`), timezone: 'UTC', system_civil_date: SYSTEM_CIVIL_DATE, tzdb_identity: `sha256:${'a'.repeat(64)}` };
+function withServerReadModel(source) {
+  const result = structuredClone(source); result.civil_time = structuredClone(CIVIL_TIME);
+  result.items = result.items.map(item => {
+    const category = result.statuses.find(status => status.project_id === item.project_id && status.status_id === item.status_id)?.category ?? 'open';
+    const day = item.due_at == null ? undefined : /^\d{4}-\d{2}-\d{2}$/u.test(item.due_at) ? item.due_at : Number.isFinite(Date.parse(item.due_at)) ? new Date(item.due_at).toISOString().slice(0, 10) : undefined;
+    const deadline = day === undefined ? item.due_at == null ? 'unscheduled' : 'unknown' : day < SYSTEM_CIVIL_DATE ? 'overdue' : day === SYSTEM_CIVIL_DATE ? 'due_today' : 'later';
+    const waiting = category === 'waiting';
+    const group = deadline === 'overdue' ? 'overdue' : deadline === 'due_today' ? 'due_today' : deadline === 'unscheduled' ? waiting ? 'waiting' : 'unscheduled' : deadline === 'later' ? waiting ? 'waiting' : 'later' : waiting ? 'waiting' : 'unknown';
+    return { ...item, daily_classification: { group, deadline, waiting, filters: { today: deadline === 'due_today', overdue: deadline === 'overdue', waiting, unscheduled: deadline === 'unscheduled', all_open: true } } };
+  });
+  {
+    const summary = owner => {
+      const items = result.items.filter(item => item.project_id === owner && !item.archived);
+      const category = item => result.statuses.find(status => status.project_id === item.project_id && status.status_id === item.status_id)?.category;
+      const active = items.filter(item => !['completed', 'cancelled'].includes(category(item)));
+      const counts = { open: active.length, waiting: 0, overdue: 0, due_today: 0, unscheduled: 0, later: 0 };
+      for (const item of active) { const value = item.daily_classification; if (value.waiting) counts.waiting++; if (Object.hasOwn(counts, value.deadline)) counts[value.deadline]++; }
+      const next = items.find(item => ['open', 'active'].includes(category(item)) && ['task', 'subtask'].includes(item.kind));
+      return { ...counts, next_action: next ? { item_id: next.id, title: next.title, due_at: next.due_at, priority: next.priority, status_id: next.status_id, status_label: result.statuses.find(status => status.project_id === next.project_id && status.status_id === next.status_id)?.label ?? next.status_id, kind: next.kind } : null, next_milestone: null, blocked_by: [], next_action_unavailable_reason: next ? null : 'no_open_action' };
+    };
+    const projects = Object.fromEntries(result.projects.map(project => [project.id, summary(project.id)]));
+    const personal = summary(null); const portfolio = { open: personal.open, waiting: personal.waiting, overdue: personal.overdue, due_today: personal.due_today, unscheduled: personal.unscheduled, later: personal.later };
+    for (const value of Object.values(projects)) for (const key of Object.keys(portfolio)) portfolio[key] += value[key];
+    result.attention = { portfolio, projects, projects_total: result.projects.length, projects_limit: result.projects.length, projects_has_more: false, projects_truncated: false, personal };
+  }
+  return result;
+}
+const snapshot = () => withServerReadModel({ schema_version: 2, revision: 1,
   projects: [{ id: 'p1', name: 'Life', description: '', archived: false, created_at: '', updated_at: '' }],
-  items: [{ id: 'i1', project_id: 'p1', parent_id: null, kind: 'task', title: 'A task', description: '', status_id: 'todo', priority: null, due_at: null, labels: [], archived: false, position: 0, created_at: '', updated_at: '' }],
-  notes: [], statuses: [{ project_id: 'p1', status_id: 'todo', label: 'To do', category: 'todo', position: 0 }], relationships: [], associations: [] });
+  items: [{ id: 'i1', project_id: 'p1', parent_id: null, kind: 'task', title: 'A task', description: '', status_id: 'todo', priority: null, due_at: null, follow_up_at: null, labels: [], archived: false, position: 0, created_at: '', updated_at: '' }],
+  notes: [], statuses: [{ project_id: 'p1', status_id: 'todo', label: 'To do', category: 'open', position: 0 }], relationships: [], associations: [] });
 function harness(options = {}) {
   const calls = [], historyCalls = [], linkedPageCalls=[]; let snapshotCalls = 0;
-  const client = { snapshot: async () => { snapshotCalls++; if(options.failSnapshotAfter!==undefined&&snapshotCalls>options.failSnapshotAfter)throw new Error('snapshot unavailable'); if(options.failFirstSnapshot&&snapshotCalls===1)throw new Error('service unavailable'); return options.snapshot ?? snapshot(); }, history: async args => { historyCalls.push(args); return options.history ? options.history(args) : { events: [], total: 0, has_more: false, next_offset: null }; }, noteShow: async id => options.noteShow?.(id)??options.snapshot?.notes?.find(n=>n.id===id), linkedShow: async (projectId,identity) => options.linkedShow?.(projectId,identity), linkedPage: async (projectId,identity,args) => { linkedPageCalls.push({projectId,identity,...args}); return options.linkedPage?.(projectId,identity,args); }, linkedJobShow: async id => options.linkedJobShow?.(id), execute: async (command, payload, mutation) => { if(mutation)calls.push({ command, payload }); if (options.fail&&mutation) throw new Error('write rejected for fixture'); if(options.conflict&&mutation)throw Object.assign(new Error('revision conflict'),{errorCode:'revision_conflict'}); if(!mutation&&/show$/.test(command))return options.showItem?.(payload.item_id,command)??options.snapshot?.items?.find(i=>i.id===payload.item_id)??snapshot().items[0]; return { operation_id: `op${calls.length}`, revision: calls.length+1 }; } };
+  const client = { snapshot: async () => { snapshotCalls++; if(options.failSnapshotAfter!==undefined&&snapshotCalls>options.failSnapshotAfter)throw new Error('snapshot unavailable'); if(options.failFirstSnapshot&&snapshotCalls===1)throw new Error('service unavailable'); return withServerReadModel(options.snapshot ?? snapshot()); }, history: async args => { historyCalls.push(args); return options.history ? options.history(args) : { events: [], total: 0, has_more: false, next_offset: null }; }, noteShow: async id => options.noteShow?.(id)??options.snapshot?.notes?.find(n=>n.id===id), linkedShow: async (projectId,identity) => options.linkedShow?.(projectId,identity), linkedPage: async (projectId,identity,args) => { linkedPageCalls.push({projectId,identity,...args}); return options.linkedPage?.(projectId,identity,args); }, linkedJobShow: async id => options.linkedJobShow?.(id), execute: async (command, payload, mutation) => { if(mutation)calls.push({ command, payload }); if (options.fail&&mutation) throw new Error('write rejected for fixture'); if(options.conflict&&mutation)throw Object.assign(new Error('revision conflict'),{errorCode:'revision_conflict'}); if(mutation)await options.onMutation?.(command,payload); if(!mutation&&/show$/.test(command))return options.showItem?.(payload.item_id,command)??options.snapshot?.items?.find(i=>i.id===payload.item_id)??snapshot().items[0]; return { operation_id: `op${calls.length}`, revision: calls.length+1 }; } };
   const controller = new GlobalController(client); controller.setScope('p1'); controller.setRoute(options.route ?? 'list');
   const terminal = { isTty: true, output: '', raw: false, listener: undefined, write(s) { this.output += s; }, setRawMode(v) { this.raw = v; }, onData(fn) { this.listener = fn; return () => { this.listener = undefined; }; }, dimensions() { return options.dimensions??{ width: 80, height: 18 }; }, openLinkedWorkspace: options.openLinkedWorkspace };
   const run = runInteractive(controller, terminal);
@@ -44,6 +73,7 @@ test('quick capture retains Unicode and commas in its title and submits once', a
   const h = harness(); await h.key('n'); await h.key('Café 家, groceries'); await h.key('\r'); await new Promise(r => setTimeout(r, 5));
   assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0].command, 'todo add');
+  assert.equal(h.calls[0].payload.project_id, null, 'quick capture is always Personal Inbox, even in project scope');
   assert.equal(h.calls[0].payload.title, 'Café 家, groceries');
   await h.key('q'); await h.run;
 });
@@ -52,6 +82,7 @@ test('command palette quick capture performs the selected action', async () => {
   const h = harness(); await h.key(':'); await h.key('Quick capture'); await h.key('\r');
   await h.key('Call, then Café'); await h.key('\r');
   assert.equal(h.calls[0].command, 'todo add');
+  assert.equal(h.calls[0].payload.project_id, null, 'palette capture is always Personal Inbox, even in project scope');
   assert.equal(h.calls[0].payload.title, 'Call, then Café');
   await h.key('\x03'); await h.run;
 });
@@ -203,6 +234,66 @@ test('bulk triage collects marked rows and sends one atomic changes command', as
   await h.key('\x03');await h.run;
 });
 
+test('triage selects the next remaining Inbox item by stable ID after refresh', async () => {
+  const data=snapshot();
+  data.statuses.push({project_id:'p1',status_id:'inbox',label:'Inbox',category:'inbox',position:1});
+  data.items[0].status_id='inbox';
+  data.items.push({...data.items[0],id:'i2',title:'Second task',status_id:'inbox',position:1});
+  const h=harness({snapshot:data,route:'inbox',onMutation:(command,payload)=>{
+    if(command==='todo edit')data.items.find(item=>item.id===payload.item_id).status_id=payload.status_id;
+  }});
+  h.controller.setScope(undefined);h.controller.selectId('i1');
+  await h.key('e');await new Promise(r=>setTimeout(r,10));
+  for(let i=0;i<4;i++)await h.key('\t');
+  await h.key('\r');await h.key('\r');await h.key('\x13');
+  assert.equal(h.calls[0].command,'todo edit');
+  assert.equal(h.controller.selectedRow()?.id,'i2');
+  assert.equal(h.controller.selectedId,'i2');
+  await h.key('\x03');await h.run;
+});
+
+test('committed Inbox triage with failed refresh retains selected identity and truthful notice', async () => {
+  const data=snapshot();
+  data.statuses.push({project_id:'p1',status_id:'inbox',label:'Inbox',category:'inbox',position:1});
+  data.items[0].status_id='inbox';
+  data.items.push({...data.items[0],id:'i2',title:'Second task',status_id:'inbox',position:1});
+  const h=harness({snapshot:data,route:'inbox',failSnapshotAfter:1,onMutation:(command,payload)=>{
+    if(command==='todo edit')data.items.find(item=>item.id===payload.item_id).status_id=payload.status_id;
+  }});
+  await new Promise(r=>setTimeout(r,0));
+  h.controller.setScope(undefined);h.controller.selectId('i1');
+  const selectedBefore=h.controller.selectedId;
+  await h.key('e');await new Promise(r=>setTimeout(r,10));
+  for(let i=0;i<4;i++)await h.key('\t');
+  await h.key('\r');await h.key('\r');await h.key('\x13');
+  assert.equal(h.calls.length,1);
+  assert.equal(h.controller.lastMutationRefreshFailed,true);
+  assert.equal(h.controller.selectedId,selectedBefore);
+  assert.equal(h.controller.selectedRow()?.id,'i1');
+  assert.match(h.terminal.output,/Saved; refresh failed/);
+  await h.key('\x03');await h.run;
+});
+
+test('bulk Inbox triage advances past the last triaged ID only after refreshed readback', async () => {
+  const data=snapshot();
+  data.statuses.push({project_id:'p1',status_id:'inbox',label:'Inbox',category:'inbox',position:1});
+  data.items[0].status_id='inbox';
+  data.items.push({...data.items[0],id:'i2',title:'Second task',status_id:'inbox',position:1},{...data.items[0],id:'i3',title:'Third task',status_id:'inbox',position:2});
+  const h=harness({snapshot:data,route:'inbox',onMutation:(command,payload)=>{
+    if(command==='todo bulk triage')for(const change of payload.changes)data.items.find(item=>item.id===change.item_id).status_id=change.status_id;
+  }});
+  await new Promise(r=>setTimeout(r,0));
+  h.controller.setScope(undefined);h.controller.toggleBulkSelected('i1');h.controller.toggleBulkSelected('i2');
+  await h.key('Y');await h.key('\x1b[B');await h.key('\r');
+  await h.key('\r');await h.key('\r');await h.key('\r');
+  assert.equal(h.calls[0].command,'todo bulk triage');
+  assert.deepEqual(h.calls[0].payload.changes.map(change=>change.item_id),['i1','i2']);
+  assert.equal(h.controller.selectedRow()?.id,'i3');
+  assert.equal(h.controller.selectedId,'i3');
+  assert.equal(h.controller.bulkSelectedIds.size,0);
+  await h.key('\x03');await h.run;
+});
+
 test('planning collapse, parent navigation, and breadcrumb use the selected hierarchy', async () => {
   const data=snapshot();data.items.push({...data.items[0],id:'child',title:'Child task',kind:'subtask',parent_id:'i1',position:1});
   const h=harness({snapshot:data,route:'planning'});
@@ -304,7 +395,7 @@ test('form date and optional priority rules reject invalid input and explain val
 test('blank optional priority is omitted for detailed create and project edit', async () => {
   const h=harness();await h.key('N');await h.key('New detailed task');
   for(const key of ['\t','\t','\t','\t','\t','\t','\t','\t','\x13'])await h.key(key);
-  assert.equal(h.calls[0].command,'todo add');assert.equal(Object.hasOwn(h.calls[0].payload,'priority'),false);
+  assert.equal(h.calls[0].command,'task add');assert.equal(Object.hasOwn(h.calls[0].payload,'priority'),false);assert.equal(Object.hasOwn(h.calls[0].payload,'capture_text'),false);
   h.controller.setRoute('projects');await h.key('e');await h.key('\x13');
   assert.equal(h.calls[1].command,'project edit');assert.equal(Object.hasOwn(h.calls[1].payload,'priority'),false);
   await h.key('\x03');await h.run;
@@ -408,6 +499,21 @@ test('global detailed capture defaults to Personal inbox and exposes destination
   assert.match(h.terminal.output,/Parent/);
   assert.match(h.terminal.output,/Workflow status/);
   await h.key('\x03');await h.run;
+});
+
+test('detailed capture and child creation retain their project-aware destination', async () => {
+  const detailed=harness();await detailed.key('N');
+  assert.match(detailed.terminal.output,/New task · details/);
+  assert.match(detailed.terminal.output,/Destination[\s\S]*Life/);
+  await detailed.key('Scoped detail');await detailed.key('\x13');
+  assert.equal(detailed.calls[0].payload.project_id,'p1');
+  await detailed.key('\x03');await detailed.run;
+
+  const child=harness();await child.key('h');await child.key('Child task');await child.key('\x13');
+  assert.equal(child.calls[0].command,'subtask add');
+  assert.equal(child.calls[0].payload.project_id,'p1');
+  assert.equal(child.calls[0].payload.parent_id,'i1');
+  await child.key('\x03');await child.run;
 });
 
 test('Escape from a searchable form picker returns to the retained form draft', async () => {

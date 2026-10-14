@@ -20,6 +20,14 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
     }
     let app =
         GlobalManagerApplication::open(database).map_err(|e| CliError::invalid(e.to_string()))?;
+    run_with_app(parsed, operation, &app)
+}
+
+pub(crate) fn run_with_app(
+    parsed: &ParsedCommand,
+    operation: &str,
+    app: &GlobalManagerApplication,
+) -> Result<CliResult, CliError> {
     let mut changed = false;
     let mut result_revision = None;
     let replayed = match app.execute(
@@ -139,7 +147,15 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
                 .iter()
                 .filter(|link| link["kind"] == "workspace")
             {
-                let identity = link["identity"].as_str().unwrap_or("");
+                let identity = link
+                    .get("workspace_project_id")
+                    .and_then(Value::as_str)
+                    .or_else(|| link.get("identity").and_then(Value::as_str))
+                    .unwrap_or("");
+                let binding_key = link
+                    .get("workspace_binding_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let path = link["path"].as_str().unwrap_or("");
                 let management_project_id = link["project_id"].as_str().unwrap_or("");
                 let parent = project_by_id.get(management_project_id);
@@ -162,12 +178,21 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
                         parent["lifecycle"].as_str(),
                         Some("on_hold" | "completed" | "cancelled")
                     );
-                let checked = global_commands::validate_workspace(path).and_then(|(id, root)| {
-                    if id != identity {
-                        return Err(CliError::invalid("linked workspace identity changed"));
-                    }
-                    Ok(root)
-                });
+                let checked =
+                    global_commands::validate_workspace_binding(path).and_then(|resolved| {
+                        if resolved.project_id != identity {
+                            return Err(CliError::invalid(
+                                "linked workspace project identity changed",
+                            ));
+                        }
+                        if binding_key.is_empty() || resolved.physical_binding_key() != binding_key
+                        {
+                            return Err(CliError::invalid(
+                                "linked workspace physical identity changed",
+                            ));
+                        }
+                        Ok(resolved.path)
+                    });
                 let root = match checked {
                     Ok(root) => root,
                     Err(error) => {
@@ -187,7 +212,7 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
                         continue;
                     }
                 };
-                let unique = seen_associations.insert(identity.to_owned());
+                let unique = seen_associations.insert(binding_key.to_owned());
                 checks.push(json!({
                     "management_project_id":link["project_id"],
                     "workspace_id":identity,
@@ -202,8 +227,9 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
                             reason = Some("duplicate_eligible_workspace_association");
                         }
                     }
-                    if seen_candidates.insert(identity.to_owned()) {
-                        match fresh_candidate(parsed, &root, identity) {
+                    if seen_candidates.insert(binding_key.to_owned()) {
+                        match global_commands::fresh_linked_candidate(&root, identity, binding_key)
+                        {
                             Ok(mut row) => {
                                 row["management_project_id"] = link["project_id"].clone();
                                 row["management_priority"] =
@@ -339,103 +365,4 @@ pub(crate) fn run(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, 
         data: Some(data),
         ..CliResult::default()
     })
-}
-fn fresh_candidate(parsed: &ParsedCommand, root: &str, project: &str) -> Result<Value, CliError> {
-    let mut local = parsed.clone();
-    local.options.project = Some(project.to_owned());
-    local.options.db = ".boreal/boreal.sqlite".into();
-    local.options.setup.project_root = Some(root.to_owned());
-    local.options.socket = None;
-    let ctx = project_context::resolve_from(&local, Path::new(root))?;
-    let store =
-        SqliteStore::open_read_only_for_diagnostics(&ctx.database).map_err(map_store_error)?;
-    project_context::validate_store(&ctx, &store)?;
-    let metadata: Value = serde_json::from_slice(&{
-        use std::io::Read;
-        let path =
-            project_context::confined_path(&ctx.root, Path::new(".boreal/project.json"), false)?;
-        let mut bytes = Vec::new();
-        fs::File::open(path)
-            .map_err(|e| CliError::invalid(e.to_string()))?
-            .take(65537)
-            .read_to_end(&mut bytes)
-            .map_err(|e| CliError::invalid(e.to_string()))?;
-        if bytes.len() > 65536 {
-            return Err(CliError::invalid("project metadata exceeds 64 KiB"));
-        }
-        bytes
-    })
-    .map_err(|e| CliError::invalid(e.to_string()))?;
-    let actor = metadata["operator_actor"]
-        .as_str()
-        .ok_or_else(|| CliError::invalid("workspace has no registered local operator"))?;
-    let session = metadata["operator_session"]
-        .as_str()
-        .filter(|session| !session.trim().is_empty())
-        .ok_or_else(|| CliError::invalid("workspace has no registered local operator session"))?;
-    validate_operator_session(&store, project, actor, session)?;
-    let role = store
-        .principal_authority(project, actor)
-        .map_err(map_store_error)?
-        .0;
-    let snapshot = boreal_application::discover_work(
-        &store,
-        &ProjectId::new(project),
-        &boreal_domain::ActorContext {
-            actor_id: ActorId::new(actor),
-            role,
-        },
-        Some(session),
-        TimestampMs::from_millis(now_ms_u64()),
-    )
-    .map_err(CliError::invalid)?;
-    validate_operator_session(&store, project, actor, session)?;
-    let current_revision = store.project_revision(project).map_err(map_store_error)?.0;
-    if current_revision != snapshot.revision.0 {
-        return Err(CliError::invalid(
-            "workspace changed during advisory discovery",
-        ));
-    }
-    let Some(item) = snapshot
-        .items
-        .iter()
-        .find(|item| item.claimable_for_actor())
-    else {
-        return Ok(
-            json!({"workspace_id":project,"project_revision":snapshot.revision.0,"state":"idle_or_blocked"}),
-        );
-    };
-    Ok(
-        json!({"workspace_id":project,"working_directory":ctx.root,"project_revision":snapshot.revision.0,"as_of":stamp(now_ms_u64()),"work_id":item.work.id.as_str(),"title":item.work.title,"priority":item.work.priority,"safe_argv":["bwrk","prime","--project",project,"--json"],"authority":"advisory_snapshot_only"}),
-    )
-}
-
-fn validate_operator_session(
-    store: &SqliteStore,
-    project: &str,
-    actor: &str,
-    session_id: &str,
-) -> Result<(), CliError> {
-    let session = store
-        .session(project, session_id)
-        .map_err(map_store_error)?
-        .ok_or_else(|| CliError::invalid("workspace operator session does not exist"))?;
-    if session.registration_operation_id.is_none() || session.project_id != project {
-        return Err(CliError::invalid(
-            "workspace operator session is not bound to this project",
-        ));
-    }
-    if session.actor_id != actor {
-        return Err(CliError::invalid(
-            "workspace operator session is bound to a different actor",
-        ));
-    }
-    if session.state != boreal_store::SessionState::Active {
-        return Err(CliError::invalid(
-            "workspace operator session is not active",
-        ));
-    }
-    store
-        .validate_project_session(project, actor, session_id)
-        .map_err(map_store_error)
 }

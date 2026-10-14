@@ -35,6 +35,10 @@ pub struct GlobalBackupSqliteRuntime {
 pub struct GlobalBackupManifest {
     pub kind: String,
     pub format_version: u64,
+    /// The caller's durable operation identity when the package was created
+    /// through the application backup route. Older and lower-level packages
+    /// may omit it.
+    pub operation_id: Option<String>,
     pub source_schema_id: String,
     pub source_schema_version: u64,
     pub database_id: String,
@@ -51,6 +55,7 @@ impl GlobalBackupManifest {
         json!({
             "kind": self.kind,
             "format_version": self.format_version,
+            "operation_id": self.operation_id,
             "source_schema_id": self.source_schema_id,
             "source_schema_version": self.source_schema_version,
             "database_id": self.database_id,
@@ -118,6 +123,25 @@ pub fn validate_global_backup_manifest(
             "unsupported Global backup format version {format_version}"
         )));
     }
+    let operation_id = match document.get("operation_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value))
+            if value.strip_prefix("op_").is_some_and(|tail| {
+                !tail.is_empty()
+                    && value.len() <= 512
+                    && tail.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+            }) =>
+        {
+            Some(value.clone())
+        }
+        _ => {
+            return Err(StoreError::Corrupt(
+                "Global backup manifest operation_id is malformed".into(),
+            ));
+        }
+    };
     let source_schema_id = required_text("source_schema_id")?;
     let source_schema_version = document
         .get("source_schema_version")
@@ -205,6 +229,7 @@ pub fn validate_global_backup_manifest(
     Ok(GlobalBackupManifest {
         kind: PACKAGE_KIND.to_owned(),
         format_version,
+        operation_id,
         source_schema_id,
         source_schema_version,
         database_id,
@@ -233,6 +258,31 @@ impl GlobalManagerStore {
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<GlobalBackupPackageReport, StoreError> {
+        self.backup_package_to_with_operation_id(destination, None)
+    }
+
+    /// Creates and atomically publishes a package associated with a durable
+    /// application operation ID, so an explicit destination can be safely
+    /// read back after an uncertain delivery.
+    pub fn backup_package_to_with_operation_id(
+        &self,
+        destination: impl AsRef<Path>,
+        operation_id: Option<&str>,
+    ) -> Result<GlobalBackupPackageReport, StoreError> {
+        if let Some(operation_id) = operation_id {
+            let valid_tail = operation_id.strip_prefix("op_").is_some_and(|tail| {
+                !tail.is_empty()
+                    && operation_id.len() <= 512
+                    && tail.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+            });
+            if !valid_tail {
+                return Err(StoreError::Invalid(
+                    "Global backup operation ID is malformed".into(),
+                ));
+            }
+        }
         let destination = destination.as_ref();
         ensure_package_destination(destination)?;
         let parent = nonempty_parent(destination);
@@ -253,7 +303,7 @@ impl GlobalManagerStore {
         let result = (|| {
             let database_path = staging.join(DATABASE_FILE);
             let backup = self.inner.backup_to(&database_path)?;
-            let manifest = build_manifest(&database_path)?;
+            let manifest = build_manifest(&database_path, operation_id)?;
             let manifest_document = manifest.as_json();
             // Validate what will be written, not just the in-memory builder.
             validate_global_backup_manifest(&manifest_document)?;
@@ -360,7 +410,10 @@ struct SnapshotIdentity {
     revision: u64,
 }
 
-fn build_manifest(database_path: &Path) -> Result<GlobalBackupManifest, StoreError> {
+fn build_manifest(
+    database_path: &Path,
+    operation_id: Option<&str>,
+) -> Result<GlobalBackupManifest, StoreError> {
     let database = open_global_snapshot_read_only(database_path)?;
     let identity = validate_global_snapshot(&database)?;
     drop(database);
@@ -369,6 +422,7 @@ fn build_manifest(database_path: &Path) -> Result<GlobalBackupManifest, StoreErr
     Ok(GlobalBackupManifest {
         kind: PACKAGE_KIND.to_owned(),
         format_version: PACKAGE_FORMAT_VERSION,
+        operation_id: operation_id.map(str::to_owned),
         source_schema_id: identity.schema_id,
         source_schema_version: identity.schema_version,
         database_id: identity.database_id,
@@ -826,11 +880,15 @@ fn validate_revision_history(
             .checked_add(1)
             .ok_or_else(|| StoreError::Corrupt("Global history revision overflow".into()))?;
     }
-    let minimum_history_count = revision.max(1);
-    if expected_revision < minimum_history_count
-        || expected_revision > revision.saturating_add(1)
-        || (revision == 0 && !current_revision_present)
-    {
+    // Mutations retain the pre-mutation state at revisions 0..N-1 while the
+    // current state is stored separately. Some upgraded stores also retain a
+    // matching snapshot at N, so accept either contiguous shape.
+    let history_ends_before_current = revision > 0 && expected_revision == revision;
+    let history_includes_current = revision
+        .checked_add(1)
+        .is_some_and(|history_count| expected_revision == history_count)
+        && current_revision_present;
+    if !history_ends_before_current && !history_includes_current {
         return Err(StoreError::Corrupt(
             "Global revision history does not cover the committed revision range".into(),
         ));
@@ -1022,5 +1080,147 @@ mod streaming_checksum_tests {
             hasher.update(chunk);
         }
         assert_eq!(format_sha256(hasher.finish()), expected);
+    }
+}
+
+#[cfg(test)]
+mod revision_history_tests {
+    use super::validate_revision_history;
+    use crate::{SqliteStore, StoreError, SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE};
+    use serde_json::{json, Value};
+    use std::path::Path;
+
+    fn state() -> Value {
+        json!({
+            "projects": [],
+            "items": [],
+            "notes": [],
+            "statuses": [],
+            "relationships": [],
+            "associations": [],
+            "status_history": [],
+            "imported_history": [],
+        })
+    }
+
+    fn encoded_state(state: &Value) -> String {
+        serde_json::to_string(state).unwrap()
+    }
+
+    fn validate_rows(
+        revision: u64,
+        rows: &[(u64, String)],
+        current_state: &Value,
+    ) -> Result<(), StoreError> {
+        let database = SqliteStore::open_connection(
+            Path::new(":memory:"),
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        )?;
+        database.execute_batch(
+            "CREATE TABLE global_revision_snapshot(revision INTEGER, state_json TEXT)",
+        )?;
+        for (history_revision, history_state) in rows {
+            let mut insert = database.prepare(
+                "INSERT INTO global_revision_snapshot(revision,state_json) VALUES(?1,?2)",
+            )?;
+            insert.bind_i64(1, *history_revision)?;
+            insert.bind_text(2, history_state)?;
+            insert.run()?;
+        }
+        validate_revision_history(&database, revision, current_state)
+    }
+
+    #[test]
+    fn accepts_contiguous_history_ending_before_current_snapshot() {
+        let prior_state = state();
+        let current_state = json!({
+            "projects": [{"id": "current"}],
+            "items": [],
+            "notes": [],
+            "statuses": [],
+            "relationships": [],
+            "associations": [],
+            "status_history": [],
+            "imported_history": [],
+        });
+        let history = vec![
+            (0, encoded_state(&prior_state)),
+            (1, encoded_state(&prior_state)),
+        ];
+
+        validate_rows(2, &history, &current_state).unwrap();
+    }
+
+    #[test]
+    fn accepts_matching_current_snapshot_and_revision_zero_baseline() {
+        let current_state = state();
+        validate_rows(0, &[(0, encoded_state(&current_state))], &current_state).unwrap();
+
+        let history = vec![
+            (0, encoded_state(&current_state)),
+            (1, encoded_state(&current_state)),
+            (2, encoded_state(&current_state)),
+        ];
+        validate_rows(2, &history, &current_state).unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_initial_and_interior_history_rows() {
+        let current_state = state();
+        let snapshot = encoded_state(&current_state);
+
+        assert!(validate_rows(2, &[(1, snapshot.clone())], &current_state).is_err());
+        assert!(validate_rows(2, &[(0, snapshot.clone())], &current_state).is_err());
+        assert!(
+            validate_rows(2, &[(0, snapshot.clone()), (2, snapshot)], &current_state,).is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_overlong_history() {
+        let current_state = state();
+        let snapshot = encoded_state(&current_state);
+        let malformed_shape = encoded_state(&json!({"projects": []}));
+
+        assert!(validate_rows(
+            2,
+            &[(0, "{".to_owned()), (1, snapshot.clone())],
+            &current_state,
+        )
+        .is_err());
+        assert!(validate_rows(
+            2,
+            &[(0, malformed_shape), (1, snapshot.clone())],
+            &current_state,
+        )
+        .is_err());
+        assert!(validate_rows(
+            1,
+            &[(0, snapshot.clone()), (1, snapshot.clone()), (2, snapshot)],
+            &current_state,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_a_mismatching_current_revision_snapshot() {
+        let prior_state = state();
+        let current_state = json!({
+            "projects": [{"id": "current"}],
+            "items": [],
+            "notes": [],
+            "statuses": [],
+            "relationships": [],
+            "associations": [],
+            "status_history": [],
+            "imported_history": [],
+        });
+        let history = vec![
+            (0, encoded_state(&prior_state)),
+            (1, encoded_state(&prior_state)),
+            (2, encoded_state(&prior_state)),
+        ];
+
+        assert!(validate_rows(2, &history, &current_state).is_err());
     }
 }

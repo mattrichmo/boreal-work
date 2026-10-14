@@ -1,0 +1,847 @@
+//! Derived Global attention. It contains no persisted or linked execution
+//! state; snapshots rebuild it from the canonical management records.
+
+use crate::global_daily_review::{classify, DailyClassification, DailyDeadline};
+use crate::GlobalCivilTimeContext;
+use boreal_domain::global_manager::{
+    management_prerequisite_state, prerequisite_to_dependent, ManagementPrerequisiteState,
+    ManagementRelationshipKind, StatusCategory,
+};
+use serde_json::{json, Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
+
+const MAX_BLOCKED_CANDIDATES: usize = 5;
+const MAX_BLOCKERS_PER_CANDIDATE: usize = 5;
+
+#[derive(Clone, Copy)]
+enum AttentionScope<'a> {
+    Portfolio,
+    Project(&'a str),
+    Personal,
+}
+
+impl AttentionScope<'_> {
+    fn owns(self, item: &Value, archived_projects: &BTreeSet<String>) -> bool {
+        let owner = item.get("project_id").and_then(Value::as_str);
+        match self {
+            Self::Portfolio => owner.map_or(true, |id| !archived_projects.contains(id)),
+            Self::Project(project_id) => owner == Some(project_id),
+            Self::Personal => owner.is_none(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Counts {
+    open: u64,
+    waiting: u64,
+    overdue: u64,
+    due_today: u64,
+    unscheduled: u64,
+    later: u64,
+}
+
+impl Counts {
+    fn record(&mut self, classification: DailyClassification) {
+        self.open += 1;
+        if classification.waiting {
+            self.waiting += 1;
+        }
+        match classification.deadline {
+            DailyDeadline::Overdue => self.overdue += 1,
+            DailyDeadline::DueToday => self.due_today += 1,
+            DailyDeadline::Unscheduled => self.unscheduled += 1,
+            DailyDeadline::Later => self.later += 1,
+            DailyDeadline::Unknown => {}
+        }
+    }
+
+    fn value(self) -> Value {
+        json!({
+            "open": self.open,
+            "waiting": self.waiting,
+            "overdue": self.overdue,
+            "due_today": self.due_today,
+            "unscheduled": self.unscheduled,
+            "later": self.later,
+        })
+    }
+}
+
+pub(crate) fn attention_summary(
+    state: &Value,
+    selected_project_ids: &[String],
+    time: &GlobalCivilTimeContext,
+) -> Result<Value, String> {
+    let archived_projects = rows(state, "projects")
+        .iter()
+        .filter(|project| project.get("archived").and_then(Value::as_bool) == Some(true))
+        .filter_map(|project| project.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    let project_ids = rows(state, "projects")
+        .iter()
+        .filter_map(|project| project.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    let projects_total = project_ids.len() as u64;
+    let included = selected_project_ids
+        .iter()
+        .filter(|id| project_ids.contains(id))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut project_counts = included
+        .iter()
+        .map(|id| (id.clone(), Counts::default()))
+        .collect::<BTreeMap<_, _>>();
+    let mut portfolio = Counts::default();
+    let mut personal = Counts::default();
+
+    for item in rows(state, "items") {
+        if item.get("archived").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let category = item_category(state, item);
+        if matches!(
+            category,
+            Some(StatusCategory::Completed | StatusCategory::Cancelled)
+        ) {
+            continue;
+        }
+        let classification = classify(
+            item.get("due_at").and_then(Value::as_str),
+            category.map_or("open", StatusCategory::as_str),
+            time,
+        );
+        let owner = item.get("project_id").and_then(Value::as_str);
+        if owner.is_some_and(|id| archived_projects.contains(id)) {
+            continue;
+        }
+        portfolio.record(classification);
+        if let Some(owner) = owner {
+            if let Some(counts) = project_counts.get_mut(owner) {
+                counts.record(classification);
+            }
+        } else {
+            personal.record(classification);
+        }
+    }
+
+    let mut project_summaries = project_counts
+        .into_iter()
+        .map(|(id, counts)| (id, empty_attention(counts)))
+        .collect::<Map<_, _>>();
+    for (project_id, summary) in project_summaries.iter_mut() {
+        if archived_projects.contains(project_id) {
+            continue;
+        }
+        populate_attention_details(state, AttentionScope::Project(project_id), summary, time)?;
+    }
+    let mut personal_summary = empty_attention(personal);
+    populate_attention_details(state, AttentionScope::Personal, &mut personal_summary, time)?;
+
+    let mut portfolio_summary = empty_attention(portfolio);
+    populate_attention_details(
+        state,
+        AttentionScope::Portfolio,
+        &mut portfolio_summary,
+        time,
+    )?;
+
+    // Preserve the legacy snapshot path while keeping Personal first-class.
+    // This compatibility entry is only a projection: totals and page bounds
+    // continue to describe actual projects, and a real `personal` project ID
+    // always takes precedence.
+    if personal.open > 0 && !project_ids.iter().any(|id| id == "personal") {
+        project_summaries.insert("personal".into(), personal_summary.clone());
+    }
+
+    let projects_sampled = included.len() as u64;
+    let projects_truncated = projects_sampled < projects_total;
+    Ok(json!({
+        "portfolio": portfolio_summary,
+        "projects": project_summaries,
+        "projects_total": projects_total,
+        "projects_limit": projects_sampled,
+        "projects_has_more": projects_truncated,
+        "projects_truncated": projects_truncated,
+        "personal": personal_summary
+    }))
+}
+
+fn empty_attention(counts: Counts) -> Value {
+    let mut result = counts.value();
+    result["next_action"] = Value::Null;
+    result["next_milestone"] = Value::Null;
+    result["blocked_by"] = json!([]);
+    result["next_action_unavailable_reason"] = Value::Null;
+    result
+}
+
+fn populate_attention_details(
+    state: &Value,
+    scope: AttentionScope<'_>,
+    summary: &mut Value,
+    time: &GlobalCivilTimeContext,
+) -> Result<(), String> {
+    let archived_projects = rows(state, "projects")
+        .iter()
+        .filter(|project| project.get("archived").and_then(Value::as_bool) == Some(true))
+        .filter_map(|project| project.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    let owns = |item: &Value| scope.owns(item, &archived_projects);
+    let mut candidates = rows(state, "items")
+        .iter()
+        .filter(|item| {
+            owns(item)
+                && item.get("archived").and_then(Value::as_bool) != Some(true)
+                && matches!(
+                    item_category(state, item),
+                    Some(StatusCategory::Open | StatusCategory::Active)
+                )
+                && matches!(
+                    item.get("kind").and_then(Value::as_str),
+                    Some("task" | "subtask")
+                )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| action_order(left, right, state, time));
+
+    let item_by_id = rows(state, "items")
+        .iter()
+        .filter_map(|item| Some((item.get("id")?.as_str()?.to_owned(), item)))
+        .collect::<BTreeMap<_, _>>();
+    let mut prerequisites: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for relationship in rows(state, "relationships") {
+        let source = relationship
+            .get("source_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "management relationship source is missing".to_owned())?;
+        let target = relationship
+            .get("target_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "management relationship target is missing".to_owned())?;
+        let raw_kind = relationship
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "management relationship kind is missing".to_owned())?;
+        let kind =
+            ManagementRelationshipKind::try_from(raw_kind).map_err(|error| error.to_string())?;
+        if let Some((prerequisite, dependent)) = prerequisite_to_dependent(source, target, kind) {
+            prerequisites
+                .entry(dependent)
+                .or_default()
+                .insert(prerequisite);
+        }
+    }
+
+    let mut blocked_candidates = Vec::new();
+    for candidate in &candidates {
+        let item_id = candidate
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let blocking = prerequisites
+            .get(item_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|prerequisite_id| {
+                let prerequisite = item_by_id.get(prerequisite_id);
+                let category = prerequisite.and_then(|item| item_category(state, item));
+                let archived = prerequisite
+                    .and_then(|item| item.get("archived"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let readiness = management_prerequisite_state(category, archived);
+                if readiness == ManagementPrerequisiteState::Satisfied {
+                    return None;
+                }
+                let prerequisite_title = prerequisite
+                    .and_then(|item| item.get("title"))
+                    .and_then(Value::as_str)
+                    .map(|title| bound_text(title, 160))
+                    .unwrap_or_else(|| "Missing prerequisite".into());
+                let status = prerequisite
+                    .and_then(|item| item.get("status_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unresolved");
+                Some(json!({
+                    "item_id": prerequisite_id,
+                    "title": prerequisite_title,
+                    "status_id": bound_text(status, 80),
+                    "reason_code": prerequisite_reason_code(readiness),
+                    "reason": prerequisite_reason(readiness, status),
+                }))
+            })
+            .take(MAX_BLOCKERS_PER_CANDIDATE)
+            .collect::<Vec<_>>();
+        if blocking.is_empty() {
+            let status_id = candidate
+                .get("status_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let label = rows(state, "statuses")
+                .iter()
+                .find(|status| {
+                    status.get("project_id").and_then(Value::as_str)
+                        == candidate.get("project_id").and_then(Value::as_str)
+                        && status.get("status_id").and_then(Value::as_str) == Some(status_id)
+                })
+                .and_then(|status| status.get("label"))
+                .and_then(Value::as_str)
+                .unwrap_or(status_id);
+            summary["next_action"] = json!({
+                "item_id": candidate.get("id"),
+                "title": bound_text(candidate.get("title").and_then(Value::as_str).unwrap_or_default(), 160),
+                "due_at": candidate.get("due_at").cloned().unwrap_or(Value::Null),
+                "priority": candidate.get("priority").cloned().unwrap_or(Value::Null),
+                "status_id": status_id,
+                "status_label": bound_text(label, 160),
+                "kind": candidate.get("kind"),
+            });
+            break;
+        }
+        if blocked_candidates.len() < MAX_BLOCKED_CANDIDATES {
+            blocked_candidates.push(json!({
+                "item_id": item_id,
+                "title": bound_text(candidate.get("title").and_then(Value::as_str).unwrap_or_default(), 160),
+                "prerequisites": blocking,
+            }));
+        }
+    }
+    if summary.get("next_action").is_some_and(Value::is_null) {
+        let unavailable_reason = if blocked_candidates.is_empty() {
+            "no_open_action".to_owned()
+        } else {
+            "unresolved_prerequisites".to_owned()
+        };
+        summary["blocked_by"] = json!(blocked_candidates);
+        summary["next_action_unavailable_reason"] = json!(unavailable_reason);
+    }
+
+    let mut milestones = rows(state, "items")
+        .iter()
+        .filter(|item| {
+            owns(item)
+                && item.get("kind").and_then(Value::as_str) == Some("milestone")
+                && item.get("archived").and_then(Value::as_bool) != Some(true)
+                && !matches!(
+                    item_category(state, item),
+                    Some(StatusCategory::Completed | StatusCategory::Cancelled)
+                )
+        })
+        .collect::<Vec<_>>();
+    milestones.sort_by(|left, right| action_order(left, right, state, time));
+    if let Some(milestone) = milestones.first() {
+        let children = rows(state, "items")
+            .iter()
+            .filter(|child| child.get("parent_id") == milestone.get("id") && owns(child))
+            .collect::<Vec<_>>();
+        let completed = children
+            .iter()
+            .filter(|child| item_category(state, child) == Some(StatusCategory::Completed))
+            .count();
+        summary["next_milestone"] = json!({
+            "item_id": milestone.get("id"),
+            "title": bound_text(milestone.get("title").and_then(Value::as_str).unwrap_or_default(), 160),
+            "due_at": milestone.get("due_at").cloned().unwrap_or(Value::Null),
+            "completed_children": completed,
+            "total_children": children.len(),
+        });
+    }
+    Ok(())
+}
+
+fn action_order(
+    left: &Value,
+    right: &Value,
+    state: &Value,
+    time: &GlobalCivilTimeContext,
+) -> std::cmp::Ordering {
+    let due_rank = |item: &Value| {
+        let category = item_category(state, item).map_or("open", StatusCategory::as_str);
+        let classification = classify(item.get("due_at").and_then(Value::as_str), category, time);
+        match classification.deadline {
+            DailyDeadline::Overdue => 0,
+            DailyDeadline::DueToday => 1,
+            DailyDeadline::Later => 2,
+            DailyDeadline::Unscheduled => 3,
+            DailyDeadline::Unknown => 4,
+        }
+    };
+    due_rank(left)
+        .cmp(&due_rank(right))
+        .then_with(|| {
+            right
+                .get("priority")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .cmp(&left.get("priority").and_then(Value::as_u64).unwrap_or(0))
+        })
+        .then_with(|| {
+            left.get("position")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .cmp(&right.get("position").and_then(Value::as_i64).unwrap_or(0))
+        })
+        .then_with(|| {
+            left.get("id")
+                .and_then(Value::as_str)
+                .cmp(&right.get("id").and_then(Value::as_str))
+        })
+}
+
+fn item_category(state: &Value, item: &Value) -> Option<StatusCategory> {
+    let owner = item.get("project_id").and_then(Value::as_str);
+    let status_id = item.get("status_id").and_then(Value::as_str)?;
+    rows(state, "statuses")
+        .iter()
+        .find(|status| {
+            status.get("project_id").and_then(Value::as_str) == owner
+                && status.get("status_id").and_then(Value::as_str) == Some(status_id)
+        })
+        .and_then(|status| status.get("category"))
+        .and_then(Value::as_str)
+        .and_then(|category| StatusCategory::try_from(category).ok())
+}
+
+fn prerequisite_reason_code(readiness: ManagementPrerequisiteState) -> &'static str {
+    match readiness {
+        ManagementPrerequisiteState::Satisfied => "completed",
+        ManagementPrerequisiteState::Incomplete => "not_completed",
+        ManagementPrerequisiteState::ArchivedIncomplete => "archived_incomplete",
+        ManagementPrerequisiteState::Cancelled => "cancelled",
+        ManagementPrerequisiteState::Missing => "missing",
+    }
+}
+
+fn prerequisite_reason(readiness: ManagementPrerequisiteState, status: &str) -> String {
+    let reason = match readiness {
+        ManagementPrerequisiteState::Satisfied => "completed",
+        ManagementPrerequisiteState::Incomplete => "not completed",
+        ManagementPrerequisiteState::ArchivedIncomplete => "archived before completion",
+        ManagementPrerequisiteState::Cancelled => "cancelled; completion is still required",
+        ManagementPrerequisiteState::Missing => "missing or unresolved",
+    };
+    bound_text(&format!("{reason} (status {status})"), 160)
+}
+
+fn rows<'a>(state: &'a Value, key: &str) -> &'a [Value] {
+    state
+        .get(key)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+fn bound_text(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    let mut end = maximum_bytes.saturating_sub(3);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &value[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attention_summary;
+    use crate::GlobalCivilTimeContext;
+    use serde_json::{json, Value};
+
+    fn status(project_id: Option<&str>) -> Value {
+        json!({
+            "project_id": project_id,
+            "status_id": "open",
+            "category": "open",
+            "label": "Open",
+        })
+    }
+
+    fn workflow_status(project_id: Option<&str>, status_id: &str, category: &str) -> Value {
+        json!({
+            "project_id": project_id,
+            "status_id": status_id,
+            "category": category,
+            "label": status_id,
+        })
+    }
+
+    fn task(project_id: Option<&str>, id: &str, due_at: &str) -> Value {
+        json!({
+            "id": id,
+            "project_id": project_id,
+            "parent_id": null,
+            "kind": "task",
+            "title": id,
+            "status_id": "open",
+            "due_at": due_at,
+            "priority": 0,
+            "position": 0,
+            "archived": false,
+        })
+    }
+
+    fn task_with_status(
+        project_id: Option<&str>,
+        id: &str,
+        due_at: &str,
+        status_id: &str,
+        archived: bool,
+    ) -> Value {
+        let mut item = task(project_id, id, due_at);
+        item["status_id"] = json!(status_id);
+        item["archived"] = json!(archived);
+        item
+    }
+
+    fn relationship(source_id: &str, target_id: &str, kind: &str) -> Value {
+        json!({
+            "source_id": source_id,
+            "target_id": target_id,
+            "kind": kind,
+        })
+    }
+
+    #[test]
+    fn personal_summary_has_legacy_projects_alias_without_changing_project_totals() {
+        let state = json!({
+            "projects": [],
+            "items": [task(None, "personal-action", "2999-01-01")],
+            "statuses": [status(None)],
+            "relationships": [],
+        });
+        let summary =
+            attention_summary(&state, &[], &GlobalCivilTimeContext::system().unwrap()).unwrap();
+
+        assert_eq!(summary["personal"]["open"], 1);
+        assert_eq!(
+            summary["personal"]["next_action"]["item_id"],
+            "personal-action"
+        );
+        assert_eq!(summary["projects"]["personal"], summary["personal"]);
+        assert_eq!(summary["projects_total"], 0);
+        assert_eq!(summary["projects_limit"], 0);
+        assert_eq!(summary["projects_has_more"], false);
+    }
+
+    #[test]
+    fn real_personal_project_id_is_not_overwritten_by_legacy_alias() {
+        let state = json!({
+            "projects": [{"id":"personal", "archived":false}],
+            "items": [
+                task(Some("personal"), "project-action", "2999-01-01"),
+                task(None, "personal-action", "1900-01-01"),
+            ],
+            "statuses": [status(Some("personal")), status(None)],
+            "relationships": [],
+        });
+        let summary = attention_summary(
+            &state,
+            &["personal".into()],
+            &GlobalCivilTimeContext::system().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(summary["projects_total"], 1);
+        assert_eq!(summary["projects_limit"], 1);
+        assert_eq!(summary["projects"].as_object().unwrap().len(), 1);
+        assert_eq!(summary["projects"]["personal"]["open"], 1);
+        assert_eq!(summary["projects"]["personal"]["later"], 1);
+        assert_eq!(
+            summary["projects"]["personal"]["next_action"]["item_id"],
+            "project-action"
+        );
+        assert_eq!(summary["personal"]["open"], 1);
+        assert_eq!(summary["personal"]["overdue"], 1);
+        assert_eq!(
+            summary["personal"]["next_action"]["item_id"],
+            "personal-action"
+        );
+    }
+
+    #[test]
+    fn portfolio_exposes_next_action_and_milestone_across_personal_and_projects() {
+        let mut milestone = task(Some("business"), "launch", "2999-01-01");
+        milestone["kind"] = json!("milestone");
+        let mut completed_child = task_with_status(
+            Some("business"),
+            "finished-checklist-item",
+            "2999-01-01",
+            "done",
+            false,
+        );
+        completed_child["parent_id"] = json!("launch");
+        let time = GlobalCivilTimeContext::system().unwrap();
+        let mut personal_waiting = task_with_status(None, "personal-waiting", "", "waiting", false);
+        personal_waiting["due_at"] = Value::Null;
+        let mut personal_unscheduled = task(None, "personal-unscheduled", "");
+        personal_unscheduled["due_at"] = Value::Null;
+        let mut personal_milestone = task(None, "personal-milestone", "3000-01-01");
+        personal_milestone["kind"] = json!("milestone");
+        let state = json!({
+            "projects": [
+                {"id":"business", "archived":false},
+                {"id":"archived", "archived":true},
+            ],
+            "items": [
+                task(None, "personal-overdue", "1900-01-01"),
+                task(None, "personal-due-today", &time.system_civil_date),
+                personal_waiting,
+                personal_unscheduled,
+                personal_milestone,
+                task(Some("business"), "business-action", "2999-01-01"),
+                milestone,
+                completed_child,
+                task(Some("archived"), "hidden-action", "1900-01-01"),
+            ],
+            "statuses": [
+                status(None),
+                workflow_status(None, "waiting", "waiting"),
+                status(Some("business")),
+                status(Some("archived")),
+                workflow_status(Some("business"), "done", "completed"),
+            ],
+            "relationships": [],
+        });
+
+        let summary = attention_summary(&state, &["business".into()], &time).unwrap();
+
+        assert_eq!(summary["portfolio"]["open"], 7);
+        assert_eq!(summary["portfolio"]["overdue"], 1);
+        assert_eq!(summary["portfolio"]["due_today"], 1);
+        assert_eq!(summary["portfolio"]["waiting"], 1);
+        assert_eq!(summary["portfolio"]["unscheduled"], 2);
+        assert_eq!(
+            summary["portfolio"]["next_action"]["item_id"],
+            "personal-overdue"
+        );
+        assert_eq!(summary["portfolio"]["next_milestone"]["item_id"], "launch");
+        assert_eq!(
+            summary["portfolio"]["next_milestone"]["completed_children"],
+            1
+        );
+        assert_eq!(summary["portfolio"]["next_milestone"]["total_children"], 1);
+        assert_eq!(
+            summary["personal"]["next_action"]["item_id"],
+            "personal-overdue"
+        );
+        assert_eq!(
+            summary["personal"]["next_milestone"]["item_id"],
+            "personal-milestone"
+        );
+        assert_eq!(
+            summary["projects"]["business"]["next_action"]["item_id"],
+            "business-action"
+        );
+    }
+
+    #[test]
+    fn dependency_orientation_is_consistent_for_depends_on_and_blocks() {
+        for (kind, source, target) in [
+            ("depends_on", "candidate", "prerequisite"),
+            ("blocks", "prerequisite", "candidate"),
+        ] {
+            let state = json!({
+                "projects": [],
+                "items": [
+                    task(None, "candidate", "2999-01-01"),
+                    task_with_status(None, "prerequisite", "2999-01-01", "waiting", false),
+                ],
+                "statuses": [
+                    status(None),
+                    workflow_status(None, "waiting", "waiting"),
+                ],
+                "relationships": [relationship(source, target, kind)],
+            });
+
+            let summary =
+                attention_summary(&state, &[], &GlobalCivilTimeContext::system().unwrap()).unwrap();
+
+            assert!(summary["personal"]["next_action"].is_null(), "{kind}");
+            assert_eq!(
+                summary["personal"]["next_action_unavailable_reason"], "unresolved_prerequisites",
+                "{kind}"
+            );
+            assert_eq!(
+                summary["personal"]["blocked_by"][0]["prerequisites"][0]["item_id"], "prerequisite",
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn related_links_and_incomplete_parents_do_not_block_an_action() {
+        let mut child = task(None, "child", "2999-01-01");
+        child["kind"] = json!("subtask");
+        child["parent_id"] = json!("zz-parent");
+        let state = json!({
+            "projects": [],
+            "items": [
+                child,
+                task(None, "zz-parent", "2999-01-01"),
+                task_with_status(None, "related-item", "2999-01-01", "waiting", false),
+            ],
+            "statuses": [
+                status(None),
+                workflow_status(None, "waiting", "waiting"),
+            ],
+            "relationships": [relationship("child", "related-item", "related")],
+        });
+
+        let summary =
+            attention_summary(&state, &[], &GlobalCivilTimeContext::system().unwrap()).unwrap();
+
+        assert_eq!(summary["personal"]["next_action"]["item_id"], "child");
+        assert_eq!(summary["personal"]["blocked_by"], json!([]));
+    }
+
+    #[test]
+    fn every_direct_prerequisite_must_be_completed_and_archived_completion_satisfies() {
+        let mut state = json!({
+            "projects": [],
+            "items": [
+                task(None, "candidate", "2999-01-01"),
+                task_with_status(None, "done", "2999-01-01", "done", true),
+                task_with_status(None, "cancelled", "2999-01-01", "cancelled", false),
+                task_with_status(None, "archived-open", "2999-01-01", "open", true),
+            ],
+            "statuses": [
+                status(None),
+                workflow_status(None, "done", "completed"),
+                workflow_status(None, "cancelled", "cancelled"),
+            ],
+            "relationships": [
+                relationship("done", "candidate", "blocks"),
+                relationship("cancelled", "candidate", "blocks"),
+                relationship("archived-open", "candidate", "blocks"),
+            ],
+        });
+
+        let time = GlobalCivilTimeContext::system().unwrap();
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert!(summary["personal"]["next_action"].is_null());
+        let blockers = summary["personal"]["blocked_by"][0]["prerequisites"]
+            .as_array()
+            .unwrap();
+        assert_eq!(blockers.len(), 2);
+        assert_eq!(blockers[0]["item_id"], "archived-open");
+        assert_eq!(blockers[0]["reason_code"], "archived_incomplete");
+        assert_eq!(blockers[1]["item_id"], "cancelled");
+        assert_eq!(blockers[1]["reason_code"], "cancelled");
+
+        state["items"][2]["status_id"] = json!("done");
+        state["items"][3]["status_id"] = json!("done");
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert_eq!(summary["personal"]["next_action"]["item_id"], "candidate");
+    }
+
+    #[test]
+    fn missing_or_unresolved_prerequisites_block_and_reopening_rechecks_readiness() {
+        let mut state = json!({
+            "projects": [],
+            "items": [
+                task(None, "candidate", "2999-01-01"),
+                task_with_status(None, "unresolved-item", "2999-01-01", "unknown", false),
+            ],
+            "statuses": [status(None)],
+            "relationships": [
+                relationship("missing-item", "candidate", "blocks"),
+                relationship("unresolved-item", "candidate", "blocks"),
+            ],
+        });
+        let time = GlobalCivilTimeContext::system().unwrap();
+
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert!(summary["personal"]["next_action"].is_null());
+        let blockers = summary["personal"]["blocked_by"][0]["prerequisites"]
+            .as_array()
+            .unwrap();
+        assert_eq!(blockers.len(), 2);
+        assert!(blockers
+            .iter()
+            .all(|blocker| blocker["reason_code"] == "missing"));
+
+        state["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(task_with_status(
+                None,
+                "missing-item",
+                "2999-01-01",
+                "done",
+                true,
+            ));
+        state["items"][2]["kind"] = json!("milestone");
+        state["items"][1]["status_id"] = json!("done");
+        state["statuses"]
+            .as_array_mut()
+            .unwrap()
+            .push(workflow_status(None, "done", "completed"));
+
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert_eq!(summary["personal"]["next_action"]["item_id"], "candidate");
+
+        state["items"][2]["status_id"] = json!("open");
+        state["items"][2]["archived"] = json!(false);
+        let summary = attention_summary(&state, &[], &time).unwrap();
+        assert!(summary["personal"]["next_action"].is_null());
+        assert_eq!(
+            summary["personal"]["blocked_by"][0]["prerequisites"][0]["reason_code"],
+            "not_completed"
+        );
+    }
+
+    #[test]
+    fn blocked_by_reasons_are_bounded_by_count_and_text_size() {
+        let mut items = Vec::new();
+        let mut relationships = Vec::new();
+        for candidate_index in 0..7 {
+            let candidate_id = format!("candidate-{candidate_index}");
+            let mut candidate = task(None, &candidate_id, "2999-01-01");
+            candidate["title"] = json!("候".repeat(100));
+            items.push(candidate);
+
+            for prerequisite_index in 0..7 {
+                let prerequisite_id =
+                    format!("prerequisite-{candidate_index}-{prerequisite_index}");
+                items.push(task_with_status(
+                    None,
+                    &prerequisite_id,
+                    "2999-01-01",
+                    "waiting",
+                    false,
+                ));
+                relationships.push(relationship(&prerequisite_id, &candidate_id, "blocks"));
+            }
+        }
+        let state = json!({
+            "projects": [],
+            "items": items,
+            "statuses": [
+                status(None),
+                workflow_status(None, "waiting", "waiting"),
+            ],
+            "relationships": relationships,
+        });
+
+        let summary =
+            attention_summary(&state, &[], &GlobalCivilTimeContext::system().unwrap()).unwrap();
+        let blocked_by = summary["personal"]["blocked_by"].as_array().unwrap();
+
+        assert_eq!(
+            summary["personal"]["next_action_unavailable_reason"],
+            "unresolved_prerequisites"
+        );
+        assert_eq!(blocked_by.len(), super::MAX_BLOCKED_CANDIDATES);
+        for candidate in blocked_by {
+            assert!(candidate["title"].as_str().unwrap().len() <= 160);
+            let prerequisites = candidate["prerequisites"].as_array().unwrap();
+            assert_eq!(prerequisites.len(), super::MAX_BLOCKERS_PER_CANDIDATE);
+            for prerequisite in prerequisites {
+                assert!(prerequisite["title"].as_str().unwrap().len() <= 160);
+                assert!(prerequisite["status_id"].as_str().unwrap().len() <= 80);
+                assert!(prerequisite["reason"].as_str().unwrap().len() <= 160);
+            }
+        }
+    }
+}

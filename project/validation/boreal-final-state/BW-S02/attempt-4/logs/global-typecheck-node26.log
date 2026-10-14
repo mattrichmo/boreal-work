@@ -1,0 +1,8 @@
+
+> typecheck
+> tsc --noEmit
+
+
+command=npm --prefix apps/global-tui run typecheck
+node=v26.8.2
+exit_code=0

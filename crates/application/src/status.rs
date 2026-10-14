@@ -6,7 +6,11 @@
 //! domain evaluators and never persists the resulting status.
 
 use boreal_domain::actions::ActionDecision;
-use boreal_domain::work_model_v3::WorkSchedule;
+use boreal_domain::work_model_v3::{
+    evaluate_business_schedule, BusinessDate, BusinessDateBoundary, BusinessSchedule,
+    BusinessTimeContext, ProjectCivilTimeSetting, WorkSchedule,
+};
+use boreal_domain::decision_inputs::ExternalWaitScopeInput;
 use boreal_domain::{
     dependency_satisfied, evaluate_rollup, evaluate_status, ActorContext, Attempt, CurrentAttempt,
     DecisionApiError, DependencyPolicy, DerivedStatus, GateId, GateKind, GateRequirement,
@@ -32,6 +36,15 @@ pub struct StatusWorkInput {
     /// Canonical calendar availability. This is never inferred from retry
     /// timing or from a presentation-layer field.
     pub schedule: Option<WorkSchedule>,
+    /// Typed business dates and waits from the same project snapshot.
+    pub business_schedule: Option<BusinessSchedule>,
+    pub business_schedule_revision: Option<u64>,
+    pub business_schedule_setting_revision: Option<u64>,
+    pub business_time: Option<BusinessTimeContext>,
+    pub business_not_before_at: Option<TimestampMs>,
+    pub business_schedule_next_change_at: Option<TimestampMs>,
+    pub external_wait_next_change_at: Option<TimestampMs>,
+    pub external_waits: Vec<ExternalWaitScopeInput>,
     /// Canonical cycle/assignment activation resolved by the store.
     pub activation_at: Option<TimestampMs>,
     pub current_attempt: Option<Attempt>,
@@ -47,6 +60,14 @@ impl StatusWorkInput {
             work,
             retry_not_before: None,
             schedule: None,
+            business_schedule: None,
+            business_schedule_revision: None,
+            business_schedule_setting_revision: None,
+            business_time: None,
+            business_not_before_at: None,
+            business_schedule_next_change_at: None,
+            external_wait_next_change_at: None,
+            external_waits: Vec::new(),
             activation_at: None,
             current_attempt: None,
             gates,
@@ -430,6 +451,14 @@ pub fn project_status(
             project_revision,
             retry_not_before: input.retry_not_before,
             schedule: input.schedule,
+            business_schedule: input.business_schedule.as_ref(),
+            business_schedule_revision: input.business_schedule_revision,
+            business_schedule_setting_revision: input.business_schedule_setting_revision,
+            business_time: input.business_time.as_ref(),
+            business_not_before_at: input.business_not_before_at,
+            business_schedule_next_change_at: input.business_schedule_next_change_at,
+            external_wait_next_change_at: input.external_wait_next_change_at,
+            external_waits: &input.external_waits,
             activation_at: input.activation_at,
             affected_dependents: &affected_dependents[index],
         };
@@ -734,10 +763,45 @@ pub fn project_status_from_store_for_session(
         )
         .map_err(|error| error.to_string())?;
     let mut diagnostics = persisted.diagnostics.clone();
+    let timezone_database = crate::planning_v3::SystemTimeZoneDatabase::default();
+    let business_time = persisted.civil_time_setting.as_ref().map(|setting| {
+        timezone_database
+            .business_time_context(setting, as_of)
+            .map_err(|error| error.to_string())
+    });
+    if let Some(Err(detail)) = &business_time {
+        diagnostics.push(StatusRecordDiagnostic {
+            work_id: format!("project:{project_id}"),
+            title: None,
+            code: "civil_time_unavailable".to_owned(),
+            detail: format!("project civil-time setting could not be validated: {detail}"),
+        });
+    }
     let mut inputs = Vec::with_capacity(persisted.works.len());
     for row in &persisted.works {
         match status_input_from_store_row(row) {
-            Ok(input) => inputs.push(input),
+            Ok(mut input) => {
+                if let (Some(setting), Some(Ok(context))) =
+                    (&persisted.civil_time_setting, &business_time)
+                {
+                    if let Err(detail) = apply_business_time(
+                        &mut input,
+                        setting,
+                        context,
+                        &timezone_database,
+                    ) {
+                        input.business_time = None;
+                        diagnostics.push(StatusRecordDiagnostic {
+                            work_id: row.work.id.to_string(),
+                            title: Some(row.work.title.clone()),
+                            code: "business_time_boundary_unavailable".to_owned(),
+                            detail,
+                        });
+                    }
+                }
+                apply_absolute_external_wait_timer(&mut input, as_of);
+                inputs.push(input);
+            }
             Err(detail) => diagnostics.push(StatusRecordDiagnostic {
                 work_id: row.work.id.to_string(),
                 title: Some(row.work.title.clone()),
@@ -865,6 +929,90 @@ pub fn project_status_from_store_for_session(
     Ok(snapshot)
 }
 
+pub(crate) fn apply_business_time(
+    input: &mut StatusWorkInput,
+    setting: &ProjectCivilTimeSetting,
+    context: &BusinessTimeContext,
+    timezone_database: &crate::planning_v3::SystemTimeZoneDatabase,
+) -> Result<(), String> {
+    input.business_time = Some(context.clone());
+    let resolve_boundary = |boundary: BusinessDateBoundary| -> Result<TimestampMs, String> {
+        match boundary {
+            BusinessDateBoundary::Instant(at) => Ok(at),
+            BusinessDateBoundary::LocalDateStart(date) => timezone_database
+                .business_date_start(setting, date)
+                .map_err(|error| error.to_string()),
+        }
+    };
+
+    if let Some(schedule) = input.business_schedule.as_ref() {
+        let view = evaluate_business_schedule(schedule, context, input.work.lifecycle.is_terminal())
+            .map_err(|error| error.to_string())?;
+        if !view.available {
+            if let Some(BusinessDate::LocalDate(date)) = &schedule.not_before {
+                input.business_not_before_at = Some(
+                    timezone_database
+                        .business_date_start(setting, *date)
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+        }
+        input.business_schedule_next_change_at = view
+            .next_changes
+            .into_iter()
+            .map(resolve_boundary)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|at| *at > context.as_of)
+            .min();
+    }
+
+    input.external_wait_next_change_at = input
+        .external_waits
+        .iter()
+        .filter(|wait| wait.state == boreal_domain::decision_inputs::ExternalWaitPersistedState::Open)
+        .filter_map(|wait| wait.follow_up.as_ref())
+        .map(|follow_up| -> Result<Option<TimestampMs>, String> { match follow_up {
+            BusinessDate::LocalDate(date) if *date > context.civil_date => timezone_database
+                .business_date_start(setting, *date)
+                .map(Some)
+                .map_err(|error| error.to_string()),
+            BusinessDate::Instant(at) if *at > context.as_of => Ok(Some(*at)),
+            BusinessDate::ResolvedLocal(value) if value.utc_instant > context.as_of => {
+                Ok(Some(value.utc_instant))
+            }
+            _ => Ok(None),
+        }})
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .min();
+    Ok(())
+}
+
+fn apply_absolute_external_wait_timer(input: &mut StatusWorkInput, as_of: TimestampMs) {
+    let absolute_follow_up = input
+        .external_waits
+        .iter()
+        .filter(|wait| {
+            wait.state == boreal_domain::decision_inputs::ExternalWaitPersistedState::Open
+        })
+        .filter_map(|wait| wait.follow_up.as_ref())
+        .filter_map(|follow_up| match follow_up {
+            BusinessDate::Instant(at) if *at > as_of => Some(*at),
+            BusinessDate::ResolvedLocal(value) if value.utc_instant > as_of => {
+                Some(value.utc_instant)
+            }
+            _ => None,
+        })
+        .min();
+    input.external_wait_next_change_at = input
+        .external_wait_next_change_at
+        .into_iter()
+        .chain(absolute_follow_up)
+        .min();
+}
+
 fn is_planning_diagnostic(code: &str) -> bool {
     let code = code.to_ascii_lowercase();
     code.contains("cycle")
@@ -882,6 +1030,25 @@ pub(crate) fn status_input_from_store_row(
         .status_retry_not_before()
         .map_err(|error| error.to_string())?;
     input.schedule = row.schedule;
+    if let Some(record) = &row.business_schedule {
+        if record.project_id != row.work.project_id || record.work_id != row.work.id {
+            return Err("typed business schedule is scoped to another work item".to_owned());
+        }
+        record
+            .validate()
+            .map_err(|error| format!("invalid typed business schedule: {error}"))?;
+        input.business_schedule = Some(record.schedule.clone());
+        input.business_schedule_revision = Some(record.revision);
+        input.business_schedule_setting_revision = record.civil_time_setting_revision;
+    } else if let Some(raw_due) = &row.legacy_due_at {
+        let due = BusinessDate::parse_legacy_due(raw_due)
+            .map_err(|error| format!("invalid legacy due value: {error}"))?;
+        input.business_schedule = Some(BusinessSchedule {
+            due: Some(due),
+            ..BusinessSchedule::default()
+        });
+    }
+    input.external_waits = row.external_waits.clone();
     input.activation_at = row.activation_at;
     input.gates = row
         .gate_diagnostics
@@ -1006,6 +1173,10 @@ fn rejected_canonical_decision(
         project_revision,
         as_of,
         next_status_change_at: None,
+        due_today: false,
+        overdue: false,
+        blocking_external_wait_ids: Vec::new(),
+        follow_up_due_wait_ids: Vec::new(),
         display_status: DerivedStatus::Blocked,
         primary_reason: reason.clone(),
         reason_codes: vec![reason],
@@ -1432,6 +1603,9 @@ mod tests {
                 target_start_at: None,
                 target_end_at: None,
             }),
+            business_schedule: None,
+            legacy_due_at: None,
+            external_waits: Vec::new(),
             activation_at: Some(TimestampMs(120)),
             current_attempt: None,
             gate_diagnostics: boreal_store::GateDiagnostics {
@@ -1638,6 +1812,23 @@ mod tests {
         assert_eq!(snapshot.next_status_change_at, Some(TimestampMs(50)));
         assert!(snapshot.has_more());
         assert_eq!(snapshot.next_offset(), Some(2));
+    }
+
+    #[test]
+    fn absolute_external_wait_follow_up_sets_a_timer_without_project_clock() {
+        let mut item = input("waiting");
+        item.external_waits.push(ExternalWaitScopeInput {
+            project_id: item.work.project_id.clone(),
+            wait_id: "wait-1".to_owned(),
+            affected_work_id: item.work.id.clone(),
+            state: ExternalWaitPersistedState::Open,
+            follow_up: Some(BusinessDate::Instant(TimestampMs(50))),
+            civil_time_setting_revision: None,
+        });
+
+        apply_absolute_external_wait_timer(&mut item, TimestampMs(10));
+
+        assert_eq!(item.external_wait_next_change_at, Some(TimestampMs(50)));
     }
 
     #[test]

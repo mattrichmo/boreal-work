@@ -1,6 +1,6 @@
 //! Durable summary and handoff command handlers.
 use super::*;
-use boreal_application::{SummaryPayload, SummaryQueries};
+use boreal_application::{summary_body_page, SummaryPayload, SummaryQueries};
 use boreal_source::{
     ArtifactProducer, ArtifactRelationshipInput, ArtifactRightsProvenance, ArtifactRole,
     ArtifactScope, SourceCaptureRequest, SourceIdentity,
@@ -36,12 +36,14 @@ fn run_summary(
     match action {
         "list" => {
             let work = extra(parsed, "work");
-            let limit = parsed.options.limit.unwrap_or(25).clamp(1, 100);
+            // Keep metadata pages small enough for the inline protocol even
+            // when retained summary bodies are near their 64 KiB limit.
+            let limit = parsed.options.limit.unwrap_or(25).clamp(1, 25);
             let offset = parsed.options.offset.unwrap_or(0);
             let page = queries
-                .list(&project, work, limit, offset)
+                .list_metadata(&project, work, limit, offset)
                 .map_err(map_store_error)?;
-            let data = json!({"items": page.items.iter().map(|item| json!({"summary": summary_json(&item.summary), "body": item.body})).collect::<Vec<_>>(), "limit": page.limit, "offset": page.offset, "has_more": page.has_more});
+            let data = json!({"items": page.items.iter().map(|item| summary_list_item_json(&item.summary)).collect::<Vec<_>>(), "limit": page.limit, "offset": page.offset, "has_more": page.has_more});
             Ok(CliResult {
                 outcome: ApplicationOutcome::Unchanged,
                 data: Some(data),
@@ -50,9 +52,12 @@ fn run_summary(
             })
         }
         "show" | "render" => {
-            let id = positional(parsed, 0)
+            let requested_id = positional(parsed, 0)
                 .or_else(|| extra(parsed, "summary"))
                 .ok_or_else(|| CliError::invalid("summary show requires SUMMARY_ID"))?;
+            let id = requested_id
+                .strip_prefix("summary-body:")
+                .unwrap_or(requested_id);
             let artifact = queries.show(&project, id).map_err(map_store_error)?;
             let (source_artifact, source_body) = summary_source_artifact(
                 parsed,
@@ -63,8 +68,9 @@ fn run_summary(
                 &artifact.summary.body_digest,
                 artifact.summary.body_size,
             )?;
+            let body = artifact.body.or(source_body);
             if action == "render" {
-                let body = artifact.body.or(source_body).ok_or_else(|| {
+                let full_body = body.as_deref().ok_or_else(|| {
                     CliError::with(
                         ErrorCode::NotFound,
                         ApplicationOutcome::Rejected,
@@ -75,22 +81,46 @@ fn run_summary(
                     let context = project_context::resolve(parsed)?;
                     let path =
                         project_context::confined_path(&context.root, Path::new(path), true)?;
-                    write_new_output(&path, body.as_bytes())?;
+                    write_new_output(&path, full_body.as_bytes())?;
                 }
+                let written_to = extra(parsed, "out");
+                let readback = summary_body_readback_json(
+                    &artifact.summary,
+                    Some(full_body),
+                    &source_artifact,
+                    parsed.options.offset.unwrap_or(0),
+                    parsed.options.limit,
+                    written_to,
+                );
+                let human = match written_to {
+                    Some(path) => format!("rendered {} bytes to {path}", full_body.len()),
+                    None => {
+                        let page_body = readback["body"].as_str().unwrap_or_default();
+                        match readback["next_body_offset"].as_u64() {
+                            Some(next) => format!("{page_body}\n\nContinue with --offset {next}"),
+                            None => page_body.to_owned(),
+                        }
+                    }
+                };
                 return Ok(CliResult {
                     outcome: ApplicationOutcome::Unchanged,
-                    data: Some(
-                        json!({"summary_id": artifact.summary.summary_id, "body": body, "body_digest": artifact.summary.body_digest, "body_size": artifact.summary.body_size, "source_artifact": source_artifact, "written_to": extra(parsed, "out")}),
-                    ),
-                    human: Some(body),
+                    data: Some(readback),
+                    human: Some(human),
                     ..CliResult::default()
                 });
             }
+            let mut readback = summary_body_readback_json(
+                &artifact.summary,
+                body.as_deref(),
+                &source_artifact,
+                parsed.options.offset.unwrap_or(0),
+                parsed.options.limit,
+                None,
+            );
+            readback["summary"] = summary_json(&artifact.summary);
             Ok(CliResult {
                 outcome: ApplicationOutcome::Unchanged,
-                data: Some(
-                    json!({"summary": summary_json(&artifact.summary), "body": artifact.body, "source_artifact": source_artifact}),
-                ),
+                data: Some(readback),
                 ..CliResult::default()
             })
         }
@@ -683,6 +713,37 @@ fn backfill_json(r: &boreal_store::LegacySummaryBackfillRecord) -> Value {
 fn summary_json(s: &boreal_store::SummaryRecord) -> Value {
     json!({"summary_id": s.summary_id, "project_id": s.project_id, "work_id": s.work_id, "attempt_id": s.attempt_id, "fence": s.fence, "subject_ref": s.subject_ref, "source_version_id": s.source_version_id, "config_identity": s.config_identity, "profile_id": s.profile_id, "profile_version": s.profile_version, "body_digest": s.body_digest, "body_size": s.body_size, "current": s.current, "created_at": s.created_at})
 }
+
+fn summary_list_item_json(summary: &boreal_store::SummaryRecord) -> Value {
+    json!({
+        "summary": summary_json(summary),
+        "body": null,
+        "body_ref": format!("summary-body:{}", summary.summary_id),
+    })
+}
+
+fn summary_body_readback_json(
+    summary: &boreal_store::SummaryRecord,
+    body: Option<&str>,
+    source_artifact: &Value,
+    offset: u64,
+    limit: Option<u64>,
+    written_to: Option<&str>,
+) -> Value {
+    let page = body.map(|body| summary_body_page(body, offset, limit));
+    json!({
+        "summary_id": summary.summary_id,
+        "body": page.as_ref().map(|page| page.body.as_str()),
+        "body_digest": summary.body_digest,
+        "body_size": summary.body_size,
+        "body_offset": page.as_ref().map(|page| page.body_offset),
+        "next_body_offset": page.as_ref().and_then(|page| page.next_body_offset),
+        "body_ref": format!("summary-body:{}", summary.summary_id),
+        "source_artifact": source_artifact,
+        "written_to": written_to,
+    })
+}
+
 fn extra<'a>(parsed: &'a ParsedCommand, key: &str) -> Option<&'a str> {
     parsed
         .options
@@ -716,4 +777,66 @@ fn write_new_output(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     file.write_all(bytes)
         .map_err(|e| CliError::invalid(format!("cannot write output {}: {e}", path.display())))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary() -> boreal_store::SummaryRecord {
+        boreal_store::SummaryRecord {
+            summary_id: "summary-large".to_owned(),
+            project_id: "project-1".to_owned(),
+            work_id: "work-1".to_owned(),
+            attempt_id: "attempt-1".to_owned(),
+            fence: 1,
+            subject_ref: "attempt:attempt-1".to_owned(),
+            source_version_id: "source-1".to_owned(),
+            config_identity: "config-1".to_owned(),
+            profile_id: "focused".to_owned(),
+            profile_version: 1,
+            body_digest: "sha256:test".to_owned(),
+            body_size: 64 * 1024,
+            current: true,
+            created_at: "unix-ms:1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn large_summary_readback_is_bounded_and_has_a_durable_continuation() {
+        let summary = summary();
+        let body = format!(
+            "{}{}",
+            "\u{1}".repeat(boreal_application::MAX_SUMMARY_BODY_PAGE_BYTES as usize),
+            "x".repeat(
+                summary.body_size as usize
+                    - boreal_application::MAX_SUMMARY_BODY_PAGE_BYTES as usize
+            )
+        );
+        let source_artifact = json!({"availability": "available"});
+        let first =
+            summary_body_readback_json(&summary, Some(&body), &source_artifact, 0, None, None);
+        let encoded = serde_json::to_vec(&first).expect("summary page serializes");
+        assert!(encoded.len() < 32 * 1024);
+        assert!(
+            first["body"].as_str().unwrap().len()
+                <= boreal_application::MAX_SUMMARY_BODY_PAGE_BYTES as usize
+        );
+        assert_eq!(first["body_ref"], "summary-body:summary-large");
+        let next = first["next_body_offset"]
+            .as_u64()
+            .expect("large summary has a next page");
+
+        let second =
+            summary_body_readback_json(&summary, Some(&body), &source_artifact, next, None, None);
+        assert_eq!(second["body_offset"], next);
+        assert_ne!(second["body"], first["body"]);
+    }
+
+    #[test]
+    fn summary_list_metadata_returns_a_followable_body_reference() {
+        let item = summary_list_item_json(&summary());
+        assert!(item["body"].is_null());
+        assert_eq!(item["body_ref"], "summary-body:summary-large");
+    }
 }

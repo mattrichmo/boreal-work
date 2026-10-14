@@ -1,11 +1,15 @@
 //! Application boundary for the installation-wide global manager.
 
-use boreal_domain::global_manager::{ManagementItemKind, StatusCategory};
+use crate::{canonical_request_digest, GlobalCivilTimeContext};
+use boreal_domain::global_manager::{ManagementItemKind, StatusCategory, PERSONAL_INBOX_STATUS_ID};
 use boreal_store::global_manager::GlobalManagerStore;
 use boreal_store::StoreError;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[path = "global_capture.rs"]
+mod global_capture;
 
 static GLOBAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 const GLOBAL_PATH_MAX_BYTES: usize = 4096;
@@ -83,7 +87,10 @@ fn validate_global_import_bundle(snapshot: &Value, limit: usize) -> Result<(), S
             "import revision history must be arrays".into(),
         ));
     }
-    if snapshot.get("schema_version").and_then(Value::as_u64) != Some(2) {
+    if !matches!(
+        snapshot.get("schema_version").and_then(Value::as_u64),
+        Some(2 | 3)
+    ) {
         return Err(StoreError::Invalid(
             "unsupported global backup schema version".into(),
         ));
@@ -146,6 +153,30 @@ pub struct GlobalManagerApplication {
 pub struct ResolvedWorkspaceIdentity {
     pub project_id: String,
     pub path: String,
+    pub database_instance_id: String,
+    pub restore_epoch: u64,
+    pub workspace_binding_digest: String,
+}
+
+impl ResolvedWorkspaceIdentity {
+    /// Derives an opaque physical identity for a validated workspace link.
+    /// The logical project ID remains a separate association field and is
+    /// never recovered from this key.
+    pub fn physical_binding_key(&self) -> String {
+        let digest = canonical_request_digest(
+            "global.workspace-binding/v1",
+            json!({
+                "project_id": self.project_id,
+                "database_instance_id": self.database_instance_id,
+                "restore_epoch": self.restore_epoch,
+                "workspace_binding_digest": self.workspace_binding_digest,
+            }),
+        );
+        format!(
+            "workspace-{}",
+            digest.strip_prefix("sha256:").unwrap_or(&digest)
+        )
+    }
 }
 
 impl GlobalManagerApplication {
@@ -195,6 +226,8 @@ impl GlobalManagerApplication {
         let mut trusted = payload.clone();
         trusted["identity"] = json!(resolved.project_id);
         trusted["path"] = json!(resolved.path);
+        trusted["workspace_project_id"] = json!(resolved.project_id);
+        trusted["workspace_binding_key"] = json!(resolved.physical_binding_key());
         self.execute_resolved(command, &trusted, operation)
     }
 
@@ -373,6 +406,16 @@ impl GlobalManagerApplication {
                     "detail page expected_revision must be a non-negative integer".into(),
                 ));
             }
+            if payload.get("offset").and_then(Value::as_u64).unwrap_or(0) > 0
+                && payload
+                    .get("expected_revision")
+                    .and_then(Value::as_u64)
+                    .is_none()
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "detail page continuation requires expected_revision; resnapshot before continuing".into(),
+                ));
+            }
         }
         if command == "attention page" {
             if payload.get("limit").is_some_and(|v| {
@@ -396,6 +439,16 @@ impl GlobalManagerApplication {
                     "attention page expected_revision must be a non-negative integer".into(),
                 ));
             }
+            if payload.get("offset").and_then(Value::as_u64).unwrap_or(0) > 0
+                && payload
+                    .get("expected_revision")
+                    .and_then(Value::as_u64)
+                    .is_none()
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "attention page continuation requires expected_revision; resnapshot before continuing".into(),
+                ));
+            }
         }
         if command == "export" {
             return self.logical_export(GLOBAL_TRANSFER_MAX_BYTES);
@@ -406,16 +459,26 @@ impl GlobalManagerApplication {
             } else {
                 (self.store.state()?, self.store.revision()?)
             };
+        let civil_time = if matches!(command, "snapshot" | "detail page" | "attention page") {
+            let context = GlobalCivilTimeContext::system()
+                .map_err(|error| GlobalManagerError::Invalid(error.to_string()))?;
+            crate::global_daily_review::annotate_items(&mut state, &context);
+            Some(context)
+        } else {
+            None
+        };
         match command {
             "snapshot" => {
-                state["schema_version"] = serde_json::json!(2);
+                state["schema_version"] = serde_json::json!(3);
                 state["revision"] = serde_json::json!(revision);
-                let attention_sample_ids = arr(&state, "projects")
+                let mut attention_sample_ids = arr(&state, "projects")
                     .iter()
-                    .take(GLOBAL_ATTENTION_PROJECTS_LIMIT)
                     .filter_map(|project| project["id"].as_str().map(str::to_owned))
                     .collect::<Vec<_>>();
-                let attention = attention_summary(&state, &attention_sample_ids);
+                attention_sample_ids.sort_unstable();
+                attention_sample_ids.truncate(GLOBAL_ATTENTION_PROJECTS_LIMIT);
+                let context = civil_time.as_ref().expect("snapshot resolves civil time");
+                let attention = attention_summary(&state, &attention_sample_ids, context)?;
                 let mut totals = serde_json::Map::new();
                 let archived_projects = state
                     .get("projects")
@@ -468,6 +531,7 @@ impl GlobalManagerApplication {
                 state["totals"] = Value::Object(totals);
                 state["snapshot_limit"] = json!(100);
                 state["attention"] = attention;
+                state["civil_time"] = json!(context);
                 state["activity"] = self.read("history", &json!({"limit":50,"offset":0}))?;
                 let mut payload_truncated = false;
                 while serde_json::to_vec(&state)
@@ -698,7 +762,7 @@ impl GlobalManagerApplication {
                 let next = offset.saturating_add(page.len() as u64);
                 let has_more = !resnapshot_required && next < total;
                 Ok(
-                    json!({"collection":collection,"rows":page,"total":total,"limit":limit,"offset":offset,"has_more":has_more,"next_offset":if has_more {json!(next)} else {Value::Null},"revision":revision,"resnapshot_required":resnapshot_required,"requested_revision":expected_revision}),
+                    json!({"collection":collection,"rows":page,"total":total,"limit":limit,"offset":offset,"has_more":has_more,"next_offset":if has_more {json!(next)} else {Value::Null},"revision":revision,"resnapshot_required":resnapshot_required,"requested_revision":expected_revision,"civil_time":civil_time}),
                 )
             }
             "attention page" => {
@@ -724,8 +788,17 @@ impl GlobalManagerApplication {
                     .take(limit)
                     .cloned()
                     .collect::<Vec<_>>();
-                let attention = (!resnapshot_required)
-                    .then(|| attention_summary(&state, &selected_project_ids));
+                let attention = if resnapshot_required {
+                    None
+                } else {
+                    Some(attention_summary(
+                        &state,
+                        &selected_project_ids,
+                        civil_time
+                            .as_ref()
+                            .expect("attention page resolves civil time"),
+                    )?)
+                };
                 let attention_projects = attention
                     .as_ref()
                     .and_then(|value| value.get("projects"))
@@ -747,7 +820,8 @@ impl GlobalManagerApplication {
                     "offset": offset,
                     "revision": revision,
                     "resnapshot_required": resnapshot_required,
-                    "requested_revision": expected_revision
+                    "requested_revision": expected_revision,
+                    "civil_time": civil_time
                 });
                 while serde_json::to_vec(&response)
                     .map(|bytes| bytes.len() > INTERACTIVE_RESPONSE_MAX_BYTES)
@@ -777,7 +851,8 @@ impl GlobalManagerApplication {
                     "next_offset": if has_more { json!(next) } else { Value::Null },
                     "revision": revision,
                     "resnapshot_required": resnapshot_required,
-                    "requested_revision": expected_revision
+                    "requested_revision": expected_revision,
+                    "civil_time": civil_time
                 }))
             }
             "project list" => Ok(filter_project_list(&state["projects"], payload)),
@@ -854,7 +929,7 @@ impl GlobalManagerApplication {
 
     fn logical_export(&self, size_limit: usize) -> Result<Value, GlobalManagerError> {
         let (mut state, revision, history) = self.store.export_bundle()?;
-        state["schema_version"] = json!(2);
+        state["schema_version"] = json!(3);
         state["revision"] = json!(revision);
         state["revision_history"] = json!(history);
         validate_global_import_bundle(&state, size_limit)
@@ -883,7 +958,7 @@ impl GlobalManagerApplication {
                 "created_at": now(),
             }));
         }
-        replacement["schema_version"] = json!(2);
+        replacement["schema_version"] = json!(3);
         replacement["revision"] = json!(next_revision);
         replacement["revision_history"] = json!(history);
         validate_global_import_bundle(&replacement, GLOBAL_TRANSFER_MAX_BYTES)
@@ -906,7 +981,14 @@ impl GlobalManagerApplication {
         let string_fields: &[&str] = match command {
             "project add" => &["project_id", "description", "folder"],
             "project edit" => &["project_id", "name", "description", "lifecycle", "health"],
-            "todo add" => &["item_id", "title", "description", "kind", "status_id"],
+            "todo add" => &[
+                "item_id",
+                "title",
+                "description",
+                "kind",
+                "status_id",
+                "capture_text",
+            ],
             "task add" | "subtask add" | "milestone add" => {
                 &["item_id", "title", "description", "status_id"]
             }
@@ -924,6 +1006,23 @@ impl GlobalManagerApplication {
                     "{field} must be a string"
                 )));
             }
+        }
+        if p.get("source_ref")
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return Err(GlobalManagerError::Invalid(
+                "source_ref must be a string or null".into(),
+            ));
+        }
+        if p.get("capture_text").is_some() && command != "todo add" {
+            return Err(GlobalManagerError::Invalid(
+                "capture_text is only valid for explicit personal todo capture".into(),
+            ));
+        }
+        if p.get("source_ref").is_some() && p.get("capture_text").is_none() {
+            return Err(GlobalManagerError::Invalid(
+                "source_ref requires explicit capture_text".into(),
+            ));
         }
         for field in ["folder", "path"] {
             if p.get(field)
@@ -946,6 +1045,47 @@ impl GlobalManagerApplication {
                 | "subtask edit"
                 | "milestone edit"
         ) {
+            if let Some(capture_text) = p.get("capture_text") {
+                if command != "todo add" {
+                    return Err(GlobalManagerError::Invalid(
+                        "capture_text is only valid for explicit personal todo capture".into(),
+                    ));
+                }
+                if capture_text.as_str() != p.get("title").and_then(Value::as_str) {
+                    return Err(GlobalManagerError::Invalid(
+                        "capture_text must exactly match the captured title".into(),
+                    ));
+                }
+                if p.get("project_id").is_some_and(|value| !value.is_null())
+                    || p.get("parent_id").is_some_and(|value| !value.is_null())
+                    || p.get("description")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.is_empty())
+                    || p.get("status_id").is_some()
+                    || p.get("priority")
+                        .is_some_and(|value| value.as_u64().is_none_or(|priority| priority != 0))
+                    || p.get("due_at").is_some_and(|value| !value.is_null())
+                    || p.get("follow_up_at").is_some_and(|value| !value.is_null())
+                    || p.get("labels")
+                        .and_then(Value::as_array)
+                        .is_some_and(|values| !values.is_empty())
+                    || p.get("position")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|value| value != 0)
+                {
+                    return Err(GlobalManagerError::Invalid(
+                        "explicit capture cannot include structured task fields".into(),
+                    ));
+                }
+                let origin = global_capture::origin_for_capture(
+                    capture_text.as_str().expect("capture_text checked above"),
+                    p.get("source_ref").and_then(Value::as_str),
+                )
+                .map_err(GlobalManagerError::Invalid)?;
+                origin
+                    .validate()
+                    .map_err(|error| GlobalManagerError::Invalid(error.to_string()))?;
+            }
             for field in ["project_id", "parent_id"] {
                 if let Some(value) = p.get(field) {
                     if !value.is_null() && !value.is_string() {
@@ -1148,8 +1288,19 @@ impl GlobalManagerApplication {
             }
         }
         if command == "project link" {
-            boreal_domain::global_manager::validate_identifier(string(p, "identity")?)
+            let identity = string(p, "identity")?;
+            let workspace_project_id = string(p, "workspace_project_id")?;
+            boreal_domain::global_manager::validate_identifier(identity)
                 .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
+            boreal_domain::global_manager::validate_identifier(workspace_project_id)
+                .map_err(|e| GlobalManagerError::Invalid(e.to_string()))?;
+            if identity != workspace_project_id
+                || !string(p, "workspace_binding_key")?.starts_with("workspace-")
+            {
+                return Err(GlobalManagerError::Invalid(
+                    "project link lacks a validated physical workspace identity".into(),
+                ));
+            }
             if string(p, "path")?.trim().is_empty() {
                 return Err(GlobalManagerError::Invalid(
                     "workspace path is required".into(),
@@ -1193,7 +1344,11 @@ impl GlobalManagerApplication {
                 status_id: p
                     .get("status_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("todo")
+                    .unwrap_or(if p.get("capture_text").is_some() {
+                        PERSONAL_INBOX_STATUS_ID
+                    } else {
+                        "todo"
+                    })
                     .to_owned(),
                 priority: p
                     .get("priority")
@@ -1546,7 +1701,11 @@ fn apply_mutation(
                     p.get("path").and_then(Value::as_str),
                 )
             };
-            let record = json!({"project_id":pid,"kind":kind,"identity":identity,"path":path,"updated_at":timestamp});
+            let mut record = json!({"project_id":pid,"kind":kind,"identity":identity,"path":path,"updated_at":timestamp});
+            if command == "project link" {
+                record["workspace_project_id"] = p["workspace_project_id"].clone();
+                record["workspace_binding_key"] = p["workspace_binding_key"].clone();
+            }
             let rows = arr_mut(s, "associations");
             if let Some(row) = rows
                 .iter_mut()
@@ -1609,7 +1768,15 @@ fn apply_mutation(
                 .transpose()?;
             boreal_domain::global_manager::validate_item_parent(kind, parent_kind)
                 .map_err(|e| StoreError::Invalid(e.to_string()))?;
-            let status = p.get("status_id").and_then(Value::as_str).unwrap_or("todo");
+            let is_capture = p.get("capture_text").is_some();
+            let status = p
+                .get("status_id")
+                .and_then(Value::as_str)
+                .unwrap_or(if is_capture {
+                    PERSONAL_INBOX_STATUS_ID
+                } else {
+                    "todo"
+                });
             validate_status(s, project_id, status)?;
             let iid = p
                 .get("item_id")
@@ -1620,7 +1787,29 @@ fn apply_mutation(
             if priority > 255 {
                 return Err(StoreError::Invalid("priority must be from 0 to 255".into()));
             }
-            let value = json!({"id":iid,"project_id":project_id,"parent_id":parent,"kind":kind.as_str(),"title":title,"description":p.get("description").and_then(Value::as_str).unwrap_or(""),"labels":p.get("labels").cloned().unwrap_or(json!([])),"status_id":status,"priority":priority,"due_at":p.get("due_at").cloned().unwrap_or(Value::Null),"follow_up_at":p.get("follow_up_at").cloned().unwrap_or(Value::Null),"archived":false,"position":p.get("position").and_then(Value::as_i64).unwrap_or(0),"created_at":timestamp,"updated_at":timestamp});
+            let mut value = json!({"id":iid,"project_id":project_id,"parent_id":parent,"kind":kind.as_str(),"title":title,"description":p.get("description").and_then(Value::as_str).unwrap_or(""),"labels":p.get("labels").cloned().unwrap_or(json!([])),"status_id":status,"priority":priority,"due_at":p.get("due_at").cloned().unwrap_or(Value::Null),"follow_up_at":p.get("follow_up_at").cloned().unwrap_or(Value::Null),"archived":false,"position":p.get("position").and_then(Value::as_i64).unwrap_or(0),"created_at":timestamp,"updated_at":timestamp});
+            let capture_witness = if let Some(capture_text) =
+                p.get("capture_text").and_then(Value::as_str)
+            {
+                let origin = global_capture::origin_for_capture(
+                    capture_text,
+                    p.get("source_ref").and_then(Value::as_str),
+                )
+                .map_err(StoreError::Invalid)?;
+                value["capture_origin"] = global_capture::origin_json(&origin);
+                let witness =
+                    global_capture::witness_json(&iid, revision, &timestamp, capture_text, &origin);
+                let witnesses = s
+                    .get_mut("capture_witnesses")
+                    .and_then(Value::as_array_mut)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt("capture_witnesses must be an array".into())
+                    })?;
+                witnesses.push(witness.clone());
+                Some(witness)
+            } else {
+                None
+            };
             arr_mut(s, "items").push(value.clone());
             let status_record = arr(s, "statuses")
                 .iter()
@@ -1628,7 +1817,11 @@ fn apply_mutation(
                 .cloned()
                 .unwrap_or(Value::Null);
             arr_mut(s, "status_history").push(json!({"item_id":iid,"workflow_owner_id":project_id,"from_workflow_owner_id":project_id,"from_status_id":null,"from_status_label":null,"from_status_category":null,"to_status_id":status,"to_status_label":status_record["label"],"to_status_category":status_record["category"],"revision":revision,"changed_at":timestamp}));
-            Ok(value)
+            let mut result = value;
+            if let Some(witness) = capture_witness {
+                result["capture_witness"] = witness;
+            }
+            Ok(result)
         }
         "todo reorder" => {
             let iid = required_string(p, "item_id")?;
@@ -2176,7 +2369,7 @@ fn apply_mutation(
                 }
                 imported_history.push(json!({"source_revision":entry["revision"],"snapshot":entry["snapshot"],"created_at":entry["created_at"].clone(),"imported":true}));
             }
-            *s = json!({"projects":incoming["projects"],"items":incoming["items"],"notes":incoming["notes"],"statuses":incoming["statuses"],"relationships":incoming["relationships"],"note_links":incoming.get("note_links").cloned().unwrap_or(json!([])),"associations":incoming["associations"],"status_history":incoming["status_history"],"imported_history":imported_history});
+            *s = json!({"projects":incoming["projects"],"items":incoming["items"],"notes":incoming["notes"],"statuses":incoming["statuses"],"relationships":incoming["relationships"],"note_links":incoming.get("note_links").cloned().unwrap_or(json!([])),"associations":incoming["associations"],"status_history":incoming["status_history"],"capture_witnesses":incoming.get("capture_witnesses").cloned().unwrap_or(json!([])),"imported_history":imported_history});
             Ok(
                 json!({"imported":true,"counts":{"projects":arr(s,"projects").len(),"items":arr(s,"items").len(),"notes":arr(s,"notes").len()}}),
             )
@@ -2386,222 +2579,13 @@ fn status_for_category(
         })
 }
 
-fn attention_summary(state: &Value, selected_project_ids: &[String]) -> Value {
-    let today = utc_today();
-    let archived = arr(state, "projects")
-        .iter()
-        .filter(|p| p["archived"] == true)
-        .filter_map(|p| p["id"].as_str().map(str::to_owned))
-        .collect::<std::collections::BTreeSet<_>>();
-    let categories = arr(state, "statuses");
-    let mut portfolio = [0_u64; 5];
-    let project_ids = arr(state, "projects")
-        .iter()
-        .filter_map(|project| project["id"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    let projects_total = project_ids.len() as u64;
-    let included_project_ids = selected_project_ids
-        .iter()
-        .filter(|id| project_ids.contains(id))
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut projects = included_project_ids
-        .iter()
-        .map(|id| (id.clone(), empty_project_attention()))
-        .collect::<serde_json::Map<_, _>>();
-    let mut personal = empty_project_attention();
-    for item in arr(state, "items") {
-        if item["archived"] == true
-            || item["project_id"]
-                .as_str()
-                .is_some_and(|id| archived.contains(id))
-        {
-            continue;
-        }
-        let category = categories
-            .iter()
-            .find(|s| {
-                s["project_id"].as_str() == item["project_id"].as_str()
-                    && s["status_id"] == item["status_id"]
-            })
-            .and_then(|s| s["category"].as_str())
-            .unwrap_or("open");
-        if matches!(category, "completed" | "cancelled") {
-            continue;
-        }
-        let due = item["due_at"].as_str().and_then(utc_date_from_iso);
-        let counts = item["project_id"]
-            .as_str()
-            .and_then(|owner| projects.get_mut(owner))
-            .or_else(|| item["project_id"].is_null().then_some(&mut personal));
-        portfolio[0] += 1;
-        if let Some(counts) = counts {
-            counts["open"] = json!(counts["open"].as_u64().unwrap_or(0) + 1);
-        }
-        if category == "waiting" {
-            portfolio[1] += 1;
-            if let Some(counts) = item["project_id"]
-                .as_str()
-                .and_then(|owner| projects.get_mut(owner))
-                .or_else(|| item["project_id"].is_null().then_some(&mut personal))
-            {
-                counts["waiting"] = json!(counts["waiting"].as_u64().unwrap_or(0) + 1);
-            }
-        }
-        match due.as_deref() {
-            Some(d) if d < today.as_str() => {
-                portfolio[2] += 1;
-                if let Some(counts) = item["project_id"]
-                    .as_str()
-                    .and_then(|owner| projects.get_mut(owner))
-                    .or_else(|| item["project_id"].is_null().then_some(&mut personal))
-                {
-                    counts["overdue"] = json!(counts["overdue"].as_u64().unwrap_or(0) + 1);
-                }
-            }
-            None => {
-                portfolio[3] += 1;
-                if let Some(counts) = item["project_id"]
-                    .as_str()
-                    .and_then(|owner| projects.get_mut(owner))
-                    .or_else(|| item["project_id"].is_null().then_some(&mut personal))
-                {
-                    counts["unscheduled"] = json!(counts["unscheduled"].as_u64().unwrap_or(0) + 1);
-                }
-            }
-            Some(d) if d == today => {
-                portfolio[4] += 1;
-                if let Some(counts) = item["project_id"]
-                    .as_str()
-                    .and_then(|owner| projects.get_mut(owner))
-                    .or_else(|| item["project_id"].is_null().then_some(&mut personal))
-                {
-                    counts["due_today"] = json!(counts["due_today"].as_u64().unwrap_or(0) + 1);
-                }
-            }
-            _ => {}
-        }
-    }
-    for (project_id, summary) in projects.iter_mut() {
-        if archived.contains(project_id.as_str()) {
-            continue;
-        }
-        populate_attention_details(state, Some(project_id), summary);
-    }
-    if personal["open"].as_u64().unwrap_or(0) > 0 {
-        populate_attention_details(state, None, &mut personal);
-        // Keep the established snapshot key for existing clients while also
-        // exposing personal attention explicitly outside the project totals.
-        projects
-            .entry("personal".to_owned())
-            .or_insert_with(|| personal.clone());
-    }
-    let projects_sampled = included_project_ids.len() as u64;
-    let projects_truncated = projects_sampled < projects_total;
-    json!({
-        "portfolio":{"open":portfolio[0],"waiting":portfolio[1],"overdue":portfolio[2],"unscheduled":portfolio[3],"due_today":portfolio[4]},
-        "projects":projects,
-        "projects_total":projects_total,
-        "projects_limit":projects_sampled,
-        "projects_has_more":projects_truncated,
-        "projects_truncated":projects_truncated,
-        "personal":personal
-    })
-}
-
-fn empty_project_attention() -> Value {
-    json!({"open":0,"waiting":0,"overdue":0,"unscheduled":0,"due_today":0,"next_action":null,"next_milestone":null})
-}
-
-fn populate_attention_details(state: &Value, project_id: Option<&str>, summary: &mut Value) {
-    let owns = |item: &Value| match project_id {
-        Some(project_id) => item["project_id"].as_str() == Some(project_id),
-        None => item["project_id"].is_null(),
-    };
-    let mut active_items = arr(state, "items")
-        .iter()
-        .filter(|item| {
-            owns(item)
-                && item["archived"] != true
-                && !matches!(item_category(state, item), "completed" | "cancelled")
-        })
-        .collect::<Vec<_>>();
-    let mut actions = active_items
-        .iter()
-        .copied()
-        .filter(|item| {
-            matches!(item["kind"].as_str(), Some("task" | "subtask"))
-                && matches!(item_category(state, item), "open" | "active")
-        })
-        .collect::<Vec<_>>();
-    actions.sort_by(|left, right| {
-        let due_key = |item: &Value| {
-            item["due_at"]
-                .as_str()
-                .and_then(utc_date_from_iso)
-                .unwrap_or_else(|| "9999-99-99".into())
-        };
-        due_key(left)
-            .cmp(&due_key(right))
-            .then_with(|| {
-                right["priority"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .cmp(&left["priority"].as_u64().unwrap_or(0))
-            })
-            .then_with(|| {
-                left["position"]
-                    .as_i64()
-                    .unwrap_or(0)
-                    .cmp(&right["position"].as_i64().unwrap_or(0))
-            })
-            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
-    });
-    if let Some(item) = actions.first() {
-        let status_id = item["status_id"].as_str().unwrap_or_default();
-        let label = arr(state, "statuses")
-            .iter()
-            .find(|status| {
-                status["project_id"].as_str() == project_id && status["status_id"] == status_id
-            })
-            .and_then(|status| status["label"].as_str())
-            .unwrap_or(status_id);
-        summary["next_action"] = json!({"item_id":item["id"],"title":bound_text(item["title"].as_str().unwrap_or_default(),160),"due_at":item["due_at"],"priority":item["priority"],"status_id":status_id,"status_label":bound_text(label,160),"kind":item["kind"]});
-    }
-    let mut milestones = active_items
-        .drain(..)
-        .filter(|item| item["kind"] == "milestone")
-        .collect::<Vec<_>>();
-    milestones.sort_by(|left, right| {
-        let due_key = |item: &Value| {
-            item["due_at"]
-                .as_str()
-                .and_then(utc_date_from_iso)
-                .unwrap_or_else(|| "9999-99-99".into())
-        };
-        due_key(left)
-            .cmp(&due_key(right))
-            .then_with(|| {
-                left["position"]
-                    .as_i64()
-                    .unwrap_or(0)
-                    .cmp(&right["position"].as_i64().unwrap_or(0))
-            })
-            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
-    });
-    if let Some(milestone) = milestones.first() {
-        let children = arr(state, "items")
-            .iter()
-            .filter(|child| {
-                child["parent_id"] == milestone["id"] && owns(child) && child["archived"] != true
-            })
-            .collect::<Vec<_>>();
-        let completed = children
-            .iter()
-            .filter(|child| item_category(state, child) == "completed")
-            .count();
-        summary["next_milestone"] = json!({"item_id":milestone["id"],"title":bound_text(milestone["title"].as_str().unwrap_or_default(),160),"due_at":milestone["due_at"],"completed_children":completed,"total_children":children.len()});
-    }
+fn attention_summary(
+    state: &Value,
+    selected_project_ids: &[String],
+    time: &GlobalCivilTimeContext,
+) -> Result<Value, GlobalManagerError> {
+    crate::global_manager_attention::attention_summary(state, selected_project_ids, time)
+        .map_err(GlobalManagerError::Invalid)
 }
 
 fn detail_row_order_key(collection: &str, row: &Value) -> String {
@@ -2642,16 +2626,6 @@ fn detail_row_order_key(collection: &str, row: &Value) -> String {
         .chain(std::iter::once(stable_row))
         .collect::<Vec<_>>()
         .join("\u{0}")
-}
-
-fn item_category<'a>(state: &'a Value, item: &Value) -> &'a str {
-    arr(state, "statuses")
-        .iter()
-        .find(|status| {
-            status["project_id"] == item["project_id"] && status["status_id"] == item["status_id"]
-        })
-        .and_then(|status| status["category"].as_str())
-        .unwrap_or("open")
 }
 
 fn detail_row_matches_query(state: &Value, collection: &str, row: &Value, query: &str) -> bool {
@@ -2814,15 +2788,6 @@ fn bound_text(value: &str, maximum_bytes: usize) -> String {
     format!("{}…", &value[..end])
 }
 
-fn utc_today() -> String {
-    let days = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-        / 86_400;
-    civil_from_days(days)
-}
-
 fn utc_date_from_iso(value: &str) -> Option<String> {
     if value.len() < 10
         || value.as_bytes().get(4) != Some(&b'-')
@@ -2967,6 +2932,7 @@ fn validate_import_snapshot(snapshot: &Value) -> Result<(), StoreError> {
             return Err(error(&format!("{key} must be an array")));
         }
     }
+    global_capture::validate_snapshot_provenance(snapshot).map_err(|message| error(&message))?;
     let projects = arr(snapshot, "projects");
     let mut project_ids = std::collections::BTreeSet::new();
     for project in projects {
@@ -3501,6 +3467,8 @@ mod global_attention_page_tests {
                 statuses.push(status);
             }
         }
+        projects.reverse();
+        items.reverse();
         bundle["projects"] = json!(projects);
         bundle["items"] = json!(items);
         bundle["statuses"] = json!(statuses);
@@ -3533,6 +3501,16 @@ mod global_attention_page_tests {
         );
         assert_eq!(snapshot["attention"]["projects_truncated"], true);
         assert_eq!(snapshot["attention"]["projects_has_more"], true);
+        let sampled_project_ids = snapshot["attention"]["projects"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let expected_sample_ids = (0..100)
+            .map(|index| format!("attention-project-{index:03}"))
+            .collect::<Vec<_>>();
+        assert_eq!(sampled_project_ids, expected_sample_ids);
         assert_eq!(snapshot["attention"]["portfolio"]["open"], PROJECTS);
         assert_eq!(snapshot["attention"]["portfolio"]["overdue"], PROJECTS);
         assert!(serde_json::to_vec(&snapshot).unwrap().len() < INTERACTIVE_RESPONSE_MAX_BYTES);
@@ -3631,6 +3609,33 @@ mod global_attention_page_tests {
     }
 
     #[test]
+    fn page_continuations_require_the_revision_of_the_first_page() {
+        let path = database_path();
+        let app = GlobalManagerApplication::open(&path).unwrap();
+
+        let attention_error = app
+            .execute(
+                "attention page",
+                &json!({"limit":10,"offset":10}),
+                "attention-without-revision",
+            )
+            .unwrap_err();
+        assert!(attention_error.to_string().contains("expected_revision"));
+
+        let detail_error = app
+            .execute(
+                "detail page",
+                &json!({"collection":"projects","limit":10,"offset":10}),
+                "detail-without-revision",
+            )
+            .unwrap_err();
+        assert!(detail_error.to_string().contains("expected_revision"));
+
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn personal_attention_keeps_legacy_snapshot_summary() {
         let path = database_path();
         let app = GlobalManagerApplication::open(&path).unwrap();
@@ -3657,6 +3662,250 @@ mod global_attention_page_tests {
 
         drop(app);
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod global_capture_workflow_tests {
+    use super::GlobalManagerApplication;
+    use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DB: AtomicU64 = AtomicU64::new(1);
+
+    fn database_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "boreal-global-capture-{}-{}.sqlite",
+            std::process::id(),
+            NEXT_DB.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn call(
+        app: &GlobalManagerApplication,
+        command: &str,
+        payload: Value,
+        operation: &str,
+    ) -> Value {
+        app.execute(command, &payload, operation).unwrap()
+    }
+
+    fn remove_database(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn explicit_capture_records_exact_witness_and_item_edits_keep_immutable_origin() {
+        let path = database_path();
+        let app = GlobalManagerApplication::open(&path).unwrap();
+        let text = "  Café – notes\n";
+        let captured = call(
+            &app,
+            "todo add",
+            json!({"title":text,"capture_text":text,"source_ref":"legacy:raw-7"}),
+            "capture-exact-bytes",
+        );
+        let item_id = captured["id"].as_str().unwrap();
+        let digest = "sha256:8b167964ac7adc09362f702cfcabcebfd3660084e3bc77119da37b2fb2569cc3";
+        assert_eq!(captured["capture_origin"]["digest"], digest);
+        assert_eq!(captured["capture_origin"]["source_ref"], "legacy:raw-7");
+        assert_eq!(captured["capture_witness"]["text"], text);
+        assert_eq!(captured["capture_witness"]["digest"], digest);
+        assert_eq!(
+            captured["created_at"],
+            captured["capture_witness"]["captured_at"]
+        );
+
+        let operation = call(
+            &app,
+            "operation show",
+            json!({"operation_id":"capture-exact-bytes"}),
+            "capture-receipt-readback",
+        );
+        assert_eq!(operation["result"]["capture_witness"]["text"], text);
+
+        let snapshot = call(&app, "snapshot", json!({}), "capture-snapshot");
+        assert_eq!(snapshot["schema_version"], 3);
+        assert_eq!(snapshot["items"][0]["status_id"], "personal-inbox");
+        assert_eq!(snapshot["items"][0]["project_id"], Value::Null);
+        assert_eq!(snapshot["capture_witnesses"].as_array().unwrap().len(), 1);
+
+        call(
+            &app,
+            "todo edit",
+            json!({"item_id":item_id,"title":"Edited after capture"}),
+            "edit-captured-item",
+        );
+        call(
+            &app,
+            "todo archive",
+            json!({"item_id":item_id}),
+            "archive-captured-item",
+        );
+        call(
+            &app,
+            "todo unarchive",
+            json!({"item_id":item_id}),
+            "restore-captured-item",
+        );
+        let item = call(
+            &app,
+            "todo show",
+            json!({"item_id":item_id}),
+            "show-edited-capture",
+        );
+        assert_eq!(item["title"], "Edited after capture");
+        assert_eq!(item["capture_origin"]["digest"], digest);
+        assert_eq!(item["capture_origin"]["source_ref"], "legacy:raw-7");
+        assert_eq!(item["created_at"], captured["created_at"]);
+        let export = call(&app, "export", json!({}), "export-edited-capture");
+        let capture_revision = captured["revision"].as_u64().unwrap();
+        let historical_capture = export["revision_history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["revision"].as_u64() == Some(capture_revision))
+            .unwrap();
+        assert_eq!(
+            historical_capture["snapshot"]["capture_witnesses"][0]["text"],
+            text
+        );
+
+        let detailed = call(
+            &app,
+            "task add",
+            json!({"title":"Detailed task","description":"structured"}),
+            "detailed-task-no-origin",
+        );
+        assert!(detailed.get("capture_origin").is_none());
+        assert!(app
+            .execute(
+                "todo add",
+                &json!({"title":"Structured capture","capture_text":"Structured capture","priority":1}),
+                "reject-structured-capture",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("structured task fields"));
+
+        drop(app);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn schema_two_import_stays_legacy_and_schema_three_round_trips_capture_and_future_fields() {
+        let source_path = database_path();
+        let source = GlobalManagerApplication::open(&source_path).unwrap();
+        let text = "Round-trip exact capture";
+        let captured = call(
+            &source,
+            "todo add",
+            json!({"title":text,"capture_text":text}),
+            "round-trip-capture",
+        );
+        let mut schema_three = call(&source, "export", json!({}), "export-schema-three");
+        assert_eq!(schema_three["schema_version"], 3);
+        let item = schema_three["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["id"] == captured["id"])
+            .unwrap();
+        item["pending_send"] = json!({"source":"legacy-send-1"});
+        item["accepted_intake"] = json!({"receipt":"legacy-intake-2"});
+
+        let target_path = database_path();
+        let target = GlobalManagerApplication::open(&target_path).unwrap();
+        call(
+            &target,
+            "import",
+            json!({"snapshot":schema_three,"replace":true,"expected_revision":0}),
+            "import-schema-three",
+        );
+        let round_trip = call(
+            &target,
+            "export",
+            json!({}),
+            "export-after-schema-three-import",
+        );
+        assert_eq!(round_trip["schema_version"], 3);
+        assert!(round_trip.get("database_id").is_none());
+        let imported = &round_trip["items"][0];
+        assert_eq!(imported["capture_origin"], captured["capture_origin"]);
+        assert_eq!(imported["pending_send"], json!({"source":"legacy-send-1"}));
+        assert_eq!(
+            imported["accepted_intake"],
+            json!({"receipt":"legacy-intake-2"})
+        );
+        assert_eq!(round_trip["capture_witnesses"][0]["text"], text);
+
+        let bad_target_path = database_path();
+        let bad_target = GlobalManagerApplication::open(&bad_target_path).unwrap();
+        let mut tampered = round_trip.clone();
+        tampered["capture_witnesses"][0]["text"] = json!("changed witness bytes");
+        let error = bad_target
+            .execute(
+                "import",
+                &json!({"snapshot":tampered,"replace":true,"expected_revision":0}),
+                "reject-tampered-witness",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("digest does not match exact text"));
+        assert_eq!(bad_target.revision().unwrap(), 0);
+
+        let mut schema_two = call(&source, "export", json!({}), "export-for-schema-two");
+        schema_two["schema_version"] = json!(2);
+        schema_two
+            .as_object_mut()
+            .unwrap()
+            .remove("capture_witnesses");
+        schema_two["items"] = json!([{
+            "id":"old-schema-item",
+            "project_id":null,
+            "parent_id":null,
+            "kind":"task",
+            "title":"Legacy schema two item",
+            "description":"",
+            "labels":[],
+            "status_id":"todo",
+            "priority":0,
+            "due_at":null,
+            "follow_up_at":null,
+            "archived":false,
+            "position":0,
+            "created_at":"old-created",
+            "updated_at":"old-updated"
+        }]);
+        schema_two["status_history"] = json!([]);
+        let legacy_target_path = database_path();
+        let legacy_target = GlobalManagerApplication::open(&legacy_target_path).unwrap();
+        call(
+            &legacy_target,
+            "import",
+            json!({"snapshot":schema_two,"replace":true,"expected_revision":0}),
+            "import-schema-two",
+        );
+        let legacy_export = call(
+            &legacy_target,
+            "export",
+            json!({}),
+            "export-legacy-after-import",
+        );
+        assert_eq!(legacy_export["schema_version"], 3);
+        assert!(legacy_export["items"][0].get("capture_origin").is_none());
+        assert_eq!(legacy_export["capture_witnesses"], json!([]));
+
+        drop(source);
+        drop(target);
+        drop(bad_target);
+        drop(legacy_target);
+        remove_database(&source_path);
+        remove_database(&target_path);
+        remove_database(&bad_target_path);
+        remove_database(&legacy_target_path);
     }
 }
 
@@ -3764,5 +4013,45 @@ mod global_transfer_tests {
 
         drop(app);
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod workspace_binding_key_tests {
+    use super::ResolvedWorkspaceIdentity;
+
+    fn identity() -> ResolvedWorkspaceIdentity {
+        ResolvedWorkspaceIdentity {
+            project_id: "logical-project".to_owned(),
+            path: "/workspace/project".to_owned(),
+            database_instance_id: "database-instance-a".to_owned(),
+            restore_epoch: 1,
+            workspace_binding_digest: format!("sha256:{}", "a".repeat(64)),
+        }
+    }
+
+    #[test]
+    fn physical_binding_key_is_opaque_deterministic_and_tracks_database_lineage() {
+        let original = identity();
+        let key = original.physical_binding_key();
+        assert!(key.starts_with("workspace-"));
+        assert!(!key.contains("logical-project"));
+        assert_eq!(key, original.clone().physical_binding_key());
+
+        let mut replacement = original.clone();
+        replacement.project_id = "another-logical-project".to_owned();
+        assert_ne!(key, replacement.physical_binding_key());
+
+        replacement = original.clone();
+        replacement.database_instance_id = "database-instance-b".to_owned();
+        assert_ne!(key, replacement.physical_binding_key());
+
+        replacement = original.clone();
+        replacement.restore_epoch += 1;
+        assert_ne!(key, replacement.physical_binding_key());
+
+        replacement = original.clone();
+        replacement.workspace_binding_digest = format!("sha256:{}", "b".repeat(64));
+        assert_ne!(key, replacement.physical_binding_key());
     }
 }

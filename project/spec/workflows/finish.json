@@ -1,6 +1,6 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.2.0",
+  "asset_version": "1.3.0",
   "ref": "boreal.workflow.finish.v1",
   "kind": "finish",
   "title": "Attach evidence, verify, and close or release work",
@@ -13,13 +13,16 @@
     "handoff": "boreal.workflow.handoff.v1"
   },
   "allowed_commands": [
-    "bwrk agent guide --json",
-    "bwrk work show <work_id> --json",
-    "bwrk evidence run --work <work_id> --gate <gate_id> --attempt <attempt_id> --fence <fence> --json",
-    "bwrk agent finish <work_id> --close --attempt <attempt_id> --fence <fence> --receipt <receipt_path> --summary <summary_path> --expected-revision <revision> --json",
-    "bwrk operation show <operation_id> --json",
-    "bwrk summary compose --work <work_id> --json",
-    "bwrk summary create --work <work_id> --input <input_path> --attempt <attempt_id> --fence <fence> --expected-revision <revision> --json"
+    "bwrk agent guide --project <project_id> --work <work_id> --json",
+    "bwrk work show <project_id> <work_id> --json",
+    "bwrk source add <project_id> --input <result_path> --origin <origin> --media-type <media_type> --expected-revision <revision> --session <session_id> --json",
+    "bwrk evidence bind-result --project <project_id> --work <work_id> --attempt <attempt_id> --fence <fence> --source-version <source_version_id> --content-digest <content_digest> --expected-entity-revision <entity_revision> --expected-proof-revision <proof_revision> --operation <operation_id> --actor <actor_id> --session <session_id> --json",
+    "bwrk evidence run --project <project_id> --work <work_id> --gate <gate_id> --attempt <attempt_id> --fence <fence> --json",
+    "bwrk agent finish <work_id> --close --project <project_id> --attempt <attempt_id> --fence <fence> --receipt <receipt_path> --summary <summary_path> --expected-revision <revision> --session <session_id> --json",
+    "bwrk operation show <project_id> <operation_id> --json",
+    "bwrk summary compose --project <project_id> --work <work_id> --json",
+    "bwrk summary create --project <project_id> --work <work_id> --input <input_path> --attempt <attempt_id> --fence <fence> --expected-revision <revision> --json",
+    "bwrk agent next --project <project_id> --work <work_id> --json"
   ],
   "typed_inputs": [
     {
@@ -37,13 +40,6 @@
       "validation": "subject_match"
     },
     {
-      "name": "sprint_id",
-      "type": "nullable_work_id",
-      "required": false,
-      "source": "rollup",
-      "validation": "kind_sprint_and_project_bound"
-    },
-    {
       "name": "attempt_id",
       "type": "attempt_id",
       "required": true,
@@ -58,25 +54,74 @@
       "validation": "stale_write_rejected"
     },
     {
+      "name": "expected_entity_revision",
+      "type": "entity_revision",
+      "required": true,
+      "source": "canonical_action_descriptor",
+      "validation": "compare_and_swap"
+    },
+    {
+      "name": "expected_proof_revision",
+      "type": "proof_revision",
+      "required": true,
+      "source": "canonical_action_descriptor",
+      "validation": "result_binding_supersedes_stale_proof"
+    },
+    {
+      "name": "result_source_identity",
+      "type": "source_identity",
+      "required": true,
+      "source": "operator_source_capture_receipt",
+      "validation": "same_project_registered_version_and_digest_revalidated"
+    },
+    {
+      "name": "result_content_digest",
+      "type": "sha256",
+      "required": true,
+      "source": "source_catalog_readback",
+      "validation": "exact_identity_digest_match"
+    },
+    {
+      "name": "operation_id",
+      "type": "operation_id",
+      "required": true,
+      "source": "versioned_request_envelope",
+      "validation": "idempotent_durable_readback"
+    },
+    {
+      "name": "source_version_id",
+      "type": "source_version_id",
+      "required": true,
+      "source": "claim_or_bound_result",
+      "validation": "verifier_uses_bound_result_when_present_claim_input_remains_immutable"
+    },
+    {
+      "name": "config_identity",
+      "type": "config_identity",
+      "required": true,
+      "source": "authoritative_attempt",
+      "validation": "read_pinned_configuration_not_client_supplied"
+    },
+    {
       "name": "acceptance_profile_ref",
       "type": "workflow_ref",
       "required": true,
-      "source": "work",
-      "validation": "version_match"
+      "source": "authoritative_work",
+      "validation": "read_pinned_profile_not_client_supplied"
     },
     {
       "name": "receipt_ids",
       "type": "receipt_id_array",
       "required": true,
       "source": "evidence",
-      "validation": "subject_source_config_policy_match"
+      "validation": "subject_source_config_policy_and_proof_revision_match"
     },
     {
       "name": "summary_id",
       "type": "nullable_summary_id",
       "required": false,
-      "source": "summary",
-      "validation": "subject_match"
+      "source": "durable_summary_record",
+      "validation": "subject_and_attempt_match"
     },
     {
       "name": "close_intent",
@@ -95,28 +140,38 @@
   ],
   "finish_criteria": [
     {
+      "id": "finish.result",
+      "type": "operator_captures_exact_produced_artifact_then_worker_binding_pins_it_to_current_attempt_and_proof_revision",
+      "required": true
+    },
+    {
+      "id": "finish.invalidations",
+      "type": "result_change_invalidates_prior_receipt_submission_and_review_applicability",
+      "required": true
+    },
+    {
       "id": "finish.evidence",
-      "type": "all_required_structured_proof_attached",
+      "type": "all_required_structured_proof_attached_to_bound_result",
       "required": true
     },
     {
       "id": "finish.verification",
-      "type": "all_required_structured_proof_verified",
+      "type": "all_required_structured_proof_verified_against_bound_result_source_and_pinned_config",
       "required": true
     },
     {
       "id": "finish.review",
-      "type": "profile_declared_review_gate_only",
+      "type": "profile_declared_review_gate_only_and_review_decision_matches_current_submission",
       "required": true
     },
     {
       "id": "finish.intent",
-      "type": "valid_close_intent",
+      "type": "valid_close_intent_and_current_fenced_action_descriptor",
       "required": true
     },
     {
       "id": "finish.commit",
-      "type": "atomic_summary_closeout_and_release",
+      "type": "atomic_summary_closeout_and_release_with_durable_readback",
       "required": true
     },
     {

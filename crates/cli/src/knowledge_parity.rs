@@ -1,13 +1,21 @@
 //! CLI adapters for decisions, cited claims, intake promotion/disposition,
 //! and bounded project knowledge context.
 use super::*;
-use boreal_application::{ClaimInput, ClaimReviewInput, DecisionInput, KnowledgeParityApplication};
+use boreal_application::{
+    ClaimInput, ClaimReviewInput, DecisionInput, KnowledgeParityApplication, PlanningScope,
+    WorkApplication,
+};
 use boreal_domain::work_model_v3::{
     IntakeLifecycle, IntakePromotion, PromotionId, PromotionTargetKind,
 };
 use boreal_domain::{
     AcceptanceProfile, DispatchPolicy, PersistedLifecycle, WorkId, WorkItem, WorkKind,
 };
+use boreal_protocol::models::{
+    IntakeDeliveryItemDto, IntakeDeliveryReadbackDto, IntakeDeliveryReadbackStateDto,
+    IntakeDeliveryReceiptDto, INTAKE_DELIVERY_READBACK_SCHEMA_VERSION,
+};
+use boreal_store::{IntakeDeliveryReadback, IntakeDeliveryRecord, IntakeItemV3Record};
 
 pub(crate) fn supported(path: &[String]) -> bool {
     matches!(path, [a,b] if (a=="decision" && matches!(b.as_str(),"create"|"list"|"show"|"supersede"))
@@ -15,7 +23,7 @@ pub(crate) fn supported(path: &[String]) -> bool {
         || (a=="claim" && matches!(b.as_str(),"create"|"list"|"show"|"review"))
         || (a=="context" && matches!(b.as_str(),"show"|"search"|"rebuild"))
         || (a=="search" && matches!(b.as_str(),"query"|"index"))
-        || (a=="intake" && matches!(b.as_str(),"promote"|"disposition")))
+        || (a=="intake" && matches!(b.as_str(),"promote"|"disposition"|"show")))
         || matches!(path,[a,b,c] if a=="knowledge" && b=="claim" && matches!(c.as_str(),"create"|"list"|"show"|"review"))
         || matches!(path,[a,b,c] if a=="knowledge" && b=="context" && matches!(c.as_str(),"show"|"search"|"rebuild"))
 }
@@ -46,6 +54,39 @@ pub(crate) fn run(
     }
     let project = project_argument(parsed, 0)?;
     let app = KnowledgeParityApplication::new(store);
+    if parsed.path.as_slice() == ["intake", "show"] {
+        let intake_index = usize::from(parsed.options.project.is_none());
+        let intake_id = parsed
+            .options
+            .positionals
+            .get(intake_index)
+            .ok_or_else(|| CliError::invalid("intake show requires an intake identifier"))?;
+        let scope = PlanningScope::new(
+            ProjectId::new(project.clone()),
+            parsed.options.actor.clone(),
+        )
+        .with_session(parsed.options.session.clone());
+        let readback = WorkApplication::new(store)
+            .intake_delivery_readback_for_intake(&scope, intake_id)
+            .map_err(app_error)?;
+        if readback.intake.is_none() {
+            return Err(CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("intake item not found: {intake_id}"),
+            ));
+        }
+        let value = json!({
+            "command": "intake_show",
+            "project_id": project,
+            "revision": readback.project_revision,
+            "item": readback.intake.as_ref().map(intake_delivery_item_dto),
+            "delivery_receipt": readback.receipt.as_ref().map(intake_delivery_receipt_dto),
+        });
+        let mut result = bounded_result(Some(value), Some(readback.project_revision))?;
+        result.outcome = ApplicationOutcome::Unchanged;
+        return Ok(result);
+    }
     if parsed.path[0] == "decision" && parsed.path[1] == "list" {
         return read_list(&app, parsed, &project, "decision");
     }
@@ -328,6 +369,56 @@ pub(crate) fn run(
             )
         }
         _ => Err(CliError::invalid("unsupported knowledge command")),
+    }
+}
+
+/// Build the stable service/CLI wire shape from the authenticated application
+/// snapshot. By-key absence is represented as `state=absent` with no receipt;
+/// read failures remain errors and are never converted to absence.
+pub(crate) fn intake_delivery_readback_dto(
+    project_id: &str,
+    readback: &IntakeDeliveryReadback,
+) -> IntakeDeliveryReadbackDto {
+    IntakeDeliveryReadbackDto {
+        schema_version: INTAKE_DELIVERY_READBACK_SCHEMA_VERSION.to_owned(),
+        project_id: project_id.to_owned(),
+        project_revision: readback.project_revision,
+        state: if readback.receipt.is_some() {
+            IntakeDeliveryReadbackStateDto::Received
+        } else {
+            IntakeDeliveryReadbackStateDto::Absent
+        },
+        receipt: readback.receipt.as_ref().map(intake_delivery_receipt_dto),
+        intake: readback.intake.as_ref().map(intake_delivery_item_dto),
+    }
+}
+
+fn intake_delivery_receipt_dto(record: &IntakeDeliveryRecord) -> IntakeDeliveryReceiptDto {
+    IntakeDeliveryReceiptDto {
+        project_id: record.project_id.clone(),
+        delivery_key: record.delivery_key.clone(),
+        intake_id: record.intake_id.clone(),
+        origin_kind: record.origin_kind.clone(),
+        origin_item_id: record.origin_item_id.clone(),
+        origin_digest: record.origin_digest.clone(),
+        payload_digest: record.payload_digest.clone(),
+        created_at: record.created_at.clone(),
+    }
+}
+
+fn intake_delivery_item_dto(record: &IntakeItemV3Record) -> IntakeDeliveryItemDto {
+    IntakeDeliveryItemDto {
+        project_id: record.project_id.clone(),
+        intake_id: record.intake_id.clone(),
+        bucket_id: record.bucket_id.clone(),
+        kind: record.kind.clone(),
+        lifecycle: record.lifecycle.clone(),
+        content: record.content.clone(),
+        content_revision: record.content_revision,
+        content_digest: record.content_digest.clone(),
+        captured_at: record.captured_at.clone(),
+        updated_at: record.updated_at.clone(),
+        revisit_at_utc_ms: record.revisit_at_utc_ms,
     }
 }
 

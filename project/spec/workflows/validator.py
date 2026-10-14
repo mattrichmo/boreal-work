@@ -38,6 +38,7 @@ CORE_REFS = {
     "boreal.workflow.handoff.v1",
     "boreal.workflow.health.v1",
     "boreal.workflow.memory.v1",
+    "boreal.workflow.onboarding.v1",
 }
 CORE_KINDS = {ref.rsplit(".", 2)[1] for ref in CORE_REFS}
 REF_PATTERN = re.compile(r"^boreal\.workflow\.[a-z0-9-]+\.v[0-9]+$")

@@ -1381,6 +1381,8 @@ fn write_journal(path: &Path, journal: &RestoreJournal, create: bool) -> Result<
         .open(&temporary)
         .map_err(|error| io_unavailable("cannot create Global restore journal", error))?;
     set_private_file_permissions(&temporary)?;
+    #[cfg(test)]
+    tests::maybe_inject_storage_full_on_journal_write(&journal.phase)?;
     file.write_all(&bytes)
         .map_err(|error| io_unavailable("cannot write Global restore journal", error))?;
     file.sync_all()
@@ -1619,7 +1621,40 @@ fn io_unavailable(context: &str, error: std::io::Error) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::cell::Cell;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    thread_local! {
+        static STORAGE_FULL_PHASE: Cell<Option<&'static str>> = const { Cell::new(None) };
+    }
+
+    fn inject_storage_full_once_before_journal_write(phase: &'static str) {
+        STORAGE_FULL_PHASE.with(|selected| selected.set(Some(phase)));
+    }
+
+    pub(super) fn maybe_inject_storage_full_on_journal_write(
+        phase: &str,
+    ) -> Result<(), StoreError> {
+        let should_fail = STORAGE_FULL_PHASE.with(|selected| {
+            if selected.get() == Some(phase) {
+                selected.set(None);
+                true
+            } else {
+                false
+            }
+        });
+        if should_fail {
+            return Err(io_unavailable(
+                "cannot write Global restore journal",
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "synthetic storage-full fault injection (ENOSPC)",
+                ),
+            ));
+        }
+        Ok(())
+    }
 
     #[test]
     #[cfg(unix)]
@@ -1702,19 +1737,26 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn invalid_package_does_not_change_the_active_global_database() {
+    fn corrupt_truncated_and_newer_packages_preserve_the_seeded_active_database() {
         let root = test_root("invalid-package");
+        let source_path = root.join("source.sqlite");
         let active_path = root.join("global.sqlite");
+
+        let source = GlobalManagerStore::open(&source_path).unwrap();
+        add_project(&source, "restore-source", "Valid restore source");
+        let valid_package = root.join("valid.global-backup");
+        source.backup_package_to(&valid_package).unwrap();
+        drop(source);
+
         let active = GlobalManagerStore::open(&active_path).unwrap();
-        add_project(&active, "keep", "Keep current data");
+        add_project(&active, "keep-one", "Keep current data");
+        add_project(&active, "keep-two", "Keep its revision history");
         let before_identity = read_store_identity(&active).unwrap();
         let before_snapshot = active.snapshot().unwrap();
+        let before_history = active.revision_history().unwrap();
+        let before_activity = active.activity_snapshot(None, None, 200, 0).unwrap();
         drop(active);
 
-        let bad_package = root.join("bad.global-backup");
-        fs::create_dir(&bad_package).unwrap();
-        fs::write(bad_package.join("manifest.json"), b"{}").unwrap();
-        fs::write(bad_package.join("database.sqlite"), b"not sqlite").unwrap();
         let operation_id = "op_restore_invalid_test";
         let guard = super::super::GlobalMaintenanceGuard::acquire_exclusive(
             &active_path,
@@ -1722,18 +1764,395 @@ mod tests {
             super::super::GlobalMaintenanceKind::Restore,
         )
         .unwrap();
-        assert!(
-            restore_global_backup_package(&active_path, &bad_package, operation_id, &guard)
-                .is_err()
+
+        let cases = ["corrupt", "truncated", "newer"];
+        for case in cases {
+            let package = root.join(format!("{case}.global-backup"));
+            copy_package(&valid_package, &package);
+            match case {
+                "corrupt" => {
+                    let database = package.join("database.sqlite");
+                    let mut bytes = fs::read(&database).unwrap();
+                    let middle = bytes.len() / 2;
+                    bytes[middle] ^= 0x5a;
+                    fs::write(database, bytes).unwrap();
+                }
+                "truncated" => {
+                    let database = package.join("database.sqlite");
+                    let file = OpenOptions::new().write(true).open(database).unwrap();
+                    let length = file.metadata().unwrap().len();
+                    file.set_len(length / 2).unwrap();
+                }
+                "newer" => {
+                    let manifest_path = package.join("manifest.json");
+                    let mut manifest: Value =
+                        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+                    manifest["source_schema_version"] = json!(GLOBAL_SCHEMA_VERSION + 1);
+                    fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let error = restore_global_backup_package(&active_path, &package, operation_id, &guard)
+                .expect_err("invalid package must be rejected before activation");
+            assert!(
+                matches!(error, StoreError::Corrupt(_) | StoreError::Invalid(_)),
+                "{case} package should be rejected as invalid input, got: {error}"
+            );
+            assert_eq!(
+                read_database_identity(&active_path).unwrap(),
+                before_identity
+            );
+            let current = GlobalManagerStore::open_under_maintenance(&active_path, &guard).unwrap();
+            assert_eq!(
+                current.snapshot().unwrap(),
+                before_snapshot,
+                "{case} package"
+            );
+            assert_eq!(
+                current.revision_history().unwrap(),
+                before_history,
+                "{case} package"
+            );
+            assert_eq!(
+                current.activity_snapshot(None, None, 200, 0).unwrap(),
+                before_activity,
+                "{case} package"
+            );
+            drop(current);
+        }
+
+        drop(guard);
+        let reopened = GlobalManagerStore::open(&active_path).unwrap();
+        assert_eq!(read_store_identity(&reopened).unwrap(), before_identity);
+        assert_eq!(reopened.snapshot().unwrap(), before_snapshot);
+        assert_eq!(reopened.revision_history().unwrap(), before_history);
+        drop(reopened);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "manual T90 qualification: allocates a Global database larger than 64 MiB"]
+    #[cfg(unix)]
+    fn package_larger_than_64_mib_restores_to_independent_targets_with_equal_state_and_history() {
+        const LARGE_PAYLOAD_BYTES: usize = 35 * 1024 * 1024;
+        const ACCEPTANCE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+
+        let root = test_root("large-independent-targets");
+        let source_path = root.join("source.sqlite");
+        let package_path = root.join("large.global-backup");
+        let source = GlobalManagerStore::open(&source_path).unwrap();
+        let payload = "x".repeat(LARGE_PAYLOAD_BYTES);
+        source
+            .mutate(
+                "restore fixture add large state",
+                &json!({"fixture":"greater-than-64-mib"}),
+                "test-add-large-restore-fixture",
+                |mut state, revision| {
+                    state["restore_fixture"] = json!({"payload": payload});
+                    Ok((
+                        state,
+                        json!({"fixture":"large-restore","revision":revision}),
+                    ))
+                },
+            )
+            .unwrap();
+        // A subsequent mutation snapshots the large state into revision
+        // history, making both current state and history exceed the threshold.
+        add_project(
+            &source,
+            "large-history-marker",
+            "Keep the large prior revision",
         );
+        let source_identity = read_store_identity(&source).unwrap();
+        let source_snapshot = source.snapshot().unwrap();
+        let source_history = source.revision_history().unwrap();
+        let source_activity = source.activity_snapshot(None, None, 200, 0).unwrap();
+        let package = source.backup_package_to(&package_path).unwrap();
+        assert!(
+            package.manifest.database_bytes > ACCEPTANCE_SIZE_BYTES,
+            "physical package must exceed 64 MiB; got {} bytes",
+            package.manifest.database_bytes
+        );
+        assert_eq!(
+            fs::metadata(&package.database_path).unwrap().len(),
+            package.manifest.database_bytes
+        );
+        drop(source);
+
+        let mut restored_database_ids = Vec::new();
+        for (target_name, operation_id) in [
+            ("target-one", "op_restore_large_target_one"),
+            ("target-two", "op_restore_large_target_two"),
+        ] {
+            let target_root = root.join(target_name);
+            fs::create_dir_all(&target_root).unwrap();
+            let target_path = target_root.join("global.sqlite");
+            let guard = super::super::GlobalMaintenanceGuard::acquire_exclusive(
+                &target_path,
+                operation_id,
+                super::super::GlobalMaintenanceKind::Restore,
+            )
+            .unwrap();
+            let report =
+                restore_global_backup_package(&target_path, &package_path, operation_id, &guard)
+                    .unwrap();
+            assert_eq!(report.source_database_id, source_identity.database_id);
+            assert_eq!(report.revision, source_identity.revision);
+            assert!(report.previous_database_path.is_none());
+            assert_ne!(report.database_id, source_identity.database_id);
+            assert!(!restored_database_ids.contains(&report.database_id));
+
+            let restored =
+                GlobalManagerStore::open_under_maintenance(&target_path, &guard).unwrap();
+            assert_eq!(restored.snapshot().unwrap(), source_snapshot);
+            assert_eq!(restored.revision_history().unwrap(), source_history);
+            assert_eq!(
+                restored.activity_snapshot(None, None, 200, 0).unwrap(),
+                source_activity
+            );
+            assert_eq!(
+                read_store_identity(&restored).unwrap().database_id,
+                report.database_id
+            );
+            restored_database_ids.push(report.database_id);
+            drop(restored);
+            drop(guard);
+        }
+        assert_eq!(restored_database_ids.len(), 2);
+        assert_ne!(restored_database_ids[0], restored_database_ids[1]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn injected_storage_full_before_retention_checkpoint_preserves_active_and_resumes() {
+        let root = test_root("storage-full-journal");
+        let source_path = root.join("source.sqlite");
+        let active_path = root.join("global.sqlite");
+        let package_path = root.join("restore.global-backup");
+
+        let source = GlobalManagerStore::open(&source_path).unwrap();
+        add_project(&source, "restored", "Restored source");
+        source.backup_package_to(&package_path).unwrap();
+        let source_snapshot = source.snapshot().unwrap();
+        let source_history = source.revision_history().unwrap();
+        drop(source);
+
+        let active = GlobalManagerStore::open(&active_path).unwrap();
+        add_project(&active, "retained", "Prior active state");
+        let before_identity = read_store_identity(&active).unwrap();
+        let before_snapshot = active.snapshot().unwrap();
+        let before_history = active.revision_history().unwrap();
+        let before_activity = active.activity_snapshot(None, None, 200, 0).unwrap();
+        drop(active);
+
+        let operation_id = "op_restore_synthetic_enospc";
+        let guard = super::super::GlobalMaintenanceGuard::acquire_exclusive(
+            &active_path,
+            operation_id,
+            super::super::GlobalMaintenanceKind::Restore,
+        )
+        .unwrap();
+        inject_storage_full_once_before_journal_write("previous_retained");
+        let error =
+            restore_global_backup_package(&active_path, &package_path, operation_id, &guard)
+                .expect_err("synthetic storage-full fault should stop before activation");
+        assert!(error
+            .to_string()
+            .contains("synthetic storage-full fault injection (ENOSPC)"));
         assert_eq!(
             read_database_identity(&active_path).unwrap(),
             before_identity
         );
-        drop(guard);
-        let current = GlobalManagerStore::open(&active_path).unwrap();
+        let operation_root = guard
+            .staging_database_path()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(
+            read_journal(&operation_root.join(JOURNAL_FILE))
+                .unwrap()
+                .phase,
+            "staged_ready"
+        );
+        assert!(operation_root.join("previous.sqlite").exists());
+        let current = GlobalManagerStore::open_under_maintenance(&active_path, &guard).unwrap();
         assert_eq!(current.snapshot().unwrap(), before_snapshot);
+        assert_eq!(current.revision_history().unwrap(), before_history);
+        assert_eq!(
+            current.activity_snapshot(None, None, 200, 0).unwrap(),
+            before_activity
+        );
         drop(current);
+        drop(guard);
+
+        // Reacquiring admission models recovery after the failed owner releases
+        // its lock. The durable journal and retained copy must make retry safe.
+        let recovered_guard = super::super::GlobalMaintenanceGuard::acquire_exclusive(
+            &active_path,
+            operation_id,
+            super::super::GlobalMaintenanceKind::Restore,
+        )
+        .unwrap();
+        let report = restore_global_backup_package(
+            &active_path,
+            &package_path,
+            operation_id,
+            &recovered_guard,
+        )
+        .unwrap();
+        assert!(report.previous_database_path.as_ref().unwrap().exists());
+        assert!(!report.idempotent_readback);
+        let restored =
+            GlobalManagerStore::open_under_maintenance(&active_path, &recovered_guard).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), source_snapshot);
+        assert_eq!(restored.revision_history().unwrap(), source_history);
+        let retained = SqliteStore::open_connection(
+            report.previous_database_path.as_ref().unwrap(),
+            SQLITE_OPEN_READONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            read_connection_identity(&retained).unwrap(),
+            before_identity
+        );
+        let (retained_snapshot, _, retained_history) =
+            read_snapshot_and_history(&retained).unwrap();
+        assert_eq!(retained_snapshot, before_snapshot.0);
+        assert_eq!(retained_history, before_history);
+        drop(retained);
+        drop(restored);
+        drop(recovered_guard);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restore_child_holds_maintenance_after_activation_for_parent_kill() {
+        let Some(root) = std::env::var_os("BOREAL_GLOBAL_RESTORE_TEST_CHILD_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let active_path = root.join("global.sqlite");
+        let package_path = root.join("restore.global-backup");
+        let operation_id = "op_restore_hard_child_exit";
+        let guard = super::super::GlobalMaintenanceGuard::acquire_exclusive(
+            &active_path,
+            operation_id,
+            super::super::GlobalMaintenanceKind::Restore,
+        )
+        .unwrap();
+        let error = restore_global_backup_package_with_interruption(
+            &active_path,
+            &package_path,
+            operation_id,
+            &guard,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("simulated interruption"));
+        fs::write(root.join("activation-complete.marker"), b"activated").unwrap();
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restore_recovers_after_process_is_killed_after_activation() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let root = test_root("hard-process-exit");
+        let source_path = root.join("source.sqlite");
+        let active_path = root.join("global.sqlite");
+        let package_path = root.join("restore.global-backup");
+        let source = GlobalManagerStore::open(&source_path).unwrap();
+        add_project(&source, "restored", "Restored source");
+        let package = source.backup_package_to(&package_path).unwrap();
+        let source_snapshot = source.snapshot().unwrap();
+        let source_history = source.revision_history().unwrap();
+        drop(source);
+
+        let active = GlobalManagerStore::open(&active_path).unwrap();
+        add_project(&active, "retained", "Previous active state");
+        let previous_identity = read_store_identity(&active).unwrap();
+        let previous_snapshot = active.snapshot().unwrap();
+        let previous_history = active.revision_history().unwrap();
+        drop(active);
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("restore_child_holds_maintenance_after_activation_for_parent_kill")
+            .arg("--nocapture")
+            .env("BOREAL_GLOBAL_RESTORE_TEST_CHILD_ROOT", &root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let marker = root.join("activation-complete.marker");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if marker.exists() {
+                break;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("restore child exited before activation marker: {status}");
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("restore child did not reach activation within 30 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        child.kill().unwrap();
+        let child_status = child.wait().unwrap();
+        assert_eq!(child_status.signal(), Some(9), "child must receive SIGKILL");
+
+        let operation_id = "op_restore_hard_child_exit";
+        let recovered_guard = super::super::GlobalMaintenanceGuard::acquire_exclusive(
+            &active_path,
+            operation_id,
+            super::super::GlobalMaintenanceKind::Restore,
+        )
+        .expect("kernel must release the killed process's maintenance lock");
+        let report = restore_global_backup_package(
+            &active_path,
+            &package_path,
+            operation_id,
+            &recovered_guard,
+        )
+        .unwrap();
+        assert!(report.idempotent_readback);
+        assert_eq!(report.source_database_id, package.manifest.database_id);
+        assert!(report.previous_database_path.as_ref().unwrap().exists());
+
+        let restored =
+            GlobalManagerStore::open_under_maintenance(&active_path, &recovered_guard).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), source_snapshot);
+        assert_eq!(restored.revision_history().unwrap(), source_history);
+        assert_eq!(
+            read_store_identity(&restored).unwrap().database_id,
+            report.database_id
+        );
+        let retained = SqliteStore::open_connection(
+            report.previous_database_path.as_ref().unwrap(),
+            SQLITE_OPEN_READONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            read_connection_identity(&retained).unwrap(),
+            previous_identity
+        );
+        let (retained_snapshot, _, retained_history) =
+            read_snapshot_and_history(&retained).unwrap();
+        assert_eq!(retained_snapshot, previous_snapshot.0);
+        assert_eq!(retained_history, previous_history);
+        drop(retained);
+        drop(restored);
+        drop(recovered_guard);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1843,6 +2262,13 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    fn copy_package(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).unwrap();
+        for file in ["database.sqlite", "manifest.json"] {
+            fs::copy(source.join(file), destination.join(file)).unwrap();
+        }
     }
 
     fn test_root(label: &str) -> PathBuf {

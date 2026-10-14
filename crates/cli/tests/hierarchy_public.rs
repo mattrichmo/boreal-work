@@ -277,6 +277,126 @@ fn public_cli_replays_identical_work_create_as_unchanged() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn public_cli_records_and_replays_revisioned_container_disposition() {
+    let root = temporary_root();
+    fs::create_dir_all(&root).unwrap();
+    let database = root.join(".boreal/boreal.sqlite");
+
+    let initialized = Command::new(binary())
+        .current_dir(&root)
+        .args([
+            "init",
+            "--project",
+            "hierarchy-project",
+            "--actor",
+            "hierarchy-agent",
+            "--db",
+            database.to_str().unwrap(),
+            "--operation-id",
+            "disposition-init",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&initialized, "init");
+
+    let mut revision = start_session(
+        &root,
+        &database,
+        "hierarchy-project",
+        "hierarchy-agent",
+        "hierarchy-session",
+    );
+    revision = create(
+        &root,
+        &database,
+        "milestone-1",
+        "Release milestone",
+        "milestone",
+        None,
+        revision,
+    );
+    revision = create(
+        &root,
+        &database,
+        "sprint-1",
+        "First sprint",
+        "sprint",
+        Some("milestone-1"),
+        revision,
+    );
+    revision = create(
+        &root,
+        &database,
+        "task-1",
+        "Deferred descendant",
+        "task",
+        Some("sprint-1"),
+        revision,
+    );
+
+    let expected_revision_arg = revision.to_string();
+    let disposition_args = [
+        "work",
+        "disposition",
+        "milestone-1",
+        "task-1",
+        "--project",
+        "hierarchy-project",
+        "--kind",
+        "deferred",
+        "--reason",
+        "waiting for an external dependency",
+        "--expected-revision",
+        &expected_revision_arg,
+        "--actor",
+        "hierarchy-agent",
+        "--harness",
+        "hierarchy-public-test",
+        "--session",
+        "hierarchy-session",
+        "--db",
+        database.to_str().unwrap(),
+        "--operation-id",
+        "disposition-deferred",
+        "--yes",
+        "--json",
+    ];
+
+    let first = Command::new(binary())
+        .current_dir(&root)
+        .args(disposition_args)
+        .output()
+        .unwrap();
+    assert_success(&first, "work disposition");
+    let first_envelope = envelope(&first);
+    assert_eq!(first_envelope["outcome"], "changed");
+    assert_eq!(first_envelope["data"]["kind"], "deferred");
+    assert_eq!(first_envelope["data"]["container_id"], "milestone-1");
+    assert_eq!(first_envelope["data"]["descendant_id"], "task-1");
+    assert_eq!(
+        first_envelope["data"]["reason"],
+        "waiting for an external dependency"
+    );
+    let disposition_id = first_envelope["data"]["disposition_id"].clone();
+    let first_revision = first_envelope["revision"].as_u64().unwrap();
+
+    let replay = Command::new(binary())
+        .current_dir(&root)
+        .args(disposition_args)
+        .output()
+        .unwrap();
+    assert_success(&replay, "replayed work disposition");
+    let replay_envelope = envelope(&replay);
+    assert_eq!(replay_envelope["outcome"], "unchanged");
+    assert_eq!(replay_envelope["data"]["changed"], false);
+    assert_eq!(replay_envelope["data"]["disposition_id"], disposition_id);
+    assert_eq!(replay_envelope["revision"], first_revision);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn create(
     root: &Path,
     database: &Path,

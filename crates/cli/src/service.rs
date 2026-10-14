@@ -25,6 +25,13 @@ fn parity_supported(path: &[String]) -> bool {
             .as_slice(),
         ["agent", "guide" | "next"]
             | ["next"]
+            | ["project", "civil-time", "set" | "show"]
+            | ["work", "schedule", "set" | "show"]
+            | ["wait", "create" | "resolve" | "list" | "show"]
+            | ["evidence", "bind-result" | "receipts"]
+            | ["artifact", "result", "bind" | "attempt" | "operation"]
+            | ["work", "close-readiness"]
+            | ["work", "disposition"]
             | ["work", "create"]
             | ["cycle" | "sprint", "current"]
     ) || super::directive_commands::supported(path)
@@ -95,6 +102,10 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             | ["review", "show"]
             | ["source", "list"]
             | ["source", "search"]
+            | ["source", "show"]
+            | ["source", "verify"]
+            | ["intake", "bucket"]
+            | ["intake", "capture"]
             | ["gate", "policy", "publish"]
             | ["work", "claim"]
             | ["work", "accept"]
@@ -167,7 +178,24 @@ mod unix {
         ExternalEffectReadback, ExternalEffectResolution,
     };
     use boreal_domain::{ActorContext, ActorRole, ReasonCode};
-    use boreal_protocol::{schema, Envelope, ProtocolError as WireError, TransportOutcome};
+    use boreal_protocol::{
+        models::{
+            ArtifactResultBindRequestDto, ExternalWaitCreateDto, ExternalWaitResolveDto,
+            FinalResultCaptureReadbackDto, FinalResultCaptureRequestDto, IntakeBucketCreateDto,
+            IntakeBucketReadbackDto, IntakeCaptureDto, IntakeCaptureReadbackDto,
+            IntakeDeliveryReadbackRequestDto, IntakeDeliveryReceiveDto, IntakeKindDto,
+            ProjectCivilTimeUpdateDto, SourceAvailabilityDto, SourceShowReadbackDto,
+            SourceVerifyReadbackDto, SourceVersionLookupDto, SourceVersionMetadataDto,
+            SourceVersionRegistrationDto, WorkScheduleUpdateDto,
+            FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION, FINAL_RESULT_CAPTURE_SCHEMA_VERSION,
+            INTAKE_BUCKET_CREATE_SCHEMA_VERSION, INTAKE_BUCKET_READBACK_SCHEMA_VERSION,
+            INTAKE_CAPTURE_READBACK_SCHEMA_VERSION, INTAKE_CAPTURE_SCHEMA_VERSION,
+            INTAKE_DELIVERY_READBACK_SCHEMA_VERSION, INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION,
+            SOURCE_LOOKUP_SCHEMA_VERSION, SOURCE_SHOW_READBACK_SCHEMA_VERSION,
+            SOURCE_VERIFY_READBACK_SCHEMA_VERSION,
+        },
+        schema, Envelope, ProtocolError as WireError, TransportOutcome,
+    };
     use boreal_service::{
         ApplicationCommandHandler, ApplicationRequest, ApplicationResponse, BusyOutcome,
         ConcurrentApplicationCommandHandler, ElectionError, JsonRequest, OperationPhase,
@@ -1749,6 +1777,248 @@ mod unix {
             "session_id": parsed.options.session,
             "operation_id": operation,
         });
+        if path.as_slice() == ["evidence", "bind-result"] {
+            let request =
+                FinalResultCaptureRequestDto {
+                    schema_version: FINAL_RESULT_CAPTURE_SCHEMA_VERSION.to_owned(),
+                    work_id: parsed
+                        .options
+                        .work
+                        .clone()
+                        .ok_or_else(|| CliError::invalid("evidence bind-result requires --work"))?,
+                    attempt_id: parsed.options.attempt.clone().ok_or_else(|| {
+                        CliError::invalid("evidence bind-result requires --attempt")
+                    })?,
+                    fence: parsed.options.fence.ok_or_else(|| {
+                        CliError::invalid("evidence bind-result requires --fence")
+                    })?,
+                    expected_project_revision: parsed.options.expected_revision.ok_or_else(
+                        || CliError::invalid("evidence bind-result requires --expected-revision"),
+                    )?,
+                    expected_entity_revision: required_extra_revision(
+                        &parsed.options,
+                        "--expected-entity-revision",
+                    )?,
+                    expected_proof_revision: required_extra_revision(
+                        &parsed.options,
+                        "--expected-proof-revision",
+                    )?,
+                    source_version_id: parsed.options.source_version.clone().ok_or_else(|| {
+                        CliError::invalid("evidence bind-result requires --source-version")
+                    })?,
+                    content_digest: extra_value(&parsed.options, "--content-digest")
+                        .ok_or_else(|| {
+                            CliError::invalid("evidence bind-result requires --content-digest")
+                        })?
+                        .to_owned(),
+                };
+            data["command"] = json!("bind_final_result_v1");
+            data["final_result"] = serde_json::to_value(request)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            return Ok(data);
+        }
+        match path.as_slice() {
+            ["project", "civil-time", "set"] => {
+                let input = parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("project civil-time set requires --input REQUEST.json")
+                })?;
+                let request: ProjectCivilTimeUpdateDto =
+                    super::super::read_scheduling_request(input)?;
+                data["command"] = json!("project_civil_time_update_v1");
+                data["civil_time_update"] = serde_json::to_value(request)
+                    .map_err(|error| CliError::invalid(error.to_string()))?;
+                return Ok(data);
+            }
+            ["project", "civil-time", "show"] => {
+                data["command"] = json!("project_civil_time_readback_v1");
+                return Ok(data);
+            }
+            ["work", "schedule", "set"] => {
+                let index = usize::from(parsed.options.project.is_none());
+                data["work_id"] =
+                    json!(parsed.options.positionals.get(index).ok_or_else(|| {
+                        CliError::invalid("work schedule set requires a work identifier")
+                    })?);
+                let input = parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("work schedule set requires --input REQUEST.json")
+                })?;
+                let request: WorkScheduleUpdateDto = super::super::read_scheduling_request(input)?;
+                data["command"] = json!("work_schedule_update_v1");
+                data["schedule_update"] = serde_json::to_value(request)
+                    .map_err(|error| CliError::invalid(error.to_string()))?;
+                return Ok(data);
+            }
+            ["work", "schedule", "show"] => {
+                let index = usize::from(parsed.options.project.is_none());
+                data["work_id"] =
+                    json!(parsed.options.positionals.get(index).ok_or_else(|| {
+                        CliError::invalid("work schedule show requires a work identifier")
+                    })?);
+                data["command"] = json!("work_schedule_readback_v1");
+                return Ok(data);
+            }
+            ["wait", "create"] | ["wait", "resolve"] => {
+                let input = parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("wait mutation requires --input REQUEST.json")
+                })?;
+                if path[1] == "create" {
+                    let request: ExternalWaitCreateDto =
+                        super::super::read_scheduling_request(input)?;
+                    data["command"] = json!("external_wait_create_v1");
+                    data["wait_create"] = serde_json::to_value(request)
+                        .map_err(|error| CliError::invalid(error.to_string()))?;
+                } else {
+                    let request: ExternalWaitResolveDto =
+                        super::super::read_scheduling_request(input)?;
+                    data["command"] = json!("external_wait_resolve_v1");
+                    data["wait_resolve"] = serde_json::to_value(request)
+                        .map_err(|error| CliError::invalid(error.to_string()))?;
+                }
+                return Ok(data);
+            }
+            ["wait", "list"] => {
+                data["command"] = json!("external_wait_readback_v1");
+                return Ok(data);
+            }
+            ["wait", "show"] => {
+                let index = usize::from(parsed.options.project.is_none());
+                data["wait_id"] =
+                    json!(parsed.options.positionals.get(index).ok_or_else(|| {
+                        CliError::invalid("wait show requires a wait identifier")
+                    })?);
+                data["command"] = json!("external_wait_readback_v1");
+                return Ok(data);
+            }
+            _ => {}
+        }
+        match path.as_slice() {
+            ["artifact", "result", "bind"] => {
+                let input = parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("artifact result bind requires --input REQUEST.json")
+                })?;
+                let request = super::super::read_artifact_result_bind_request(input)?;
+                data["command"] = json!("bind_artifact_result_v1");
+                data["artifact_result"] = serde_json::to_value(request)
+                    .map_err(|error| CliError::invalid(error.to_string()))?;
+                return Ok(data);
+            }
+            ["artifact", "result", "attempt"] => {
+                data["command"] = json!("artifact_result_for_attempt_v1");
+                data["work_id"] = json!(parsed.options.work.as_deref().ok_or_else(|| {
+                    CliError::invalid("artifact result attempt requires --work")
+                })?);
+                data["attempt_id"] = json!(parsed.options.attempt.as_deref().ok_or_else(|| {
+                    CliError::invalid("artifact result attempt requires --attempt")
+                })?);
+                data["fence"] = json!(parsed.options.fence.ok_or_else(|| {
+                    CliError::invalid("artifact result attempt requires --fence")
+                })?);
+                return Ok(data);
+            }
+            ["artifact", "result", "operation"] => {
+                data["command"] = json!("artifact_result_for_operation_v1");
+                data["target_operation_id"] = json!(parsed
+                    .options
+                    .positionals
+                    .first()
+                    .ok_or_else(|| CliError::invalid(
+                        "artifact result operation requires OPERATION_ID"
+                    ))?);
+                return Ok(data);
+            }
+            _ => {}
+        }
+        if matches!(path.as_slice(), ["source", "show"] | ["source", "verify"]) {
+            let index = usize::from(parsed.options.project.is_none());
+            let source_version_id = parsed.options.positionals.get(index).ok_or_else(|| {
+                CliError::invalid("source route requires a source version identifier")
+            })?;
+            let lookup = SourceVersionLookupDto {
+                schema_version: SOURCE_LOOKUP_SCHEMA_VERSION.to_owned(),
+                source_version_id: source_version_id.clone(),
+            };
+            data["command"] = json!(if path[1] == "show" {
+                "source_show_v1"
+            } else {
+                "source_verify_v1"
+            });
+            data["lookup"] = serde_json::to_value(lookup)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            return Ok(data);
+        }
+        if path.as_slice() == ["intake", "bucket"] {
+            let index = usize::from(parsed.options.project.is_none());
+            let bucket_id =
+                parsed.options.positionals.get(index).ok_or_else(|| {
+                    CliError::invalid("intake bucket requires a bucket identifier")
+                })?;
+            let name = parsed
+                .options
+                .positionals
+                .get(index + 1)
+                .ok_or_else(|| CliError::invalid("intake bucket requires a bucket name"))?;
+            let expected_revision = parsed.options.expected_revision.ok_or_else(|| {
+                CliError::invalid("service intake bucket requires --expected-revision")
+            })?;
+            let request = IntakeBucketCreateDto {
+                schema_version: INTAKE_BUCKET_CREATE_SCHEMA_VERSION.to_owned(),
+                expected_revision,
+                bucket_id: bucket_id.clone(),
+                name: name.clone(),
+            };
+            data["command"] = json!("intake_bucket_v1");
+            data["bucket"] = serde_json::to_value(request)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            return Ok(data);
+        }
+        if path.as_slice() == ["intake", "capture"] {
+            let index = usize::from(parsed.options.project.is_none());
+            let intake_id =
+                parsed.options.positionals.get(index).ok_or_else(|| {
+                    CliError::invalid("intake capture requires an intake identifier")
+                })?;
+            let content = parsed
+                .options
+                .positionals
+                .get(index + 1)
+                .ok_or_else(|| CliError::invalid("intake capture requires content"))?;
+            let bucket_id = parsed
+                .options
+                .bucket
+                .clone()
+                .ok_or_else(|| CliError::invalid("intake capture requires --bucket"))?;
+            let kind = match parsed.options.kind.as_deref().unwrap_or("note") {
+                "note" => IntakeKindDto::Note,
+                "discovery" => IntakeKindDto::Discovery,
+                "question" => IntakeKindDto::Question,
+                "revisit" => IntakeKindDto::Revisit,
+                _ => return Err(CliError::invalid("intake capture kind is invalid")),
+            };
+            let expected_revision = parsed.options.expected_revision.ok_or_else(|| {
+                CliError::invalid("service intake capture requires --expected-revision")
+            })?;
+            let request = IntakeCaptureDto {
+                schema_version: INTAKE_CAPTURE_SCHEMA_VERSION.to_owned(),
+                expected_revision,
+                intake_id: intake_id.clone(),
+                bucket_id,
+                kind,
+                content: content.clone(),
+            };
+            data["command"] = json!("intake_capture_v1");
+            data["capture"] = serde_json::to_value(request)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            return Ok(data);
+        }
+        if path.as_slice() == ["work", "close-readiness"] {
+            let work_index = usize::from(parsed.options.project.is_none());
+            data["command"] = json!("work_close_readiness_v1");
+            data["work_id"] =
+                json!(parsed.options.positionals.get(work_index).ok_or_else(|| {
+                    CliError::invalid("work close-readiness requires a work identifier")
+                })?);
+            return Ok(data);
+        }
         // Work creation has its own versioned service DTO below. Keep it out
         // of the generic feature envelope so the service validates the typed
         // fields, acceptance profile version and expected revision directly.
@@ -1970,6 +2240,8 @@ mod unix {
                     .options
                     .expected_revision
                     .map_or(Value::Null, |value| json!(value));
+                data["planning_contract"] =
+                    super::super::planning_contract_file_value(parsed)?.unwrap_or(Value::Null);
             }
             ["work", "edit"] => {
                 let offset = usize::from(parsed.options.project.is_none());
@@ -2572,6 +2844,8 @@ mod unix {
             alias = "acceptance_profile_version"
         )]
         profile_version: String,
+        #[serde(default)]
+        execution_mode: Option<String>,
         actor_id: String,
         #[serde(default, rename = "harness_id")]
         _harness_id: Option<String>,
@@ -2579,6 +2853,8 @@ mod unix {
         _session_id: Option<String>,
         #[serde(default, rename = "expected_revision")]
         expected_revision: Option<u64>,
+        #[serde(default)]
+        planning_contract: Option<Value>,
         #[serde(default, rename = "operation_id")]
         _operation_id: Option<String>,
     }
@@ -2771,6 +3047,17 @@ mod unix {
                     )?;
                     Ok((result.outcome, result.revision, result.data))
                 }
+                "intake_delivery_receive_v1" => self.intake_delivery_receive(request, data),
+                "intake_delivery_readback_v1" => self.intake_delivery_readback(data),
+                "intake_bucket_v1" => self.intake_bucket(data, &request.operation_id),
+                "intake_capture_v1" => self.intake_capture(data, &request.operation_id),
+                "project_civil_time_update_v1"
+                | "project_civil_time_readback_v1"
+                | "work_schedule_update_v1"
+                | "work_schedule_readback_v1"
+                | "external_wait_create_v1"
+                | "external_wait_resolve_v1"
+                | "external_wait_readback_v1" => self.scheduling_route(request, data),
                 "memory_command" => {
                     let result = super::super::memory_commands::apply(
                         &self.store,
@@ -2799,6 +3086,8 @@ mod unix {
                 }
                 "source_add" => self.source_add(data, &request.operation_id),
                 "source_list" => self.source_list(data, &request.operation_id),
+                "source_show_v1" => self.source_show(data),
+                "source_verify_v1" => self.source_verify(data),
                 "gate_policy_publish" => self.gate_policy_publish(data, &request.operation_id),
                 "source_search" => self.source_search(data),
                 "backup" => self.backup(data, &request.operation_id),
@@ -2896,6 +3185,12 @@ mod unix {
                 "finish_close" => self.finish_close(data, &request.operation_id),
                 "evidence_add" => self.evidence_add(data),
                 "evidence_run" => self.evidence_run(data, &request.operation_id),
+                "bind_final_result_v1" => self.bind_final_result(data, &request.operation_id),
+                "bind_artifact_result_v1" => self.bind_artifact_result(data, &request.operation_id),
+                "artifact_result_for_attempt_v1" => self.artifact_result_for_attempt(data),
+                "artifact_result_for_operation_v1" => self.artifact_result_for_operation(data),
+                "work_close_readiness_v1" => self.close_readiness(data),
+                "receipts_for_attempt" => self.receipts_for_attempt(data),
                 "update" => self.update(data, &request.operation_id),
                 "operation_show" => self.operation_show(data),
                 "session_start" => self.session_start(data, &request.operation_id),
@@ -2921,6 +3216,230 @@ mod unix {
                 ApplicationOutcome::Unchanged,
                 None,
                 Some(super::super::workflow_package_json(&registry)),
+            ))
+        }
+
+        fn scheduling_route(&self, request: &ApplicationRequest, data: &Value) -> ServiceResult {
+            let project = string(data, "project_id")?;
+            let actor = string(data, "actor_id")?;
+            let session = string(data, "session_id")?;
+            let app = WorkApplication::new(&self.store);
+            let result = match request.command.as_str() {
+                "project_civil_time_update_v1" => {
+                    let dto: ProjectCivilTimeUpdateDto = serde_json::from_value(
+                        data.get("civil_time_update").cloned().ok_or_else(|| {
+                            CliError::invalid("civil-time update DTO is required")
+                        })?,
+                    )
+                    .map_err(|error| invalid_service_dto("project_civil_time_update_v1", error))?;
+                    super::super::project_civil_time_set(
+                        &project,
+                        &actor,
+                        &session,
+                        &request.operation_id,
+                        dto,
+                        &app,
+                        &self.store,
+                    )?
+                }
+                "project_civil_time_readback_v1" => {
+                    super::super::project_civil_time_show(&project, &self.store)?
+                }
+                "work_schedule_update_v1" => {
+                    let dto: WorkScheduleUpdateDto =
+                        serde_json::from_value(data.get("schedule_update").cloned().ok_or_else(
+                            || CliError::invalid("work schedule update DTO is required"),
+                        )?)
+                        .map_err(|error| invalid_service_dto("work_schedule_update_v1", error))?;
+                    super::super::work_schedule_set(
+                        &project,
+                        &string(data, "work_id")?,
+                        &actor,
+                        &session,
+                        &request.operation_id,
+                        dto,
+                        &app,
+                        &self.store,
+                    )?
+                }
+                "work_schedule_readback_v1" => super::super::work_schedule_show(
+                    &project,
+                    &string(data, "work_id")?,
+                    &self.store,
+                )?,
+                "external_wait_create_v1" => {
+                    let dto: ExternalWaitCreateDto =
+                        serde_json::from_value(data.get("wait_create").cloned().ok_or_else(
+                            || CliError::invalid("external-wait create DTO is required"),
+                        )?)
+                        .map_err(|error| invalid_service_dto("external_wait_create_v1", error))?;
+                    super::super::external_wait_create(
+                        &project,
+                        &actor,
+                        &session,
+                        &request.operation_id,
+                        dto,
+                        &app,
+                        &self.store,
+                    )?
+                }
+                "external_wait_resolve_v1" => {
+                    let dto: ExternalWaitResolveDto =
+                        serde_json::from_value(data.get("wait_resolve").cloned().ok_or_else(
+                            || CliError::invalid("external-wait resolve DTO is required"),
+                        )?)
+                        .map_err(|error| invalid_service_dto("external_wait_resolve_v1", error))?;
+                    super::super::external_wait_resolve(
+                        &project,
+                        &actor,
+                        &session,
+                        &request.operation_id,
+                        dto,
+                        &app,
+                        &self.store,
+                    )?
+                }
+                "external_wait_readback_v1" => super::super::external_wait_read(
+                    &project,
+                    data.get("wait_id").and_then(Value::as_str),
+                    &self.store,
+                )?,
+                _ => {
+                    return Err(CliError::invalid(
+                        "unknown date and external-wait service route",
+                    ))
+                }
+            };
+            Ok((result.outcome, result.revision, result.data))
+        }
+
+        fn intake_delivery_receive(
+            &self,
+            request: &ApplicationRequest,
+            data: &Value,
+        ) -> ServiceResult {
+            let delivery: IntakeDeliveryReceiveDto = serde_json::from_value(
+                data.get("delivery")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("delivery payload is required"))?,
+            )
+            .map_err(|error| CliError::invalid(format!("invalid delivery payload: {error}")))?;
+            if delivery.schema_version != INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    format!(
+                        "Intake delivery schema mismatch: expected {INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION}, found {}",
+                        delivery.schema_version
+                    ),
+                ));
+            }
+
+            let project_id = string(data, "project_id")?;
+            let actor_id = string(data, "actor_id")?;
+            let session_id = string(data, "session_id")?;
+            let payload = delivery.payload;
+            let payload = boreal_application::IntakeDeliveryPayload {
+                bucket_id: IntakeBucketId::parse(payload.bucket_id)
+                    .map_err(|error| CliError::invalid(error.to_string()))?,
+                kind: parse_intake_kind(&payload.kind)?,
+                content: payload.content,
+                revisit_at: payload.revisit_at_utc_ms.map(TimestampMs::from_millis),
+            };
+            let scope = PlanningScope::new(ProjectId::new(project_id.clone()), actor_id)
+                .with_session(session_id)
+                .at_revision(delivery.expected_revision);
+            let result = WorkApplication::new(&self.store)
+                .receive_intake_delivery(&boreal_application::IntakeDeliveryRequest {
+                    scope,
+                    operation_id: request.operation_id.clone(),
+                    delivery_key: delivery.delivery_key,
+                    origin: boreal_application::IntakeDeliveryOrigin {
+                        kind: delivery.origin.kind,
+                        item_id: delivery.origin.item_id,
+                        digest: delivery.origin.digest,
+                    },
+                    intake_id: IntakeItemId::parse(delivery.intake_id)
+                        .map_err(|error| CliError::invalid(error.to_string()))?,
+                    payload,
+                    payload_digest: delivery.payload_digest,
+                    captured_at: now(),
+                })
+                .map_err(map_application_error)?;
+            let readback = boreal_store::IntakeDeliveryReadback {
+                project_revision: result.project_revision,
+                receipt: Some(result.receipt),
+                intake: Some(result.intake),
+            };
+            let mut body = serde_json::to_value(
+                super::super::knowledge_parity::intake_delivery_readback_dto(
+                    &project_id,
+                    &readback,
+                ),
+            )
+            .map_err(|error| {
+                CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    format!("cannot encode Intake delivery response: {error}"),
+                )
+            })?;
+            body["command"] = json!("intake_delivery_receive_v1");
+            Ok((
+                if result.operation.is_some() {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.project_revision),
+                Some(body),
+            ))
+        }
+
+        fn intake_delivery_readback(&self, data: &Value) -> ServiceResult {
+            let lookup: IntakeDeliveryReadbackRequestDto = serde_json::from_value(
+                data.get("lookup")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("delivery lookup is required"))?,
+            )
+            .map_err(|error| CliError::invalid(format!("invalid delivery lookup: {error}")))?;
+            if lookup.schema_version != INTAKE_DELIVERY_READBACK_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    format!(
+                        "Intake delivery readback schema mismatch: expected {INTAKE_DELIVERY_READBACK_SCHEMA_VERSION}, found {}",
+                        lookup.schema_version
+                    ),
+                ));
+            }
+
+            let project_id = string(data, "project_id")?;
+            let scope = PlanningScope::new(
+                ProjectId::new(project_id.clone()),
+                string(data, "actor_id")?,
+            )
+            .with_session(string(data, "session_id")?);
+            let readback = WorkApplication::new(&self.store)
+                .intake_delivery_readback(&scope, &lookup.delivery_key)
+                .map_err(map_application_error)?;
+            let body = serde_json::to_value(
+                super::super::knowledge_parity::intake_delivery_readback_dto(
+                    &project_id,
+                    &readback,
+                ),
+            )
+            .map_err(|error| {
+                CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    format!("cannot encode Intake delivery readback: {error}"),
+                )
+            })?;
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(readback.project_revision),
+                Some(body),
             ))
         }
 
@@ -3191,6 +3710,146 @@ mod unix {
             let _ = request.credential_ref;
             let result = super::super::source_list_result(&parsed, &self.store)?;
             Ok((result.outcome, result.revision, result.data))
+        }
+
+        fn source_show(&self, data: &Value) -> ServiceResult {
+            let lookup: SourceVersionLookupDto = serde_json::from_value(
+                data.get("lookup")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("source lookup DTO is required"))?,
+            )
+            .map_err(|error| invalid_service_dto("source_show_v1", error))?;
+            if lookup.schema_version != SOURCE_LOOKUP_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    "source lookup DTO schema version is not supported",
+                ));
+            }
+            let project = string(data, "project_id")?;
+            let revision = store_revision(&self.store, &ProjectId::new(project.clone()))?;
+            let database = self.store.database_path().ok_or_else(|| {
+                CliError::invalid("source show requires a file-backed source catalog")
+            })?;
+            let binding = IdentityStore::new(&self.store)
+                .workspace_binding(&project)
+                .map_err(|error| {
+                    CliError::with(
+                        ErrorCode::OperationConflict,
+                        ApplicationOutcome::Rejected,
+                        format!("workspace identity binding is invalid: {error}"),
+                    )
+                })?;
+            let root = PathBuf::from(binding.canonical_root());
+            let catalog_root = project_context::confined_path(
+                &root,
+                &super::super::source_catalog_root(&database.to_string_lossy()),
+                true,
+            )?;
+            let catalog = super::super::source_catalog(&catalog_root)?;
+            let source = KnowledgeApplication::new(&catalog)
+                .show_source(&project, &lookup.source_version_id)
+                .map_err(map_knowledge_error)?;
+            let registration = self
+                .store
+                .source_version(&project, &lookup.source_version_id)
+                .map_err(map_store_error)?;
+            let mut source_json = super::super::source_json(&source);
+            source_json
+                .as_object_mut()
+                .expect("source JSON is an object")
+                .remove("project_id");
+            let source = serde_json::from_value::<SourceVersionMetadataDto>(source_json)
+                .map_err(|error| invalid_service_dto("source_show_v1_readback", error))?;
+            let sqlite_registration = registration
+                .map(|registration| {
+                    let mut value = super::super::source_record_json(&registration);
+                    value
+                        .as_object_mut()
+                        .expect("source registration JSON is an object")
+                        .remove("project_id");
+                    serde_json::from_value::<SourceVersionRegistrationDto>(value)
+                        .map_err(|error| invalid_service_dto("source_show_v1_registration", error))
+                })
+                .transpose()?;
+            let readback = SourceShowReadbackDto {
+                schema_version: SOURCE_SHOW_READBACK_SCHEMA_VERSION.to_owned(),
+                source,
+                sqlite_registration,
+            };
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(revision),
+                Some(json!({
+                    "command": "source_show_v1",
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("source show readback cannot be encoded: {error}"))
+                    })?,
+                })),
+            ))
+        }
+
+        fn source_verify(&self, data: &Value) -> ServiceResult {
+            let lookup: SourceVersionLookupDto = serde_json::from_value(
+                data.get("lookup")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("source lookup DTO is required"))?,
+            )
+            .map_err(|error| invalid_service_dto("source_verify_v1", error))?;
+            if lookup.schema_version != SOURCE_LOOKUP_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    "source lookup DTO schema version is not supported",
+                ));
+            }
+            let project = string(data, "project_id")?;
+            let revision = store_revision(&self.store, &ProjectId::new(project.clone()))?;
+            let database = self.store.database_path().ok_or_else(|| {
+                CliError::invalid("source verification requires a file-backed source catalog")
+            })?;
+            let binding = IdentityStore::new(&self.store)
+                .workspace_binding(&project)
+                .map_err(|error| {
+                    CliError::with(
+                        ErrorCode::OperationConflict,
+                        ApplicationOutcome::Rejected,
+                        format!("workspace identity binding is invalid: {error}"),
+                    )
+                })?;
+            let root = PathBuf::from(binding.canonical_root());
+            let catalog_root = project_context::confined_path(
+                &root,
+                &super::super::source_catalog_root(&database.to_string_lossy()),
+                true,
+            )?;
+            let catalog = super::super::source_catalog(&catalog_root)?;
+            let result = KnowledgeApplication::new(&catalog)
+                .verify_source(&project, &lookup.source_version_id)
+                .map_err(map_knowledge_error)?;
+            let availability = match result.availability {
+                boreal_source::Availability::Available => SourceAvailabilityDto::Available,
+                boreal_source::Availability::Missing => SourceAvailabilityDto::Missing,
+                boreal_source::Availability::Corrupt => SourceAvailabilityDto::Corrupt,
+            };
+            let readback = SourceVerifyReadbackDto {
+                schema_version: SOURCE_VERIFY_READBACK_SCHEMA_VERSION.to_owned(),
+                source_version_id: lookup.source_version_id,
+                availability,
+                verified_digest: result.verified_digest,
+                byte_count: result.byte_count as u64,
+                verified: result.availability == boreal_source::Availability::Available,
+            };
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(revision),
+                Some(json!({
+                    "command": "source_verify_v1",
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("source verify readback cannot be encoded: {error}"))
+                    })?,
+                })),
+            ))
         }
 
         fn maintenance_show(&self, data: &Value) -> ServiceResult {
@@ -3542,14 +4201,33 @@ mod unix {
             };
             let kind = parse_work_kind(&request.kind)?;
             let dispatch_policy = parse_dispatch_policy(&request.dispatch)?;
-            let mut acceptance_profile = parse_acceptance_profile(&request.profile)?;
-            if request.profile_version != "1" {
-                return Err(CliError::invalid(format!(
-                    "unsupported acceptance profile version {:?}; supported versions: 1",
-                    request.profile_version
-                )));
+            let profile_token = if request.profile.contains('/') {
+                let (_, explicit_version) = request.profile.split_once('/').unwrap();
+                if explicit_version != request.profile_version {
+                    return Err(CliError::invalid(
+                        "acceptance profile token and profile_version disagree",
+                    ));
+                }
+                request.profile.clone()
+            } else {
+                format!("{}/{}", request.profile, request.profile_version)
+            };
+            let acceptance_profile = super::super::acceptance_profile_from_token(&profile_token)?;
+            let planning_contract = request
+                .planning_contract
+                .map(|payload| {
+                    super::super::planning_contract_from_value(
+                        payload,
+                        &ProjectId::new(project_id.clone()),
+                        &work_id,
+                    )
+                })
+                .transpose()?;
+            if kind == WorkKind::Sprint && planning_contract.is_some() {
+                return Err(CliError::invalid(
+                    "structured deliverable and input contracts are supported on Milestones and Tasks, not legacy Sprint containers",
+                ));
             }
-            acceptance_profile.version = request.profile_version;
             let parent_id = request
                 .parent_id
                 .map(|parent_id| required_trimmed(parent_id, "parent_id"))
@@ -3569,18 +4247,64 @@ mod unix {
                 acceptance_profile,
             };
             let app = WorkApplication::new(&self.store);
-            let result = app
-                .create_work_as_session_checked(
+            let requested_mode = request
+                .execution_mode
+                .as_deref()
+                .map(super::super::execution_mode_from_token)
+                .transpose()?;
+            let mode =
+                requested_mode.unwrap_or_else(|| super::super::default_execution_mode(work.kind));
+            let at = now();
+            let result = if work.kind == WorkKind::Sprint {
+                if requested_mode.is_some() {
+                    return Err(CliError::invalid(
+                        "Sprint is a legacy grouping row and has no execution mode",
+                    ));
+                }
+                app.create_work_as_session_checked(
                     &work,
                     &actor_id,
                     request._session_id.as_deref().ok_or_else(|| {
                         CliError::invalid("work creation requires project session")
                     })?,
                     request.expected_revision,
-                    &now(),
+                    &at,
                     operation,
                 )
-                .map_err(map_application_error)?;
+                .map_err(map_application_error)?
+            } else {
+                let expected_revision = request
+                    .expected_revision
+                    .ok_or_else(|| CliError::invalid("work creation requires expected_revision"))?;
+                let session_id = request
+                    ._session_id
+                    .as_deref()
+                    .ok_or_else(|| CliError::invalid("work creation requires project session"))?;
+                let scope = PlanningScope::new(work.project_id.clone(), actor_id.clone())
+                    .with_session(session_id)
+                    .at_revision(expected_revision);
+                app.create_planning_work_v3_with_contract(
+                    &scope,
+                    operation,
+                    &work,
+                    mode,
+                    planning_contract,
+                    &at,
+                )
+                .map_err(map_application_error)?
+            };
+            let planning = super::super::planning_projection_json(
+                &self.store,
+                &result.value.project_id,
+                &result.value.work_id,
+                &result.value.kind,
+                result.value.parent_id.as_deref(),
+            );
+            let planning_contract = super::super::planning_contract_detail_json(
+                &self.store,
+                result.value.project_id.as_str(),
+                &result.value.work_id,
+            )?;
             Ok((
                 if result.changed {
                     ApplicationOutcome::Changed
@@ -3601,6 +4325,11 @@ mod unix {
                         "id": work.acceptance_profile.id.as_str(),
                         "version": work.acceptance_profile.version,
                     },
+                    "execution_mode": planning["execution_mode"],
+                    "planning_parent_id": planning["planning_parent_id"],
+                    "planning_integrity": planning["planning_integrity"],
+                    "planning_diagnostic": planning["planning_diagnostic"],
+                    "planning_contract": planning_contract,
                     "hard_holds": result
                         .value
                         .hard_holds
@@ -3615,44 +4344,123 @@ mod unix {
         fn work_edit(&mut self, data: &Value, operation: &str) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
             let work_id = string(data, "work_id")?;
-            let result = WorkApplication::new(&self.store)
-                .edit_work_as(
-                    &project,
-                    &work_id,
-                    &string(data, "actor_id")?,
-                    optional_string(data, "parent_id")?.map(Some),
-                    optional_string(data, "title")?,
-                    optional_string(data, "description")?,
-                    optional_u64(data, "priority")?
-                        .map(|value| {
-                            u8::try_from(value).map_err(|_| {
-                                CliError::invalid("priority must be an integer from 0 to 255")
-                            })
-                        })
-                        .transpose()?,
-                    optional_string(data, "dispatch_policy")?,
-                    optional_u64(data, "expected_revision")?,
-                    &now(),
-                    operation.to_owned(),
-                )
-                .map_err(map_application_error)?;
+            let actor_id = string(data, "actor_id")?;
+            let session_id = optional_string(data, "session_id")?;
+            let expected_revision = optional_u64(data, "expected_revision")?
+                .ok_or_else(|| CliError::invalid("work_edit requires expected_revision"))?;
+            let parent_id = optional_string(data, "parent_id")?;
+            let clear_parent = match data.get("clear_parent") {
+                None | Some(Value::Null) => false,
+                Some(value) => value
+                    .as_bool()
+                    .ok_or_else(|| CliError::invalid("work_edit clear_parent must be a boolean"))?,
+            };
+            if parent_id.is_some() && clear_parent {
+                return Err(CliError::invalid(
+                    "work_edit parent_id and clear_parent are mutually exclusive",
+                ));
+            }
+            let title = optional_string(data, "title")?;
+            let description = optional_string(data, "description")?;
+            let priority = optional_u64(data, "priority")?
+                .map(|value| {
+                    u8::try_from(value)
+                        .map_err(|_| CliError::invalid("priority must be an integer from 0 to 255"))
+                })
+                .transpose()?;
+            let dispatch_policy = optional_string(data, "dispatch_policy")?
+                .map(|value| parse_dispatch_policy(&value))
+                .transpose()?;
+            let execution_mode = optional_string(data, "execution_mode")?
+                .map(|value| super::super::execution_mode_from_token(&value))
+                .transpose()?;
+            let planning_contract = data
+                .get("planning_contract")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .map(|value| super::super::planning_contract_from_value(value, &project, &work_id))
+                .transpose()?;
+            let app = WorkApplication::new(&self.store);
+            let current = self
+                .store
+                .work(project.as_str(), &work_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| {
+                    CliError::with(
+                        ErrorCode::NotFound,
+                        ApplicationOutcome::Rejected,
+                        format!("work not found: {work_id}"),
+                    )
+                })?;
+            let at = now();
+            let (revision, changed) = if current.kind == "sprint" && planning_contract.is_none() {
+                if clear_parent || parent_id.is_some() || execution_mode.is_some() {
+                    return Err(CliError::invalid(
+                        "Sprint parent and execution-mode edits require the atomic planning projection route",
+                    ));
+                }
+                let result = app
+                    .edit_work_as(
+                        &project,
+                        &work_id,
+                        &actor_id,
+                        None,
+                        title,
+                        description,
+                        priority,
+                        dispatch_policy.map(|policy| dispatch_policy_name(policy).to_owned()),
+                        Some(expected_revision),
+                        &at,
+                        operation.to_owned(),
+                    )
+                    .map_err(map_application_error)?;
+                (result.snapshot_revision, result.changed)
+            } else {
+                let canonical_parent_id = if clear_parent {
+                    Some(None)
+                } else {
+                    parent_id.map(|parent_id| Some(WorkId::new(parent_id)))
+                };
+                let input = WorkPlanningEditV3Input {
+                    work_id: WorkId::new(work_id.clone()),
+                    canonical_parent_id,
+                    title,
+                    description,
+                    priority,
+                    dispatch_policy,
+                    execution_mode,
+                    planning_contract,
+                };
+                let mut scope = PlanningScope::new(project.clone(), actor_id);
+                if let Some(session_id) = session_id {
+                    scope = scope.with_session(session_id);
+                }
+                scope = scope.at_revision(expected_revision);
+                let result = app
+                    .edit_planning_work_v3(&scope, operation.to_owned(), &input, &at)
+                    .map_err(map_application_error)?;
+                (result.snapshot_revision, result.changed)
+            };
+            let projected = self
+                .store
+                .work(project.as_str(), &work_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| CliError::invalid("edited work disappeared during readback"))?;
+            let mut response = super::super::work_projection_json(&projected, &self.store);
+            response["planning_contract"] = super::super::planning_contract_detail_json(
+                &self.store,
+                project.as_str(),
+                &work_id,
+            )?;
+            response["replayed"] = json!(!changed);
             Ok((
-                if result.changed {
+                if changed {
                     ApplicationOutcome::Changed
                 } else {
                     ApplicationOutcome::Unchanged
                 },
-                Some(result.snapshot_revision),
-                Some(json!({
-                    "command": "work_edit",
-                    "project_id": project.as_str(),
-                    "work_id": result.value.work_id,
-                    "title": result.value.title,
-                    "description": result.value.description,
-                    "priority": result.value.priority,
-                    "dispatch_policy": result.value.dispatch_policy,
-                    "replayed": !result.changed,
-                })),
+                Some(revision),
+                Some(response),
             ))
         }
 
@@ -3958,31 +4766,51 @@ mod unix {
             ))
         }
 
-        #[allow(dead_code)]
         fn intake_bucket(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let request: IntakeBucketCreateDto = serde_json::from_value(
+                data.get("bucket")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("intake bucket DTO is required"))?,
+            )
+            .map_err(|error| invalid_service_dto("intake_bucket_v1", error))?;
+            if request.schema_version != INTAKE_BUCKET_CREATE_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    "intake bucket DTO schema version is not supported",
+                ));
+            }
             let project = ProjectId::new(string(data, "project_id")?);
-            let bucket_id = IntakeBucketId::new(string(data, "bucket_id")?);
-            let name = string(data, "name")?;
+            let bucket_id = IntakeBucketId::new(request.bucket_id.clone());
             let actor = string(data, "actor_id")?;
             let session = string(data, "session_id")?;
             let app = WorkApplication::new(&self.store);
-            app.ensure_work_model_v3().map_err(map_application_error)?;
+            if !app.work_model_v3_enabled().map_err(map_application_error)? {
+                return Err(CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Rejected,
+                    "intake bucket requires work-model/3; schema-v2 was left unchanged",
+                ));
+            }
             let bucket = IntakeBucket {
                 id: bucket_id.clone(),
                 project_id: project.clone(),
-                name: name.clone(),
+                name: request.name.clone(),
                 archived: false,
             };
-            let revision = app
-                .intake_items_v3(&project)
-                .map_err(map_application_error)?
-                .revision;
             let scope = boreal_application::PlanningScope::new(project.clone(), actor)
                 .with_session(session)
-                .at_revision(optional_u64(data, "expected_revision")?.unwrap_or(revision));
+                .at_revision(request.expected_revision);
             let result = app
                 .create_intake_bucket_v3(&scope, operation.to_owned(), &bucket, &now())
                 .map_err(map_application_error)?;
+            let readback = IntakeBucketReadbackDto {
+                schema_version: INTAKE_BUCKET_READBACK_SCHEMA_VERSION.to_owned(),
+                bucket_id: bucket_id.to_string(),
+                name: request.name,
+                archived: false,
+                replayed: !result.changed,
+            };
             Ok((
                 if result.changed {
                     ApplicationOutcome::Changed
@@ -3991,27 +4819,48 @@ mod unix {
                 },
                 Some(result.snapshot_revision),
                 Some(json!({
-                    "command": "intake_bucket",
-                    "project_id": project.as_str(),
-                    "bucket_id": bucket_id.as_str(),
-                    "name": name,
-                    "archived": false,
-                    "replayed": !result.changed,
+                    "command": "intake_bucket_v1",
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("intake bucket readback cannot be encoded: {error}"))
+                    })?,
                 })),
             ))
         }
 
-        #[allow(dead_code)]
         fn intake_capture(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let request: IntakeCaptureDto = serde_json::from_value(
+                data.get("capture")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("intake capture DTO is required"))?,
+            )
+            .map_err(|error| invalid_service_dto("intake_capture_v1", error))?;
+            if request.schema_version != INTAKE_CAPTURE_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    "intake capture DTO schema version is not supported",
+                ));
+            }
             let project = ProjectId::new(string(data, "project_id")?);
-            let intake_id = IntakeItemId::new(string(data, "intake_id")?);
-            let bucket_id = IntakeBucketId::new(string(data, "bucket_id")?);
-            let content = string(data, "content")?;
-            let kind = parse_intake_kind(&string(data, "kind")?)?;
+            let intake_id = IntakeItemId::new(request.intake_id.clone());
+            let bucket_id = IntakeBucketId::new(request.bucket_id.clone());
+            let content = request.content.clone();
+            let kind = match request.kind {
+                IntakeKindDto::Note => IntakeKind::Note,
+                IntakeKindDto::Discovery => IntakeKind::Discovery,
+                IntakeKindDto::Question => IntakeKind::Question,
+                IntakeKindDto::Revisit => IntakeKind::Revisit,
+            };
             let actor = string(data, "actor_id")?;
             let session = string(data, "session_id")?;
             let app = WorkApplication::new(&self.store);
-            app.ensure_work_model_v3().map_err(map_application_error)?;
+            if !app.work_model_v3_enabled().map_err(map_application_error)? {
+                return Err(CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Rejected,
+                    "intake capture requires work-model/3; schema-v2 was left unchanged",
+                ));
+            }
             let captured_at = now();
             let item = IntakeItem {
                 id: intake_id.clone(),
@@ -4024,13 +4873,9 @@ mod unix {
                 content_digest: sha256_content_digest(content.as_bytes()),
                 revisit_at: None,
             };
-            let revision = app
-                .intake_items_v3(&project)
-                .map_err(map_application_error)?
-                .revision;
             let scope = boreal_application::PlanningScope::new(project.clone(), actor)
                 .with_session(session)
-                .at_revision(optional_u64(data, "expected_revision")?.unwrap_or(revision));
+                .at_revision(request.expected_revision);
             let result = app
                 .create_intake_item_v3(
                     &scope,
@@ -4040,6 +4885,16 @@ mod unix {
                     &captured_at,
                 )
                 .map_err(map_application_error)?;
+            let readback = IntakeCaptureReadbackDto {
+                schema_version: INTAKE_CAPTURE_READBACK_SCHEMA_VERSION.to_owned(),
+                intake_id: intake_id.to_string(),
+                bucket_id: bucket_id.to_string(),
+                kind: request.kind,
+                lifecycle: "captured".to_owned(),
+                content_revision: 1,
+                content_digest: item.content_digest,
+                replayed: !result.changed,
+            };
             Ok((
                 if result.changed {
                     ApplicationOutcome::Changed
@@ -4048,15 +4903,10 @@ mod unix {
                 },
                 Some(result.snapshot_revision),
                 Some(json!({
-                    "command": "intake_capture",
-                    "project_id": project.as_str(),
-                    "intake_id": intake_id.as_str(),
-                    "bucket_id": bucket_id.as_str(),
-                    "kind": format!("{kind:?}").to_ascii_lowercase(),
-                    "lifecycle": "captured",
-                    "content_revision": 1,
-                    "content_digest": item.content_digest,
-                    "replayed": !result.changed,
+                    "command": "intake_capture_v1",
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("intake capture readback cannot be encoded: {error}"))
+                    })?,
                 })),
             ))
         }
@@ -4195,6 +5045,7 @@ mod unix {
                     "readback_required": false,
                     "service_state": "ready",
                 })),
+                &self.store,
             );
             if include_query_metrics {
                 let metrics = self.store.query_metrics();
@@ -4223,10 +5074,36 @@ mod unix {
                 .store
                 .project_revision(project.as_str())
                 .map_err(map_store_error)?;
+            let mut detail = super::super::work_projection_json(&item, &self.store);
+            detail["planning_contract"] = super::super::planning_contract_detail_json(
+                &self.store,
+                project.as_str(),
+                &work_id,
+            )?;
             Ok((
                 ApplicationOutcome::Unchanged,
                 Some(revision.0),
-                Some(super::super::work_projection_json(&item)),
+                Some(detail),
+            ))
+        }
+
+        fn close_readiness(&self, data: &Value) -> ServiceResult {
+            let project = string(data, "project_id")?;
+            let work_id = string(data, "work_id")?;
+            let app = WorkApplication::new(&self.store);
+            let (readback, revision) =
+                super::super::close_readiness_readback_for_work(&project, &work_id, &app)?;
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(revision),
+                Some(json!({
+                    "command": "work_close_readiness_v1",
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!(
+                            "close-readiness readback cannot be encoded: {error}"
+                        ))
+                    })?,
+                })),
             ))
         }
 
@@ -4805,6 +5682,190 @@ mod unix {
             ))
         }
 
+        fn bind_final_result(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let request: FinalResultCaptureRequestDto = serde_json::from_value(
+                data.get("final_result")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("final-result request DTO is required"))?,
+            )
+            .map_err(|error| invalid_service_dto("bind_final_result_v1", error))?;
+            if request.schema_version != FINAL_RESULT_CAPTURE_SCHEMA_VERSION {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Rejected,
+                    "final-result request DTO schema version is not supported",
+                ));
+            }
+            let database = self.store.database_path().ok_or_else(|| {
+                CliError::invalid("final-result binding requires a file-backed source catalog")
+            })?;
+            let mut extra = std::collections::BTreeMap::new();
+            extra.insert("--content-digest".to_owned(), vec![request.content_digest]);
+            extra.insert(
+                "--expected-entity-revision".to_owned(),
+                vec![request.expected_entity_revision.to_string()],
+            );
+            extra.insert(
+                "--expected-proof-revision".to_owned(),
+                vec![request.expected_proof_revision.to_string()],
+            );
+            let parsed = ParsedCommand {
+                path: vec!["evidence".to_owned(), "bind-result".to_owned()],
+                options: CliOptions {
+                    extra,
+                    db: database.to_string_lossy().into_owned(),
+                    project: Some(string(data, "project_id")?),
+                    actor: string(data, "actor_id")?,
+                    session: string(data, "session_id")?,
+                    operation_id: Some(operation.to_owned()),
+                    expected_revision: Some(request.expected_project_revision),
+                    attempt: Some(request.attempt_id),
+                    fence: Some(request.fence),
+                    work: Some(request.work_id),
+                    source_version: Some(request.source_version_id),
+                    ..CliOptions::default()
+                },
+            };
+            let result = super::super::evidence_bind_result_result(
+                &parsed,
+                operation,
+                &WorkApplication::new(&self.store),
+                &self.store,
+            )?;
+            let mut data = result
+                .data
+                .ok_or_else(|| CliError::invalid("final-result binding omitted readback data"))?;
+            let object = data
+                .as_object_mut()
+                .ok_or_else(|| CliError::invalid("final-result readback must be an object"))?;
+            object.remove("project_id");
+            object.remove("operation_id");
+            object.insert(
+                "schema_version".to_owned(),
+                json!(FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION),
+            );
+            let readback: FinalResultCaptureReadbackDto = serde_json::from_value(data)
+                .map_err(|error| invalid_service_dto("bind_final_result_v1_readback", error))?;
+            Ok((
+                result.outcome,
+                result.revision,
+                Some(json!({
+                    "command": "bind_final_result_v1",
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("final-result readback cannot be encoded: {error}"))
+                    })?,
+                })),
+            ))
+        }
+
+        fn bind_artifact_result(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let request: ArtifactResultBindRequestDto = serde_json::from_value(
+                data.get("artifact_result")
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("artifact result request DTO is required"))?,
+            )
+            .map_err(|error| invalid_service_dto("bind_artifact_result_v1", error))?;
+            let result = super::super::artifact_result_bind_request_result(
+                &string(data, "project_id")?,
+                &string(data, "actor_id")?,
+                &string(data, "session_id")?,
+                operation,
+                request,
+                &WorkApplication::new(&self.store),
+                &self.store,
+            )?;
+            let readback = serde_json::from_value::<ArtifactResultBindReadbackDto>(
+                result
+                    .data
+                    .ok_or_else(|| CliError::invalid("artifact result bind omitted readback"))?,
+            )
+            .map_err(|error| invalid_service_dto("bind_artifact_result_v1_readback", error))?;
+            Ok((
+                result.outcome,
+                result.revision,
+                Some(json!({
+                    "command": "bind_artifact_result_v1",
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("artifact result bind readback cannot be encoded: {error}"))
+                    })?,
+                })),
+            ))
+        }
+
+        fn artifact_result_for_attempt(&self, data: &Value) -> ServiceResult {
+            let result = super::super::artifact_result_for_attempt_result(
+                &string(data, "project_id")?,
+                &string(data, "work_id")?,
+                &string(data, "attempt_id")?,
+                required_u64(data, "fence")?,
+                &WorkApplication::new(&self.store),
+            )?;
+            let readback =
+                serde_json::from_value::<ArtifactResultReadbackDto>(result.data.ok_or_else(
+                    || CliError::invalid("artifact result attempt omitted readback"),
+                )?)
+                .map_err(|error| {
+                    invalid_service_dto("artifact_result_for_attempt_v1_readback", error)
+                })?;
+            Ok((
+                result.outcome,
+                result.revision,
+                Some(json!({
+                    "command": "artifact_result_for_attempt_v1",
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("artifact result attempt readback cannot be encoded: {error}"))
+                    })?,
+                })),
+            ))
+        }
+
+        fn artifact_result_for_operation(&self, data: &Value) -> ServiceResult {
+            let result = super::super::artifact_result_for_operation_result(
+                &string(data, "project_id")?,
+                &string(data, "target_operation_id")?,
+                &WorkApplication::new(&self.store),
+            )?;
+            let readback =
+                serde_json::from_value::<ArtifactResultReadbackDto>(result.data.ok_or_else(
+                    || CliError::invalid("artifact result operation omitted readback"),
+                )?)
+                .map_err(|error| {
+                    invalid_service_dto("artifact_result_for_operation_v1_readback", error)
+                })?;
+            Ok((
+                result.outcome,
+                result.revision,
+                Some(json!({
+                    "command": "artifact_result_for_operation_v1",
+                    "readback": serde_json::to_value(readback).map_err(|error| {
+                        CliError::invalid(format!("artifact result operation readback cannot be encoded: {error}"))
+                    })?,
+                })),
+            ))
+        }
+
+        fn receipts_for_attempt(&self, data: &Value) -> ServiceResult {
+            let parsed = ParsedCommand {
+                path: vec!["evidence".to_owned(), "receipts".to_owned()],
+                options: CliOptions {
+                    project: Some(string(data, "project_id")?),
+                    actor: optional_string(data, "actor_id")?.unwrap_or_default(),
+                    session: optional_string(data, "session_id")?.unwrap_or_default(),
+                    attempt: Some(string(data, "attempt_id")?),
+                    fence: Some(required_u64(data, "fence")?),
+                    work: Some(string(data, "work_id")?),
+                    limit: Some(optional_u64(data, "limit")?.unwrap_or(50)),
+                    offset: Some(optional_u64(data, "offset")?.unwrap_or(0)),
+                    ..CliOptions::default()
+                },
+            };
+            let result = super::super::evidence_receipts_result(
+                &parsed,
+                &WorkApplication::new(&self.store),
+            )?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
         pub(super) fn evidence_run(&mut self, data: &Value, operation: &str) -> ServiceResult {
             let database = self
                 .store
@@ -5127,10 +6188,12 @@ mod unix {
                 }
             };
             let summary_result = app
-                .record_summary(
+                .record_summary_with_body(
+                    project.as_str(),
                     &actor,
                     Some(&session),
                     &summary,
+                    &summary_body,
                     &sub_operation(operation, "summary"),
                     None,
                     TimestampMs::from_millis(now_ms_u64()),
@@ -5800,16 +6863,6 @@ mod unix {
         }
     }
 
-    fn parse_acceptance_profile(value: &str) -> Result<AcceptanceProfile, CliError> {
-        match value {
-            "focused" => Ok(AcceptanceProfile::focused()),
-            "reviewed" => Ok(AcceptanceProfile::reviewed()),
-            _ => Err(CliError::invalid(format!(
-                "unknown create_work acceptance profile: {value}"
-            ))),
-        }
-    }
-
     fn parse_intake_kind(value: &str) -> Result<IntakeKind, CliError> {
         match value {
             "note" => Ok(IntakeKind::Note),
@@ -5904,7 +6957,23 @@ mod tests {
         bind_service_host, request_data, schedule_current_attempt_deadlines, ServiceCommandHandler,
     };
     use super::*;
-    use boreal_protocol::Envelope;
+    use boreal_protocol::{
+        models::{
+            ExternalWaitCreateDto, ExternalWaitMutationReadbackDto, ExternalWaitReadbackDto,
+            FinalResultCaptureReadbackDto, IntakeBucketReadbackDto, IntakeCaptureReadbackDto,
+            IntakeKindDto, ProjectCivilTimeMutationReadbackDto, ProjectCivilTimeReadbackDto,
+            SourceAvailabilityDto, SourceShowReadbackDto, SourceVerifyReadbackDto,
+            WorkScheduleMutationReadbackDto, WorkScheduleReadbackDto,
+            EXTERNAL_WAIT_CREATE_SCHEMA_VERSION, EXTERNAL_WAIT_READBACK_SCHEMA_VERSION,
+            EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION, FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION,
+            FINAL_RESULT_CAPTURE_SCHEMA_VERSION, INTAKE_BUCKET_CREATE_SCHEMA_VERSION,
+            INTAKE_CAPTURE_SCHEMA_VERSION, PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION,
+            PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION, SOURCE_LOOKUP_SCHEMA_VERSION,
+            SOURCE_SHOW_READBACK_SCHEMA_VERSION, WORK_SCHEDULE_READBACK_SCHEMA_VERSION,
+            WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+        },
+        Envelope,
+    };
     use boreal_service::{
         ApplicationCommandHandler, ApplicationRequest, ApplicationResponse, BusyOutcome,
         ElectionError, JsonRequest, ServiceHost, ServiceHostConfig, ServiceHostError,
@@ -6165,6 +7234,74 @@ mod tests {
         (catalog, captured.source.source_version_id)
     }
 
+    fn bind_service_test_final_result(
+        handler: &mut ServiceCommandHandler,
+        project: &str,
+        work: &str,
+        actor: &str,
+        session: &str,
+        attempt: &str,
+        fence: u64,
+        operation_id: &str,
+    ) -> String {
+        let (_, source_version_id) = capture_service_test_workspace(
+            &handler.store,
+            project,
+            &format!("{operation_id}_source"),
+        );
+        let source = handler
+            .store
+            .source_version(project, &source_version_id)
+            .expect("final-result source read succeeds")
+            .expect("final-result source is registered");
+        let (entity_revision, proof_revision) = handler
+            .store
+            .work_revisions(project, work)
+            .expect("final-result work revisions read");
+        let project_revision = handler
+            .store
+            .project_revision(project)
+            .expect("final-result project revision reads")
+            .0;
+        let credential = if actor == DEFAULT_ACTOR {
+            SERVICE_TEST_CREDENTIAL
+        } else {
+            SERVICE_TEST_AGENT_CREDENTIAL
+        };
+        let response = application_envelope(
+            handler,
+            operation_id,
+            json!({
+                "command": "bind_final_result_v1",
+                "credential_ref": credential,
+                "project_id": project,
+                "actor_id": actor,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": session,
+                "final_result": {
+                    "schema_version": FINAL_RESULT_CAPTURE_SCHEMA_VERSION,
+                    "work_id": work,
+                    "attempt_id": attempt,
+                    "fence": fence,
+                    "expected_project_revision": project_revision,
+                    "expected_entity_revision": entity_revision,
+                    "expected_proof_revision": proof_revision,
+                    "source_version_id": source_version_id,
+                    "content_digest": source.content_digest,
+                },
+            }),
+        );
+        assert_eq!(
+            response.outcome,
+            ApplicationOutcome::Changed,
+            "final-result binding response: {response:?}",
+        );
+        response.data.expect("final-result binding has readback data")["readback"]["source_version_id"]
+            .as_str()
+            .expect("final-result readback names its source")
+            .to_owned()
+    }
+
     struct ServiceTestGatePolicy<'a> {
         source_version_id: &'a str,
         gate_id: &'a str,
@@ -6299,6 +7436,16 @@ mod tests {
                 "op_service_witnessed_start",
             )
             .expect("witnessed finish attempt starts");
+        let result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            "session-cli",
+            "attempt-witnessed-finish",
+            1,
+            "op_service_witnessed_bind_result",
+        );
         let evidence_operation = "op_service_witnessed_evidence".to_owned();
         let evidence = handler
             .evidence_run(
@@ -6324,6 +7471,10 @@ mod tests {
             &fs::read_to_string(receipt_path).expect("witnessed receipt is readable"),
         )
         .expect("witnessed receipt is JSON");
+        assert_eq!(
+            receipt_sidecar["source_snapshot_hash"], result_source_version_id,
+            "the verifier receipt names the bound result instead of the claim input",
+        );
         let durable_receipt = handler
             .store
             .receipt(
@@ -6381,6 +7532,192 @@ mod tests {
             })
             .expect("application handler returns an envelope");
         serde_json::from_str(&response.data).expect("application envelope is valid JSON")
+    }
+
+    #[test]
+    fn intake_delivery_routes_receive_readback_and_show_receipt() {
+        let root = temp_path("intake-delivery-routes");
+        let store = seed_project_store(&root);
+        let app = WorkApplication::new(&store);
+        app.ensure_work_model_v3()
+            .expect("work model v3 enables for the project");
+        let bucket_id = IntakeBucketId::new("bucket-delivery");
+        let bucket_scope = PlanningScope::new(ProjectId::new("service-project"), DEFAULT_ACTOR)
+            .with_session("service-test-session")
+            .at_revision(store.project_revision("service-project").unwrap().0);
+        app.create_intake_bucket_v3(
+            &bucket_scope,
+            "op_intake_delivery_bucket",
+            &IntakeBucket {
+                id: bucket_id.clone(),
+                project_id: ProjectId::new("service-project"),
+                name: "Delivery Inbox".to_owned(),
+                archived: false,
+            },
+            &now(),
+        )
+        .expect("destination bucket creates");
+        let expected_revision = store.project_revision("service-project").unwrap().0;
+        let payload = boreal_application::IntakeDeliveryPayload {
+            bucket_id,
+            kind: IntakeKind::Note,
+            content: "A frozen delivery from Global.".to_owned(),
+            revisit_at: None,
+        };
+        let payload_digest = boreal_application::intake_delivery_payload_digest(&payload);
+        let delivery = boreal_protocol::models::IntakeDeliveryReceiveDto {
+            schema_version: boreal_protocol::models::INTAKE_DELIVERY_RECEIVE_SCHEMA_VERSION
+                .to_owned(),
+            expected_revision,
+            delivery_key: "delivery-project-origin".to_owned(),
+            origin: boreal_protocol::models::IntakeDeliveryOriginDto {
+                kind: "capture".to_owned(),
+                item_id: "capture-1".to_owned(),
+                digest: "sha256:origin-capture-1".to_owned(),
+            },
+            intake_id: "intake-delivered-1".to_owned(),
+            payload: boreal_protocol::models::IntakeDeliveryPayloadDto {
+                bucket_id: payload.bucket_id.as_str().to_owned(),
+                kind: "note".to_owned(),
+                content: payload.content.clone(),
+                revisit_at_utc_ms: None,
+            },
+            payload_digest,
+        };
+        let receive_data = json!({
+            "command": "intake_delivery_receive_v1",
+            "project_id": "service-project",
+            "actor_id": DEFAULT_ACTOR,
+            "session_id": "service-test-session",
+            "credential_ref": SERVICE_TEST_CREDENTIAL,
+            "delivery": delivery,
+        });
+        let mut handler = make_handler(store);
+        let first = application_envelope(
+            &mut handler,
+            "op_intake_delivery_first",
+            receive_data.clone(),
+        );
+        assert_eq!(first.outcome, ApplicationOutcome::Changed);
+        let first_data = first.data.as_ref().expect("receive includes readback data");
+        assert_eq!(first_data["state"], "received");
+        assert_eq!(first_data["intake"]["intake_id"], "intake-delivered-1");
+        assert_eq!(
+            first_data["receipt"]["delivery_key"],
+            "delivery-project-origin"
+        );
+        let first_revision = first.revision.expect("receive returns committed revision");
+        assert!(first_data["_scope"]["database_instance_id"].is_string());
+        assert!(!first_data.to_string().contains(SERVICE_TEST_CREDENTIAL));
+        assert!(!first_data
+            .to_string()
+            .contains(&root.canonicalize().unwrap().to_string_lossy().to_string()));
+
+        let mut denied_receive = receive_data.clone();
+        denied_receive["actor_id"] = json!("agent-1");
+        let denied =
+            application_envelope(&mut handler, "op_intake_delivery_denied", denied_receive);
+        assert_eq!(denied.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code),
+            Some(ErrorCode::PermissionDenied)
+        );
+        assert!(denied.data.is_none());
+
+        // A fresh service operation resolves the stable semantic delivery even
+        // though its original expected revision is now stale.
+        let duplicate = application_envelope(
+            &mut handler,
+            "op_intake_delivery_duplicate",
+            receive_data.clone(),
+        );
+        assert_eq!(duplicate.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(duplicate.revision, Some(first_revision));
+        assert_eq!(
+            duplicate
+                .data
+                .as_ref()
+                .expect("duplicate includes readback data")["intake"]["intake_id"],
+            "intake-delivered-1"
+        );
+
+        let mut stale_receive = receive_data.clone();
+        stale_receive["delivery"]["delivery_key"] = json!("delivery-stale-revision");
+        stale_receive["delivery"]["intake_id"] = json!("intake-stale-revision");
+        let stale = application_envelope(
+            &mut handler,
+            "op_intake_delivery_stale_revision",
+            stale_receive,
+        );
+        assert_eq!(stale.outcome, ApplicationOutcome::Conflict);
+
+        let readback = application_envelope(
+            &mut handler,
+            "op_intake_delivery_readback",
+            json!({
+                "command": "intake_delivery_readback_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "lookup": {
+                    "schema_version": boreal_protocol::models::INTAKE_DELIVERY_READBACK_SCHEMA_VERSION,
+                    "delivery_key": "delivery-project-origin",
+                },
+            }),
+        );
+        assert_eq!(readback.outcome, ApplicationOutcome::Unchanged);
+        let readback_data = readback
+            .data
+            .as_ref()
+            .expect("lookup returns readback data");
+        assert_eq!(readback_data["state"], "received");
+        assert_eq!(readback_data["receipt"]["intake_id"], "intake-delivered-1");
+        assert!(readback_data["_scope"]["restore_epoch"].is_number());
+
+        let absent = application_envelope(
+            &mut handler,
+            "op_intake_delivery_absent",
+            json!({
+                "command": "intake_delivery_readback_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "lookup": {
+                    "schema_version": boreal_protocol::models::INTAKE_DELIVERY_READBACK_SCHEMA_VERSION,
+                    "delivery_key": "delivery-not-yet-received",
+                },
+            }),
+        );
+        assert_eq!(absent.outcome, ApplicationOutcome::Unchanged);
+        let absent_data = absent.data.as_ref().expect("absence is authoritative data");
+        assert_eq!(absent_data["state"], "absent");
+        assert!(absent_data["receipt"].is_null());
+        assert!(absent_data["_scope"]["database_instance_id"].is_string());
+
+        let show = ParsedCommand {
+            path: vec!["intake".to_owned(), "show".to_owned()],
+            options: CliOptions {
+                project: Some("service-project".to_owned()),
+                actor: DEFAULT_ACTOR.to_owned(),
+                session: "service-test-session".to_owned(),
+                positionals: vec!["intake-delivered-1".to_owned()],
+                ..CliOptions::default()
+            },
+        };
+        let mut show_data = request_data(&show, "op_intake_delivery_show")
+            .expect("intake show creates a versioned feature request");
+        show_data["credential_ref"] = json!(SERVICE_TEST_CREDENTIAL);
+        let show = application_envelope(&mut handler, "op_intake_delivery_show", show_data);
+        assert_eq!(show.outcome, ApplicationOutcome::Unchanged);
+        let show_data = show.data.as_ref().expect("Intake show returns item data");
+        assert_eq!(show_data["command"], "intake_show");
+        assert_eq!(
+            show_data["delivery_receipt"]["delivery_key"],
+            "delivery-project-origin"
+        );
+        assert_eq!(show_data["item"]["intake_id"], "intake-delivered-1");
     }
 
     #[test]
@@ -6463,6 +7800,1571 @@ mod tests {
     }
 
     #[test]
+    fn source_and_intake_routes_use_typed_readbacks_and_preserve_replay_and_authority() {
+        let root = temp_path("source-intake-typed-routes");
+        let store = seed_project_store(&root);
+        let (_, source_version_id) = capture_service_test_workspace(
+            &store,
+            "service-project",
+            "op_source_intake_typed_source",
+        );
+        WorkApplication::new(&store)
+            .ensure_work_model_v3()
+            .expect("test fixture explicitly enables work-model/3");
+        let mut handler = make_handler(store);
+
+        let source_show = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_show",
+            json!({
+                "command": "source_show_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "lookup": {
+                    "schema_version": SOURCE_LOOKUP_SCHEMA_VERSION,
+                    "source_version_id": source_version_id,
+                },
+            }),
+        );
+        assert_eq!(source_show.outcome, ApplicationOutcome::Unchanged);
+        let source_data = source_show.data.expect("source show readback exists");
+        let show_readback: SourceShowReadbackDto =
+            serde_json::from_value(source_data["readback"].clone())
+                .expect("source show is the strict versioned DTO");
+        assert_eq!(
+            show_readback.schema_version,
+            SOURCE_SHOW_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(show_readback.source.source_version_id, source_version_id);
+        assert_eq!(
+            show_readback.source.availability,
+            SourceAvailabilityDto::Available
+        );
+        assert!(show_readback.sqlite_registration.is_some());
+        assert!(!source_data.to_string().contains("catalog_root"));
+        assert!(!source_data.to_string().contains(".boreal/source"));
+
+        let source_verify = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_verify",
+            json!({
+                "command": "source_verify_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "lookup": {
+                    "schema_version": SOURCE_LOOKUP_SCHEMA_VERSION,
+                    "source_version_id": source_version_id,
+                },
+            }),
+        );
+        let verify_data = source_verify
+            .data
+            .expect("source verification readback exists");
+        let verify_readback: SourceVerifyReadbackDto =
+            serde_json::from_value(verify_data["readback"].clone())
+                .expect("source verify is the strict versioned DTO");
+        assert_eq!(verify_readback.source_version_id, source_version_id);
+        assert_eq!(
+            verify_readback.availability,
+            SourceAvailabilityDto::Available
+        );
+        assert!(verify_readback.verified);
+        assert!(verify_readback.verified_digest.is_some());
+
+        let denied = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_wrong_actor",
+            json!({
+                "command": "source_verify_v1",
+                "project_id": "service-project",
+                "actor_id": "agent-1",
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "lookup": {
+                    "schema_version": SOURCE_LOOKUP_SCHEMA_VERSION,
+                    "source_version_id": source_version_id,
+                },
+            }),
+        );
+        assert_eq!(denied.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code),
+            Some(ErrorCode::PermissionDenied)
+        );
+
+        let bucket_revision = handler
+            .store
+            .project_revision("service-project")
+            .expect("project revision reads")
+            .0;
+        let bucket_request = json!({
+            "command": "intake_bucket_v1",
+            "project_id": "service-project",
+            "actor_id": DEFAULT_ACTOR,
+            "session_id": "service-test-session",
+            "credential_ref": SERVICE_TEST_CREDENTIAL,
+            "bucket": {
+                "schema_version": INTAKE_BUCKET_CREATE_SCHEMA_VERSION,
+                "expected_revision": bucket_revision,
+                "bucket_id": "typed-inbox",
+                "name": "Typed Inbox",
+            },
+        });
+        let bucket = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_bucket",
+            bucket_request.clone(),
+        );
+        assert_eq!(bucket.outcome, ApplicationOutcome::Changed);
+        let bucket_data = bucket.data.expect("bucket readback exists");
+        let bucket_readback: IntakeBucketReadbackDto =
+            serde_json::from_value(bucket_data["readback"].clone())
+                .expect("bucket result is the strict versioned DTO");
+        assert_eq!(bucket_readback.bucket_id, "typed-inbox");
+        assert_eq!(bucket_readback.name, "Typed Inbox");
+        assert!(!bucket_readback.replayed);
+
+        let replay = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_bucket",
+            bucket_request,
+        );
+        assert_eq!(replay.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(
+            replay.data.as_ref().expect("replay data")["readback"]["replayed"],
+            true
+        );
+
+        let capture_request = json!({
+            "command": "intake_capture_v1",
+            "project_id": "service-project",
+            "actor_id": DEFAULT_ACTOR,
+            "session_id": "service-test-session",
+            "credential_ref": SERVICE_TEST_CREDENTIAL,
+            "capture": {
+                "schema_version": INTAKE_CAPTURE_SCHEMA_VERSION,
+                "expected_revision": bucket.revision.unwrap(),
+                "intake_id": "typed-intake",
+                "bucket_id": "typed-inbox",
+                "kind": "question",
+                "content": "Which acceptance criteria apply?",
+            },
+        });
+        let capture = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_capture",
+            capture_request.clone(),
+        );
+        assert_eq!(capture.outcome, ApplicationOutcome::Changed);
+        let capture_data = capture.data.expect("intake capture readback exists");
+        let capture_readback: IntakeCaptureReadbackDto =
+            serde_json::from_value(capture_data["readback"].clone())
+                .expect("capture result is the strict versioned DTO");
+        assert_eq!(capture_readback.intake_id, "typed-intake");
+        assert_eq!(capture_readback.bucket_id, "typed-inbox");
+        assert_eq!(capture_readback.kind, IntakeKindDto::Question);
+        assert_eq!(capture_readback.lifecycle, "captured");
+        assert_eq!(capture_readback.content_revision, 1);
+        assert!(!capture_readback.replayed);
+
+        let capture_replay = application_envelope(
+            &mut handler,
+            "op_source_intake_typed_capture",
+            capture_request,
+        );
+        assert_eq!(capture_replay.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(
+            capture_replay.data.as_ref().expect("capture replay data")["readback"]["replayed"],
+            true
+        );
+        let items = WorkApplication::new(&handler.store)
+            .intake_items_v3(&ProjectId::new("service-project"))
+            .expect("canonical intake readback succeeds");
+        assert_eq!(items.items.len(), 1);
+        assert_eq!(items.items[0].content, "Which acceptance criteria apply?");
+        assert_eq!(
+            items.items[0].content_digest,
+            capture_readback.content_digest
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typed_source_and_intake_contract_works_over_the_local_protocol() {
+        let root = temp_path("source-intake-protocol");
+        let socket = PathBuf::from("/tmp").join(format!(
+            "bwr-source-intake-{}-{}.sock",
+            std::process::id(),
+            TEST_PATH_COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        let store = seed_project_store(&root);
+        let (_, source_version_id) = capture_service_test_workspace(
+            &store,
+            "service-project",
+            "op_source_intake_protocol_source",
+        );
+        WorkApplication::new(&store)
+            .ensure_work_model_v3()
+            .expect("the protocol fixture explicitly enables work-model/3");
+        let bucket_revision = store.project_revision("service-project").unwrap().0;
+        let host = match ServiceHost::bind(
+            &socket,
+            make_handler(store),
+            ServiceHostConfig::default()
+                .with_max_requests(Some(7))
+                .expect("positive request bound"),
+        ) {
+            Ok(host) => host,
+            Err(error) if socket_unavailable_in_sandbox(&error.to_string()) => return,
+            Err(error) => panic!("service host binds in a temporary directory: {error}"),
+        };
+        let handle = host.start().expect("service host starts");
+        let auth = json!({
+            "project_id": "service-project",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "service-test-session",
+            "credential_ref": SERVICE_TEST_CREDENTIAL,
+        });
+
+        let mut show = auth.clone();
+        show["command"] = json!("source_show_v1");
+        show["lookup"] = json!({
+            "schema_version": SOURCE_LOOKUP_SCHEMA_VERSION,
+            "source_version_id": source_version_id,
+        });
+        let show = socket_envelope(
+            &socket,
+            "request-source-show-v1",
+            "op_source_intake_protocol_show",
+            show,
+        );
+        let Some(show) = show else {
+            handle.shutdown();
+            let _ = handle.join();
+            return;
+        };
+        assert_eq!(show.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(
+            show.data.as_ref().unwrap()["readback"]["schema_version"],
+            SOURCE_SHOW_READBACK_SCHEMA_VERSION
+        );
+
+        let mut verify = auth.clone();
+        verify["command"] = json!("source_verify_v1");
+        verify["lookup"] = json!({
+            "schema_version": SOURCE_LOOKUP_SCHEMA_VERSION,
+            "source_version_id": source_version_id,
+        });
+        let verify = socket_envelope(
+            &socket,
+            "request-source-verify-v1",
+            "op_source_intake_protocol_verify",
+            verify,
+        )
+        .expect("socket remains available for source verification");
+        assert_eq!(verify.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(verify.data.as_ref().unwrap()["readback"]["verified"], true);
+
+        let mut bucket = auth.clone();
+        bucket["command"] = json!("intake_bucket_v1");
+        bucket["bucket"] = json!({
+            "schema_version": INTAKE_BUCKET_CREATE_SCHEMA_VERSION,
+            "expected_revision": bucket_revision,
+            "bucket_id": "protocol-inbox",
+            "name": "Protocol Inbox",
+        });
+        let bucket = socket_envelope(
+            &socket,
+            "request-intake-bucket-v1",
+            "op_source_intake_protocol_bucket",
+            bucket,
+        )
+        .expect("socket remains available for Intake bucket");
+        assert_eq!(bucket.outcome, ApplicationOutcome::Changed);
+        let bucket_revision = bucket.revision.expect("bucket returns current revision");
+
+        let mut denied_capture = auth.clone();
+        denied_capture["actor_id"] = json!("agent-1");
+        denied_capture["command"] = json!("intake_capture_v1");
+        denied_capture["capture"] = json!({
+            "schema_version": INTAKE_CAPTURE_SCHEMA_VERSION,
+            "expected_revision": bucket_revision,
+            "intake_id": "denied-intake",
+            "bucket_id": "protocol-inbox",
+            "kind": "note",
+            "content": "wrong project actor must not capture",
+        });
+        let denied = socket_envelope(
+            &socket,
+            "request-intake-denied-v1",
+            "op_source_intake_protocol_denied",
+            denied_capture,
+        )
+        .expect("socket remains available for an authority rejection");
+        assert_eq!(denied.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code),
+            Some(ErrorCode::PermissionDenied)
+        );
+
+        let mut capture = auth.clone();
+        capture["command"] = json!("intake_capture_v1");
+        capture["capture"] = json!({
+            "schema_version": INTAKE_CAPTURE_SCHEMA_VERSION,
+            "expected_revision": bucket_revision,
+            "intake_id": "protocol-intake",
+            "bucket_id": "protocol-inbox",
+            "kind": "question",
+            "content": "Can the non-CLI client reconnect?",
+        });
+        let captured = socket_envelope(
+            &socket,
+            "request-intake-capture-v1",
+            "op_source_intake_protocol_capture",
+            capture.clone(),
+        )
+        .expect("socket remains available for Intake capture");
+        assert_eq!(captured.outcome, ApplicationOutcome::Changed);
+        let capture_readback: IntakeCaptureReadbackDto =
+            serde_json::from_value(captured.data.as_ref().unwrap()["readback"].clone())
+                .expect("protocol response matches the typed readback");
+        assert_eq!(capture_readback.intake_id, "protocol-intake");
+        assert!(!capture_readback.replayed);
+
+        let replay = socket_envelope(
+            &socket,
+            "request-intake-capture-replay-v1",
+            "op_source_intake_protocol_capture",
+            capture,
+        )
+        .expect("socket remains available for an idempotent replay");
+        assert_eq!(replay.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(replay.data.as_ref().unwrap()["readback"]["replayed"], true);
+
+        let mut close_readiness = auth.clone();
+        close_readiness["command"] = json!("work_close_readiness_v1");
+        close_readiness["work_id"] = json!("service-work");
+        let close_readiness = socket_envelope(
+            &socket,
+            "request-close-readiness-v1",
+            "op_source_intake_protocol_close_readiness",
+            close_readiness,
+        )
+        .expect("socket returns canonical close readiness to a non-CLI client");
+        assert_eq!(close_readiness.outcome, ApplicationOutcome::Unchanged);
+        let close_data = close_readiness
+            .data
+            .as_ref()
+            .expect("close-readiness protocol data exists");
+        let close_readback: CloseReadinessReadbackDto =
+            serde_json::from_value(close_data["readback"].clone())
+                .expect("non-CLI close-readiness response uses the typed DTO");
+        assert_eq!(close_readback.work_id, "service-work");
+        assert_eq!(
+            close_readback.project_revision,
+            close_readiness
+                .revision
+                .expect("read route returns snapshot revision")
+        );
+
+        handle
+            .join()
+            .expect("bounded service host exits after seven requests");
+        let reopened = SqliteStore::open(
+            root.join(".boreal/boreal.sqlite"),
+            super::super::PRODUCTION_SCHEMA,
+        )
+        .expect("protocol writes remain readable after service shutdown");
+        let readback = WorkApplication::new(&reopened)
+            .intake_items_v3(&ProjectId::new("service-project"))
+            .expect("persisted Intake is readable through the application");
+        assert_eq!(readback.items.len(), 1);
+        assert_eq!(readback.items[0].intake_id, "protocol-intake");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(socket);
+    }
+
+    #[test]
+    fn source_intake_and_final_result_cli_requests_use_versioned_typed_dtos() {
+        let source_show = ParsedCommand {
+            path: vec!["source".to_owned(), "show".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                positionals: vec!["source-1".to_owned()],
+                ..CliOptions::default()
+            },
+        };
+        assert!(supports(&source_show));
+        let source_data = request_data(&source_show, "op_source_show").unwrap();
+        assert_eq!(source_data["command"], "source_show_v1");
+        assert_eq!(source_data["project_id"], "project-1");
+        assert_eq!(
+            source_data["lookup"]["schema_version"],
+            SOURCE_LOOKUP_SCHEMA_VERSION
+        );
+        assert_eq!(source_data["lookup"]["source_version_id"], "source-1");
+        assert!(source_data["lookup"]["catalog_root"].is_null());
+
+        let source_verify = ParsedCommand {
+            path: vec!["source".to_owned(), "verify".to_owned()],
+            options: source_show.options.clone(),
+        };
+        let verify_data = request_data(&source_verify, "op_source_verify").unwrap();
+        assert_eq!(verify_data["command"], "source_verify_v1");
+        assert_eq!(verify_data["lookup"]["source_version_id"], "source-1");
+
+        let bucket = ParsedCommand {
+            path: vec!["intake".to_owned(), "bucket".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                positionals: vec!["inbox".to_owned(), "Inbox".to_owned()],
+                expected_revision: Some(7),
+                ..CliOptions::default()
+            },
+        };
+        let bucket_data = request_data(&bucket, "op_intake_bucket").unwrap();
+        assert_eq!(bucket_data["command"], "intake_bucket_v1");
+        assert_eq!(
+            bucket_data["bucket"]["schema_version"],
+            INTAKE_BUCKET_CREATE_SCHEMA_VERSION
+        );
+        assert_eq!(bucket_data["bucket"]["expected_revision"], 7);
+        assert_eq!(bucket_data["bucket"]["bucket_id"], "inbox");
+        assert_eq!(bucket_data["bucket"]["name"], "Inbox");
+        let mut missing_revision = bucket.clone();
+        missing_revision.options.expected_revision = None;
+        assert!(request_data(&missing_revision, "op_intake_bucket_missing_revision").is_err());
+
+        let capture = ParsedCommand {
+            path: vec!["intake".to_owned(), "capture".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                positionals: vec!["intake-1".to_owned(), "Review the result".to_owned()],
+                bucket: Some("inbox".to_owned()),
+                kind: Some("question".to_owned()),
+                expected_revision: Some(8),
+                ..CliOptions::default()
+            },
+        };
+        let capture_data = request_data(&capture, "op_intake_capture").unwrap();
+        assert_eq!(capture_data["command"], "intake_capture_v1");
+        assert_eq!(
+            capture_data["capture"]["schema_version"],
+            INTAKE_CAPTURE_SCHEMA_VERSION
+        );
+        assert_eq!(capture_data["capture"]["expected_revision"], 8);
+        assert_eq!(capture_data["capture"]["intake_id"], "intake-1");
+        assert_eq!(capture_data["capture"]["bucket_id"], "inbox");
+        assert_eq!(capture_data["capture"]["kind"], "question");
+        assert_eq!(capture_data["capture"]["content"], "Review the result");
+        let mut missing_capture_revision = capture.clone();
+        missing_capture_revision.options.expected_revision = None;
+        assert!(request_data(
+            &missing_capture_revision,
+            "op_intake_capture_missing_revision"
+        )
+        .is_err());
+
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert(
+            "--content-digest".to_owned(),
+            vec!["sha256:result".to_owned()],
+        );
+        extra.insert(
+            "--expected-entity-revision".to_owned(),
+            vec!["4".to_owned()],
+        );
+        extra.insert("--expected-proof-revision".to_owned(), vec!["6".to_owned()]);
+        let bind_result = ParsedCommand {
+            path: vec!["evidence".to_owned(), "bind-result".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                work: Some("work-1".to_owned()),
+                attempt: Some("attempt-1".to_owned()),
+                fence: Some(3),
+                source_version: Some("source-result".to_owned()),
+                expected_revision: Some(12),
+                extra,
+                ..CliOptions::default()
+            },
+        };
+        let bind_data = request_data(&bind_result, "op_bind_final_result").unwrap();
+        assert_eq!(bind_data["command"], "bind_final_result_v1");
+        assert_eq!(
+            bind_data["final_result"]["schema_version"],
+            FINAL_RESULT_CAPTURE_SCHEMA_VERSION
+        );
+        assert_eq!(bind_data["final_result"]["work_id"], "work-1");
+        assert_eq!(bind_data["final_result"]["attempt_id"], "attempt-1");
+        assert_eq!(bind_data["final_result"]["fence"], 3);
+        assert_eq!(bind_data["final_result"]["expected_project_revision"], 12);
+        assert_eq!(bind_data["final_result"]["expected_entity_revision"], 4);
+        assert_eq!(bind_data["final_result"]["expected_proof_revision"], 6);
+        assert_eq!(
+            bind_data["final_result"]["source_version_id"],
+            "source-result"
+        );
+        assert_eq!(bind_data["final_result"]["content_digest"], "sha256:result");
+        assert!(bind_data["final_result"]["project_id"].is_null());
+        assert!(bind_data["final_result"]["operation_id"].is_null());
+
+        for missing in [
+            "--expected-entity-revision",
+            "--expected-proof-revision",
+            "--content-digest",
+        ] {
+            let mut incomplete = bind_result.clone();
+            incomplete.options.extra.remove(missing);
+            assert!(
+                request_data(&incomplete, "op_bind_final_result_incomplete").is_err(),
+                "service final-result request must require {missing}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduling_service_routes_enforce_revisions_replay_and_operator_authority() {
+        let root = temp_path("scheduling-service-routes");
+        let store = seed_project_store(&root);
+        let mut handler = make_handler(store);
+        let base = || {
+            json!({
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": "service-test-session"
+            })
+        };
+
+        let expected_project_revision =
+            handler.store.project_revision("service-project").unwrap().0;
+        let mut civil_time_request = base();
+        civil_time_request["command"] = json!("project_civil_time_update_v1");
+        civil_time_request["civil_time_update"] = json!({
+            "schema_version": PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+            "expected_project_revision": expected_project_revision,
+            "expected_setting_revision": 0,
+            "timezone": "America/Regina"
+        });
+        let civil_time = application_envelope(
+            &mut handler,
+            "op_s13_civil_time",
+            civil_time_request.clone(),
+        );
+        assert_eq!(civil_time.outcome, ApplicationOutcome::Changed);
+        let civil_time_readback: ProjectCivilTimeMutationReadbackDto =
+            serde_json::from_value(civil_time.data.as_ref().unwrap()["readback"].clone())
+                .expect("civil-time mutation returns the typed readback");
+        assert_eq!(
+            civil_time_readback.schema_version,
+            PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(civil_time_readback.setting.timezone, "America/Regina");
+
+        let civil_time_replay =
+            application_envelope(&mut handler, "op_s13_civil_time", civil_time_request);
+        assert_eq!(
+            civil_time_replay.outcome,
+            ApplicationOutcome::Unchanged,
+            "civil-time replay failed: {:?}",
+            civil_time_replay.error
+        );
+        let civil_time_readback: ProjectCivilTimeMutationReadbackDto =
+            serde_json::from_value(civil_time_replay.data.unwrap()["readback"].clone())
+                .expect("civil-time replay returns the typed readback");
+        assert!(civil_time_readback.replayed);
+
+        let mut civil_time_show = base();
+        civil_time_show["command"] = json!("project_civil_time_readback_v1");
+        let civil_time_show =
+            application_envelope(&mut handler, "op_s13_civil_time_show", civil_time_show);
+        let civil_time_readback: ProjectCivilTimeReadbackDto =
+            serde_json::from_value(civil_time_show.data.unwrap()["readback"].clone())
+                .expect("civil-time read returns the typed readback");
+        assert_eq!(
+            civil_time_readback.schema_version,
+            PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(civil_time_readback.setting.unwrap().setting_revision, 1);
+
+        let mut schedule = base();
+        schedule["command"] = json!("work_schedule_update_v1");
+        schedule["work_id"] = json!("service-work");
+        schedule["schedule_update"] = json!({
+            "schema_version": WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+            "expected_project_revision": civil_time.revision.unwrap(),
+            "expected_schedule_revision": 0,
+            "schedule": {
+                "not_before": null,
+                "due": {"kind": "local_date", "year": 2026, "month": 10, "day": 14},
+                "planned_start": null,
+                "planned_end": null
+            }
+        });
+        let schedule_first =
+            application_envelope(&mut handler, "op_s13_schedule_set", schedule.clone());
+        assert_eq!(schedule_first.outcome, ApplicationOutcome::Changed);
+        let schedule_readback: WorkScheduleMutationReadbackDto =
+            serde_json::from_value(schedule_first.data.as_ref().unwrap()["readback"].clone())
+                .expect("schedule mutation returns the typed readback");
+        assert_eq!(schedule_readback.schedule_revision, 1);
+        assert!(!schedule_readback.replayed);
+
+        let mut stale_project_schedule = schedule.clone();
+        stale_project_schedule["schedule_update"]["expected_project_revision"] =
+            json!(expected_project_revision);
+        stale_project_schedule["schedule_update"]["expected_schedule_revision"] = json!(1);
+        let stale_project = application_envelope(
+            &mut handler,
+            "op_s13_schedule_stale_project",
+            stale_project_schedule,
+        );
+        assert_eq!(stale_project.outcome, ApplicationOutcome::Conflict);
+
+        let mut stale_object_schedule = schedule.clone();
+        stale_object_schedule["schedule_update"]["expected_project_revision"] =
+            json!(schedule_first.revision.unwrap());
+        stale_object_schedule["schedule_update"]["expected_schedule_revision"] = json!(0);
+        let stale_object = application_envelope(
+            &mut handler,
+            "op_s13_schedule_stale_object",
+            stale_object_schedule,
+        );
+        assert_eq!(stale_object.outcome, ApplicationOutcome::Conflict);
+
+        let schedule_replay = application_envelope(&mut handler, "op_s13_schedule_set", schedule);
+        assert_eq!(schedule_replay.outcome, ApplicationOutcome::Unchanged);
+        let schedule_replay: WorkScheduleMutationReadbackDto =
+            serde_json::from_value(schedule_replay.data.unwrap()["readback"].clone())
+                .expect("schedule replay returns the typed readback");
+        assert!(schedule_replay.replayed);
+        assert_eq!(schedule_replay.schedule_revision, 1);
+
+        let mut schedule_clear = base();
+        schedule_clear["command"] = json!("work_schedule_update_v1");
+        schedule_clear["work_id"] = json!("service-work");
+        schedule_clear["schedule_update"] = json!({
+            "schema_version": WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+            "expected_project_revision": schedule_first.revision.unwrap(),
+            "expected_schedule_revision": 1,
+            "schedule": {
+                "not_before": null,
+                "due": null,
+                "planned_start": null,
+                "planned_end": null
+            }
+        });
+        let schedule_clear =
+            application_envelope(&mut handler, "op_s13_schedule_clear", schedule_clear);
+        assert_eq!(schedule_clear.outcome, ApplicationOutcome::Changed);
+        let schedule_clear: WorkScheduleMutationReadbackDto =
+            serde_json::from_value(schedule_clear.data.as_ref().unwrap()["readback"].clone())
+                .expect("schedule clear returns the typed readback");
+        assert_eq!(schedule_clear.schedule_revision, 2);
+        assert_eq!(schedule_clear.schedule.due, None);
+
+        let mut schedule_show = base();
+        schedule_show["command"] = json!("work_schedule_readback_v1");
+        schedule_show["work_id"] = json!("service-work");
+        let schedule_show =
+            application_envelope(&mut handler, "op_s13_schedule_show", schedule_show);
+        let schedule_readback: WorkScheduleReadbackDto =
+            serde_json::from_value(schedule_show.data.unwrap()["readback"].clone())
+                .expect("schedule read returns the typed readback");
+        assert_eq!(
+            schedule_readback.schema_version,
+            WORK_SCHEDULE_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(schedule_readback.schedule_revision, 2);
+        assert!(schedule_readback.schedule.is_some());
+
+        let mut wait_create_request = base();
+        wait_create_request["command"] = json!("external_wait_create_v1");
+        wait_create_request["wait_create"] = json!({
+            "schema_version": EXTERNAL_WAIT_CREATE_SCHEMA_VERSION,
+            "expected_project_revision": schedule_clear.project_revision,
+            "expected_wait_revision": 0,
+            "wait_id": "wait-service-1",
+            "source_work_id": "service-work",
+            "affected_work_ids": ["service-work"],
+            "category": "decision",
+            "reason": "Need the owner to choose a direction",
+            "accountable": {"kind": "person", "reference": "owner-1", "display_name": "Owner"},
+            "expected_decision": "Choose a direction",
+            "expected_output": null,
+            "follow_up": null
+        });
+        let wait_create = application_envelope(
+            &mut handler,
+            "op_s13_wait_create",
+            wait_create_request.clone(),
+        );
+        assert_eq!(wait_create.outcome, ApplicationOutcome::Changed);
+        let wait_readback: ExternalWaitMutationReadbackDto =
+            serde_json::from_value(wait_create.data.as_ref().unwrap()["readback"].clone())
+                .expect("wait creation returns the typed readback");
+        assert_eq!(wait_readback.wait.wait_revision, 1);
+        assert_eq!(
+            wait_readback.wait.state,
+            boreal_protocol::models::ExternalWaitStateDto::Open
+        );
+
+        let wait_create_replay =
+            application_envelope(&mut handler, "op_s13_wait_create", wait_create_request);
+        assert_eq!(wait_create_replay.outcome, ApplicationOutcome::Unchanged);
+        let wait_readback: ExternalWaitMutationReadbackDto =
+            serde_json::from_value(wait_create_replay.data.unwrap()["readback"].clone())
+                .expect("wait create replay returns the typed readback");
+        assert!(wait_readback.replayed);
+
+        let mut wait_list = base();
+        wait_list["command"] = json!("external_wait_readback_v1");
+        let wait_list = application_envelope(&mut handler, "op_s13_wait_list", wait_list);
+        let wait_readback: ExternalWaitReadbackDto =
+            serde_json::from_value(wait_list.data.unwrap()["readback"].clone())
+                .expect("wait list returns the typed readback");
+        assert_eq!(
+            wait_readback.schema_version,
+            EXTERNAL_WAIT_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(wait_readback.waits.len(), 1);
+
+        let mut wait_show = base();
+        wait_show["command"] = json!("external_wait_readback_v1");
+        wait_show["wait_id"] = json!("wait-service-1");
+        let wait_show = application_envelope(&mut handler, "op_s13_wait_show", wait_show);
+        let wait_readback: ExternalWaitReadbackDto =
+            serde_json::from_value(wait_show.data.unwrap()["readback"].clone())
+                .expect("single-wait read returns the typed readback");
+        assert_eq!(wait_readback.waits.len(), 1);
+        assert_eq!(wait_readback.waits[0].wait_id, "wait-service-1");
+
+        let mut wait_resolve_request = base();
+        wait_resolve_request["command"] = json!("external_wait_resolve_v1");
+        wait_resolve_request["wait_resolve"] = json!({
+            "schema_version": EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
+            "expected_project_revision": wait_create.revision,
+            "expected_wait_revision": 1,
+            "wait_id": "wait-service-1",
+            "next_state": "resolved",
+            "outcome": "decision_provided",
+            "detail": "The owner selected the second direction",
+            "output_ref": null,
+            "supplied_by": {"kind": "person", "reference": "owner-1", "display_name": "Owner"}
+        });
+        let wait_resolve = application_envelope(
+            &mut handler,
+            "op_s13_wait_resolve",
+            wait_resolve_request.clone(),
+        );
+        assert_eq!(wait_resolve.outcome, ApplicationOutcome::Changed);
+        let wait_readback: ExternalWaitMutationReadbackDto =
+            serde_json::from_value(wait_resolve.data.as_ref().unwrap()["readback"].clone())
+                .expect("wait resolution returns the typed readback");
+        assert_eq!(wait_readback.wait.wait_revision, 2);
+        let resolution = wait_readback.wait.resolution.as_ref().unwrap();
+        assert_eq!(resolution.recorded_by, DEFAULT_ACTOR);
+        assert_eq!(
+            resolution.recorded_as,
+            boreal_protocol::models::ExternalWaitRoleDto::Operator
+        );
+
+        let wait_replay =
+            application_envelope(&mut handler, "op_s13_wait_resolve", wait_resolve_request);
+        assert_eq!(wait_replay.outcome, ApplicationOutcome::Unchanged);
+        let wait_readback: ExternalWaitMutationReadbackDto =
+            serde_json::from_value(wait_replay.data.unwrap()["readback"].clone())
+                .expect("wait replay returns the typed readback");
+        assert!(wait_readback.replayed);
+
+        let agent_session_revision = register_fixture_session(
+            &handler.store,
+            "service-project",
+            "agent-1",
+            "service-agent-session",
+            "op_s13_agent_session",
+        );
+        let mut agent_update = json!({
+            "command": "project_civil_time_update_v1",
+            "project_id": "service-project",
+            "actor_id": "agent-1",
+            "credential_ref": SERVICE_TEST_AGENT_CREDENTIAL,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "service-agent-session",
+            "civil_time_update": {
+                "schema_version": PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+                "expected_project_revision": agent_session_revision,
+                "expected_setting_revision": 1,
+                "timezone": "America/Edmonton"
+            }
+        });
+        agent_update["credential_ref"] = json!(SERVICE_TEST_AGENT_CREDENTIAL);
+        let denied = application_envelope(&mut handler, "op_s13_agent_civil_time", agent_update);
+        assert_eq!(denied.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code),
+            Some(ErrorCode::PermissionDenied)
+        );
+
+        let direct_read = ParsedCommand {
+            path: vec!["project".into(), "civil-time".into(), "show".into()],
+            options: CliOptions {
+                project: Some("service-project".into()),
+                actor: DEFAULT_ACTOR.into(),
+                session: "service-test-session".into(),
+                json: true,
+                ..CliOptions::default()
+            },
+        };
+        let app = WorkApplication::new(&handler.store);
+        let adapter = SqliteAttemptAdapter::new(&handler.store);
+        let direct = super::super::dispatch(
+            &direct_read,
+            "op_s13_direct_civil_time_show",
+            &app,
+            &adapter,
+            &handler.store,
+        )
+        .expect("the direct CLI dispatch reaches the civil-time read route");
+        let direct_readback: ProjectCivilTimeReadbackDto =
+            serde_json::from_value(direct.data.unwrap()["readback"].clone())
+                .expect("direct CLI route returns the typed readback");
+        assert_eq!(direct_readback.setting.unwrap().timezone, "America/Regina");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scheduling_cli_requests_cross_the_typed_versioned_boundary() {
+        let root = temp_path("scheduling-cli-request-dtos");
+        fs::create_dir_all(&root).expect("request fixture directory creates");
+        let write_request = |name: &str, value: Value| {
+            let path = root.join(name);
+            fs::write(&path, value.to_string()).expect("typed request fixture writes");
+            path.to_string_lossy().into_owned()
+        };
+        let parsed = |path: &[&str], input: Option<String>, positionals: &[&str]| ParsedCommand {
+            path: path.iter().map(|part| (*part).to_owned()).collect(),
+            options: CliOptions {
+                project: Some("service-project".to_owned()),
+                input,
+                positionals: positionals.iter().map(|part| (*part).to_owned()).collect(),
+                ..CliOptions::default()
+            },
+        };
+
+        let civil_time = write_request(
+            "civil-time.json",
+            json!({
+                "schema_version": PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+                "expected_project_revision": 9,
+                "expected_setting_revision": 0,
+                "timezone": "America/Regina"
+            }),
+        );
+        let civil_time_command = parsed(&["project", "civil-time", "set"], Some(civil_time), &[]);
+        assert!(supports(&civil_time_command));
+        let civil_time_data = request_data(&civil_time_command, "op_s13_cli_civil_time").unwrap();
+        assert_eq!(civil_time_data["command"], "project_civil_time_update_v1");
+        assert_eq!(
+            civil_time_data["civil_time_update"]["expected_project_revision"],
+            9
+        );
+
+        let schedule = write_request(
+            "schedule.json",
+            json!({
+                "schema_version": WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+                "expected_project_revision": 10,
+                "expected_schedule_revision": 0,
+                "schedule": {
+                    "not_before": null,
+                    "due": null,
+                    "planned_start": null,
+                    "planned_end": null
+                }
+            }),
+        );
+        let schedule_command = parsed(
+            &["work", "schedule", "set"],
+            Some(schedule),
+            &["service-work"],
+        );
+        let schedule_data = request_data(&schedule_command, "op_s13_cli_schedule").unwrap();
+        assert_eq!(schedule_data["command"], "work_schedule_update_v1");
+        assert_eq!(schedule_data["work_id"], "service-work");
+        assert!(schedule_data["schedule_update"]["schedule"]["due"].is_null());
+
+        let incomplete_schedule = write_request(
+            "incomplete-schedule.json",
+            json!({
+                "schema_version": WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
+                "expected_project_revision": 10,
+                "expected_schedule_revision": 0,
+                "schedule": {
+                    "not_before": null,
+                    "due": null,
+                    "planned_start": null
+                }
+            }),
+        );
+        let incomplete_command = parsed(
+            &["work", "schedule", "set"],
+            Some(incomplete_schedule),
+            &["service-work"],
+        );
+        assert!(request_data(&incomplete_command, "op_s13_cli_schedule_incomplete").is_err());
+
+        let wait_create = write_request(
+            "wait-create.json",
+            json!({
+                "schema_version": EXTERNAL_WAIT_CREATE_SCHEMA_VERSION,
+                "expected_project_revision": 11,
+                "expected_wait_revision": 0,
+                "wait_id": "wait-cli-1",
+                "source_work_id": "service-work",
+                "affected_work_ids": ["service-work"],
+                "category": "decision",
+                "reason": "Need a decision",
+                "accountable": {"kind": "person", "reference": "owner-1", "display_name": "Owner"},
+                "expected_decision": "Choose a direction",
+                "expected_output": null,
+                "follow_up": null
+            }),
+        );
+        let create_command = parsed(&["wait", "create"], Some(wait_create), &[]);
+        let create_data = request_data(&create_command, "op_s13_cli_wait_create").unwrap();
+        let decoded: ExternalWaitCreateDto =
+            serde_json::from_value(create_data["wait_create"].clone())
+                .expect("service input uses the strict wait-create DTO");
+        assert_eq!(decoded.expected_wait_revision, 0);
+        assert_eq!(
+            decoded.expected_decision.0.as_deref(),
+            Some("Choose a direction")
+        );
+
+        let wait_resolve = write_request(
+            "wait-resolve.json",
+            json!({
+                "schema_version": EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
+                "expected_project_revision": 12,
+                "expected_wait_revision": 1,
+                "wait_id": "wait-cli-1",
+                "next_state": "resolved",
+                "outcome": "decision_provided",
+                "detail": "The owner chose an option",
+                "output_ref": null,
+                "supplied_by": {"kind": "person", "reference": "owner-1", "display_name": "Owner"}
+            }),
+        );
+        let resolve_command = parsed(&["wait", "resolve"], Some(wait_resolve), &[]);
+        let resolve_data = request_data(&resolve_command, "op_s13_cli_wait_resolve").unwrap();
+        assert_eq!(resolve_data["command"], "external_wait_resolve_v1");
+        assert!(resolve_data["wait_resolve"]["output_ref"].is_null());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn close_readiness_cli_request_keeps_context_in_the_envelope() {
+        let parsed = ParsedCommand {
+            path: vec!["work".to_owned(), "close-readiness".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                actor: "operator-1".to_owned(),
+                session: "session-1".to_owned(),
+                positionals: vec!["work-1".to_owned()],
+                ..CliOptions::default()
+            },
+        };
+        assert!(supports(&parsed));
+        let data = request_data(&parsed, "op_close_readiness").unwrap();
+        assert_eq!(data["command"], "work_close_readiness_v1");
+        assert_eq!(data["project_id"], "project-1");
+        assert_eq!(data["actor_id"], "operator-1");
+        assert_eq!(data["session_id"], "session-1");
+        assert_eq!(data["operation_id"], "op_close_readiness");
+        assert_eq!(data["work_id"], "work-1");
+        assert_eq!(data.as_object().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn close_readiness_service_route_matches_the_application_snapshot() {
+        let root = temp_path("close-readiness-service-route");
+        let store = seed_project_store(&root);
+        let app = WorkApplication::new(&store);
+        app.ensure_work_model_v3()
+            .expect("test fixture explicitly enables work-model/3");
+        let (expected, expected_revision) = super::super::close_readiness_readback_for_work(
+            "service-project",
+            "service-work",
+            &app,
+        )
+        .expect("application snapshot produces the typed close-readiness readback");
+        let mut handler = make_handler(store);
+        let envelope = application_envelope(
+            &mut handler,
+            "op_close_readiness_service",
+            json!({
+                "command": "work_close_readiness_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "work_id": "service-work",
+            }),
+        );
+        assert_eq!(envelope.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(envelope.revision, Some(expected_revision));
+        let data = envelope.data.expect("close-readiness data exists");
+        assert_eq!(data["command"], "work_close_readiness_v1");
+        let actual: CloseReadinessReadbackDto = serde_json::from_value(data["readback"].clone())
+            .expect("service readback uses the strict typed DTO");
+        assert_eq!(actual, expected);
+        assert_eq!(actual.project_revision, expected_revision);
+        assert_eq!(actual.work_id, "service-work");
+        assert_eq!(actual.current_attempt_id, None);
+        assert_eq!(actual.current_fence, None);
+        assert!(!actual.ready);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn artifact_result_cli_routes_use_typed_request_and_exact_read_selectors() {
+        use boreal_protocol::models::{
+            ArtifactResultAttestationDto, ArtifactResultBindRequestDto,
+            ArtifactResultOutputRequestDto, ArtifactResultRightsDto,
+            ArtifactResultSourceIdentityDto, ARTIFACT_RESULT_BIND_SCHEMA_VERSION,
+            ARTIFACT_RESULT_READBACK_SCHEMA_VERSION,
+        };
+
+        let path = temp_path("artifact-result-request");
+        let request = ArtifactResultBindRequestDto {
+            schema_version: ARTIFACT_RESULT_BIND_SCHEMA_VERSION.to_owned(),
+            work_id: "work-1".to_owned(),
+            attempt_id: "attempt-1".to_owned(),
+            fence: 3,
+            expected_project_revision: 12,
+            expected_entity_revision: 4,
+            expected_proof_revision: 6,
+            result_id: "result-1".to_owned(),
+            contract_revision: 2,
+            outputs: vec![ArtifactResultOutputRequestDto {
+                requirement_key: "report".to_owned(),
+                source: ArtifactResultSourceIdentityDto {
+                    project_id: "project-1".to_owned(),
+                    source_version_id: "source-1".to_owned(),
+                    content_digest: "sha256:source".to_owned(),
+                },
+                relationship_id: "report-v1".to_owned(),
+                rights: ArtifactResultRightsDto::default(),
+            }],
+            attestation: Some(ArtifactResultAttestationDto {
+                statement: "Report is ready.".to_owned(),
+            }),
+        };
+        fs::write(&path, serde_json::to_vec(&request).unwrap())
+            .expect("typed artifact result request writes");
+        let bind = ParsedCommand {
+            path: vec!["artifact".into(), "result".into(), "bind".into()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                input: Some(path.to_string_lossy().into_owned()),
+                ..CliOptions::default()
+            },
+        };
+        assert!(supports(&bind));
+        let bind_data = request_data(&bind, "op_artifact_bind").unwrap();
+        assert_eq!(bind_data["command"], "bind_artifact_result_v1");
+        assert_eq!(bind_data["project_id"], "project-1");
+        assert_eq!(
+            bind_data["artifact_result"]["schema_version"],
+            ARTIFACT_RESULT_BIND_SCHEMA_VERSION
+        );
+        assert_eq!(
+            bind_data["artifact_result"]["outputs"][0]["source"]["project_id"],
+            "project-1"
+        );
+        assert!(bind_data["artifact_result"]["catalog_root"].is_null());
+        assert!(bind_data["artifact_result"]["actor_id"].is_null());
+        assert!(bind_data["artifact_result"]["operation_id"].is_null());
+
+        let attempt = ParsedCommand {
+            path: vec!["artifact".into(), "result".into(), "attempt".into()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                work: Some("work-1".to_owned()),
+                attempt: Some("attempt-1".to_owned()),
+                fence: Some(3),
+                ..CliOptions::default()
+            },
+        };
+        assert!(supports(&attempt));
+        let attempt_data = request_data(&attempt, "op_artifact_read_attempt").unwrap();
+        assert_eq!(attempt_data["command"], "artifact_result_for_attempt_v1");
+        assert_eq!(attempt_data["work_id"], "work-1");
+        assert_eq!(attempt_data["attempt_id"], "attempt-1");
+        assert_eq!(attempt_data["fence"], 3);
+
+        let operation = ParsedCommand {
+            path: vec!["artifact".into(), "result".into(), "operation".into()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                positionals: vec!["op_artifact_bind".to_owned()],
+                ..CliOptions::default()
+            },
+        };
+        assert!(supports(&operation));
+        let operation_data = request_data(&operation, "op_artifact_read_operation").unwrap();
+        assert_eq!(
+            operation_data["command"],
+            "artifact_result_for_operation_v1"
+        );
+        assert_eq!(operation_data["target_operation_id"], "op_artifact_bind");
+        assert_eq!(
+            ARTIFACT_RESULT_READBACK_SCHEMA_VERSION,
+            "boreal.artifact_result_readback.v1"
+        );
+
+        let mut missing_project = bind;
+        missing_project.options.project = None;
+        assert!(request_data(&missing_project, "op_artifact_bind_missing_project").is_err());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn final_result_service_route_returns_typed_replayable_readback() {
+        let root = temp_path("final-result-typed-route");
+        let store = seed_project_store(&root);
+        let (_, claim_source_id) = capture_service_test_workspace(
+            &store,
+            "service-project",
+            "op_final_result_claim_source",
+        );
+        let claim_revision = store.project_revision("service-project").unwrap().0;
+        let mut handler = make_handler(store);
+        handler
+            .claim(
+                &json!({
+                    "command": "claim",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": "agent-1",
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-cli",
+                    "attempt_id": "attempt-final-result-route",
+                    "expected_revision": claim_revision,
+                    "source_version_id": claim_source_id,
+                    "config_identity": "config-final-result-route",
+                }),
+                "op_final_result_claim",
+            )
+            .expect("service attempt claims");
+        handler
+            .start(
+                &json!({
+                    "command": "start",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": "agent-1",
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-cli",
+                    "attempt_id": "attempt-final-result-route",
+                    "fence": 1,
+                }),
+                "op_final_result_start",
+            )
+            .expect("service attempt starts");
+        let (_, result_source_id) = capture_service_test_workspace(
+            &handler.store,
+            "service-project",
+            "op_final_result_output_source",
+        );
+        let result_source = handler
+            .store
+            .source_version("service-project", &result_source_id)
+            .expect("result source read succeeds")
+            .expect("result source is registered");
+        let (entity_revision, proof_revision) = handler
+            .store
+            .work_revisions("service-project", "service-work")
+            .expect("work revisions read");
+        let request = json!({
+            "command": "bind_final_result_v1",
+            "project_id": "service-project",
+            "actor_id": "agent-1",
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-cli",
+            "credential_ref": SERVICE_TEST_AGENT_CREDENTIAL,
+            "final_result": {
+                "schema_version": FINAL_RESULT_CAPTURE_SCHEMA_VERSION,
+                "work_id": "service-work",
+                "attempt_id": "attempt-final-result-route",
+                "fence": 1,
+                "expected_project_revision": handler.store.project_revision("service-project").unwrap().0,
+                "expected_entity_revision": entity_revision,
+                "expected_proof_revision": proof_revision,
+                "source_version_id": result_source_id,
+                "content_digest": result_source.content_digest,
+            },
+        });
+        let first = application_envelope(&mut handler, "op_final_result_bind", request.clone());
+        assert_eq!(first.outcome, ApplicationOutcome::Changed);
+        let first_data = first.data.expect("final-result readback exists");
+        let first_readback: FinalResultCaptureReadbackDto =
+            serde_json::from_value(first_data["readback"].clone())
+                .expect("final-result response is the strict versioned DTO");
+        assert_eq!(
+            first_readback.schema_version,
+            FINAL_RESULT_CAPTURE_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(first_readback.attempt_id, "attempt-final-result-route");
+        assert_eq!(first_readback.source_version_id, result_source_id);
+        assert_eq!(first_readback.entity_revision, entity_revision);
+        assert_eq!(first_readback.proof_revision, proof_revision + 1);
+        assert!(!first_readback.replayed);
+
+        let replay = application_envelope(&mut handler, "op_final_result_bind", request);
+        assert_eq!(replay.outcome, ApplicationOutcome::Unchanged);
+        let replay_readback: FinalResultCaptureReadbackDto = serde_json::from_value(
+            replay.data.expect("replay readback exists")["readback"].clone(),
+        )
+        .expect("replay returns the same typed result contract");
+        assert!(replay_readback.replayed);
+        assert_eq!(replay_readback.binding_id, first_readback.binding_id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn artifact_result_service_routes_bind_replay_and_read_the_same_record() {
+        use boreal_protocol::models::{
+            ArtifactResultBindReadbackDto, ArtifactResultBindRequestDto,
+            ArtifactResultOutputRequestDto, ArtifactResultReadbackDto, ArtifactResultRightsDto,
+            ArtifactResultSourceIdentityDto, ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION,
+            ARTIFACT_RESULT_BIND_SCHEMA_VERSION, ARTIFACT_RESULT_READBACK_SCHEMA_VERSION,
+        };
+
+        let root = temp_path("artifact-result-routes");
+        let mut handler = make_handler(seed_project_store(&root));
+        let create_revision = handler
+            .store
+            .project_revision("service-project")
+            .expect("create revision reads")
+            .0;
+        let contract = json!({
+            "requirements": [{
+                "schema_version": boreal_protocol::models::DELIVERABLE_REQUIREMENT_V2_SCHEMA_VERSION,
+                "requirement_key": "report",
+                "purpose": "Produce a report",
+                "required": true,
+                "deliverable_type": "report",
+                "allowed_media_types": ["application/vnd.boreal.workspace-snapshot.v1"],
+                "min_count": 1,
+                "max_count": 1,
+                "criteria": [{"kind": "minimum_bytes", "value": 1}]
+            }],
+            "inputs": []
+        });
+        handler
+            .create_work(
+                &json!({
+                    "command": "create_work",
+                    "project_id": "service-project",
+                    "work_id": "artifact-work",
+                    "kind": "task",
+                    "title": "Inspect an artifact result",
+                    "actor_id": DEFAULT_ACTOR,
+                    "session_id": "service-test-session",
+                    "expected_revision": create_revision,
+                    "profile": "validated-deliverables",
+                    "profile_version": "1",
+                    "planning_contract": contract,
+                }),
+                "op_artifact_work_create",
+            )
+            .expect("typed deliverable work creates through the service application");
+
+        let (_, claim_source_id) = capture_service_test_workspace(
+            &handler.store,
+            "service-project",
+            "op_artifact_claim_source",
+        );
+        let claim_revision = handler
+            .store
+            .project_revision("service-project")
+            .expect("claim revision reads")
+            .0;
+        handler
+            .claim(
+                &json!({
+                    "command": "claim",
+                    "project_id": "service-project",
+                    "work_id": "artifact-work",
+                    "actor_id": "agent-1",
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-cli",
+                    "attempt_id": "attempt-artifact-route",
+                    "expected_revision": claim_revision,
+                    "source_version_id": claim_source_id,
+                    "config_identity": "config-artifact-route",
+                }),
+                "op_artifact_claim",
+            )
+            .expect("artifact attempt claims through the service application");
+        handler
+            .start(
+                &json!({
+                    "command": "start",
+                    "project_id": "service-project",
+                    "work_id": "artifact-work",
+                    "actor_id": "agent-1",
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-cli",
+                    "attempt_id": "attempt-artifact-route",
+                    "fence": 1,
+                }),
+                "op_artifact_start",
+            )
+            .expect("artifact attempt starts through the service application");
+        let (_, output_source_id) = capture_service_test_workspace(
+            &handler.store,
+            "service-project",
+            "op_artifact_output_source",
+        );
+        let source = handler
+            .store
+            .source_version("service-project", &output_source_id)
+            .expect("output source registration reads")
+            .expect("output source is registered");
+        let (entity_revision, proof_revision) = handler
+            .store
+            .work_revisions("service-project", "artifact-work")
+            .expect("work revisions read");
+        let request = ArtifactResultBindRequestDto {
+            schema_version: ARTIFACT_RESULT_BIND_SCHEMA_VERSION.to_owned(),
+            work_id: "artifact-work".to_owned(),
+            attempt_id: "attempt-artifact-route".to_owned(),
+            fence: 1,
+            expected_project_revision: handler
+                .store
+                .project_revision("service-project")
+                .expect("binding revision reads")
+                .0,
+            expected_entity_revision: entity_revision,
+            expected_proof_revision: proof_revision,
+            result_id: "result-artifact-route".to_owned(),
+            contract_revision: 1,
+            outputs: vec![ArtifactResultOutputRequestDto {
+                requirement_key: "report".to_owned(),
+                source: ArtifactResultSourceIdentityDto {
+                    project_id: "service-project".to_owned(),
+                    source_version_id: output_source_id,
+                    content_digest: source.content_digest,
+                },
+                relationship_id: "report-v1".to_owned(),
+                rights: ArtifactResultRightsDto {
+                    attribution: Some("agent-1".to_owned()),
+                    rights_statement: Some("authored for this project".to_owned()),
+                    license: None,
+                },
+            }],
+            attestation: None,
+        };
+        let request_for_direct = request.clone();
+        let mut envelope_data = json!({
+            "command": "bind_artifact_result_v1",
+            "project_id": "service-project",
+            "actor_id": "agent-1",
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-cli",
+            "credential_ref": SERVICE_TEST_AGENT_CREDENTIAL,
+            "artifact_result": request,
+        });
+        let unchanged_revision = handler
+            .store
+            .project_revision("service-project")
+            .expect("pre-rejection revision reads")
+            .0;
+        envelope_data["actor_id"] = json!(DEFAULT_ACTOR);
+        envelope_data["session_id"] = json!("service-test-session");
+        envelope_data["credential_ref"] = json!(SERVICE_TEST_CREDENTIAL);
+        let denied = application_envelope(
+            &mut handler,
+            "op_artifact_wrong_actor",
+            envelope_data.clone(),
+        );
+        assert_eq!(denied.outcome, ApplicationOutcome::Conflict);
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code),
+            Some(ErrorCode::ClaimConflict)
+        );
+        assert_eq!(
+            handler
+                .store
+                .project_revision("service-project")
+                .expect("post-rejection revision reads")
+                .0,
+            unchanged_revision,
+            "wrong attempt authority cannot mutate result state"
+        );
+
+        envelope_data["actor_id"] = json!("agent-1");
+        envelope_data["session_id"] = json!("session-cli");
+        envelope_data["credential_ref"] = json!(SERVICE_TEST_AGENT_CREDENTIAL);
+        let mut unknown_request = envelope_data.clone();
+        unknown_request["artifact_result"]["caller_inspection_facts"] = json!({"passed": true});
+        let unknown = application_envelope(
+            &mut handler,
+            "op_artifact_unknown_request_field",
+            unknown_request,
+        );
+        assert_eq!(unknown.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            handler
+                .store
+                .project_revision("service-project")
+                .expect("post-decode-rejection revision reads")
+                .0,
+            unchanged_revision,
+            "strict DTO decoding rejects caller inspection facts without mutation"
+        );
+
+        let first = application_envelope(&mut handler, "op_artifact_bind", envelope_data.clone());
+        assert_eq!(first.outcome, ApplicationOutcome::Changed);
+        let first_data = first.data.expect("artifact result readback exists");
+        assert_eq!(first_data["command"], "bind_artifact_result_v1");
+        let first_readback: ArtifactResultBindReadbackDto =
+            serde_json::from_value(first_data["readback"].clone())
+                .expect("bind response follows the strict typed DTO");
+        assert_eq!(
+            first_readback.schema_version,
+            ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(first_readback.result.result_id, "result-artifact-route");
+        assert_eq!(first_readback.result.actor_id, "agent-1");
+        assert_eq!(
+            first_readback.result.outputs[0].availability,
+            boreal_protocol::models::ArtifactResultAvailabilityDto::Available
+        );
+        assert_eq!(first_readback.source_relationship_ids, ["report-v1"]);
+        assert!(first_readback.lineage_pending.is_empty());
+        let committed_revision = handler
+            .store
+            .project_revision("service-project")
+            .expect("committed artifact revision reads")
+            .0;
+
+        let mut changed_payload = envelope_data.clone();
+        changed_payload["artifact_result"]["result_id"] = json!("result-payload-changed");
+        let changed = application_envelope(&mut handler, "op_artifact_bind", changed_payload);
+        assert!(matches!(
+            changed.outcome,
+            ApplicationOutcome::Conflict | ApplicationOutcome::Rejected
+        ));
+        assert_eq!(
+            handler
+                .store
+                .project_revision("service-project")
+                .expect("changed-replay revision reads")
+                .0,
+            committed_revision,
+            "changed-payload replay cannot replace the immutable result"
+        );
+        let replay = application_envelope(&mut handler, "op_artifact_bind", envelope_data);
+        assert_eq!(replay.outcome, ApplicationOutcome::Unchanged);
+        let replay_data = replay.data.expect("replay readback exists");
+        assert_eq!(replay_data["command"], "bind_artifact_result_v1");
+        let replay_readback: ArtifactResultBindReadbackDto =
+            serde_json::from_value(replay_data["readback"].clone())
+                .expect("replay uses the same strict bind readback DTO");
+        assert!(replay_readback.result.replayed);
+        assert_eq!(
+            replay_readback.result.result_digest,
+            first_readback.result.result_digest
+        );
+        let direct_bind = super::super::artifact_result_bind_request_result(
+            "service-project",
+            "agent-1",
+            "session-cli",
+            "op_artifact_bind",
+            request_for_direct,
+            &WorkApplication::new(&handler.store),
+            &handler.store,
+        )
+        .expect("direct CLI adapter replays through the same application API");
+        assert_eq!(direct_bind.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(direct_bind.data.as_ref().unwrap(), &replay_data["readback"]);
+
+        let attempt = application_envelope(
+            &mut handler,
+            "op_artifact_read_attempt",
+            json!({
+                "command": "artifact_result_for_attempt_v1",
+                "project_id": "service-project",
+                "actor_id": "agent-1",
+                "credential_ref": SERVICE_TEST_AGENT_CREDENTIAL,
+                "work_id": "artifact-work",
+                "attempt_id": "attempt-artifact-route",
+                "fence": 1,
+            }),
+        );
+        assert_eq!(attempt.outcome, ApplicationOutcome::Unchanged);
+        let attempt_data = attempt.data.expect("attempt readback exists");
+        assert_eq!(attempt_data["command"], "artifact_result_for_attempt_v1");
+        let attempt_readback: ArtifactResultReadbackDto =
+            serde_json::from_value(attempt_data["readback"].clone())
+                .expect("attempt readback follows the strict typed DTO");
+        assert_eq!(
+            attempt_readback.schema_version,
+            ARTIFACT_RESULT_READBACK_SCHEMA_VERSION
+        );
+        assert_eq!(
+            attempt_readback.result.result_id,
+            first_readback.result.result_id
+        );
+
+        let operation = application_envelope(
+            &mut handler,
+            "op_artifact_read_operation",
+            json!({
+                "command": "artifact_result_for_operation_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "target_operation_id": "op_artifact_bind",
+            }),
+        );
+        assert_eq!(operation.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(
+            operation.data.as_ref().unwrap()["command"],
+            "artifact_result_for_operation_v1"
+        );
+        assert_eq!(
+            operation.data.as_ref().unwrap()["readback"],
+            attempt_data["readback"]
+        );
+
+        let direct_attempt = super::super::artifact_result_for_attempt_result(
+            "service-project",
+            "artifact-work",
+            "attempt-artifact-route",
+            1,
+            &WorkApplication::new(&handler.store),
+        )
+        .expect("direct CLI adapter reads the same application record");
+        assert_eq!(
+            direct_attempt.data.as_ref().unwrap(),
+            &attempt_data["readback"]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn service_status_uses_the_complete_canonical_status_dto() {
         let db = temp_path("status-dto");
         let store = seed_store(&db);
@@ -6518,16 +9420,9 @@ mod tests {
             .work_model_v3_enabled()
             .expect("v3 capability reads"));
 
-        for (index, command) in [
-            "cycle_board",
-            "cycle_report",
-            "intake_list",
-            "intake_show",
-            "intake_bucket",
-            "intake_capture",
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, command) in ["cycle_board", "cycle_report", "intake_list", "intake_show"]
+            .into_iter()
+            .enumerate()
         {
             let envelope = application_envelope(
                 &mut handler,
@@ -6543,6 +9438,126 @@ mod tests {
                 Some(ErrorCode::UnknownCommandNamespace)
             );
         }
+        for (index, data) in [
+            json!({
+                "command": "intake_bucket_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "bucket": {
+                    "schema_version": INTAKE_BUCKET_CREATE_SCHEMA_VERSION,
+                    "expected_revision": before_revision,
+                    "bucket_id": "schema-v2-bucket",
+                    "name": "Schema v2 bucket",
+                },
+            }),
+            json!({
+                "command": "intake_capture_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "capture": {
+                    "schema_version": INTAKE_CAPTURE_SCHEMA_VERSION,
+                    "expected_revision": before_revision,
+                    "intake_id": "schema-v2-intake",
+                    "bucket_id": "schema-v2-bucket",
+                    "kind": "note",
+                    "content": "must not migrate schema-v2",
+                },
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let envelope = application_envelope(
+                &mut handler,
+                &format!("op_unavailable_v3_intake_{index}"),
+                data,
+            );
+            assert_eq!(envelope.outcome, ApplicationOutcome::Rejected);
+            assert_eq!(
+                envelope.error.as_ref().map(|error| error.code),
+                Some(ErrorCode::ServiceUnavailable)
+            );
+        }
+        let unsupported_artifact_bind = application_envelope(
+            &mut handler,
+            "op_unavailable_v3_artifact_result_bind",
+            json!({
+                "command": "bind_artifact_result_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "session_id": "service-test-session",
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "artifact_result": {
+                    "schema_version": boreal_protocol::models::ARTIFACT_RESULT_BIND_SCHEMA_VERSION,
+                    "work_id": "service-work",
+                    "attempt_id": "attempt-v2",
+                    "fence": 1,
+                    "expected_project_revision": before_revision,
+                    "expected_entity_revision": 1,
+                    "expected_proof_revision": 1,
+                    "result_id": "result-v2",
+                    "contract_revision": 0,
+                    "outputs": [],
+                    "attestation": {"statement": "must not migrate schema-v2"}
+                }
+            }),
+        );
+        assert_eq!(
+            unsupported_artifact_bind.outcome,
+            ApplicationOutcome::Rejected
+        );
+        assert_eq!(
+            unsupported_artifact_bind
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some(ErrorCode::ServiceUnavailable)
+        );
+        let unsupported_artifact_read = application_envelope(
+            &mut handler,
+            "op_unavailable_v3_artifact_result_read",
+            json!({
+                "command": "artifact_result_for_operation_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "credential_ref": SERVICE_TEST_CREDENTIAL,
+                "target_operation_id": "op_result_v2",
+            }),
+        );
+        assert_eq!(
+            unsupported_artifact_read.outcome,
+            ApplicationOutcome::Rejected
+        );
+        assert_eq!(
+            unsupported_artifact_read
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some(ErrorCode::ServiceUnavailable)
+        );
+        let unsupported_close_readiness = application_envelope(
+            &mut handler,
+            "op_unavailable_v3_close_readiness",
+            json!({
+                "command": "work_close_readiness_v1",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "work_id": "service-work",
+            }),
+        );
+        assert_eq!(
+            unsupported_close_readiness.outcome,
+            ApplicationOutcome::Rejected
+        );
+        assert_eq!(
+            unsupported_close_readiness
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some(ErrorCode::ServiceUnavailable)
+        );
         assert_eq!(
             handler
                 .store
@@ -7340,7 +10355,14 @@ mod tests {
         let direct = WorkApplication::new(&handler.store)
             .show_work(&ProjectId::new("show-project"), "show-task")
             .expect("direct work show");
-        assert_eq!(data, &super::super::work_projection_json(&direct));
+        let mut direct_projection = super::super::work_projection_json(&direct, &handler.store);
+        direct_projection["planning_contract"] = super::super::planning_contract_detail_json(
+            &handler.store,
+            "show-project",
+            "show-task",
+        )
+        .expect("direct planning contract readback");
+        assert_eq!(data, &direct_projection);
         let _ = fs::remove_file(db);
     }
 
@@ -7643,6 +10665,16 @@ mod tests {
                 "op_production_concurrent_start",
             )
             .expect("evidence fixture attempt starts");
+        let _result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            "session-production-concurrent",
+            "attempt-production-concurrent",
+            1,
+            "op_production_concurrent_bind_result",
+        );
         drop(handler);
 
         let host = match bind_service_host(
@@ -8779,8 +11811,8 @@ mod tests {
 
     #[test]
     fn service_finish_close_persists_receipt_and_retains_gate_diagnostics() {
-        let db = temp_path("finish.sqlite");
-        let store = seed_store(&db);
+        let root = temp_path("finish");
+        let store = seed_project_store(&root);
         let (_catalog, source_version_id) =
             capture_service_test_source(&store, "service-project", "op_finish_source");
         let revision = store.project_revision("service-project").unwrap().0;
@@ -8790,7 +11822,7 @@ mod tests {
             "command": "claim",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": "session-finish",
             "attempt_id": "attempt-finish",
@@ -8808,7 +11840,7 @@ mod tests {
             "command": "start",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": "session-finish",
             "attempt_id": "attempt-finish",
@@ -8817,11 +11849,21 @@ mod tests {
         handler
             .start(&start, "op_service_finish_start")
             .expect("service start succeeds");
+        let result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            "session-finish",
+            "attempt-finish",
+            1,
+            "op_service_finish_bind_result",
+        );
         let mut finish = json!({
             "command": "finish_close",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": "session-finish",
             "attempt_id": "attempt-finish",
@@ -8839,7 +11881,7 @@ mod tests {
                 "exit_code": 0,
                 "started_at": "unix-ms:1",
                 "ended_at": "unix-ms:2",
-                "source_snapshot_hash": source_version_id,
+                "source_snapshot_hash": result_source_version_id,
                 "config_identity": "config-finish-v1",
                 "environment_fingerprint": "env-1",
                 "output_digest": "digest-1",
@@ -8913,6 +11955,14 @@ mod tests {
             .expect("missing gate list")
             .iter()
             .any(|gate| gate.as_str().is_some_and(|id| id.ends_with(":summary"))));
+        let summary_id = "summary-attempt-finish-service_finish_close";
+        let retained = boreal_application::SummaryQueries::new(&handler.store)
+            .show("service-project", summary_id)
+            .expect("service finish retains a readable summary body");
+        assert_eq!(
+            retained.body.as_deref(),
+            Some("Completed service finish fixture.")
+        );
         let replay = handler
             .finish_close(&finish, "op_service_finish_close")
             .expect("finish close replays its durable result");
@@ -8920,6 +11970,128 @@ mod tests {
         assert_eq!(
             replay.2.expect("replayed finish data")["close_state"],
             "open"
+        );
+        let replayed_summary = boreal_application::SummaryQueries::new(&handler.store)
+            .show("service-project", summary_id)
+            .expect("summary body remains readable after finish replay");
+        assert_eq!(replayed_summary.body, retained.body);
+
+        // Public review list/show must expose canonical events while keeping
+        // old review rows addressable through their historical IDs.
+        let (review_entity_revision, review_proof_revision) = handler
+            .store
+            .work_revisions("service-project", "service-work")
+            .expect("review fixture reads current work revisions");
+        handler
+            .store
+            .execute_batch(&format!(
+                r#"INSERT INTO boreal_submission(
+                    submission_id,project_id,work_id,attempt_id,fence,entity_revision,
+                    proof_revision,source_version_id,config_identity,profile_id,
+                    profile_version,profile_digest,summary_id,summary_digest,
+                    receipt_ids_json,sealed_at
+                 )
+                 SELECT 'service-review-submission',w.project_id,a.work_id,a.attempt_id,
+                    a.fence,{review_entity_revision},{review_proof_revision},
+                    '{result_source_version_id}',a.config_identity,
+                    w.acceptance_profile_id,w.acceptance_profile_version,p.policy_digest,
+                    s.summary_id,s.body_digest,'[]','unix-ms:9000000000000'
+                 FROM attempt a
+                 JOIN work_item w ON w.work_id=a.work_id
+                    AND w.project_id='service-project'
+                 JOIN acceptance_profile p ON p.profile_id=w.acceptance_profile_id
+                    AND p.version=w.acceptance_profile_version
+                 JOIN summary s ON s.work_id=a.work_id AND s.attempt_id=a.attempt_id
+                    AND s.fence=a.fence
+                 WHERE w.project_id='service-project' AND a.work_id='service-work'
+                    AND a.attempt_id='attempt-finish';"#,
+            ))
+            .expect("canonical review submission fixture inserts");
+        handler
+            .store
+            .execute_batch(
+                "INSERT INTO boreal_review_event(
+                    review_event_id,project_id,work_id,submission_id,gate_id,
+                    reviewer_actor_id,outcome,reason,operation_id,created_at
+                 ) VALUES (
+                    'service-canonical-review','service-project','service-work',
+                    'service-review-submission','verification','operator','approved',
+                    'canonical reviewed','op_service_finish_close','unix-ms:9000000000001'
+                 );",
+            )
+            .expect("canonical review event fixture inserts");
+        handler
+            .store
+            .execute_batch(
+                "INSERT INTO review(
+                    review_id,work_id,attempt_id,fence,gate_id,reviewer_actor_id,
+                    decision,reason,source_version_id,policy_digest,created_at
+                 ) VALUES (
+                    'service-legacy-review','service-work','attempt-finish',1,
+                    (SELECT gate_id FROM gate WHERE work_id='service-work'
+                     AND kind='verification' ORDER BY gate_id LIMIT 1),
+                    'operator','accepted','legacy reviewed',
+                    (SELECT source_version_id FROM attempt WHERE attempt_id='attempt-finish'),
+                    'legacy-policy','unix-ms:9000000000000'
+                 );",
+            )
+            .expect("legacy review fixture inserts");
+        let mut list_command = ParsedCommand {
+            path: vec!["review".to_owned(), "list".to_owned()],
+            options: CliOptions::default(),
+        };
+        list_command.options.project = Some("service-project".to_owned());
+        list_command.options.limit = Some(50);
+        let listed = super::super::review_list_result(
+            &list_command,
+            &WorkApplication::new(&handler.store),
+            &handler.store,
+        )
+        .expect("shared service/direct review list reads canonical history");
+        let listed_data = listed.data.expect("review list data");
+        let reviews = listed_data["items"]
+            .as_array()
+            .expect("review history page items");
+        assert!(reviews.iter().any(|review| {
+            review["event_id"] == "canonical:service-canonical-review"
+                && review["provenance"] == "canonical_event"
+                && review["submission_id"].as_str().is_some()
+        }));
+        assert!(reviews.iter().any(|review| {
+            review["event_id"] == "legacy:service-legacy-review"
+                && review["provenance"] == "legacy_review"
+                && review["policy_digest"] == "legacy-policy"
+        }));
+        let review_show = |review_id: &str| {
+            let mut parsed = ParsedCommand {
+                path: vec!["review".to_owned(), "show".to_owned()],
+                options: CliOptions::default(),
+            };
+            parsed.options.project = Some("service-project".to_owned());
+            parsed.options.positionals.push(review_id.to_owned());
+            super::super::review_show_result(
+                &parsed,
+                &WorkApplication::new(&handler.store),
+                &handler.store,
+            )
+        };
+        let canonical_show = review_show("canonical:service-canonical-review")
+            .expect("qualified canonical review show succeeds");
+        assert_eq!(
+            canonical_show.data.expect("canonical review data")["review"]["event_id"],
+            "canonical:service-canonical-review"
+        );
+        let raw_canonical_show = review_show("service-canonical-review")
+            .expect("raw canonical review ID remains readable");
+        assert_eq!(
+            raw_canonical_show.data.expect("raw canonical review data")["review"]["event_id"],
+            "canonical:service-canonical-review"
+        );
+        let legacy_show = review_show("service-legacy-review")
+            .expect("unqualified legacy review ID remains readable");
+        assert_eq!(
+            legacy_show.data.expect("legacy review data")["review"]["policy_digest"],
+            "legacy-policy"
         );
         let parent = handler
             .store
@@ -8933,12 +12105,13 @@ mod tests {
             .expect("result operation reads")
             .expect("result operation exists");
         assert_eq!(result.command, "finish_close.result");
-        let _ = fs::remove_file(db);
+        let _ = fs::remove_dir_all(root);
     }
 
     fn external_finish_fixture(kind: &str) -> (PathBuf, ServiceCommandHandler, Value) {
-        let db = temp_path(kind);
-        let store = seed_store(&db);
+        let root = temp_path(kind);
+        let store = seed_project_store(&root);
+        let db = root.join(".boreal/boreal.sqlite");
         let source_operation = format!("op_{kind}_source");
         let (_catalog, source_version_id) =
             capture_service_test_source(&store, "service-project", &source_operation);
@@ -8950,7 +12123,7 @@ mod tests {
             "command": "claim",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": session_id,
             "attempt_id": attempt_id,
@@ -8971,7 +12144,7 @@ mod tests {
                     "command": "start",
                     "project_id": "service-project",
                     "work_id": "service-work",
-                    "actor_id": DEFAULT_ACTOR,
+                    "actor_id": "agent-1",
                     "harness_id": DEFAULT_HARNESS,
                     "session_id": session_id,
                     "attempt_id": attempt_id,
@@ -8980,6 +12153,16 @@ mod tests {
                 &format!("op_{kind}_start"),
             )
             .expect("finish fixture attempt starts");
+        let result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            &session_id,
+            &attempt_id,
+            1,
+            &format!("op_{kind}_bind_result"),
+        );
 
         let receipt_id = format!("receipt-{kind}");
         let receipt_operation = format!("op-receipt-{kind}");
@@ -8987,7 +12170,7 @@ mod tests {
             "command": "finish_close",
             "project_id": "service-project",
             "work_id": "service-work",
-            "actor_id": DEFAULT_ACTOR,
+            "actor_id": "agent-1",
             "harness_id": DEFAULT_HARNESS,
             "session_id": session_id,
             "attempt_id": attempt_id,
@@ -9005,7 +12188,7 @@ mod tests {
                 "exit_code": 0,
                 "started_at": "unix-ms:1",
                 "ended_at": "unix-ms:2",
-                "source_snapshot_hash": source_version_id,
+                "source_snapshot_hash": result_source_version_id,
                 "config_identity": "config-finish-v1",
                 "environment_fingerprint": "env-1",
                 "output_digest": "digest-1",
@@ -9102,7 +12285,7 @@ mod tests {
             .is_none());
 
         drop(handler);
-        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+        let store = SqliteStore::open(&db, super::super::PRODUCTION_SCHEMA)
             .expect("service database reopens after simulated interruption");
         let mut handler = make_handler(store);
         let resumed = handler
@@ -9144,7 +12327,9 @@ mod tests {
             .finish_close(&finish, operation)
             .expect("exact result replay does not create another receipt or finish");
         assert_eq!(replay.2.unwrap()["receipt_id"], receipt_id.as_str());
-        let _ = fs::remove_file(db);
+        if let Some(root) = db.parent().and_then(Path::parent) {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -9194,7 +12379,7 @@ mod tests {
             .expect("attempt submit is durable before interruption");
 
         drop(handler);
-        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+        let store = SqliteStore::open(&db, super::super::PRODUCTION_SCHEMA)
             .expect("service database reopens after simulated submit response loss");
         let mut handler = make_handler(store);
         let resumed = handler
@@ -9219,7 +12404,9 @@ mod tests {
             .expect("finish result read succeeds")
             .expect("finish result is recorded after submit reconciliation");
         assert_eq!(result_operation.command, "finish_close.result");
-        let _ = fs::remove_file(db);
+        if let Some(root) = db.parent().and_then(Path::parent) {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -9284,7 +12471,7 @@ mod tests {
         );
 
         drop(handler);
-        let store = SqliteStore::open(&db, super::super::LEGACY_SCHEMA)
+        let store = SqliteStore::open(&db, super::super::PRODUCTION_SCHEMA)
             .expect("service database reopens after terminal submit rejection");
         let mut handler = make_handler(store);
         let replay = handler
@@ -9305,7 +12492,9 @@ mod tests {
             .receipt(receipt_id)
             .expect("receipt read succeeds")
             .is_some());
-        let _ = fs::remove_file(db);
+        if let Some(root) = db.parent().and_then(Path::parent) {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -9531,6 +12720,16 @@ mod tests {
                 "op_service_evidence_start",
             )
             .expect("evidence attempt starts");
+        let _result_source_version_id = bind_service_test_final_result(
+            &mut handler,
+            "service-project",
+            "service-work",
+            "agent-1",
+            "session-cli",
+            "attempt-evidence-failure",
+            1,
+            "op_service_evidence_failure_bind_result",
+        );
         let request = json!({
             "command": "evidence_run",
             "project_id": "service-project",

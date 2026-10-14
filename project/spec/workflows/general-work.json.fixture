@@ -61,18 +61,108 @@
     "fixture_check": "json_shape_and_observed_fields_only",
     "limitation": "The CLI service request DTO is not exported from boreal-protocol and is outside this task's write set; this fixture does not create a second protocol DTO."
   },
+  "contract_only_schemas": {
+    "callable": false,
+    "status": "frozen_contract_not_callable",
+    "reason": "BW-S12-T01 freezes additive typed payloads; the owning planning, execution, and knowledge tasks must implement callable operations before these schemas are advertised as available.",
+    "deliverable_requirement": {
+      "schema_version": "boreal.deliverable_requirement.v1",
+      "requirement_key": "final_brief",
+      "purpose": "Deliver the approved project brief.",
+      "required": true,
+      "allowed_media_types": ["text/markdown"],
+      "min_count": 1,
+      "max_count": 1,
+      "criteria": [{"kind":"non_empty"},{"kind":"maximum_bytes","value":131072}]
+    },
+    "accepted_input_bundle": {
+      "schema_version": "boreal.accepted_input_bundle.v1",
+      "project_id": "project_demo",
+      "work_id": "work_task_01",
+      "bindings": [{
+        "input_key": "approved_brief",
+        "role": "brief",
+        "required": true,
+        "access_scope": "accepted_result_only",
+        "artifact": {
+          "project_id": "project_demo",
+          "source_version_id": "source_version_01",
+          "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "media_type": "text/markdown",
+          "byte_count": 128,
+          "availability": "available"
+        },
+        "accepted_result": {
+          "producer_work_id": "work_task_master",
+          "decision_id": "decision_master_01",
+          "submission_id": "submission_master_01",
+          "artifact_set_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }],
+      "bundle_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "deliverable_requirement_v2": {
+      "schema_version": "boreal.deliverable_requirement.v2",
+      "requirement_key": "final_brief",
+      "purpose": "Provide the approved project brief.",
+      "required": true,
+      "deliverable_type": "document",
+      "allowed_media_types": ["text/markdown"],
+      "min_count": 1,
+      "max_count": 1,
+      "criteria": [{"kind":"non_empty"},{"kind":"maximum_bytes","value":131072},{"kind":"text_contains","text":"Approved brief"}]
+    },
+    "accepted_input_bundle_v2": {
+      "schema_version": "boreal.accepted_input_bundle.v2",
+      "project_id": "project_demo",
+      "work_id": "work_task_02",
+      "bindings": [{
+        "input_key": "approved_logo",
+        "role": "accepted_input",
+        "required": true,
+        "access_scope": "project",
+        "artifact": {
+          "project_id": "project_demo",
+          "source_version_id": "source_version_logo_01",
+          "content_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "media_type": "image/png",
+          "byte_count": 4096,
+          "availability": "available"
+        },
+        "produced_by": {
+          "work_id": "work_task_master",
+          "attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+          "result_id": "result_logo_master_01"
+        },
+        "accepted_result": {
+          "producer": {
+            "work_id": "work_task_master",
+            "attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+            "result_id": "result_logo_master_01"
+          },
+          "decision_id": "decision_master_01",
+          "submission_id": "submission_master_01",
+          "artifact_set_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }],
+      "bundle_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
   "v4_optional_contracts": {
     "deliverable_requirements": {
       "status": "unavailable",
-      "reason": "The callable work create/edit DTOs have no requirement collection or typed deliverable schema."
+      "reason": "The callable work create/edit DTOs have no requirement collection or typed deliverable schema.",
+      "schema_status": "frozen_contract_not_callable"
     },
     "accepted_input_schema": {
       "status": "partial",
-      "reason": "Claim/start binds one source_version_id and config_identity; no callable multi-input requirement, role, or access-scope schema is present."
+      "reason": "Claim/start binds one source_version_id and config_identity; no callable multi-input requirement, role, or access-scope schema is present.",
+      "schema_status": "frozen_contract_not_callable"
     },
     "output_submission_and_inspection": {
       "status": "unavailable",
-      "reason": "No public general-work artifact submission or typed output-inspection route is registered."
+      "reason": "No public general-work artifact submission or typed output-inspection route is registered.",
+      "schema_status": "frozen_contract_not_callable"
     }
   },
   "contract_status": "implemented_fields_are_limited_to_the_callable_create_edit_and_claim_routes"

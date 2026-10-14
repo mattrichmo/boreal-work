@@ -1,0 +1,138 @@
+name: Release package candidates
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }} candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install target and TypeScript compiler
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup target add "$TARGET"
+          npm install --global typescript@5.8.3
+
+      - name: Build release candidate
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          output_dir="$RUNNER_TEMP/boreal-release"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            python3 scripts/release/build_release.py \
+              --version "$version" \
+              --target "$TARGET" \
+              --output-dir "$output_dir"
+          else
+            python3 scripts/release/build_release.py \
+              --target "$TARGET" \
+              --output-dir "$output_dir"
+          fi
+
+      - name: Install candidate and smoke package surfaces
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          output_dir="$RUNNER_TEMP/boreal-release"
+          archive=$(find "$output_dir" -maxdepth 1 -type f -name "bwrk-v*-$TARGET.tar.gz" -print -quit)
+          test -n "$archive"
+          sh scripts/release/package-target-smoke.sh "$archive" "$TARGET"
+
+      - name: Inject installer and archive failures on Linux x86-64
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          output_dir="$RUNNER_TEMP/boreal-release"
+          archive=$(find "$output_dir" -maxdepth 1 -type f -name "bwrk-v*-x86_64-unknown-linux-gnu.tar.gz" -print -quit)
+          test -n "$archive"
+          python3 scripts/release/test_package_smoke.py --archive "$archive"
+
+      - name: Retain target archive and release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: boreal-package-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/boreal-release/bwrk-v*-*.tar.gz
+            ${{ runner.temp }}/boreal-release/bwrk-v*-*.release.json
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble:
+    name: Assemble candidate download layout
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download target artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: boreal-package-*-${{ github.run_id }}
+          path: ${{ runner.temp }}/boreal-release-input
+          merge-multiple: true
+
+      - name: Validate and assemble candidate layout
+        env:
+          RELEASE_INPUT_DIR: ${{ runner.temp }}/boreal-release-input
+          RELEASE_CANDIDATE_DIR: ${{ runner.temp }}/boreal-release-candidate
+        run: |
+          python3 scripts/release/assemble_artifacts.py \
+            --input-dir "$RELEASE_INPUT_DIR" \
+            --output-dir "$RELEASE_CANDIDATE_DIR"
+
+      - name: Check release layout assembler failure cases
+        run: python3 scripts/release/test_assemble_artifacts.py
+
+      - name: Retain combined candidate layout
+        uses: actions/upload-artifact@v4
+        with:
+          name: boreal-release-candidates-${{ github.run_id }}
+          path: ${{ runner.temp }}/boreal-release-candidate/*
+          if-no-files-found: error
+          retention-days: 14

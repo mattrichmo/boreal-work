@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,7 @@ def tool_version(command: list[str]) -> str:
 
 
 def source_identity(root: Path) -> str:
+    """Match the Rust CLI build fingerprint exactly."""
     files: set[Path] = set()
     for directory in (root / "crates", root / "skills", root / "project/spec/workflows"):
         if directory.is_dir():
@@ -111,6 +113,30 @@ def source_identity(root: Path) -> str:
         digest.update(b"\n")
     return "sha256:" + digest.hexdigest()
 
+
+def runtime_source_identity(root: Path, app_name: str) -> str:
+    """Fingerprint authored TUI inputs separately from the CLI build fingerprint."""
+    app_root = root / "apps" / app_name
+    files: set[Path] = set()
+    source_root = app_root / "src"
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise ReleaseBuildError(f"TUI source directory is missing: {source_root}")
+    for path in source_root.rglob("*.ts"):
+        relative = path.relative_to(source_root)
+        if path.is_symlink() or relative.name == "test.ts" or relative.name.endswith(".test.ts"):
+            continue
+        files.add(path)
+    for name in ("package.json", "package-lock.json", "tsconfig.json"):
+        path = app_root / name
+        if path.is_file() and not path.is_symlink():
+            files.add(path)
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\n")
+    return "sha256:" + digest.hexdigest()
 
 def binary_version(binary: Path) -> dict[str, Any]:
     result = subprocess.run(
@@ -158,32 +184,45 @@ def asset_record(stage: Path, relative: str) -> dict[str, Any]:
 
 
 TUI_UI_MODULES = ("cells", "dashboard", "input", "keys", "layout", "model", "screen", "terminal-size")
-EXCLUDED_TUI_PARTS = {"node_modules", ".git", ".cache", "node-compile-cache", "__pycache__", "coverage"}
+def compiled_module_paths(source_root: Path) -> list[Path]:
+    """Return runtime outputs derived from authored TypeScript source files."""
+    source_directory = source_root / "src"
+    if source_directory.is_symlink() or not source_directory.is_dir():
+        raise ReleaseBuildError(f"TUI source directory is missing: {source_directory}")
+    modules: list[Path] = []
+    for source in sorted(source_directory.rglob("*.ts")):
+        relative = source.relative_to(source_directory)
+        if (
+            source.is_symlink()
+            or relative.name.endswith(".d.ts")
+            or relative.name == "test.ts"
+            or relative.name.endswith(".test.ts")
+        ):
+            continue
+        modules.append(relative.with_suffix(".js"))
+    if not modules:
+        raise ReleaseBuildError(f"TUI source directory has no runtime modules: {source_directory}")
+    return modules
 
 
-def stage_tui(root: Path, stage: Path) -> None:
-    """Ship the full authored TUI tree and the complete built runtime separately."""
+def stage_tui(root: Path, stage: Path, compiled_root: Path) -> None:
+    """Stage only source-backed runtime modules, omitting TS source and stale dist files."""
     source_root = root / "apps/tui"
+    runtime_root = stage / "lib/boreal/tui"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    modules = compiled_module_paths(source_root)
     for module in TUI_UI_MODULES:
-        if not (source_root / "dist/ui" / f"{module}.js").is_file():
+        if Path("ui") / f"{module}.js" not in modules:
             raise ReleaseBuildError(f"compiled TUI module is missing: ui/{module}.js")
-    for source in sorted(source_root.rglob("*")):
-        relative = source.relative_to(source_root)
-        if any(part in EXCLUDED_TUI_PARTS for part in relative.parts):
-            continue
-        if source.is_symlink():
-            raise ReleaseBuildError(f"TUI source/build contains a symlink: {relative}")
-        if not source.is_file():
-            continue
-        destination = stage / "apps/tui" / relative
+    for relative in modules:
+        source = compiled_root / relative
+        if source.is_symlink() or not source.is_file():
+            raise ReleaseBuildError(f"compiled TUI module is missing or unsafe: {relative}")
+        destination = runtime_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
-        if relative.parts[0] == "dist":
-            runtime = stage / "lib/boreal/tui" / Path(*relative.parts[1:])
-            runtime.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, runtime)
-    # Node must interpret installed .js modules the same way as the source tree.
-    shutil.copy2(source_root / "package.json", stage / "lib/boreal/tui/package.json")
+    # Node must interpret installed .js modules the same way the source tree does.
+    shutil.copy2(source_root / "package.json", runtime_root / "package.json")
 
 
 def collect_assets(stage: Path) -> list[dict[str, Any]]:
@@ -196,47 +235,28 @@ def collect_assets(stage: Path) -> list[dict[str, Any]]:
         for path in sorted(tui_root.rglob("*"))
         if path.is_file()
     )
-    source_root = stage / "apps/tui"
-    if not (source_root / "src/entrypoint.ts").is_file():
-        raise ReleaseBuildError("full apps/tui source tree is missing from the release")
-    paths.extend(path.relative_to(stage).as_posix() for path in sorted(source_root.rglob("*")) if path.is_file())
     global_root = stage / "lib/boreal/global-tui"
     if not (global_root / "entrypoint.js").is_file():
         raise ReleaseBuildError("compiled global TUI entrypoint is missing from the release")
     paths.extend(path.relative_to(stage).as_posix() for path in sorted(global_root.rglob("*")) if path.is_file())
-    global_source = stage / "apps/global-tui"
-    if not (global_source / "src/entrypoint.ts").is_file():
-        raise ReleaseBuildError("global TUI source tree is missing from the release")
-    paths.extend(path.relative_to(stage).as_posix() for path in sorted(global_source.rglob("*")) if path.is_file())
     for module in TUI_UI_MODULES:
         if not (tui_root / "ui" / f"{module}.js").is_file():
             raise ReleaseBuildError(f"installed TUI module is missing: ui/{module}.js")
     return [asset_record(stage, relative) for relative in sorted(set(paths))]
 
 
-def stage_global_tui(root: Path, stage: Path) -> None:
+def stage_global_tui(root: Path, stage: Path, compiled_root: Path) -> None:
     source_root = root / "apps/global-tui"
     runtime_root = stage / "lib/boreal/global-tui"
-    if not (source_root / "dist/entrypoint.js").is_file():
-        raise ReleaseBuildError("build apps/global-tui before packaging")
     runtime_root.mkdir(parents=True, exist_ok=True)
-    for source in sorted(source_root.rglob("*")):
-        relative = source.relative_to(source_root)
-        if any(part in EXCLUDED_TUI_PARTS for part in relative.parts):
-            continue
-        if source.is_symlink():
-            raise ReleaseBuildError(f"global TUI contains a symlink: {relative}")
-        if not source.is_file():
-            continue
-        destination = stage / "apps/global-tui" / relative
+    for relative in compiled_module_paths(source_root):
+        source = compiled_root / relative
+        if source.is_symlink() or not source.is_file():
+            raise ReleaseBuildError(f"compiled Global TUI module is missing or unsafe: {relative}")
+        destination = runtime_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
-        if relative.parts[0] == "dist":
-            runtime = runtime_root / Path(*relative.parts[1:])
-            runtime.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, runtime)
     shutil.copy2(source_root / "package.json", runtime_root / "package.json")
-
 
 def contract_identity(root: Path, output: Path) -> dict[str, Any]:
     run(
@@ -253,26 +273,45 @@ def contract_identity(root: Path, output: Path) -> dict[str, Any]:
     return json.loads(output.read_text(encoding="utf-8"))
 
 
-def build(root: Path, target: str, skip_build: bool) -> None:
-    if skip_build:
-        print("Skipping compilation; using existing release binary and TUI dist")
-        return
-    cargo = [
-        "cargo",
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "boreal-cli",
-        "--bin",
-        "bwrk",
-    ]
-    if target:
-        cargo.extend(["--target", target])
-    run(cargo, cwd=root)
-    run(["npm", "--prefix", str(root / "apps/tui"), "run", "build"], cwd=root)
-    run(["npm", "--prefix", str(root / "apps/global-tui"), "run", "build"], cwd=root)
+def build(
+    root: Path, target: str, skip_cli_build: bool, compiled_output: Path
+) -> tuple[Path, Path]:
+    if not skip_cli_build:
+        cargo = [
+            "cargo",
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "boreal-cli",
+            "--bin",
+            "bwrk",
+        ]
+        if target:
+            cargo.extend(["--target", target])
+        run(cargo, cwd=root)
+    else:
+        print("Skipping CLI compilation; compiling clean TUI runtime output")
 
+    tui_output = compiled_output / "tui"
+    global_tui_output = compiled_output / "global-tui"
+    tui_output.mkdir(parents=True)
+    global_tui_output.mkdir(parents=True)
+    for package, output in (("tui", tui_output), ("global-tui", global_tui_output)):
+        run(
+            [
+                "npm",
+                "--prefix",
+                str(root / f"apps/{package}"),
+                "run",
+                "build",
+                "--",
+                "--outDir",
+                str(output),
+            ],
+            cwd=root,
+        )
+    return tui_output, global_tui_output
 
 def binary_path(root: Path, target: str) -> Path:
     if target:
@@ -287,6 +326,8 @@ def write_release_manifest(
     target: str,
     revision: str,
     source_id: str,
+    tui_source_id: str,
+    global_tui_source_id: str,
     contract: dict[str, Any],
     tui_node_range: str,
 ) -> Path:
@@ -301,6 +342,7 @@ def write_release_manifest(
         "binary": {"path": "bin/bwrk", "sha256": next(a["sha256"] for a in assets if a["path"] == "bin/bwrk")},
         "tui": {
             "runtime": "node",
+            "source_id": tui_source_id,
             "node_range": tui_node_range,
             "api_version": contract["contract"]["api_version"],
             "envelope_schema": contract["components"]["protocol"]["schema"],
@@ -309,6 +351,7 @@ def write_release_manifest(
         },
         "global_tui": {
             "runtime": "node",
+            "source_id": global_tui_source_id,
             "node_range": tui_node_range,
             "api_version": contract["contract"]["api_version"],
             "entrypoint": "lib/boreal/global-tui/entrypoint.js",
@@ -407,27 +450,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-build",
         action="store_true",
-        help="package existing target/release/bwrk and apps/tui/dist output",
+        help="package an existing target/release/bwrk; TUI outputs are still compiled cleanly",
     )
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    root = args.root.resolve()
-    version = args.version or workspace_version(root)
-    if not SEMVER.fullmatch(version):
-        raise ReleaseBuildError(f"release version is not semver: {version!r}")
-    package_version = workspace_version(root)
-    if version != package_version:
-        raise ReleaseBuildError(
-            f"release version {version} does not match Cargo workspace version {package_version}"
-        )
-    target = args.target or host_target()
-    if not TARGET.fullmatch(target):
-        raise ReleaseBuildError(f"unsafe target name: {target!r}")
-    output_dir = args.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+def build_archive(
+    root: Path,
+    output_dir: Path,
+    version: str,
+    target: str,
+    cargo_target: str,
+    compiled_tui: Path,
+    compiled_global_tui: Path,
+) -> Path:
     archive_base = f"bwrk-v{version}-{target}"
     stage = output_dir / archive_base
     archive = output_dir / f"{archive_base}.tar.gz"
@@ -435,15 +471,16 @@ def main() -> int:
     if stage.exists() or archive.exists() or release_manifest.exists():
         raise ReleaseBuildError(f"release output already exists: {output_dir}")
 
-    build(root, args.target or "", args.skip_build)
-    binary = binary_path(root, args.target or "")
-    tui_dist = root / "apps/tui/dist"
+    binary = binary_path(root, cargo_target)
     if not binary.is_file():
         raise ReleaseBuildError(f"release binary is missing: {binary}")
-    if not tui_dist.is_dir():
-        raise ReleaseBuildError(f"compiled TUI directory is missing: {tui_dist}")
     source_id = source_identity(root)
     version_data = binary_version(binary)
+    if version_data.get("version") != version:
+        raise ReleaseBuildError(
+            "release version does not match the version embedded in the CLI: "
+            f"binary={version_data.get('version')!r}, package={version!r}"
+        )
     if version_data.get("build_source_id") != source_id:
         raise ReleaseBuildError(
             "release binary is stale for the current source tree: "
@@ -457,12 +494,11 @@ def main() -> int:
 
     stage.mkdir(parents=True)
     (stage / "bin").mkdir()
-    (stage / "lib/boreal/tui").mkdir(parents=True)
     (stage / "share/boreal").mkdir(parents=True)
     shutil.copy2(binary, stage / "bin/bwrk")
     (stage / "bin/bwrk").chmod(0o755)
-    stage_tui(root, stage)
-    stage_global_tui(root, stage)
+    stage_tui(root, stage, compiled_tui)
+    stage_global_tui(root, stage, compiled_global_tui)
     shutil.copy2(root / "LICENSE", stage / "share/boreal/LICENSE")
     shutil.copy2(root / "install.sh", stage / "share/boreal/install.sh")
     (stage / "share/boreal/install.sh").chmod(0o755)
@@ -476,6 +512,8 @@ def main() -> int:
             target=target,
             revision=build_revision,
             source_id=source_id,
+            tui_source_id=runtime_source_identity(root, "tui"),
+            global_tui_source_id=runtime_source_identity(root, "global-tui"),
             contract=contract,
             tui_node_range=tui_node_range(root),
         )
@@ -501,6 +539,39 @@ def main() -> int:
         "version": version,
         "sha256": sha256_file(archive),
     }, sort_keys=True))
+    return archive
+
+
+def main() -> int:
+    args = parse_args()
+    root = args.root.resolve()
+    version = args.version or workspace_version(root)
+    if not SEMVER.fullmatch(version):
+        raise ReleaseBuildError(f"release version is not semver: {version!r}")
+    package_version = workspace_version(root)
+    if version != package_version:
+        raise ReleaseBuildError(
+            f"release version {version} does not match Cargo workspace version {package_version}"
+        )
+    target = args.target or host_target()
+    if not TARGET.fullmatch(target):
+        raise ReleaseBuildError(f"unsafe target name: {target!r}")
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="boreal-release-", dir=output_dir) as temporary:
+        compiled_tui, compiled_global_tui = build(
+            root, args.target or "", args.skip_build, Path(temporary)
+        )
+        build_archive(
+            root,
+            output_dir,
+            version,
+            target,
+            args.target or "",
+            compiled_tui,
+            compiled_global_tui,
+        )
     return 0
 
 

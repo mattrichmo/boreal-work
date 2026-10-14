@@ -160,6 +160,10 @@ export interface ServerActionSet {
 export interface StatusActionContext {
   state: string;
   missing_facts?: string[];
+  entity_revision?: number | null;
+  proof_revision?: number | null;
+  authenticated_session_id?: string | null;
+  integrity?: string;
 }
 
 export interface StatusItem {
@@ -178,6 +182,10 @@ export interface StatusItem {
   title?: string;
   kind?: WorkKind | string;
   parent_id?: string | null;
+  execution_mode?: ExecutionMode | null;
+  planning_parent_id?: string | null;
+  planning_integrity?: PlanningIntegrity;
+  planning_diagnostic?: string | null;
   description?: string;
   priority?: number;
   dispatch_policy?: DispatchPolicy | string;
@@ -349,6 +357,8 @@ export class TuiTransportError extends Error {
 
 export type WorkKind = "milestone" | "sprint" | "task";
 export type DispatchPolicy = "automatic" | "operator_only" | "paused";
+export type ExecutionMode = "direct" | "container";
+export type PlanningIntegrity = "valid" | "missing" | "inconsistent" | "unavailable" | "unreadable" | "legacy";
 
 export interface AcceptanceProfileInput {
   id: string;
@@ -375,6 +385,7 @@ export interface CreateWorkInput {
   dispatch_policy: DispatchPolicy;
   hard_holds: string[];
   acceptance_profile: AcceptanceProfileInput;
+  execution_mode?: ExecutionMode;
 }
 
 interface CreateProjectWireInput {
@@ -397,6 +408,7 @@ interface CreateWorkWireInput {
   dispatch: DispatchPolicy;
   profile: string;
   profile_version: string;
+  execution_mode?: ExecutionMode;
 }
 
 export interface CreateProjectDraftInput {
@@ -416,6 +428,7 @@ export interface CreateWorkDraftInput {
   dispatch_policy?: DispatchPolicy;
   hard_holds?: string[];
   acceptance_profile?: AcceptanceProfileInput;
+  execution_mode?: ExecutionMode;
 }
 
 export interface ClaimInput {
@@ -496,6 +509,85 @@ export interface OperationReadback {
   recovery?: RecoveryMetadata;
 }
 
+export interface AttemptReceiptRecord {
+  receipt_id: string;
+  work_id: string;
+  attempt_id: string;
+  fence: number;
+  project_id: string;
+  operation_id: string;
+  gate_id: string | null;
+  executable: string;
+  argv_json: string;
+  cwd: string;
+  exit_code: number;
+  started_at: string;
+  ended_at: string;
+  source_version_id: string | null;
+  config_identity: string;
+  environment_fingerprint: string;
+  output_digest: string | null;
+  output_ref: string | null;
+  subject_json: string;
+  coverage_json: string;
+  attestation: "boreal_witnessed" | "external_attested" | "self_reported" | "unknown";
+  result: "passed" | "failed" | "rejected" | "unknown" | "stale";
+  rejection_code: string | null;
+  created_at: string;
+  /** Rust's receipt_record_json projection, null when durable data is malformed. */
+  receipt_payload?: unknown | null;
+  receipt_payload_diagnostic?: string | null;
+}
+
+export interface AttemptReceiptPage {
+  project_id: string;
+  work_id: string;
+  attempt_id: string;
+  fence: number;
+  items: AttemptReceiptRecord[];
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface FinalResultBinding {
+  binding_id: string;
+  project_id: string;
+  work_id: string;
+  attempt_id: string;
+  fence: number;
+  source_version_id: string;
+  content_digest: string;
+  config_identity: string;
+  profile_id: string;
+  profile_version: number;
+  profile_digest: string;
+  entity_revision: number;
+  prior_proof_revision: number;
+  proof_revision: number;
+  operation_id: string;
+  request_digest: string;
+  project_revision: number;
+  created_at: string;
+  lineage_pending: string | null;
+  replayed: boolean;
+}
+
+export interface BindFinalResultInput {
+  project_id: string;
+  actor_id: string;
+  session_id: string;
+  work_id: string;
+  attempt_id: string;
+  fence: number;
+  source_version_id: string;
+  content_digest: string;
+  expected_revision: number;
+  expected_entity_revision: number;
+  expected_proof_revision: number;
+}
+
+/** Legacy mock/adapter shape retained for source compatibility; never used for finish eligibility. */
 export interface ReceiptReadback {
   project_id?: string;
   work_id: string;
@@ -506,6 +598,135 @@ export interface ReceiptReadback {
   timing?: TimingMetadata;
   recovery?: RecoveryMetadata;
 }
+
+export interface WorkEditInput {
+  project_id: string;
+  work_id: string;
+  expected_revision: number;
+  title?: string;
+  description?: string;
+  priority?: number;
+  dispatch_policy?: DispatchPolicy;
+  execution_mode?: ExecutionMode;
+  /** A string moves the work item; omission leaves its parent unchanged. */
+  parent_id?: string;
+  /** Explicitly clears the canonical parent; parent_id and clear_parent are exclusive. */
+  clear_parent?: boolean;
+}
+
+/** Exact typed projection returned by the public work_show service route. */
+export interface WorkProjection {
+  project_id: string;
+  work_id: string;
+  kind: WorkKind | string;
+  parent_id: string | null;
+  lifecycle: string;
+  dispatch_policy: DispatchPolicy | string;
+  priority: number;
+  hard_holds: string[];
+  title: string;
+  description: string;
+  /** Null means legacy work has no projected v3 decomposition node. */
+  execution_mode?: ExecutionMode | null;
+  /** The v3 hierarchy edge (for example, a Task's projected Milestone parent). */
+  planning_parent_id?: string | null;
+  /** Rust-owned assessment of the projected decomposition row and parent chain. */
+  planning_integrity?: PlanningIntegrity;
+  planning_diagnostic?: string | null;
+}
+
+export interface DependencyChangeInput {
+  project_id: string;
+  prerequisite_id: string;
+  dependent_id: string;
+  expected_revision: number;
+}
+
+export interface LocalDateTimeInput {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second?: number;
+}
+
+/** Existing Rust CycleOperationDto, kept as a discriminated union. */
+export type CycleChange =
+  | { kind: "create"; cycle_id: string; name: string; goal: string; timezone: string; start: LocalDateTimeInput; end: LocalDateTimeInput | null; later_fold?: boolean }
+  | { kind: "activate" | "close" | "cancel"; cycle_id: string }
+  | { kind: "assign"; cycle_id: string; assignment_id: string; work_id: string }
+  | { kind: "commit" | "remove"; cycle_id: string; assignment_id: string }
+  | { kind: "carry_over"; cycle_id: string; assignment_id: string; successor_cycle_id: string; successor_assignment_id: string }
+  | { kind: "map_legacy"; cycle_id: string; work_id: string };
+
+export interface CycleCommandInput {
+  expected_revision: number;
+  reason: string;
+  confirmed: true;
+  change: CycleChange;
+}
+
+export type CycleReadView = "list" | "current" | "board" | "report";
+
+export interface SourceListReadback {
+  project_id: string;
+  items: Array<{
+    project_id: string;
+    source_version_id: string;
+    origin: string;
+    media_type: string;
+    byte_count: number;
+    content_digest: string;
+    availability: string;
+    parser_identity?: string | null;
+  }>;
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  catalog_root: string;
+}
+
+export type MemoryCitationInput = { source_version_id: string; location: string };
+export type MemoryOperationInput =
+  | { kind: "draft"; draft_id: string; entry_id: string; title: string; body: string; citations: MemoryCitationInput[] }
+  | { kind: "review"; draft_id: string; decision: string; reason: string }
+  | { kind: "publish"; review_id: string; expected_manifest_identity: string }
+  | { kind: "show"; draft_id: string }
+  | { kind: "search"; text: string | null; entry_id: string | null; source_version_id: string | null; requested_git_revision: string | null; limit: number | null }
+  | { kind: "readback" | "reconcile"; operation_id: string };
+export interface MemoryCommandInput {
+  expected_revision: number | null;
+  confirmed: boolean;
+  change: MemoryOperationInput;
+}
+
+export type RecoveryCommandInput =
+  | { action: "list"; limit: number; after_id?: string }
+  | { action: "resolve"; obligation_id: string; resolution_id: string; outcome: string; reason: string; resource_state: string; expected_revision: number; confirmed: true }
+  | { action: "recover"; descriptor: ServerActionDescriptor; disposition: "adapter_acknowledged" | "reviewed_safe_recovery"; expected_revision: number; confirmed: true };
+
+export interface CompletionCommandInput {
+  kind: string;
+  work_id: string;
+  expected_revision: number;
+  expected_entity_revision: number;
+  expected_proof_revision: number;
+  submission_id?: string | null;
+  target_id?: string | null;
+  predecessor_revision?: number | null;
+  exception_reason?: string | null;
+  reason: string;
+  expires_at_ms?: number | null;
+  confirmed: boolean;
+}
+
+export type WorkspaceAction =
+  | "work_edit" | "dependency_add" | "dependency_remove" | "cycle_change"
+  | "memory_command" | "recovery_command" | "completion" | "session_end" | "bind_final_result"
+  | "source_add";
+export type MutationAction = TuiAction | WorkspaceAction;
 
 export interface VersionedServiceApi extends StatusReader {
   readonly notifications?: RefreshNotificationSource;
@@ -518,13 +739,32 @@ export interface VersionedServiceApi extends StatusReader {
   release(request: RequestEnvelope<ReleaseInput>): Promise<Envelope<unknown>>;
   /** Optional operation readback. The current mounted service may omit it. */
   readOperation?(project_id: string, operation_id: string): Promise<Envelope<OperationReadback>>;
-  /** Optional durable receipt payload readback. Finish stays disabled without this seam. */
+  /** Bounded durable history for one exact active attempt fence. */
+  readReceiptsForAttempt?(project_id: string, work_id: string, attempt_id: string, fence: number, limit?: number, offset?: number): Promise<Envelope<AttemptReceiptPage>>;
+  bindFinalResult?(request: RequestEnvelope<BindFinalResultInput>): Promise<Envelope<FinalResultBinding>>;
+  /** @deprecated Compatibility only. Dashboard hydration never trusts a singular readback. */
   readReceipt?(project_id: string, work_id: string, attempt_id: string, fence: number): Promise<Envelope<ReceiptReadback>>;
   /** Optional read-only workspace projections served by the versioned Rust API. */
   readWorkspaceView?(kind: WorkspaceViewKind, project_id: string): Promise<Envelope<unknown>>;
+  editWork?(request: RequestEnvelope<WorkEditInput>): Promise<Envelope<unknown>>;
+  readWork?(project_id: string, work_id: string): Promise<Envelope<WorkProjection>>;
+  addDependency?(request: RequestEnvelope<DependencyChangeInput>): Promise<Envelope<unknown>>;
+  removeDependency?(request: RequestEnvelope<DependencyChangeInput>): Promise<Envelope<unknown>>;
+  readDependencyGraph?(project_id: string, command?: "dependency_tree" | "dependency_cycles"): Promise<Envelope<unknown>>;
+  readCycle?(project_id: string, view: CycleReadView, cycle_id?: string, limit?: number, offset?: number): Promise<Envelope<unknown>>;
+  changeCycle?(request: RequestEnvelope<{ project_id: string; cycle_change: CycleCommandInput }>): Promise<Envelope<unknown>>;
+  readSources?(project_id: string, limit?: number, offset?: number): Promise<Envelope<SourceListReadback>>;
+  searchSources?(project_id: string, query: string, limit?: number): Promise<Envelope<unknown>>;
+  readReview?(project_id: string, review_id: string): Promise<Envelope<unknown>>;
+  memoryCommand?(request: RequestEnvelope<{ project_id: string; memory: MemoryCommandInput }>): Promise<Envelope<unknown>>;
+  recoveryCommand?(request: RequestEnvelope<{ project_id: string; recovery: RecoveryCommandInput }>): Promise<Envelope<unknown>>;
+  completion?(request: RequestEnvelope<{ project_id: string; completion: CompletionCommandInput }>): Promise<Envelope<unknown>>;
+  readSession?(project_id: string): Promise<Envelope<unknown>>;
+  endSession?(request: RequestEnvelope<{ project_id: string; expected_revision: number }>): Promise<Envelope<unknown>>;
+  captureSource?(request: RequestEnvelope<{ project_id: string; input: string; origin: string; media_type?: string; expected_revision: number }>): Promise<Envelope<unknown>>;
 }
 
-export type WorkspaceViewKind = "cycles" | "reviews" | "memory" | "recovery";
+export type WorkspaceViewKind = "cycles" | "reviews" | "memory" | "recovery" | "dependencies" | "sources" | "session";
 
 export type TuiAction =
   | "create_project" | "create_work" | "claim" | "accept_start"
@@ -566,11 +806,35 @@ export const DASHBOARD_CAPABILITIES: readonly DashboardCapability[] = [
   { route: "dependency.add/remove/tree", label: "Dependencies", status: "unavailable", reason: "Use the project command line to inspect or edit dependencies", owner: "planning/application" },
   { route: "cycle.create/activate/board", label: "Cycle changes and boards", status: "unavailable", reason: "Cycle lists are available here; use the project command line to create, change, or open a cycle board", owner: "hierarchy/application" },
   { route: "intake.list/promote", label: "Intake", status: "unavailable", reason: "Use the project command line for this workflow", owner: "knowledge/application" },
-  { route: "source.list/verify", label: "Sources", status: "unavailable", reason: "Use the project command line for this workflow", owner: "source/application" },
+  { route: "source.list/search/capture", label: "Sources", status: "unavailable", reason: "Source routes are not available in this connection", owner: "source/application" },
+  { route: "evidence.bind_final_result/receipts_for_attempt", label: "Result binding and attempt receipts", status: "unavailable", reason: "Typed result binding and receipt history routes are not available in this connection", owner: "evidence/service" },
   { route: "memory.publish", label: "Published memory changes", status: "unavailable", reason: "Memory search is available here; use the project command line to draft, review, publish, or reconcile memory", owner: "memory/application" },
   { route: "session.end/recover", label: "Session recovery resolution", status: "unavailable", reason: "Recovery obligations are visible here; use the project command line to resolve an obligation or end a session", owner: "runtime/service" },
   { route: "activity.history", label: "Activity history", status: "unavailable", reason: "Use the project command line for this workflow", owner: "protocol/service" },
 ];
+
+function dashboardCapabilities(service: VersionedServiceApi): DashboardCapability[] {
+  return DASHBOARD_CAPABILITIES.map(capability => {
+    const available = capability.route === "work.edit"
+      ? !!service.editWork && !!service.readWork
+      : capability.route === "dependency.add/remove/tree"
+        ? !!service.addDependency && !!service.removeDependency && !!service.readDependencyGraph
+        : capability.route === "cycle.create/activate/board"
+          ? !!service.changeCycle && !!service.readCycle
+          : capability.route === "source.list/search/capture"
+            ? !!service.readSources && !!service.searchSources && !!service.captureSource
+            : capability.route === "evidence.bind_final_result/receipts_for_attempt"
+              ? !!service.bindFinalResult && !!service.readReceiptsForAttempt && !!service.readSources
+              : capability.route === "memory.publish"
+                ? !!service.memoryCommand
+                : capability.route === "session.end/recover"
+                  ? !!service.endSession && !!service.recoveryCommand
+                  : false;
+    return available
+      ? { ...capability, status: "available", reason: "Typed service routes are available in this connection." }
+      : capability;
+  });
+}
 
 export interface StaleRevisionDisplay {
   kind: "stale_revision";
@@ -601,7 +865,7 @@ export class ActionDisabledError extends Error {
   readonly kind = "action_disabled";
 
   constructor(
-    readonly action: TuiAction,
+    readonly action: string,
     readonly reason: string,
     readonly work_id?: string,
   ) {
@@ -635,7 +899,7 @@ export class TuiServiceError extends Error {
 
 export interface PendingOperation {
   operation_id: string;
-  action: TuiAction;
+  action: MutationAction;
   work_id?: string;
 }
 
@@ -956,7 +1220,14 @@ function normalizeStatusItem(value: unknown): StatusItem {
     && (!isObject(rawActionContext) || typeof rawActionContext.state !== "string"
       || (rawActionContext.missing_facts !== undefined
         && (!Array.isArray(rawActionContext.missing_facts)
-          || !rawActionContext.missing_facts.every((fact) => typeof fact === "string"))))) {
+          || !rawActionContext.missing_facts.every((fact) => typeof fact === "string")))
+      || (rawActionContext.entity_revision !== undefined && rawActionContext.entity_revision !== null
+        && (typeof rawActionContext.entity_revision !== "number" || !Number.isSafeInteger(rawActionContext.entity_revision)))
+      || (rawActionContext.proof_revision !== undefined && rawActionContext.proof_revision !== null
+        && (typeof rawActionContext.proof_revision !== "number" || !Number.isSafeInteger(rawActionContext.proof_revision)))
+      || (rawActionContext.authenticated_session_id !== undefined && rawActionContext.authenticated_session_id !== null
+        && typeof rawActionContext.authenticated_session_id !== "string")
+      || (rawActionContext.integrity !== undefined && typeof rawActionContext.integrity !== "string"))) {
     throw new ProtocolEnvelopeError("status action context has invalid fields");
   }
   const actionContext = isObject(rawActionContext) ? rawActionContext : undefined;
@@ -979,6 +1250,14 @@ function normalizeStatusItem(value: unknown): StatusItem {
     throw new ProtocolEnvelopeError("status item next_status_change_at must be a string or null");
   }
   const priority = value.priority === undefined ? undefined : asNumber(value.priority, "priority");
+  const rawExecutionMode = value.execution_mode;
+  if (rawExecutionMode !== undefined && rawExecutionMode !== null && !["direct", "container"].includes(String(rawExecutionMode)))
+    throw new ProtocolEnvelopeError("status item execution_mode must be direct, container, or null");
+  const rawPlanningIntegrity = value.planning_integrity;
+  if (rawPlanningIntegrity !== undefined && !["valid", "missing", "inconsistent", "unavailable", "unreadable", "legacy"].includes(String(rawPlanningIntegrity)))
+    throw new ProtocolEnvelopeError("status item planning_integrity is invalid");
+  const planningParent = asOptionalString(value.planning_parent_id, "planning_parent_id");
+  const planningDiagnostic = asOptionalString(value.planning_diagnostic, "planning_diagnostic");
   return {
     work_id: value.work_id,
     project_id: typeof value.project_id === "string" ? value.project_id : undefined,
@@ -993,6 +1272,10 @@ function normalizeStatusItem(value: unknown): StatusItem {
     title: typeof value.title === "string" ? value.title : undefined,
     kind: typeof value.kind === "string" ? value.kind : undefined,
     parent_id: typeof value.parent_id === "string" || value.parent_id === null ? value.parent_id : undefined,
+    execution_mode: rawExecutionMode as ExecutionMode | null | undefined,
+    planning_parent_id: planningParent,
+    planning_integrity: rawPlanningIntegrity as PlanningIntegrity | undefined,
+    planning_diagnostic: planningDiagnostic,
     description: typeof value.description === "string" ? value.description : undefined,
     priority,
     dispatch_policy: typeof value.dispatch_policy === "string" ? value.dispatch_policy : undefined,
@@ -1008,8 +1291,77 @@ function normalizeStatusItem(value: unknown): StatusItem {
     action_context: actionContext ? {
       state: actionContext.state as string,
       missing_facts: actionContext.missing_facts as string[] | undefined,
+      entity_revision: actionContext.entity_revision as number | null | undefined,
+      proof_revision: actionContext.proof_revision as number | null | undefined,
+      authenticated_session_id: actionContext.authenticated_session_id as string | null | undefined,
+      integrity: actionContext.integrity as string | undefined,
     } : undefined,
   };
+}
+
+function normalizeAttemptReceiptRecord(value: unknown): AttemptReceiptRecord {
+  if (!isObject(value)) throw new ProtocolEnvelopeError("attempt receipt row must be an object");
+  const stringFields = ["receipt_id", "project_id", "work_id", "attempt_id", "operation_id", "executable", "argv_json", "cwd", "started_at", "ended_at", "config_identity", "environment_fingerprint", "subject_json", "coverage_json", "created_at"] as const;
+  for (const field of stringFields) if (typeof value[field] !== "string") throw new ProtocolEnvelopeError(`attempt receipt ${field} must be a string`);
+  for (const field of ["gate_id", "source_version_id", "output_digest", "output_ref", "rejection_code"] as const)
+    if (value[field] !== null && typeof value[field] !== "string") throw new ProtocolEnvelopeError(`attempt receipt ${field} must be a string or null`);
+  if (!Number.isSafeInteger(value.fence) || (value.fence as number) < 0 || !Number.isInteger(value.exit_code))
+    throw new ProtocolEnvelopeError("attempt receipt fence or exit_code is invalid");
+  if (!["boreal_witnessed", "external_attested", "self_reported", "unknown"].includes(String(value.attestation)))
+    throw new ProtocolEnvelopeError("attempt receipt attestation is invalid");
+  if (!["passed", "failed", "rejected", "unknown", "stale"].includes(String(value.result)))
+    throw new ProtocolEnvelopeError("attempt receipt result is invalid");
+  if (value.receipt_payload !== undefined && value.receipt_payload !== null && !isObject(value.receipt_payload))
+    throw new ProtocolEnvelopeError("attempt receipt payload must be an object or null");
+  if (value.receipt_payload_diagnostic !== undefined && value.receipt_payload_diagnostic !== null && typeof value.receipt_payload_diagnostic !== "string")
+    throw new ProtocolEnvelopeError("attempt receipt payload diagnostic must be a string or null");
+  return {
+    receipt_id: value.receipt_id as string,
+    project_id: value.project_id as string,
+    work_id: value.work_id as string,
+    attempt_id: value.attempt_id as string,
+    fence: value.fence as number,
+    operation_id: value.operation_id as string,
+    gate_id: value.gate_id as string | null,
+    executable: value.executable as string,
+    argv_json: value.argv_json as string,
+    cwd: value.cwd as string,
+    exit_code: value.exit_code as number,
+    started_at: value.started_at as string,
+    ended_at: value.ended_at as string,
+    source_version_id: value.source_version_id as string | null,
+    config_identity: value.config_identity as string,
+    environment_fingerprint: value.environment_fingerprint as string,
+    output_digest: value.output_digest as string | null,
+    output_ref: value.output_ref as string | null,
+    subject_json: value.subject_json as string,
+    coverage_json: value.coverage_json as string,
+    attestation: value.attestation as AttemptReceiptRecord["attestation"],
+    result: value.result as AttemptReceiptRecord["result"],
+    rejection_code: value.rejection_code as string | null,
+    created_at: value.created_at as string,
+    receipt_payload: value.receipt_payload,
+    receipt_payload_diagnostic: value.receipt_payload_diagnostic as string | null | undefined,
+  };
+}
+
+function normalizeFinalResultBinding(value: unknown): FinalResultBinding {
+  if (!isObject(value)) throw new ProtocolEnvelopeError("final result binding response must be an object");
+  for (const field of ["binding_id", "project_id", "work_id", "attempt_id", "source_version_id", "content_digest",
+    "config_identity", "profile_id", "profile_digest", "operation_id", "request_digest", "created_at"] as const) {
+    if (typeof value[field] !== "string") throw new ProtocolEnvelopeError(`final result binding ${field} must be a string`);
+  }
+  for (const field of ["fence", "profile_version", "entity_revision", "prior_proof_revision", "proof_revision", "project_revision"] as const) {
+    if (!Number.isSafeInteger(value[field]) || (value[field] as number) < 0)
+      throw new ProtocolEnvelopeError(`final result binding ${field} must be a non-negative integer`);
+  }
+  if ((value.fence as number) === 0 || (value.profile_version as number) === 0
+    || (value.entity_revision as number) === 0 || (value.proof_revision as number) === 0 || (value.project_revision as number) === 0)
+    throw new ProtocolEnvelopeError("final result binding contains a zero revision or fence");
+  if (typeof value.lineage_pending !== "string" && value.lineage_pending !== null)
+    throw new ProtocolEnvelopeError("final result binding lineage_pending must be a string or null");
+  if (typeof value.replayed !== "boolean") throw new ProtocolEnvelopeError("final result binding replayed must be boolean");
+  return value as unknown as FinalResultBinding;
 }
 
 function normalizeDiagnostics(value: unknown): StatusDiagnostic[] {
@@ -1181,6 +1533,15 @@ function validateCreateWorkInput(input: CreateWorkInput): void {
     throw new ProtocolEnvelopeError("create_work.kind must be milestone, sprint, or task");
   }
   if (input.parent_id !== null) requiredString(input.parent_id, "create_work.parent_id");
+  if (input.execution_mode !== undefined && !["direct", "container"].includes(input.execution_mode)) {
+    throw new ProtocolEnvelopeError("create_work.execution_mode must be direct or container");
+  }
+  if (input.kind === "milestone" && input.execution_mode !== undefined && input.execution_mode !== "container") {
+    throw new ProtocolEnvelopeError("milestones must use container execution mode");
+  }
+  if (input.kind === "sprint" && input.execution_mode !== undefined) {
+    throw new ProtocolEnvelopeError("Sprint grouping rows do not have a v3 execution mode");
+  }
   if (!Number.isInteger(input.priority) || input.priority < 0 || input.priority > 255) {
     throw new ProtocolEnvelopeError("create_work.priority must be an integer between 0 and 255");
   }
@@ -1276,32 +1637,166 @@ export class VersionedServiceClient implements VersionedServiceApi {
     return this.call<OperationReadback, typeof data>("operation_show", requestEnvelope(operationId(), data, null));
   }
 
+  readWork(project_id: string, work_id: string): Promise<Envelope<WorkProjection>> {
+    this.assertProject(project_id, "work detail");
+    requiredString(work_id, "work_show.work_id");
+    return this.call("work_show", requestEnvelope(operationId(), { project_id, work_id }, null));
+  }
+
+  readReceiptsForAttempt(project_id: string, work_id: string, attempt_id: string, fence: number, limit = 50, offset = 0): Promise<Envelope<AttemptReceiptPage>> {
+    this.assertProject(project_id, "attempt receipt history");
+    requiredString(work_id, "receipts_for_attempt.work_id");
+    requiredString(attempt_id, "receipts_for_attempt.attempt_id");
+    if (!Number.isSafeInteger(fence) || fence < 0) throw new ProtocolEnvelopeError("receipts_for_attempt.fence must be a non-negative integer");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0)
+      throw new ProtocolEnvelopeError("receipts_for_attempt requires a page limit of 1..100 and a non-negative offset");
+    return this.call("receipts_for_attempt", requestEnvelope(operationId(), {
+      project_id, actor_id: this.actor_id, session_id: this.session_id, work_id, attempt_id, fence, limit, offset,
+    }, null));
+  }
+
+  async bindFinalResult(request: RequestEnvelope<BindFinalResultInput>): Promise<Envelope<FinalResultBinding>> {
+    const input = request.data;
+    this.assertProject(input.project_id, "final result binding");
+    requiredString(input.work_id, "bind_final_result.work_id");
+    requiredString(input.attempt_id, "bind_final_result.attempt_id");
+    requiredString(input.actor_id, "bind_final_result.actor_id");
+    requiredString(input.session_id, "bind_final_result.session_id");
+    requiredString(input.source_version_id, "bind_final_result.source_version_id");
+    if (!/^sha256:[0-9a-f]{64}$/u.test(input.content_digest))
+      throw new ProtocolEnvelopeError("bind_final_result.content_digest must be a lowercase sha256 digest");
+    for (const [field, value] of [["fence", input.fence], ["expected_revision", input.expected_revision],
+      ["expected_entity_revision", input.expected_entity_revision], ["expected_proof_revision", input.expected_proof_revision]] as const) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new ProtocolEnvelopeError(`bind_final_result.${field} must be a positive integer`);
+    }
+    const response = await this.call<FinalResultBinding, BindFinalResultInput>("bind_final_result",
+      requestEnvelope(request.operation_id, input, input.expected_revision, input.attempt_id, input.fence), true);
+    if (response.outcome !== "changed" && response.outcome !== "unchanged") return response;
+    if (!response.data) throw new ProtocolEnvelopeError("final result binding response is missing its binding DTO");
+    return { ...response, data: normalizeFinalResultBinding(response.data) };
+  }
+
   readWorkspaceView(kind: WorkspaceViewKind, project_id: string): Promise<Envelope<unknown>> {
     requiredString(project_id, "workspace_view.project_id");
     if (this.project_id && project_id !== this.project_id) {
       throw new ProtocolEnvelopeError("workspace view belongs to a different mounted project");
     }
-    let command: string;
-    let data: Record<string, unknown>;
     switch (kind) {
       case "cycles":
-        command = "cycle_read";
-        data = { view: "list", project_id, actor_id: this.actor_id, harness_id: this.harness_id, session_id: this.session_id, limit: 100, offset: 0 };
-        break;
+        return this.readCycle(project_id, "list", undefined, 100, 0);
       case "reviews":
-        command = "review_list";
-        data = { project_id, limit: 100, offset: 0 };
-        break;
+        return this.call("review_list", requestEnvelope(operationId(), { project_id, limit: 100, offset: 0 }, null));
       case "memory":
-        command = "memory_command";
-        data = { project_id, memory: { expected_revision: null, confirmed: false, change: { kind: "search", text: null, entry_id: null, source_version_id: null, requested_git_revision: null, limit: 20 } } };
-        break;
+        return this.memoryCommand(requestEnvelope(operationId(), { project_id, memory: {
+          expected_revision: null,
+          confirmed: false,
+          change: { kind: "search", text: null, entry_id: null, source_version_id: null, requested_git_revision: null, limit: 20 },
+        } }, null));
       case "recovery":
-        command = "recovery_command";
-        data = { project_id, recovery: { action: "list", limit: 100 } };
-        break;
+        return this.recoveryCommand(requestEnvelope(operationId(), { project_id, recovery: { action: "list", limit: 100 } }, null));
+      case "dependencies":
+        return this.readDependencyGraph(project_id, "dependency_tree");
+      case "sources":
+        return this.readSources(project_id, 100, 0);
+      case "session":
+        return this.readSession(project_id);
     }
-    return this.call<unknown, typeof data>(command, requestEnvelope(operationId(), data, null));
+  }
+
+  editWork(request: RequestEnvelope<WorkEditInput>): Promise<Envelope<unknown>> {
+    return this.call("work_edit", requestEnvelope(request.operation_id, request.data, request.data.expected_revision), true);
+  }
+
+  addDependency(request: RequestEnvelope<DependencyChangeInput>): Promise<Envelope<unknown>> {
+    // DependencyAddRequest is deny_unknown_fields and does not accept credentials;
+    // its service route authorizes with the authenticated actor and session.
+    return this.call("dependency_add", requestEnvelope(request.operation_id, request.data, request.data.expected_revision), true, false);
+  }
+
+  removeDependency(request: RequestEnvelope<DependencyChangeInput>): Promise<Envelope<unknown>> {
+    return this.call("dependency_remove", requestEnvelope(request.operation_id, request.data, request.data.expected_revision), true);
+  }
+
+  readDependencyGraph(project_id: string, command: "dependency_tree" | "dependency_cycles" = "dependency_tree"): Promise<Envelope<unknown>> {
+    this.assertProject(project_id, "dependency graph");
+    return this.call(command, requestEnvelope(operationId(), { project_id }, null));
+  }
+
+  readCycle(project_id: string, view: CycleReadView, cycle_id?: string, limit = 50, offset = 0): Promise<Envelope<unknown>> {
+    this.assertProject(project_id, "cycle read");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0)
+      throw new ProtocolEnvelopeError("cycle read requires a page limit of 1..100 and a non-negative offset");
+    if ((view === "board" || view === "report") && !cycle_id)
+      throw new ProtocolEnvelopeError(`cycle ${view} requires a cycle_id`);
+    const data = { project_id, view, ...(cycle_id ? { cycle_id } : {}), limit, offset };
+    return this.call("cycle_read", requestEnvelope(operationId(), data, null));
+  }
+
+  changeCycle(request: RequestEnvelope<{ project_id: string; cycle_change: CycleCommandInput }>): Promise<Envelope<unknown>> {
+    const input = request.data.cycle_change;
+    requiredString(input.reason, "cycle_change.reason");
+    if (!input.confirmed) throw new ProtocolEnvelopeError("cycle changes require explicit confirmation");
+    return this.call("cycle_change", requestEnvelope(request.operation_id, request.data, input.expected_revision), true);
+  }
+
+  readSources(project_id: string, limit = 50, offset = 0): Promise<Envelope<SourceListReadback>> {
+    this.assertProject(project_id, "source list");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0)
+      throw new ProtocolEnvelopeError("source list requires a page limit of 1..100 and a non-negative offset");
+    const op = operationId();
+    const data = { project_id, command: "source_list", operation_id: op, limit, offset };
+    return this.call("source_list", requestEnvelope(op, data, null));
+  }
+
+  searchSources(project_id: string, query: string, limit = 20): Promise<Envelope<unknown>> {
+    this.assertProject(project_id, "source search");
+    requiredString(query, "source_search.query");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new ProtocolEnvelopeError("source search limit must be 1..100");
+    return this.call("source_search", requestEnvelope(operationId(), { project_id, query, limit }, null));
+  }
+
+  captureSource(request: RequestEnvelope<{ project_id: string; input: string; origin: string; media_type?: string; expected_revision: number }>): Promise<Envelope<unknown>> {
+    requiredString(request.data.input, "source_add.input");
+    requiredString(request.data.origin, "source_add.origin");
+    const data = { ...request.data, operation_id: request.operation_id };
+    return this.call("source_add", requestEnvelope(request.operation_id, data, request.data.expected_revision), true);
+  }
+
+  readReview(project_id: string, review_id: string): Promise<Envelope<unknown>> {
+    this.assertProject(project_id, "review read");
+    requiredString(review_id, "review_show.review_id");
+    return this.call("review_show", requestEnvelope(operationId(), { project_id, review_id }, null));
+  }
+
+  memoryCommand(request: RequestEnvelope<{ project_id: string; memory: MemoryCommandInput }>): Promise<Envelope<unknown>> {
+    const operation = request.data.memory.change.kind;
+    const mutation = ["draft", "review", "publish", "reconcile"].includes(operation);
+    return this.call("memory_command", requestEnvelope(request.operation_id, request.data, request.data.memory.expected_revision), mutation);
+  }
+
+  recoveryCommand(request: RequestEnvelope<{ project_id: string; recovery: RecoveryCommandInput }>): Promise<Envelope<unknown>> {
+    const mutation = request.data.recovery.action !== "list";
+    return this.call("recovery_command", requestEnvelope(request.operation_id, request.data, "expected_revision" in request.data.recovery ? request.data.recovery.expected_revision : null), mutation);
+  }
+
+  completion(request: RequestEnvelope<{ project_id: string; completion: CompletionCommandInput }>): Promise<Envelope<unknown>> {
+    return this.call("completion", requestEnvelope(request.operation_id, request.data, request.data.completion.expected_revision), true);
+  }
+
+  readSession(project_id: string): Promise<Envelope<unknown>> {
+    this.assertProject(project_id, "session read");
+    return this.call("session_show", requestEnvelope(operationId(), { project_id }, null));
+  }
+
+  endSession(request: RequestEnvelope<{ project_id: string; expected_revision: number }>): Promise<Envelope<unknown>> {
+    return this.call("session_end", requestEnvelope(request.operation_id, request.data, request.data.expected_revision), true);
+  }
+
+  private assertProject(project_id: string, route: string): void {
+    requiredString(project_id, `${route}.project_id`);
+    if (this.project_id && project_id !== this.project_id)
+      throw new ProtocolEnvelopeError(`${route} belongs to a different mounted project`);
   }
 
   createProject(request: RequestEnvelope<CreateProjectInput>): Promise<Envelope<unknown>> {
@@ -1340,6 +1835,7 @@ export class VersionedServiceClient implements VersionedServiceApi {
         // requested version on the wire so a version-aware adapter can
         // bind it; older services ignore this optional field.
         profile_version: validated.data.acceptance_profile.version,
+        ...(validated.data.execution_mode ? { execution_mode: validated.data.execution_mode } : {}),
       },
     };
     return this.call<unknown, CreateWorkWireInput>("create_work", wireRequest, true);
@@ -1379,7 +1875,7 @@ export class VersionedServiceClient implements VersionedServiceApi {
     return this.transport.close?.();
   }
 
-  private async call<Response, Request>(command: string, request: RequestEnvelope<Request>, mutation = false): Promise<Envelope<Response>> {
+  private async call<Response, Request>(command: string, request: RequestEnvelope<Request>, mutation = false, includeCredential = true): Promise<Envelope<Response>> {
     const validated = validateRequestEnvelope(request);
     if (isObject(validated.data)) {
       if (this.project_id && validated.data.project_id && validated.data.project_id !== this.project_id) throw new ProtocolEnvelopeError("request belongs to a different project");
@@ -1387,7 +1883,7 @@ export class VersionedServiceClient implements VersionedServiceApi {
     }
     const data = isObject(validated.data) ? {
       ...validated.data,
-      ...(this.credential_ref ? { credential_ref: this.credential_ref } : {}),
+      ...(includeCredential && this.credential_ref ? { credential_ref: this.credential_ref } : {}),
       command,
       ...(this.project_id && !validated.data.project_id ? { project_id: this.project_id } : {}),
       ...(this.actor_id && !validated.data.actor_id ? { actor_id: this.actor_id } : {}),
@@ -1730,7 +2226,12 @@ export function actionAvailability(
       requires_confirmation: true,
     }));
   }
-  if (item.actions) return serverActionAvailability(item, busy, context);
+  if (item.actions) return serverActionAvailability(item, busy, context).map((entry) => {
+    if (entry.action === "finish" && entry.enabled && context.receipt_available !== true) {
+      return { ...entry, enabled: false, reason: "Select a receipt payload from this exact attempt and fence before finishing." };
+    }
+    return entry;
+  });
   // A status label is a display fact, never authorization. Older/partial
   // servers remain readable but cannot silently enable local mutation policy.
   return (["claim", "accept_start", "evidence", "finish", "release"] as const).map((action) => ({
@@ -1750,6 +2251,10 @@ export interface MountedView {
   pending_operations: PendingOperation[];
   capabilities?: readonly DashboardCapability[];
   selected_receipt_available?: boolean;
+  selected_receipt_id?: string;
+  receipt_readback_available?: boolean;
+  workspace_actions_available?: readonly string[];
+  workspace_views_available?: readonly string[];
 }
 
 export interface TuiWorkflowContext {
@@ -1792,7 +2297,8 @@ function requestEnvelope<T>(operation_id: string, data: T, revision: number | nu
 
 export class TuiWorkflowController {
   private readonly refreshCoordinator: RevisionRefreshCoordinator;
-  private readonly receipts = new Map<string, { attempt_id: string; fence: number; receipt: unknown }>();
+  private readonly receipts = new Map<string, { attempt_id: string; fence: number; receipt_id?: string; receipt: unknown }>();
+  private readonly receiptHistory = new Map<string, Map<string, AttemptReceiptRecord>>();
   private model: MonitoringModel | null = null;
   private mounted = false;
   private authorityFresh = false;
@@ -1800,6 +2306,7 @@ export class TuiWorkflowController {
   private route: Route = { kind: "monitoring" };
   private notice: ControllerNotice | null = null;
   private readonly busy = new Set<TuiAction>();
+  private readonly workspaceBusy = new Set<WorkspaceAction>();
   private readonly pending = new Map<string, PendingOperation>();
   private readonly receiptHydration = new Set<string>();
   private readonly context: TuiWorkflowContext;
@@ -1869,6 +2376,334 @@ export class TuiWorkflowController {
     return response;
   }
 
+  async readCycle(view: CycleReadView, cycle_id?: string, limit = 50, offset = 0): Promise<Envelope<unknown>> {
+    if (!this.mounted || !this.service.readCycle) throw new ProtocolEnvelopeError("cycle reads are unavailable in this connection");
+    return this.readWorkspace("cycle", () => this.service.readCycle!(this.context.project_id, view, cycle_id, limit, offset));
+  }
+
+  async readSources(limit = 50, offset = 0): Promise<Envelope<SourceListReadback>> {
+    if (!this.mounted || !this.service.readSources) throw new ProtocolEnvelopeError("source selection is unavailable in this connection");
+    const response = await this.readWorkspace("source list", () => this.service.readSources!(this.context.project_id, limit, offset));
+    const data = response.data;
+    if (!data || data.project_id !== this.context.project_id || !Array.isArray(data.items)
+      || typeof data.total !== "number" || typeof data.offset !== "number" || typeof data.limit !== "number" || typeof data.has_more !== "boolean"
+      || typeof data.catalog_root !== "string" || data.items.some(item => !item || item.project_id !== this.context.project_id
+        || typeof item.source_version_id !== "string" || !item.source_version_id.trim()
+        || typeof item.origin !== "string" || typeof item.media_type !== "string"
+        || typeof item.byte_count !== "number" || typeof item.content_digest !== "string"
+        || typeof item.availability !== "string"))
+      throw new ProtocolEnvelopeError("source list response is malformed or belongs to a different project");
+    return response;
+  }
+
+  async readWork(work_id: string): Promise<Envelope<WorkProjection>> {
+    if (!this.mounted || !this.service.readWork) throw new ProtocolEnvelopeError("work detail is unavailable in this connection");
+    const response = await this.readWorkspace("work detail", () => this.service.readWork!(this.context.project_id, work_id));
+    const data = response.data;
+    if (!data || data.project_id !== this.context.project_id || data.work_id !== work_id
+      || !["milestone", "sprint", "task"].includes(data.kind)
+      || (data.parent_id !== null && typeof data.parent_id !== "string")
+      || typeof data.lifecycle !== "string"
+      || !["automatic", "operator_only", "paused"].includes(data.dispatch_policy)
+      || !Number.isInteger(data.priority) || data.priority < 0 || data.priority > 255
+      || !Array.isArray(data.hard_holds) || data.hard_holds.some(hold => typeof hold !== "string")
+      || typeof data.title !== "string" || typeof data.description !== "string"
+      || (data.execution_mode !== undefined && data.execution_mode !== null && !["direct", "container"].includes(data.execution_mode))
+      || (data.planning_integrity !== undefined && !["valid", "missing", "inconsistent", "unavailable", "unreadable", "legacy"].includes(data.planning_integrity))
+      || (data.planning_parent_id !== undefined && data.planning_parent_id !== null && typeof data.planning_parent_id !== "string")
+      || (data.planning_diagnostic !== undefined && data.planning_diagnostic !== null && typeof data.planning_diagnostic !== "string"))
+      throw new ProtocolEnvelopeError("work detail response is malformed or belongs to a different work item");
+    return response;
+  }
+
+  async readWorkPage(limit = 100, offset = 0): Promise<Envelope<RevisionedStatusResponse>> {
+    if (!this.mounted) throw new ProtocolEnvelopeError("work list is unavailable before the dashboard is mounted");
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_INLINE_ITEMS || !Number.isInteger(offset) || offset < 0)
+      throw new ProtocolEnvelopeError("work list requires a page limit of 1..100 and a non-negative offset");
+    const response = await this.readWorkspace("work list", () => this.service.readStatus({
+      project_id: this.context.project_id, cursor_revision: null, limit, offset,
+    }));
+    if (!response.data || response.data.project_id !== this.context.project_id || !Array.isArray(response.data.items))
+      throw new ProtocolEnvelopeError("work list response is malformed or belongs to a different project");
+    const normalized = buildMonitoringModel(response);
+    return { ...response, data: { ...response.data, items: normalized.items } };
+  }
+
+  async searchSources(query: string, limit = 20): Promise<Envelope<unknown>> {
+    if (!this.mounted || !this.service.searchSources) throw new ProtocolEnvelopeError("source search is unavailable in this connection");
+    return this.readWorkspace("source search", () => this.service.searchSources!(this.context.project_id, query, limit));
+  }
+
+  async readReview(review_id: string): Promise<Envelope<unknown>> {
+    if (!this.mounted || !this.service.readReview) throw new ProtocolEnvelopeError("review detail is unavailable in this connection");
+    return this.readWorkspace("review detail", () => this.service.readReview!(this.context.project_id, review_id));
+  }
+
+  async readSession(): Promise<Envelope<unknown>> {
+    if (!this.mounted || !this.service.readSession) throw new ProtocolEnvelopeError("session detail is unavailable in this connection");
+    return this.readWorkspace("session", () => this.service.readSession!(this.context.project_id));
+  }
+
+  async readReceiptsForAttempt(work_id: string, limit = 50, offset = 0): Promise<Envelope<AttemptReceiptPage>> {
+    if (!this.mounted || !this.service.readReceiptsForAttempt) throw new ProtocolEnvelopeError("attempt receipt history is unavailable in this connection");
+    const item = this.model?.items.find(candidate => candidate.work_id === work_id);
+    const attempt = item?.attempt;
+    if (!item || !attempt) throw new ProtocolEnvelopeError("receipt history requires the selected work's current attempt");
+    const key = `${work_id}:${attempt.attempt_id}:${attempt.fence}`;
+    const response = await this.readWorkspace("attempt receipt history", () => this.service.readReceiptsForAttempt!(
+      this.context.project_id, work_id, attempt.attempt_id, attempt.fence, limit, offset,
+    ));
+    const raw = response.data as unknown;
+    if (!isObject(raw) || raw.project_id !== this.context.project_id || raw.work_id !== work_id
+      || raw.attempt_id !== attempt.attempt_id || raw.fence !== attempt.fence || !Array.isArray(raw.items)
+      || !Number.isInteger(raw.limit) || (raw.limit as number) < 1 || (raw.limit as number) > 100
+      || !Number.isInteger(raw.offset) || (raw.offset as number) < 0 || typeof raw.has_more !== "boolean")
+      throw new ProtocolEnvelopeError("attempt receipt page does not match the selected project, attempt, and fence");
+    const items = raw.items.map(normalizeAttemptReceiptRecord);
+    if (items.some(record => record.project_id !== this.context.project_id || record.work_id !== work_id
+      || record.attempt_id !== attempt.attempt_id || record.fence !== attempt.fence))
+      throw new ProtocolEnvelopeError("attempt receipt page contained a row outside the exact current fence");
+    const current = this.model?.items.find(candidate => candidate.work_id === work_id)?.attempt;
+    if (!current || current.attempt_id !== attempt.attempt_id || current.fence !== attempt.fence)
+      throw new ProtocolEnvelopeError("the active attempt changed while receipt history was loading");
+    const history = this.receiptHistory.get(key) ?? new Map<string, AttemptReceiptRecord>();
+    for (const record of items) {
+      const prior = history.get(record.receipt_id);
+      if (prior && JSON.stringify(prior) !== JSON.stringify(record))
+        throw new ProtocolEnvelopeError(`receipt ${record.receipt_id} changed between history pages`);
+      history.set(record.receipt_id, record);
+    }
+    this.receiptHistory.set(key, history);
+    return { ...response, data: { ...raw, items } as AttemptReceiptPage };
+  }
+
+  selectReceiptForAttempt(work_id: string, receipt_id: string): void {
+    const item = this.model?.items.find(candidate => candidate.work_id === work_id);
+    const attempt = item?.attempt;
+    if (!item || !attempt) throw new ProtocolEnvelopeError("receipt selection requires the current attempt");
+    requiredString(receipt_id, "receipt_id");
+    const key = `${work_id}:${attempt.attempt_id}:${attempt.fence}`;
+    const record = this.receiptHistory.get(key)?.get(receipt_id);
+    if (!record || record.project_id !== this.context.project_id || record.work_id !== work_id
+      || record.attempt_id !== attempt.attempt_id || record.fence !== attempt.fence)
+      throw new ProtocolEnvelopeError("selected receipt is not in the loaded page for the exact current attempt and fence");
+    if (!isObject(record.receipt_payload))
+      throw new ProtocolEnvelopeError(record.receipt_payload_diagnostic ?? "this durable receipt has no safely reconstructed receipt payload");
+    const payload = record.receipt_payload;
+    const subject = isObject(payload.subject) ? payload.subject : undefined;
+    if (payload.receipt_id !== record.receipt_id || !subject || subject.work_id !== work_id
+      || subject.attempt_id !== attempt.attempt_id || subject.fence !== attempt.fence)
+      throw new ProtocolEnvelopeError("receipt payload identity does not match the selected current attempt and fence");
+    this.receipts.set(work_id, { attempt_id: attempt.attempt_id, fence: attempt.fence, receipt_id, receipt: payload });
+  }
+
+  private async readWorkspace<T>(label: string, read: () => Promise<Envelope<T>>): Promise<Envelope<T>> {
+    let response: Envelope<T>;
+    try { response = validateEnvelope(await read()); }
+    catch (error) {
+      this.notice = { kind: "error", message: `${label} unavailable: ${error instanceof Error ? error.message : String(error)}` };
+      throw error;
+    }
+    if (response.outcome !== "changed" && response.outcome !== "unchanged") {
+      const error = new TuiServiceError(response.error?.code ?? response.outcome, response.error?.message ?? `${label} request did not succeed`, response.operation_id, response as Envelope<unknown>);
+      this.notice = { kind: "error", message: `${label} unavailable: ${error.message}`, error };
+      throw error;
+    }
+    if (isObject(response.data) && typeof response.data.project_id === "string" && response.data.project_id !== this.context.project_id)
+      throw new ProtocolEnvelopeError(`${label} belongs to another project; it was not displayed`);
+    return response;
+  }
+
+  async editWork(input: Omit<WorkEditInput, "project_id" | "expected_revision">): Promise<ActionResult<unknown>> {
+    const service = this.requireWorkspaceService("editWork", "work editing");
+    requiredString(input.work_id, "work_edit.work_id");
+    if (input.parent_id !== undefined && input.clear_parent) throw new ProtocolEnvelopeError("work_edit.parent_id and clear_parent are mutually exclusive");
+    if (input.execution_mode !== undefined && !["direct", "container"].includes(input.execution_mode)) throw new ProtocolEnvelopeError("work_edit.execution_mode must be direct or container");
+    return this.mutateWorkspace("work_edit", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id, work_id: input.work_id, expected_revision: revision,
+      ...(input.parent_id !== undefined ? { parent_id: input.parent_id } : {}),
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.priority !== undefined ? { priority: input.priority } : {}),
+      ...(input.dispatch_policy !== undefined ? { dispatch_policy: input.dispatch_policy } : {}),
+      ...(input.execution_mode !== undefined ? { execution_mode: input.execution_mode } : {}),
+      ...(input.clear_parent ? { clear_parent: true } : {}),
+    }, revision)));
+  }
+
+  async changeDependency(action: "dependency_add" | "dependency_remove", input: Omit<DependencyChangeInput, "project_id" | "expected_revision">): Promise<ActionResult<unknown>> {
+    const method = action === "dependency_add" ? this.service.addDependency : this.service.removeDependency;
+    if (!method) throw new ActionDisabledError(action, "dependency changes are unavailable in this connection");
+    return this.mutateWorkspace(action, (id, revision) => method.call(this.service, requestEnvelope(id, {
+      project_id: this.context.project_id, ...input, expected_revision: revision,
+    }, revision)));
+  }
+
+  async changeCycle(input: CycleCommandInput): Promise<ActionResult<unknown>> {
+    const service = this.requireWorkspaceService("changeCycle", "cycle changes");
+    const expected_revision = this.currentRevision();
+    return this.mutateWorkspace("cycle_change", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id,
+      cycle_change: { ...input, expected_revision: revision },
+    }, expected_revision)));
+  }
+
+  async runMemoryCommand(input: MemoryCommandInput): Promise<ActionResult<unknown>> {
+    const service = this.requireWorkspaceService("memoryCommand", "memory operations");
+    const action = input.change.kind;
+    const mutation = ["draft", "review", "publish", "reconcile"].includes(action);
+    if (!mutation) {
+      const response = await this.readWorkspace("memory", () => service(requestEnvelope(operationId(), {
+        project_id: this.context.project_id, memory: input,
+      }, input.expected_revision)));
+      return { ok: true, envelope: response, data: response.data };
+    }
+    return this.mutateWorkspace("memory_command", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id, memory: { ...input, expected_revision: revision },
+    }, revision)));
+  }
+
+  async runRecoveryCommand(input: RecoveryCommandInput): Promise<ActionResult<unknown>> {
+    const service = this.requireWorkspaceService("recoveryCommand", "recovery operations");
+    if (input.action === "list") {
+      const response = await this.readWorkspace("recovery", () => service(requestEnvelope(operationId(), {
+        project_id: this.context.project_id, recovery: input,
+      }, null)));
+      return { ok: true, envelope: response, data: response.data };
+    }
+    return this.mutateWorkspace("recovery_command", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id,
+      recovery: { ...input, expected_revision: revision } as RecoveryCommandInput,
+    }, revision)));
+  }
+
+  async decideCompletion(input: CompletionCommandInput): Promise<ActionResult<unknown>> {
+    const service = this.requireWorkspaceService("completion", "completion decisions");
+    return this.mutateWorkspace("completion", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id,
+      completion: { ...input, expected_revision: revision },
+    }, revision)));
+  }
+
+  async endSession(): Promise<ActionResult<unknown>> {
+    const service = this.requireWorkspaceService("endSession", "session recovery");
+    return this.mutateWorkspace("session_end", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id, expected_revision: revision,
+    }, revision)));
+  }
+
+  async addSource(input: { input: string; origin: string; media_type?: string }): Promise<ActionResult<unknown>> {
+    const service = this.requireWorkspaceService("captureSource", "source capture");
+    return this.mutateWorkspace("source_add", (id, revision) => service(requestEnvelope(id, {
+      project_id: this.context.project_id,
+      input: input.input,
+      origin: input.origin,
+      ...(input.media_type ? { media_type: input.media_type } : {}),
+      expected_revision: revision,
+    }, revision)));
+  }
+
+  async bindFinalResult(work_id: string, input: { source_version_id: string; content_digest: string }): Promise<ActionResult<FinalResultBinding>> {
+    const service = this.requireWorkspaceService("bindFinalResult", "final result binding");
+    const item = this.item(work_id);
+    const attempt = item.attempt;
+    const facts = item.action_context;
+    if (!attempt) throw new ActionDisabledError("bind_final_result", "the selected work has no current attempt", work_id);
+    if (!facts || facts.state !== "available" || facts.integrity !== "valid"
+      || !Number.isSafeInteger(facts.entity_revision) || (facts.entity_revision ?? 0) <= 0
+      || !Number.isSafeInteger(facts.proof_revision) || (facts.proof_revision ?? 0) <= 0
+      || facts.authenticated_session_id !== this.session()) {
+      throw new ActionDisabledError("bind_final_result", "authoritative entity, proof, and session revisions are unavailable or stale", work_id);
+    }
+    const source_version_id = requiredString(input.source_version_id, "bind_final_result.source_version_id");
+    const content_digest = requiredString(input.content_digest, "bind_final_result.content_digest");
+    if (!/^sha256:[0-9a-f]{64}$/u.test(content_digest))
+      throw new ProtocolEnvelopeError("bind_final_result.content_digest must be a lowercase sha256 digest from the registered source");
+    return this.mutateWorkspace("bind_final_result", async (id, revision) => {
+      const response = await service(requestEnvelope(id, {
+        project_id: this.context.project_id,
+        actor_id: this.actor(),
+        session_id: this.session(),
+        work_id,
+        attempt_id: attempt.attempt_id,
+        fence: attempt.fence,
+        source_version_id,
+        content_digest,
+        expected_revision: revision,
+        expected_entity_revision: facts.entity_revision as number,
+        expected_proof_revision: facts.proof_revision as number,
+      }, revision, attempt.attempt_id, attempt.fence));
+      if (response.outcome !== "changed" && response.outcome !== "unchanged") return response;
+      if (!response.data) throw new ProtocolEnvelopeError("final result binding response is missing its binding DTO");
+      const data = normalizeFinalResultBinding(response.data);
+      if (data.project_id !== this.context.project_id || data.work_id !== work_id
+        || data.attempt_id !== attempt.attempt_id || data.fence !== attempt.fence
+        || data.source_version_id !== source_version_id || data.content_digest !== content_digest
+        || data.operation_id !== id || data.entity_revision !== facts.entity_revision
+        || data.prior_proof_revision !== facts.proof_revision
+        || response.revision !== data.project_revision || data.project_revision < revision) {
+        throw new ProtocolEnvelopeError("final result binding response does not match the submitted project, attempt, revisions, or source");
+      }
+      return { ...response, data };
+    });
+  }
+
+  private requireWorkspaceService<K extends keyof VersionedServiceApi>(key: K, label: string): NonNullable<VersionedServiceApi[K]> {
+    const method = this.service[key];
+    if (typeof method !== "function") throw new ActionDisabledError(String(key), `${label} are unavailable in this connection`);
+    return method as NonNullable<VersionedServiceApi[K]>;
+  }
+
+  private currentRevision(): number {
+    if (!this.authorityFresh || this.model === null) throw new ActionDisabledError("workspace mutation", "refresh the connection before making changes");
+    return this.model.revision;
+  }
+
+  private async mutateWorkspace<T = unknown>(action: WorkspaceAction, invoke: (operation_id: string, revision: number) => Promise<Envelope<T>>): Promise<ActionResult<T>> {
+    if (!this.mounted) throw new ActionDisabledError(action, "dashboard is not mounted");
+    const revision = this.currentRevision();
+    if (this.pending.size) throw new ActionDisabledError(action, "resolve the pending operation before submitting another change");
+    if (this.workspaceBusy.size > 0) throw new ActionDisabledError(action, "another workspace operation is already in progress");
+    this.workspaceBusy.add(action);
+    this.notice = null;
+    const id = operationId();
+    try {
+      const envelope = validateEnvelope<T>(await invoke(id, revision));
+      if (envelope.revision !== null) this.minimumObservedRevision = Math.max(this.minimumObservedRevision, envelope.revision);
+      if (envelope.outcome === "changed" || envelope.outcome === "unchanged") {
+        this.authorityFresh = false;
+        const result: ActionResult<T> = { ok: true, envelope, data: envelope.data };
+        if (this.mounted) {
+          try { await this.refresh(); }
+          catch (error) { this.notice = { kind: "error", message: `change committed at revision ${envelope.revision ?? "unknown"}; refresh unavailable: ${error instanceof Error ? error.message : String(error)}` }; }
+        }
+        return result;
+      }
+      const error = new TuiServiceError(envelope.error?.code ?? "unknown", envelope.error?.message ?? "service rejected operation", envelope.operation_id, envelope as Envelope<unknown>);
+      if (error.unknown) {
+        this.authorityFresh = false;
+        this.pending.set(envelope.operation_id, { operation_id: envelope.operation_id, action });
+        this.notice = { kind: "unknown", message: `${error.message} Read operation ${envelope.operation_id} before retrying.`, error };
+      } else if (error.stale) {
+        this.notice = { kind: "stale_revision", message: error.message, stale: {
+          kind: "stale_revision", message: error.message,
+          expected_revision: envelope.error?.expected_revision ?? revision,
+          observed_revision: envelope.error?.observed_revision ?? envelope.revision,
+          operation_id: envelope.operation_id, error_code: error.code,
+        }, error };
+        if (this.mounted) { try { await this.refresh(); } catch { /* Keep the precise stale error. */ } }
+      } else this.notice = { kind: "error", message: error.message, error };
+      return { ok: false, envelope: envelope as Envelope<unknown>, error };
+    } catch (error) {
+      this.authorityFresh = false;
+      this.pending.set(id, { operation_id: id, action });
+      this.notice = { kind: "unknown", message: `Operation ${id} may have been admitted. Read it back before retrying. ${error instanceof Error ? error.message : String(error)}` };
+      throw error;
+    } finally {
+      this.workspaceBusy.delete(action);
+    }
+  }
+
   view(): MountedView {
     const selected = this.route.work_id ? this.model?.items.find((item) => item.work_id === this.route.work_id) ?? null : null;
     const pending = selected ? this.pendingForWork(selected.work_id) : undefined;
@@ -1899,8 +2734,25 @@ export class TuiWorkflowController {
       stale_revision: this.notice?.stale ?? null,
       busy_actions: [...this.busy],
       pending_operations: [...this.pending.values()],
-      capabilities: DASHBOARD_CAPABILITIES,
+      capabilities: dashboardCapabilities(this.service),
       selected_receipt_available: selected ? this.currentReceipt(selected) !== undefined : false,
+      selected_receipt_id: selected ? this.currentReceiptId(selected) : undefined,
+      receipt_readback_available: typeof this.service.readReceiptsForAttempt === "function",
+      workspace_actions_available: [
+        ...(this.service.editWork && this.service.readWork ? ["edit_work"] : []),
+        ...(this.service.addDependency ? ["dependency_add"] : []),
+        ...(this.service.removeDependency ? ["dependency_remove"] : []),
+        ...(this.service.changeCycle ? ["cycle_create", "cycle_activate", "cycle_close", "cycle_cancel", "cycle_assign", "cycle_commit", "cycle_remove", "cycle_carry_over"] : []),
+        ...(this.service.readCycle ? ["cycle_board"] : []),
+        ...(this.service.memoryCommand ? ["memory_search", "memory_show", "memory_draft", "memory_review", "memory_publish", "memory_reconcile"] : []),
+        ...(this.service.recoveryCommand ? ["recovery_resolve"] : []),
+        ...(this.service.endSession ? ["session_end"] : []),
+        ...(this.service.captureSource ? ["source_capture"] : []),
+        ...(this.service.searchSources ? ["source_search"] : []),
+        ...(this.service.readReview ? ["review_show"] : []),
+        ...(this.service.bindFinalResult && this.service.readSources ? ["bind_result"] : []),
+      ],
+      workspace_views_available: this.service.readWorkspaceView ? ["cycles", "reviews", "memory", "recovery", "dependencies", "sources", "session"] : [],
     };
   }
 
@@ -2048,6 +2900,7 @@ export class TuiWorkflowController {
       dispatch_policy: input.dispatch_policy ?? "automatic",
       hard_holds: [...(input.hard_holds ?? [])],
       acceptance_profile: input.acceptance_profile ?? { id: "focused", version: "1" },
+      ...(input.kind === "milestone" ? { execution_mode: "container" } : input.kind === "task" ? { execution_mode: input.execution_mode ?? "direct" } : {}),
     };
     const result = await this.mutate("create_work", (id, revision) => this.service.createWork(requestEnvelope(id, request, revision)), undefined);
     if (result.ok) {
@@ -2123,7 +2976,14 @@ export class TuiWorkflowController {
       receipt: evidence,
     };
     const result = await this.mutate("evidence", (id, revision) => this.service.addEvidence(requestEnvelope(id, input, revision, attempt.attempt_id, attempt.fence)), work_id);
-    if (result.ok) this.receipts.set(work_id, { attempt_id: attempt.attempt_id, fence: attempt.fence, receipt: evidence });
+    if (result.ok) {
+      this.receiptHistory.delete(`${work_id}:${attempt.attempt_id}:${attempt.fence}`);
+      this.receipts.set(work_id, {
+        attempt_id: attempt.attempt_id, fence: attempt.fence,
+        ...(isObject(evidence) && typeof evidence.receipt_id === "string" ? { receipt_id: evidence.receipt_id } : {}),
+        receipt: evidence,
+      });
+    }
     return result;
   }
 
@@ -2198,6 +3058,13 @@ export class TuiWorkflowController {
     return stored.receipt;
   }
 
+  private currentReceiptId(item: StatusItem): string | undefined {
+    const stored = this.receipts.get(item.work_id);
+    return stored && item.attempt && stored.attempt_id === item.attempt.attempt_id && stored.fence === item.attempt.fence
+      ? stored.receipt_id
+      : undefined;
+  }
+
   private pendingForWork(work_id: string): PendingOperation | undefined {
     return [...this.pending.values()].find((operation) => operation.work_id === work_id);
   }
@@ -2205,26 +3072,15 @@ export class TuiWorkflowController {
   private async hydrateReceiptForWork(work_id: string): Promise<void> {
     const item = this.model?.items.find((candidate) => candidate.work_id === work_id);
     const attempt = item?.attempt;
-    if (!item || !attempt || this.currentReceipt(item) !== undefined) return;
-    if (item.receipt !== undefined) {
-      this.receipts.set(work_id, { attempt_id: attempt.attempt_id, fence: attempt.fence, receipt: item.receipt });
-      return;
-    }
-    if (!this.service.readReceipt) return;
+    if (!item || !attempt || !this.service.readReceiptsForAttempt) return;
     const key = `${work_id}:${attempt.attempt_id}:${attempt.fence}`;
+    if (this.receiptHistory.has(key)) return;
     if (this.receiptHydration.has(key)) return;
     this.receiptHydration.add(key);
     try {
-      const envelope = validateEnvelope<ReceiptReadback>(await this.service.readReceipt(
-        this.context.project_id, work_id, attempt.attempt_id, attempt.fence,
-      ));
-      const receipt = envelope.data;
-      if ((envelope.outcome === "changed" || envelope.outcome === "unchanged") && receipt
-        && receipt.work_id === work_id && receipt.attempt_id === attempt.attempt_id && receipt.fence === attempt.fence) {
-        this.receipts.set(work_id, { attempt_id: attempt.attempt_id, fence: attempt.fence, receipt: receipt.receipt });
-      }
+      await this.readReceiptsForAttempt(work_id, 50, 0);
     } catch (error) {
-      this.notice = { kind: "error", message: `durable receipt readback unavailable: ${error instanceof Error ? error.message : String(error)}` };
+      this.notice = { kind: "error", message: `durable receipt history unavailable: ${error instanceof Error ? error.message : String(error)}` };
     } finally {
       this.receiptHydration.delete(key);
     }

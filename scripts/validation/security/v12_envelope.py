@@ -10,6 +10,7 @@ the evidence/receipt assertion.
 from __future__ import annotations
 
 import hashlib
+import argparse
 import json
 import os
 import shutil
@@ -183,7 +184,12 @@ def credential(root: Path, actor: str) -> str:
     return value
 
 
-def resolve_binary(root: Path) -> Path:
+def resolve_binary(root: Path, selected: Path | None = None) -> Path:
+    if selected is not None:
+        candidate = selected.expanduser().resolve()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+        fail(f"selected CLI binary is missing or not executable: {candidate}")
     configured = os.environ.get("BOREAL_BWRK")
     candidate = Path(configured) if configured else root / "target" / "debug" / "bwrk"
     if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -503,7 +509,10 @@ def run_sidecar_failure(binary: Path, root: Path, db: Path, socket_path: Path, s
 def main() -> int:
     global PROJECT_REVISION, OPERATOR_CREDENTIAL, AGENT_CREDENTIAL
     root = Path(__file__).resolve().parents[3]
-    binary = resolve_binary(root)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bin", type=Path, help="exact CLI executable for the V12 production gate")
+    args = parser.parse_args()
+    binary = resolve_binary(root, args.bin)
     with tempfile.TemporaryDirectory(prefix="boreal-v12-security-") as directory:
         fixture = Path(directory)
         db = fixture / ".boreal" / "boreal.sqlite"

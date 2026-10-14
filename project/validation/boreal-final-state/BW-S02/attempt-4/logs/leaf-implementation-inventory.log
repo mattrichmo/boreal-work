@@ -1,0 +1,167 @@
+== tracked implementation files at d1f8ae0b ==
+.github/workflows/ci.yml
+.github/workflows/release.yml
+apps/global-tui/README.md
+apps/global-tui/package.json
+apps/global-tui/src/client.ts
+apps/global-tui/src/entrypoint.ts
+apps/global-tui/src/forms.ts
+apps/global-tui/src/interaction.ts
+apps/global-tui/src/interface.ts
+apps/global-tui/src/model.ts
+apps/global-tui/src/node-shims.d.ts
+apps/global-tui/src/terminal/cells.ts
+apps/global-tui/src/terminal/input.ts
+apps/global-tui/src/terminal/keys.ts
+apps/global-tui/src/terminal/screen.ts
+apps/global-tui/src/view.ts
+apps/global-tui/tests/client-recovery.test.mjs
+apps/global-tui/tests/global-tui.test.mjs
+apps/global-tui/tests/interaction.test.mjs
+apps/global-tui/tests/model-view.test.mjs
+apps/global-tui/tests/search-pickers.test.mjs
+apps/global-tui/tsconfig.json
+apps/tui/README.md
+apps/tui/installer/wizard-body.cjs
+apps/tui/installer/wizard.cjs
+apps/tui/package.json
+apps/tui/smoke/service-smoke.mjs
+apps/tui/src/client.ts
+apps/tui/src/entrypoint.ts
+apps/tui/src/full-screen.ts
+apps/tui/src/line-shell.ts
+apps/tui/src/node-shims.d.ts
+apps/tui/src/node-transport.ts
+apps/tui/src/terminal.ts
+apps/tui/src/test.ts
+apps/tui/src/ui/cells.ts
+apps/tui/src/ui/dashboard.ts
+apps/tui/src/ui/input.ts
+apps/tui/src/ui/keys.ts
+apps/tui/src/ui/layout.ts
+apps/tui/src/ui/model.ts
+apps/tui/src/ui/screen.ts
+apps/tui/src/ui/terminal-size.ts
+apps/tui/src/ui/workspace-view.ts
+apps/tui/tests/fixtures.mjs
+apps/tui/tests/m02-contract.test.mjs
+apps/tui/tests/premium.test.mjs
+apps/tui/tests/pty-harness.mjs
+apps/tui/tests/responsive.test.mjs
+apps/tui/tsconfig.json
+crates/cli/src/dashboard.rs
+crates/cli/src/global_dashboard.rs
+docs/INSTALL.md
+docs/PACKAGING.md
+install.sh
+project/GLOBAL_MANAGER.md
+scripts/release/assemble_artifacts.py
+scripts/release/build_release.py
+scripts/release/fixtures/snapshot/Cargo.toml
+scripts/release/fixtures/snapshot/project/spec/guidance/directive-registry.json
+scripts/release/fixtures/snapshot/project/spec/guidance/safe-argv.json
+scripts/release/fixtures/snapshot/project/spec/manifest.json
+scripts/release/fixtures/snapshot/project/spec/memory-manifest.json
+scripts/release/fixtures/snapshot/project/spec/protocol/compatibility.md
+scripts/release/fixtures/snapshot/project/spec/protocol/protocol-manifest.json
+scripts/release/fixtures/snapshot/project/spec/schema-v2.sql
+scripts/release/fixtures/snapshot/project/spec/workflows/manifest.json
+scripts/release/fixtures/snapshot/project/spec/workflows/package.json
+scripts/release/fixtures/snapshot/project/spec/workflows/route.json
+scripts/release/fixtures/snapshot/skills/manifest.json
+scripts/release/git_transport_preflight.py
+scripts/release/local_pre_push.py
+scripts/release/package-smoke.sh
+scripts/release/package-target-smoke.sh
+scripts/release/release_identity.py
+scripts/release/render_homebrew_formula.py
+scripts/release/test_assemble_artifacts.py
+scripts/release/test_build_release.py
+scripts/release/test_git_transport_preflight.py
+scripts/release/test_local_pre_push.py
+scripts/release/test_package_smoke.py
+scripts/release/test_release_identity.py
+scripts/release/two-project-smoke.py
+scripts/release/verify_release_package.py
+scripts/validation/run_full_suite.py
+scripts/validation/test_run_full_suite.py
+== leaf evidence files present ==
+== S02 leaf implementation markers ==
+docs/PACKAGING.md:14:  --target aarch64-apple-darwin \
+docs/PACKAGING.md:39:manifest, and `SHA256SUMS`. The checksum file contains only the target archives
+docs/PACKAGING.md:143:The direct installer downloads `SHA256SUMS` from the same GitHub Release as
+docs/PACKAGING.md:145:artifact mismatches but does not authenticate the release with an independent
+docs/INSTALL.md:6:effect. Installation automatically provisions a separate per-user global
+docs/INSTALL.md:26:For Apple Silicon macOS and x86_64 Linux, use the prebuilt release installer. It fetches the installer from `main`, selects the compatible archive from the latest GitHub release, verifies the archive against `SHA256SUMS`, and installs it under `~/.local`. The current release, v0.2.1, includes those two platform archives. The release workflow retains candidate packages as workflow artifacts and does not publish GitHub Releases. The install process does not invoke GitHub Actions or modify project databases.
+docs/INSTALL.md:170:still requires Node.js 20–26; if the selected Homebrew runtime is outside that
+docs/INSTALL.md:178:verify it against `SHA256SUMS`, and install `bin/bwrk` plus
+docs/INSTALL.md:215:The installer verifies each downloaded archive against `SHA256SUMS` from the
+.github/workflows/release.yml:23:          - target: aarch64-apple-darwin
+.github/workflows/release.yml:25:          - target: x86_64-apple-darwin
+.github/workflows/release.yml:27:          - target: x86_64-unknown-linux-gnu
+.github/workflows/release.yml:82:        if: matrix.target == 'x86_64-unknown-linux-gnu'
+.github/workflows/release.yml:85:          archive=$(find "$output_dir" -maxdepth 1 -type f -name "bwrk-v*-x86_64-unknown-linux-gnu.tar.gz" -print -quit)
+scripts/validation/run_full_suite.py:397:            "global-tui-typecheck",
+scripts/validation/run_full_suite.py:400:        ("global-tui-tests", ["npm", "test", "--prefix", "apps/global-tui"]),
+crates/cli/src/global_dashboard.rs:60:        TuiEntrypoint::JavaScript(_) => Some(resolve_node_runtime("BOREAL_NODE_BINARY")?),
+crates/cli/src/global_dashboard.rs:437:fn resolve_node_runtime(variable: &str) -> Result<PathBuf, CliError> {
+crates/cli/src/global_dashboard.rs:497:            "Global dashboard requires Node.js 20–26; {detail}. Install a supported Node.js release or set {variable} to its executable. CLI commands and `bwrk dashboard global --json` do not require Node.js."
+crates/cli/src/global_dashboard.rs:515:            .contains("requires Node.js 20–26"));
+crates/cli/src/dashboard.rs:288:        Some(resolve_node_runtime("BOREAL_NODE", "project dashboard")?)
+crates/cli/src/dashboard.rs:824:fn resolve_node_runtime(variable: &str, dashboard: &str) -> Result<PathBuf, CliError> {
+crates/cli/src/dashboard.rs:891:            "{dashboard} requires Node.js 20–26; {detail}. Install a supported Node.js release or set {variable} to its executable. CLI commands and dashboard JSON snapshots do not require Node.js."
+crates/cli/src/dashboard.rs:1400:                .contains("requires Node.js 20–26")
+scripts/release/test_release_identity.py:128:        target = "aarch64-apple-darwin"
+scripts/release/test_release_identity.py:130:        target = "x86_64-apple-darwin"
+scripts/release/test_release_identity.py:132:        target = "x86_64-unknown-linux-gnu"
+scripts/release/test_release_identity.py:147:        sums_path = assets / "SHA256SUMS"
+scripts/release/test_package_smoke.py:49:        return "x86_64-unknown-linux-gnu"
+scripts/release/test_package_smoke.py:51:        return "aarch64-apple-darwin"
+scripts/release/test_package_smoke.py:53:        return "x86_64-apple-darwin"
+scripts/release/test_package_smoke.py:73:    (directory / "SHA256SUMS").write_text(f"{digest}  {entry_name}\n", encoding="ascii")
+scripts/release/test_package_smoke.py:207:        fail(f"installer did not fetch exactly the archive and SHA256SUMS for {label}")
+scripts/release/test_package_smoke.py:228:        # SHA256SUMS naming that exact basename with sha256sum's separator.
+scripts/release/test_package_smoke.py:246:            f"https://github.com/{REPOSITORY}/releases/download/v{version}/SHA256SUMS",
+scripts/release/test_package_smoke.py:269:            "SHA256SUMS basename mismatch",
+scripts/release/test_package_smoke.py:283:        expect_rejected(result, "SHA256SUMS path mismatch")
+scripts/release/test_package_smoke.py:284:        if f"SHA256SUMS does not contain {archive_name}" not in result.stderr:
+scripts/release/test_package_smoke.py:292:        expect_rejected(result, "SHA256SUMS digest mismatch")
+scripts/release/assemble_artifacts.py:16:    "aarch64-apple-darwin",
+scripts/release/assemble_artifacts.py:17:    "x86_64-apple-darwin",
+scripts/release/assemble_artifacts.py:18:    "x86_64-unknown-linux-gnu",
+scripts/release/assemble_artifacts.py:156:    (output_dir / "SHA256SUMS").write_text(
+install.sh:69:The separate per-user global manager database is provisioned automatically.
+install.sh:150:  die "interactive installation requires Node.js 20–26 and a terminal; use --yes for a plain install"
+install.sh:730:            { id: 'dashboard', label: 'Interactive work dashboard', hint: 'Terminal dashboard · requires Node.js 20–26', on: s.dashboard },
+install.sh:1245:        arm64|aarch64) TARGET=aarch64-apple-darwin ;;
+install.sh:1246:        x86_64|amd64) TARGET=x86_64-apple-darwin ;;
+install.sh:1252:        x86_64|amd64) TARGET=x86_64-unknown-linux-gnu ;;
+install.sh:1279:    || ! curl -fsSL -o /dev/null "$RELEASE_URL/SHA256SUMS"; then
+install.sh:1291:        aarch64-apple-darwin \
+install.sh:1292:        x86_64-apple-darwin \
+install.sh:1293:        x86_64-unknown-linux-gnu \
+install.sh:1350:  curl -fsSL "$RELEASE_URL/SHA256SUMS" -o "$TEMP_ROOT/SHA256SUMS"
+install.sh:1370:  ' "$TEMP_ROOT/SHA256SUMS")
+install.sh:1371:  [ -n "$EXPECTED_SHA" ] || die "SHA256SUMS does not contain $ARCHIVE_NAME exactly once as a valid SHA-256 entry"
+install.sh:1373:  # SHA256SUMS is downloaded from the same release as the archive. This detects
+scripts/release/package-smoke.sh:16:# asset basename consumed by install.sh's SHA256SUMS lookup.
+scripts/release/package-smoke.sh:17:python3 - "$archive" "$scratch/release/SHA256SUMS" <<'PY'
+scripts/release/package-smoke.sh:26:    raise SystemExit("package smoke: SHA256SUMS must name the release asset by basename")
+scripts/release/package-smoke.sh:29:    raise SystemExit("package smoke: SHA256SUMS digest does not match the release asset")
+scripts/release/package-smoke.sh:32:# Exercise the normal pinned-release download and SHA256SUMS lookup through a
+scripts/release/test_build_release.py:29:            older_archive = output / "bwrk-v0.2.0-aarch64-apple-darwin.tar.gz"
+scripts/release/test_build_release.py:32:                output / "bwrk-v0.2.1-x86_64-unknown-linux-gnu.tar.gz",
+scripts/release/test_build_release.py:33:                output / "bwrk-v0.2.1-aarch64-apple-darwin.tar.gz",
+scripts/release/test_build_release.py:40:            sums_path = output / "SHA256SUMS"
+scripts/release/test_build_release.py:64:                "aarch64-apple-darwin",
+scripts/release/test_build_release.py:65:                "x86_64-apple-darwin",
+scripts/release/test_build_release.py:66:                "x86_64-unknown-linux-gnu",
+scripts/release/package-target-smoke.sh:7:  aarch64-apple-darwin|x86_64-apple-darwin|x86_64-unknown-linux-gnu) ;;
+scripts/release/package-target-smoke.sh:11:  Darwin:arm64|Darwin:aarch64) actual_target=aarch64-apple-darwin ;;
+scripts/release/package-target-smoke.sh:12:  Darwin:x86_64|Darwin:amd64) actual_target=x86_64-apple-darwin ;;
+scripts/release/package-target-smoke.sh:13:  Linux:x86_64|Linux:amd64) actual_target=x86_64-unknown-linux-gnu ;;
+scripts/release/render_homebrew_formula.py:14:    "aarch64-apple-darwin": "SHA256_AARCH64_APPLE_DARWIN",
+scripts/release/render_homebrew_formula.py:15:    "x86_64-apple-darwin": "SHA256_X86_64_APPLE_DARWIN",
+scripts/release/render_homebrew_formula.py:16:    "x86_64-unknown-linux-gnu": "SHA256_X86_64_UNKNOWN_LINUX_GNU",
+scripts/release/build_release.py:434:    (output_dir / "SHA256SUMS").write_text(
+scripts/release/test_assemble_artifacts.py:60:        entries = (output / "SHA256SUMS").read_text(encoding="utf-8").splitlines()

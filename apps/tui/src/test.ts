@@ -161,6 +161,55 @@ function monitoring(revision: number, items: StatusItem[]): Envelope<RevisionedS
   }, "unchanged", null, `2026-09-14T22:${revision}:00Z`);
 }
 
+function fixtureReceiptPage(input: {
+  project_id: string;
+  work_id: string;
+  attempt_id: string;
+  fence: number;
+  receipt_id: string;
+  receipt_payload: unknown;
+  subject: { work_id: string; attempt_id: string; fence: number };
+  limit: number;
+  offset: number;
+}) {
+  return {
+    project_id: input.project_id,
+    work_id: input.work_id,
+    attempt_id: input.attempt_id,
+    fence: input.fence,
+    items: [{
+      receipt_id: input.receipt_id,
+      project_id: input.project_id,
+      work_id: input.work_id,
+      attempt_id: input.attempt_id,
+      fence: input.fence,
+      operation_id: `operation-${input.receipt_id}`,
+      gate_id: null,
+      executable: "fixture-check",
+      argv_json: "[]",
+      cwd: "/workspace",
+      exit_code: 0,
+      started_at: "2026-10-13T00:00:00Z",
+      ended_at: "2026-10-13T00:00:01Z",
+      source_version_id: null,
+      config_identity: "config-fixture",
+      environment_fingerprint: "environment-fixture",
+      output_digest: null,
+      output_ref: null,
+      subject_json: JSON.stringify(input.subject),
+      coverage_json: "{}",
+      attestation: "boreal_witnessed" as const,
+      result: "passed" as const,
+      rejection_code: null,
+      created_at: "2026-10-13T00:00:01Z",
+      receipt_payload: input.receipt_payload,
+    }],
+    limit: input.limit,
+    offset: input.offset,
+    has_more: false,
+  };
+}
+
 const initialItems = [
   item("w1", "queued", { reason_codes: ["prerequisite_open:w0"] }),
   item("w2", "ready"),
@@ -1400,14 +1449,30 @@ assert((await readbackController.claim("readback-task", testClaimContext)).ok &&
 
 let hydratedReceipt: unknown;
 let finishSummary = "";
-const durableReceipt = { receipt_id: "receipt-durable", result: "passed" };
+const durableReceipt = {
+  receipt_id: "receipt-durable",
+  subject: { work_id: "receipt-task", attempt_id: "attempt-durable", fence: 8 },
+  result: "passed",
+};
+let receiptReadbackIdentity: { project_id: string; work_id: string; attempt_id: string; fence: number; limit: number; offset: number } | undefined;
 const receiptService: VersionedServiceApi = {
   ...service,
   async readStatus() { return monitoring(140, [item("receipt-task", "in_progress", {
     attempt: { attempt_id: "attempt-durable", fence: 8, phase: "accepted" },
   })]); },
-  async readReceipt() {
-    return envelope(140, { work_id: "receipt-task", attempt_id: "attempt-durable", fence: 8, receipt: durableReceipt }, "changed");
+  async readReceiptsForAttempt(project_id, work_id, attempt_id, fence, limit = 50, offset = 0) {
+    receiptReadbackIdentity = { project_id, work_id, attempt_id, fence, limit, offset };
+    return envelope(140, fixtureReceiptPage({
+      project_id: "project_test",
+      work_id: "receipt-task",
+      attempt_id: "attempt-durable",
+      fence: 8,
+      receipt_id: "receipt-durable",
+      receipt_payload: durableReceipt,
+      subject: durableReceipt.subject,
+      limit,
+      offset,
+    }), "changed");
   },
   async finish(request) {
     hydratedReceipt = request.data.receipt;
@@ -1417,7 +1482,15 @@ const receiptService: VersionedServiceApi = {
 };
 const receiptController = new MountedWorkflowController(receiptService, { context: tuiContext });
 const receiptView = await receiptController.mount({ kind: "work", project_id: "project_test", work_id: "receipt-task" });
-assert(receiptView.selected_receipt_available === true, "mounted controller rehydrates a durable receipt after restart/navigation");
+assert(JSON.stringify(receiptReadbackIdentity) === JSON.stringify({
+  project_id: "project_test", work_id: "receipt-task", attempt_id: "attempt-durable", fence: 8, limit: 50, offset: 0,
+}), "mounted receipt hydration requests the exact current project, work, attempt, and fence");
+assert(receiptView.selected_receipt_available === false
+  && receiptController.actionAvailability("receipt-task").find((action) => action.action === "finish")?.enabled === false,
+"durable receipt history alone does not make finish eligible before explicit receipt selection");
+receiptController.selectReceiptForAttempt("receipt-task", "receipt-durable");
+assert(receiptController.view().selected_receipt_available === true, "mounted controller loads a durable receipt for explicit selection after restart/navigation");
+assert(receiptController.actionAvailability("receipt-task").find((action) => action.action === "finish")?.enabled === true, "finish is eligible after the exact attempt-and-fence receipt payload is rehydrated");
 assert((await receiptController.finish("receipt-task", "durable closeout")).ok && hydratedReceipt === durableReceipt && finishSummary === "durable closeout", "finish uses the rehydrated receipt payload");
 
 let refreshReads = 0;
@@ -1440,12 +1513,28 @@ const finishScreenService: VersionedServiceApi = {
   ...service,
   async readStatus() { return monitoring(160, [item("finish-screen", "in_progress", {
     attempt: { attempt_id: "attempt-screen", fence: 2, phase: "accepted" },
-    receipt: { receipt_id: "receipt-screen", result: "passed" },
   })]); },
+  async readReceiptsForAttempt(project_id, work_id, attempt_id, fence, limit = 50, offset = 0) {
+    const subject = { work_id: "finish-screen", attempt_id: "attempt-screen", fence: 2 };
+    return envelope(160, fixtureReceiptPage({
+      project_id,
+      work_id,
+      attempt_id,
+      fence,
+      receipt_id: "receipt-screen",
+      receipt_payload: { receipt_id: "receipt-screen", subject, result: "passed" },
+      subject,
+      limit,
+      offset,
+    }), "changed");
+  },
   async finish(request) { fullScreenFinishSummary = request.data.summary ?? ""; return envelope(161, null, "changed"); },
 };
 const finishScreenController = new MountedWorkflowController(finishScreenService, { context: tuiContext });
-await finishScreenController.mount({ kind: "monitoring", project_id: "project_test" });
+await finishScreenController.mount({ kind: "work", project_id: "project_test", work_id: "finish-screen" });
+assert(finishScreenController.actionAvailability("finish-screen").find((action) => action.action === "finish")?.enabled === false, "full-screen finish remains disabled until a current attempt receipt is selected");
+finishScreenController.selectReceiptForAttempt("finish-screen", "receipt-screen");
+assert(finishScreenController.actionAvailability("finish-screen").find((action) => action.action === "finish")?.enabled === true, "full-screen finish accepts only the explicitly selected current attempt receipt");
 const finishScreenTerminal = new FakeFullScreenTerminal(120);
 const finishScreenRun = runFullScreen(finishScreenController, finishScreenTerminal, { auto_refresh_ms: 60_000 });
 finishScreenTerminal.emitData("\r");

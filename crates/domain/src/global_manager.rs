@@ -48,7 +48,11 @@ pub enum StatusCategory {
     Blocked,
     Completed,
     Cancelled,
+    Inbox,
 }
+
+/// Stable workflow status used for classification-free personal capture.
+pub const PERSONAL_INBOX_STATUS_ID: &str = "personal-inbox";
 
 impl StatusCategory {
     pub fn as_str(self) -> &'static str {
@@ -59,6 +63,7 @@ impl StatusCategory {
             Self::Blocked => "blocked",
             Self::Completed => "completed",
             Self::Cancelled => "cancelled",
+            Self::Inbox => "inbox",
         }
     }
 }
@@ -73,8 +78,48 @@ impl TryFrom<&str> for StatusCategory {
             "blocked" => Ok(Self::Blocked),
             "completed" => Ok(Self::Completed),
             "cancelled" => Ok(Self::Cancelled),
+            "inbox" => Ok(Self::Inbox),
             _ => Err(GlobalManagerDomainError::InvalidCategory(value.to_owned())),
         }
+    }
+}
+
+/// Immutable identity of the bytes accepted by an explicit Global capture.
+/// The original text is retained separately as a witness, never copied into
+/// every management item record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureOrigin {
+    pub digest: String,
+    pub source_ref: Option<String>,
+}
+
+impl CaptureOrigin {
+    pub fn validate(&self) -> Result<(), GlobalManagerDomainError> {
+        let Some(hex) = self.digest.strip_prefix("sha256:") else {
+            return Err(GlobalManagerDomainError::InvalidCaptureDigest(
+                self.digest.clone(),
+            ));
+        };
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(GlobalManagerDomainError::InvalidCaptureDigest(
+                self.digest.clone(),
+            ));
+        }
+        if let Some(source_ref) = self.source_ref.as_deref() {
+            if source_ref.trim().is_empty()
+                || source_ref.len() > 4096
+                || source_ref.chars().any(char::is_control)
+            {
+                return Err(GlobalManagerDomainError::InvalidCaptureSourceRef(
+                    source_ref.to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -83,6 +128,70 @@ pub enum ManagementItemKind {
     Task,
     Subtask,
     Milestone,
+}
+
+/// Relationship vocabulary for management items. Hierarchy is deliberately
+/// independent: only the two dependency kinds produce prerequisite edges.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagementRelationshipKind {
+    DependsOn,
+    Blocks,
+    Related,
+}
+
+impl TryFrom<&str> for ManagementRelationshipKind {
+    type Error = GlobalManagerDomainError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "depends_on" => Ok(Self::DependsOn),
+            "blocks" => Ok(Self::Blocks),
+            "related" => Ok(Self::Related),
+            _ => Err(GlobalManagerDomainError::InvalidRelationshipKind(
+                value.to_owned(),
+            )),
+        }
+    }
+}
+
+/// Canonicalize the user-facing relationship into prerequisite → dependent.
+/// “A blocks B” and “B depends on A” describe the same edge. `related` never
+/// participates in readiness.
+pub fn prerequisite_to_dependent(
+    source: &str,
+    target: &str,
+    kind: ManagementRelationshipKind,
+) -> Option<(String, String)> {
+    match kind {
+        ManagementRelationshipKind::Blocks => Some((source.to_owned(), target.to_owned())),
+        ManagementRelationshipKind::DependsOn => Some((target.to_owned(), source.to_owned())),
+        ManagementRelationshipKind::Related => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagementPrerequisiteState {
+    Satisfied,
+    Incomplete,
+    ArchivedIncomplete,
+    Cancelled,
+    Missing,
+}
+
+/// Only completed work satisfies a management prerequisite. Archiving does
+/// not erase a completed result and cannot make incomplete or cancelled work
+/// appear complete.
+pub fn management_prerequisite_state(
+    category: Option<StatusCategory>,
+    archived: bool,
+) -> ManagementPrerequisiteState {
+    match category {
+        Some(StatusCategory::Completed) => ManagementPrerequisiteState::Satisfied,
+        Some(StatusCategory::Cancelled) => ManagementPrerequisiteState::Cancelled,
+        Some(_) if archived => ManagementPrerequisiteState::ArchivedIncomplete,
+        Some(_) => ManagementPrerequisiteState::Incomplete,
+        None => ManagementPrerequisiteState::Missing,
+    }
 }
 
 impl ManagementItemKind {
@@ -268,7 +377,10 @@ pub fn validate_identifier(value: &str) -> Result<(), GlobalManagerDomainError> 
 pub enum GlobalManagerDomainError {
     InvalidIdentifier(String),
     InvalidCategory(String),
+    InvalidCaptureDigest(String),
+    InvalidCaptureSourceRef(String),
     InvalidItemKind(String),
+    InvalidRelationshipKind(String),
     EmptyTitle,
     EmptyLabel,
     SubtaskNeedsParent,
@@ -282,7 +394,14 @@ impl fmt::Display for GlobalManagerDomainError {
         match self {
             Self::InvalidIdentifier(v) => write!(f, "invalid global identifier: {v:?}"),
             Self::InvalidCategory(v) => write!(f, "unknown workflow category: {v}"),
+            Self::InvalidCaptureDigest(v) => write!(f, "invalid capture digest: {v}"),
+            Self::InvalidCaptureSourceRef(v) => {
+                write!(f, "invalid capture source reference: {v:?}")
+            }
             Self::InvalidItemKind(v) => write!(f, "unknown management item kind: {v}"),
+            Self::InvalidRelationshipKind(v) => {
+                write!(f, "unknown management relationship kind: {v}")
+            }
             Self::EmptyTitle => f.write_str("item title is required"),
             Self::EmptyLabel => f.write_str("workflow status label is required"),
             Self::SubtaskNeedsParent => f.write_str("a subtask requires a parent item"),
@@ -300,10 +419,64 @@ impl std::error::Error for GlobalManagerDomainError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn dependency_validation_rejects_cycles() {
         let edges = vec![("a".into(), "b".into()), ("b".into(), "c".into())];
         assert!(validate_dependency("c", "a", &edges).is_err());
         assert!(validate_dependency("a", "d", &edges).is_ok());
+    }
+
+    #[test]
+    fn dependency_relationship_kinds_share_prerequisite_direction() {
+        let expected = Some(("prerequisite".to_owned(), "dependent".to_owned()));
+        assert_eq!(
+            prerequisite_to_dependent(
+                "dependent",
+                "prerequisite",
+                ManagementRelationshipKind::DependsOn,
+            ),
+            expected
+        );
+        assert_eq!(
+            prerequisite_to_dependent(
+                "prerequisite",
+                "dependent",
+                ManagementRelationshipKind::Blocks,
+            ),
+            expected
+        );
+        assert_eq!(
+            prerequisite_to_dependent(
+                "dependent",
+                "prerequisite",
+                ManagementRelationshipKind::Related,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_completed_management_work_satisfies_a_prerequisite() {
+        assert_eq!(
+            management_prerequisite_state(Some(StatusCategory::Completed), true),
+            ManagementPrerequisiteState::Satisfied
+        );
+        assert_eq!(
+            management_prerequisite_state(Some(StatusCategory::Cancelled), true),
+            ManagementPrerequisiteState::Cancelled
+        );
+        assert_eq!(
+            management_prerequisite_state(Some(StatusCategory::Open), true),
+            ManagementPrerequisiteState::ArchivedIncomplete
+        );
+        assert_eq!(
+            management_prerequisite_state(Some(StatusCategory::Waiting), false),
+            ManagementPrerequisiteState::Incomplete
+        );
+        assert_eq!(
+            management_prerequisite_state(None, false),
+            ManagementPrerequisiteState::Missing
+        );
     }
 }

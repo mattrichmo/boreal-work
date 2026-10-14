@@ -1,0 +1,21 @@
+
+> build
+> tsc --outDir /private/tmp/boreal-s02-t90-attempt-2-release/boreal-release-516224e5/tui
+
+
+> build
+> tsc --outDir /private/tmp/boreal-s02-t90-attempt-2-release/boreal-release-516224e5/global-tui
+
+{"manifest": "/private/tmp/boreal-s02-t90-attempt-2-release/bwrk-v0.2.1-aarch64-apple-darwin.contracts.json", "ok": true, "snapshot_identity": "sha256:06e5426d76cbd09f82dde035bce4bd07f87de4650b53e998316147cc4ceb3c7f"}
+release package manifest and workflow/skill capability identities verified
++ rustc -vV
+Skipping CLI compilation; compiling clean TUI runtime output
++ npm --prefix /Users/cybertron/.codex/worktrees/v4-s02-s03-gates/boreal-work/apps/tui run build -- --outDir /private/tmp/boreal-s02-t90-attempt-2-release/boreal-release-516224e5/tui
++ npm --prefix /Users/cybertron/.codex/worktrees/v4-s02-s03-gates/boreal-work/apps/global-tui run build -- --outDir /private/tmp/boreal-s02-t90-attempt-2-release/boreal-release-516224e5/global-tui
++ /opt/homebrew/opt/python@3.14/bin/python3.14 /Users/cybertron/.codex/worktrees/v4-s02-s03-gates/boreal-work/scripts/release/release_identity.py manifest --root /Users/cybertron/.codex/worktrees/v4-s02-s03-gates/boreal-work --output /private/tmp/boreal-s02-t90-attempt-2-release/bwrk-v0.2.1-aarch64-apple-darwin.contracts.json
++ rustc --version
++ cargo --version
++ node --version
++ tsc --version
++ /opt/homebrew/opt/python@3.14/bin/python3.14 /Users/cybertron/.codex/worktrees/v4-s02-s03-gates/boreal-work/scripts/release/verify_release_package.py /private/tmp/boreal-s02-t90-attempt-2-release/bwrk-v0.2.1-aarch64-apple-darwin /private/tmp/boreal-s02-t90-attempt-2-release/bwrk-v0.2.1-aarch64-apple-darwin/share/boreal/release.json
+{"archive": "/private/tmp/boreal-s02-t90-attempt-2-release/bwrk-v0.2.1-aarch64-apple-darwin.tar.gz", "release_manifest": "/private/tmp/boreal-s02-t90-attempt-2-release/bwrk-v0.2.1-aarch64-apple-darwin.release.json", "sha256": "sha256:27e2ff66db40d2a958f9e54ea4f67fdf406ee07186b656782ececbb9373dd082", "target": "aarch64-apple-darwin", "version": "0.2.1"}

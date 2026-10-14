@@ -7,9 +7,11 @@ effect. Installation automatically provisions a separate per-user global
 manager SQLite database, including CLI-only installations. The global manager
 is independent of the installation prefix and any project folder. Source
 builds are supported on Apple Silicon and Intel macOS and x86_64 Linux.
-Published v0.2.1 archives cover Apple Silicon macOS and x86_64 Linux; Linux
-ARM64 and Windows remain unsupported until their transport and SQLite runtime
-builds are verified.
+The release workflow builds candidate archives for macOS ARM64, macOS x86-64,
+and Linux x86-64. These workflow artifacts are qualification inputs; they are
+not published releases or platform-support claims. Published v0.2.1 archives
+cover Apple Silicon macOS and x86_64 Linux. Linux ARM64 and Windows remain
+unsupported until their transport and SQLite runtime builds are verified.
 
 The CLI works without Node.js. The project and Global dashboards require
 Node.js 20 through 26 and report an actionable error before starting their
@@ -21,7 +23,7 @@ or a command name. JSON snapshots remain usable without Node.js.
 
 ## Install or update from GitHub
 
-For Apple Silicon macOS and x86_64 Linux, use the prebuilt release installer. It fetches the installer from `main`, selects the compatible archive from the latest GitHub release, verifies the archive against `SHA256SUMS`, and installs it under `~/.local`. The current release, v0.2.1, includes those two platform archives. Installation does not use GitHub Actions or modify project databases.
+For Apple Silicon macOS and x86_64 Linux, use the prebuilt release installer. It fetches the installer from `main`, selects the compatible archive from the latest GitHub release, verifies the archive against `SHA256SUMS`, and installs it under `~/.local`. The current release, v0.2.1, includes those two platform archives. The release workflow retains candidate packages as workflow artifacts and does not publish GitHub Releases. The install process does not invoke GitHub Actions or modify project databases.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --yes
@@ -36,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/m
 
 ### Source-build fallback
 
-Intel macOS does not have a prebuilt v0.2.1 archive. To build from source, use the explicit option below. This requires Git, Rust/Cargo, Node.js 20 through 26, npm, Python 3, and `tsc`. Use `--ref REF` to pin a source branch or tag.
+Intel macOS does not have a published prebuilt archive. Candidate artifacts from the release workflow are not a substitute for target install and launch qualification. Until that qualification is accepted and a release is published, build from source using the explicit option below. This requires Git, Rust/Cargo, Node.js 20 through 26, npm, Python 3, and `tsc`. Use `--ref REF` to pin a source branch or tag.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --from-source --yes
@@ -59,11 +61,26 @@ and business tasks, configurable workflow statuses, milestones and notes in
 the separate global store. `bwrk dashboard` inside an initialized code project
 continues to open that project's dashboard.
 
+A workspace link is bound to the validated database instance and restore
+lineage as well as its logical project ID. Replacing or restoring a workspace
+database can make its existing Global link unavailable, even when the project
+ID and folder path stay the same. Run
+`bwrk global project link PROJECT --workspace PATH` again to validate and bind
+the current workspace database. Workspace links created before lineage binding
+was introduced also need this one-time relink after upgrading; their original
+records do not contain enough identity data to validate automatically.
+
 The default global database is `~/Library/Application Support/Boreal/global.sqlite`
 on macOS and `${XDG_STATE_HOME:-~/.local/state}/boreal/global.sqlite` on Linux.
 `BOREAL_GLOBAL_ROOT` selects an explicit alternative data directory, useful for
 isolated tests or portable use. Reinstallation preserves this data; do not
 store it beneath the binary prefix or delete it when removing installed files.
+`bwrk global backup` writes validated physical packages beneath the Global
+data directory's `backups/` folder. Boreal does not automatically prune these
+packages; choose and maintain a retention policy that preserves a verified
+recovery copy. Keep the backup directory private because packages contain
+private notes and complete revision history. Removing the binary or its
+installation prefix leaves the Global data directory and backups in place.
 The global dashboard is packaged separately at
 `lib/boreal/global-tui/entrypoint.js` and uses the versioned Rust service API.
 
@@ -117,6 +134,10 @@ The saved operator is used for subsequent commands in this project. Enroll
 separate worker actors with `bwrk auth key` and `bwrk auth grant`, and use distinct `--actor` and
 `--session` values for each worker. An empty project has no claimable work until
 you create and launch its plan. Run `bwrk doctor` after initialization.
+
+For the complete Operator-to-worker onboarding path, including source capture,
+verifier configuration, reviewer enrollment, harness liveness, result binding,
+and guided closeout, see [Agent onboarding](AGENT_ONBOARDING.md).
 
 `auth key --actor WORKER --actor-role agent --json` returns an
 `enrollment_path` to a private file; it does not grant authority or print the
@@ -174,5 +195,25 @@ complete CLI + TUI install.
 
 Older v2 archives may not contain the updater. Run the official installer once
 to replace one of those archives; subsequent `bwrk update` and
-`bwrk upgrade --machine` calls use the packaged, verified installer. Project
-databases are intentionally left untouched by machine updates.
+`bwrk upgrade --machine` calls use the packaged, verified installer. The
+installer stages package files and can restore the prior package after a
+failure. It runs Global bootstrap after publishing the package, but package
+rollback is not yet paired with a physical Global database backup and restore.
+Keep a verified Global backup for an update that may require a Global schema
+migration; restoring the prior package does not itself restore a matching
+Global database. Project databases are intentionally left untouched by machine
+updates.
+
+## Uninstall and artifact trust
+
+Uninstall the binary with the package manager used to install it, or remove the
+files under the selected binary prefix. This does not remove project data or
+the per-user Global root. Global backups are retained until an operator removes
+them; keep an independently stored, verified backup before deleting the last
+recovery copy.
+
+The installer verifies each downloaded archive against `SHA256SUMS` from the
+same GitHub Release over HTTPS. This detects a mismatched or corrupted archive,
+but the checksum file is not an independent signature or signing identity.
+Release candidates retained by GitHub Actions are not published releases and
+are not installable through the release installer.

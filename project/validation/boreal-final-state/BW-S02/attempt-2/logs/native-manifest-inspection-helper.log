@@ -1,0 +1,7 @@
+Read-only helper attempt had an incorrect field name:
+
+Traceback (most recent call last):
+  File "<stdin>", line 11, in <module>
+KeyError: 'revision'
+
+The release manifest uses `source_revision`. Follow-up inspection used the correct key and is captured in `artifacts/native-release-identity.json`. This was an evidence-summarization helper error, not a release builder or package smoke failure.

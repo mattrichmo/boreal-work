@@ -142,8 +142,10 @@ private executable owned by the running user, verifies its `--version --json`
 build revision and source fingerprint against the current clean CLI source
 inputs, rejects untracked source inputs, and removes dynamic loader search and
 injection variables from the child
-environment. It accepts only the repository's `target/debug/bwrk` binary. It
-verifies canonical `auth show`, `session show`,
+environment. The aggregate acceptance runner passes its selected absolute
+`--bin` through this gate, including a packaged qualification binary; the
+script's debug-build default is only for a local standalone run. It verifies
+canonical `auth show`, `session show`,
 `work show`, and `agent resume` readbacks. Missing, revoked, insecure, or
 mismatched inputs fail before the synthetic probes. This preflight does not
 claim work and does not establish stop/recovery evidence by itself. Credentials

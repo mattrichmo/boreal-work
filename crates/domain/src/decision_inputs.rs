@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::work_model_v3::WorkSchedule;
+use crate::work_model_v3::{BusinessDate, BusinessDateBoundary, BusinessTimeContext, WorkSchedule};
 use crate::{
     ActorId, ActorRole, AttemptId, AttemptPhase, ConfigIdentity, DependencyPolicy, DispatchPolicy,
     GateId, GateKind, GateState, PersistedLifecycle, ProfileId, ProjectId, Revision, SessionId,
@@ -148,7 +148,9 @@ impl ProfileIdentity {
     }
 }
 
-/// All proof-bearing records use this exact subject and policy context.
+/// Proof-bearing records share one work, proof revision and policy context.
+/// Execution records identify the immutable claim input; submissions and
+/// reviews may identify a separately bound result source.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProofIdentity {
     pub entity: EntityIdentity,
@@ -873,6 +875,112 @@ pub struct StatusTimingInput {
     pub retry_not_before: Option<TimestampMs>,
 }
 
+/// Persistence adapters pass one row per wait/work-scope edge to the status
+/// boundary. Unknown persisted state is explicit and must remain blocking;
+/// it is never interpreted as a successful resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalWaitPersistedState {
+    Open,
+    Resolved,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalWaitScopeInput {
+    pub project_id: ProjectId,
+    pub wait_id: String,
+    pub affected_work_id: WorkId,
+    pub state: ExternalWaitPersistedState,
+    pub follow_up: Option<BusinessDate>,
+    pub civil_time_setting_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExternalWaitDecision {
+    pub blocking_wait_ids: Vec<String>,
+    pub follow_up_wait_ids: Vec<String>,
+    pub next_follow_up_boundaries: Vec<BusinessDateBoundary>,
+}
+
+/// Evaluate only the waits explicitly scoped to the requested work. A missed
+/// follow-up remains an attention item and never changes the wait state.
+pub fn evaluate_external_waits(
+    work_id: &WorkId,
+    context: &BusinessTimeContext,
+    waits: &[ExternalWaitScopeInput],
+) -> Result<ExternalWaitDecision, crate::work_model_v3::ModelError> {
+    context.validate()?;
+    let mut decision = ExternalWaitDecision::default();
+    for wait in waits
+        .iter()
+        .filter(|wait| &wait.affected_work_id == work_id)
+    {
+        if wait.project_id != context.project_id {
+            return Err(crate::work_model_v3::ModelError::InvalidExternalWait(
+                "wait scope and business-time context belong to different projects",
+            ));
+        }
+        let has_date_follow_up = wait
+            .follow_up
+            .as_ref()
+            .is_some_and(|value| matches!(value, BusinessDate::LocalDate(_)));
+        if has_date_follow_up != wait.civil_time_setting_revision.is_some()
+            || wait.civil_time_setting_revision == Some(0)
+        {
+            return Err(crate::work_model_v3::ModelError::InvalidExternalWait(
+                "date-only follow-up is missing its project civil-time setting revision",
+            ));
+        }
+        if wait
+            .civil_time_setting_revision
+            .is_some_and(|revision| revision > context.setting_revision)
+        {
+            return Err(crate::work_model_v3::ModelError::InvalidExternalWait(
+                "wait references an unavailable future civil-time setting revision",
+            ));
+        }
+        match wait.state {
+            ExternalWaitPersistedState::Open | ExternalWaitPersistedState::Unknown => {
+                decision.blocking_wait_ids.push(wait.wait_id.clone());
+                if wait.state == ExternalWaitPersistedState::Open {
+                    if let Some(follow_up) = &wait.follow_up {
+                        if follow_up.validate().is_err() {
+                            return Err(crate::work_model_v3::ModelError::InvalidExternalWait(
+                                "invalid persisted follow-up value",
+                            ));
+                        }
+                        let (is_due, next_boundary) = match follow_up {
+                            BusinessDate::LocalDate(date) => (
+                                context.civil_date >= *date,
+                                Some(BusinessDateBoundary::LocalDateStart(*date)),
+                            ),
+                            BusinessDate::Instant(at) => (
+                                *at <= context.as_of,
+                                Some(BusinessDateBoundary::Instant(*at)),
+                            ),
+                            BusinessDate::ResolvedLocal(resolution) => (
+                                resolution.utc_instant <= context.as_of,
+                                Some(BusinessDateBoundary::Instant(resolution.utc_instant)),
+                            ),
+                        };
+                        if is_due {
+                            decision.follow_up_wait_ids.push(wait.wait_id.clone());
+                        } else if let Some(boundary) = next_boundary {
+                            decision.next_follow_up_boundaries.push(boundary);
+                        }
+                    }
+                }
+            }
+            ExternalWaitPersistedState::Resolved | ExternalWaitPersistedState::Cancelled => {}
+        }
+    }
+    decision.blocking_wait_ids.sort();
+    decision.follow_up_wait_ids.sort();
+    decision.next_follow_up_boundaries.dedup();
+    Ok(decision)
+}
+
 impl StatusTimingInput {
     pub const fn empty() -> Self {
         Self {
@@ -1213,7 +1321,7 @@ impl DecisionInputs {
             }
             // Execution ownership and the authenticated reader are different
             // facts. Action policy enforces ownership only for owner actions.
-            self.check_proof_revision(&mut diagnostics, &execution.proof);
+            self.check_proof_context(&mut diagnostics, FactKind::Execution, &execution.proof);
         }
 
         if let Some(submission) = self.submission.as_present() {
@@ -1228,7 +1336,7 @@ impl DecisionInputs {
                 &subject,
                 &submission.proof,
             );
-            self.check_proof_revision(&mut diagnostics, &submission.proof);
+            self.check_proof_context(&mut diagnostics, FactKind::Submission, &submission.proof);
             if let Some(execution) = self.execution.as_present() {
                 if submission.proof.attempt.as_ref() != Some(&execution.attempt) {
                     diagnostics.push(DecisionDiagnostic::Contradictory {
@@ -1247,7 +1355,7 @@ impl DecisionInputs {
                 FactTarget::Review(review.id.clone()),
             );
             self.check_proof_identity(&mut diagnostics, FactKind::Review, &subject, &review.proof);
-            self.check_proof_revision(&mut diagnostics, &review.proof);
+            self.check_proof_context(&mut diagnostics, FactKind::Review, &review.proof);
             if review.reviewer_id == review.attempt_actor_id
                 || review.reviewer_authority_root == review.attempt_authority_root
             {
@@ -1381,16 +1489,29 @@ impl DecisionInputs {
         }
     }
 
-    fn check_proof_revision(
+    fn check_proof_context(
         &self,
         diagnostics: &mut Vec<DecisionDiagnostic>,
+        fact: FactKind,
         proof: &ProofIdentity,
     ) {
         if let Some(requirements) = self.requirements.as_present() {
+            // The pinned and execution facts retain the immutable claim
+            // source. A sealed submission can instead name the separately
+            // bound final-result source; review is checked against that exact
+            // submission below. Store close validation proves the result
+            // source binding before lifecycle authorization.
+            let result_source = fact == FactKind::Submission
+                || (fact == FactKind::Review
+                    && self
+                        .submission
+                        .as_present()
+                        .is_some_and(|submission| submission.proof == *proof));
             if proof.proof_revision != requirements.proof.proof_revision
                 || proof.profile != requirements.proof.profile
                 || (requirements.proof.is_bound()
-                    && (proof.source_snapshot != requirements.proof.source_snapshot
+                    && ((!result_source
+                        && proof.source_snapshot != requirements.proof.source_snapshot)
                         || proof.configuration != requirements.proof.configuration))
             {
                 diagnostics.push(DecisionDiagnostic::Contradictory {
@@ -1403,5 +1524,157 @@ impl DecisionInputs {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod external_wait_timing_tests {
+    use super::*;
+    use crate::work_model_v3::LocalDate;
+
+    fn context(as_of: u64, civil_date: LocalDate) -> BusinessTimeContext {
+        BusinessTimeContext {
+            project_id: ProjectId::new("p1"),
+            setting_revision: 1,
+            as_of: TimestampMs::from_millis(as_of),
+            civil_date,
+            timezone: "Etc/UTC".into(),
+            tzdb_identity: "tzdb-test".into(),
+        }
+    }
+
+    #[test]
+    fn wait_follow_up_is_attentional_and_only_scopes_named_work() {
+        let waits = vec![ExternalWaitScopeInput {
+            project_id: ProjectId::new("p1"),
+            wait_id: "wait-1".into(),
+            affected_work_id: WorkId::new("dependent"),
+            state: ExternalWaitPersistedState::Open,
+            follow_up: Some(BusinessDate::Instant(TimestampMs::from_millis(86_400_000))),
+            civil_time_setting_revision: None,
+        }];
+
+        let before_midnight = evaluate_external_waits(
+            &WorkId::new("dependent"),
+            &context(86_399_999, LocalDate::new(1970, 1, 1)),
+            &waits,
+        )
+        .unwrap();
+        assert_eq!(before_midnight.blocking_wait_ids, ["wait-1"]);
+        assert!(before_midnight.follow_up_wait_ids.is_empty());
+        assert_eq!(
+            before_midnight.next_follow_up_boundaries,
+            [BusinessDateBoundary::Instant(TimestampMs::from_millis(
+                86_400_000
+            ))]
+        );
+
+        let at_midnight = evaluate_external_waits(
+            &WorkId::new("dependent"),
+            &context(86_400_000, LocalDate::new(1970, 1, 2)),
+            &waits,
+        )
+        .unwrap();
+        assert_eq!(at_midnight.blocking_wait_ids, ["wait-1"]);
+        assert_eq!(at_midnight.follow_up_wait_ids, ["wait-1"]);
+
+        let unrelated = evaluate_external_waits(
+            &WorkId::new("other"),
+            &context(86_400_000, LocalDate::new(1970, 1, 2)),
+            &waits,
+        )
+        .unwrap();
+        assert!(unrelated.blocking_wait_ids.is_empty());
+        assert!(unrelated.follow_up_wait_ids.is_empty());
+    }
+
+    #[test]
+    fn unknown_wait_outcome_fails_closed_and_resolved_wait_does_not_block() {
+        let waits = vec![
+            ExternalWaitScopeInput {
+                project_id: ProjectId::new("p1"),
+                wait_id: "unknown".into(),
+                affected_work_id: WorkId::new("task"),
+                state: ExternalWaitPersistedState::Unknown,
+                follow_up: None,
+                civil_time_setting_revision: None,
+            },
+            ExternalWaitScopeInput {
+                project_id: ProjectId::new("p1"),
+                wait_id: "resolved".into(),
+                affected_work_id: WorkId::new("task"),
+                state: ExternalWaitPersistedState::Resolved,
+                follow_up: Some(BusinessDate::Instant(TimestampMs::from_millis(0))),
+                civil_time_setting_revision: None,
+            },
+        ];
+        let decision = evaluate_external_waits(
+            &WorkId::new("task"),
+            &context(86_400_000, LocalDate::new(1970, 1, 2)),
+            &waits,
+        )
+        .unwrap();
+        assert_eq!(decision.blocking_wait_ids, ["unknown"]);
+        assert!(decision.follow_up_wait_ids.is_empty());
+    }
+
+    #[test]
+    fn local_date_follow_up_uses_project_civil_day_and_keeps_open_obligation() {
+        let current_context = |as_of, civil_date| BusinessTimeContext {
+            setting_revision: 4,
+            ..context(as_of, civil_date)
+        };
+        let waits = vec![ExternalWaitScopeInput {
+            project_id: ProjectId::new("p1"),
+            wait_id: "date-wait".into(),
+            affected_work_id: WorkId::new("dependent"),
+            state: ExternalWaitPersistedState::Open,
+            follow_up: Some(BusinessDate::LocalDate(LocalDate::new(2026, 3, 8))),
+            civil_time_setting_revision: Some(4),
+        }];
+        let before = evaluate_external_waits(
+            &WorkId::new("dependent"),
+            &current_context(1_773_000_000_000, LocalDate::new(2026, 3, 7)),
+            &waits,
+        )
+        .unwrap();
+        assert_eq!(before.blocking_wait_ids, ["date-wait"]);
+        assert!(before.follow_up_wait_ids.is_empty());
+        assert_eq!(
+            before.next_follow_up_boundaries,
+            [BusinessDateBoundary::LocalDateStart(LocalDate::new(
+                2026, 3, 8
+            ))]
+        );
+
+        let on_date = evaluate_external_waits(
+            &WorkId::new("dependent"),
+            &current_context(1_773_000_000_000, LocalDate::new(2026, 3, 8)),
+            &waits,
+        )
+        .unwrap();
+        assert_eq!(on_date.blocking_wait_ids, ["date-wait"]);
+        assert_eq!(on_date.follow_up_wait_ids, ["date-wait"]);
+    }
+
+    #[test]
+    fn future_setting_revision_wait_fails_closed() {
+        let waits = vec![ExternalWaitScopeInput {
+            project_id: ProjectId::new("p1"),
+            wait_id: "future-date-wait".into(),
+            affected_work_id: WorkId::new("dependent"),
+            state: ExternalWaitPersistedState::Open,
+            follow_up: Some(BusinessDate::LocalDate(LocalDate::new(2026, 3, 8))),
+            civil_time_setting_revision: Some(2),
+        }];
+
+        assert!(matches!(
+            evaluate_external_waits(
+                &WorkId::new("dependent"),
+                &context(1_773_000_000_000, LocalDate::new(2026, 3, 8)),
+                &waits,
+            ),
+            Err(crate::work_model_v3::ModelError::InvalidExternalWait(_))
+        ));
     }
 }

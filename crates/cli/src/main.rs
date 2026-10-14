@@ -1,34 +1,70 @@
 use boreal_application::{
-    canonical_request_digest, sha256_content_digest, AcceptanceGateDefinition, ApplicationError,
+    canonical_request_digest, plan_project_civil_time_update, resolve_planning_acceptance_profile,
+    sha256_content_digest, AcceptanceGateDefinition, ApplicationError, ArtifactAcceptanceRequest,
     AttemptPolicy, AttemptRequest, AuthenticatedOperationJournal, BoundedExecutionResult,
     CommandSpec, EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest,
-    ExecutorAttestation, IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind,
-    IntakeLifecycle, KnowledgeApplication, LivenessMetadata, OperationResult, ReceiptCoverage,
-    ReceiptExpectation, ReceiptPayload, SessionRegistrationRequest, SourceCaptureInput,
-    SqliteAttemptAdapter, SummaryPayload, WorkApplication, WorkflowRegistry,
+    ExecutorAttestation, ExternalWaitCreateRequest, ExternalWaitResolutionRequest, IntakeBucket,
+    IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle, KnowledgeApplication,
+    LivenessMetadata, OperationResult, PlanningScope, ProducedArtifactInput,
+    ProjectCivilTimeUpdateRequest, ReceiptCoverage, ReceiptExpectation, ReceiptPayload,
+    SchedulingSnapshot, SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter,
+    SummaryPayload, SystemTimeZoneDatabase, WorkApplication, WorkPlanningEditV3Input,
+    WorkScheduleUpdateRequest, WorkflowRegistry,
+};
+use boreal_domain::work_model_v3::{
+    BusinessDate, BusinessSchedule, DirectDependency, ExecutionMode, ExternalWait,
+    ExternalWaitAccountable, ExternalWaitCategory, ExternalWaitId, ExternalWaitOutcome,
+    ExternalWaitResolution, ExternalWaitState, FoldPolicy, GapPolicy, LocalDate, LocalDateTime,
+    LocalTime, ProjectCivilTimeSetting, TimeResolution, WorkNode,
 };
 use boreal_domain::{
-    AcceptanceProfile, ActorId, AttemptId, AttemptPhase, ConfigIdentity, DispatchPolicy, Fence,
-    GateId, GateKind, HarnessId, OperationId, PersistedLifecycle, ProjectId, ReasonCode, ReceiptId,
-    ReceiptResult, SessionId, SourceVersionId, TimestampMs, WorkId, WorkItem, WorkKind,
+    AcceptanceProfile, AcceptedResultIdentity, ActorId, ActorRole, ArtifactProductionIdentity,
+    AttemptId, AttemptPhase, ConfigIdentity, DeliverableCriterion, DeliverableRequirement,
+    DeliverableType, DispatchPolicy, Fence, GateId, GateKind, HarnessId, InputArtifactRef,
+    InputArtifactRole, InputArtifactScope, OperationId, PersistedLifecycle, ProjectId, ReasonCode,
+    ReceiptId, ReceiptResult, SessionId, SourceVersionId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
 use boreal_protocol::{
     models::{
-        AgentGuideDto, AgentNextDto, ContextRefDto, CoverageDto, GuidanceContextDto,
-        GuidanceProvenanceDto, GuidanceStatusDto, NextActionDto, NextReasonDto, NextStatusDto,
-        ReceiptDto, ReceiptSubjectDto, RequirementDto, SubjectDto, WorkflowAssetDto,
-        WorkflowCriterionDto, WorkflowInputDto, WorkflowPackageDto, WorkflowShowDto,
+        AcceptedInputBindingV2Dto, AgentGuideDto, AgentNextDto, ArtifactResultAttestationDto,
+        ArtifactResultAvailabilityDto, ArtifactResultBindReadbackDto, ArtifactResultBindRequestDto,
+        ArtifactResultCriterionDto, ArtifactResultOutputReadbackDto, ArtifactResultReadbackDto,
+        ArtifactResultRecordDto, ArtifactResultRightsDto, ArtifactResultSourceIdentityDto,
+        BusinessDateDto, BusinessScheduleDto, BusinessScheduleUpdateDto, CloseReadinessGapDto,
+        CloseReadinessGateDto, CloseReadinessReadbackDto, ContextRefDto, CoverageDto,
+        DeliverableCriterionV2Dto, DeliverableRequirementV2Dto, DeliverableTypeDto,
+        ExternalWaitAccountableDto, ExternalWaitCategoryDto, ExternalWaitCreateDto,
+        ExternalWaitDto, ExternalWaitMutationReadbackDto, ExternalWaitOutcomeDto,
+        ExternalWaitReadbackDto, ExternalWaitResolutionDto, ExternalWaitResolveDto,
+        ExternalWaitRoleDto, ExternalWaitStateDto, FoldPolicyDto, GapPolicyDto, GuidanceContextDto,
+        GuidanceProvenanceDto, GuidanceStatusDto, InputArtifactRoleV2Dto, InputArtifactScopeV2Dto,
+        LocalDateTimeDto, NextActionDto, NextReasonDto, NextStatusDto,
+        ProjectCivilTimeMutationReadbackDto, ProjectCivilTimeReadbackDto,
+        ProjectCivilTimeSettingDto, ProjectCivilTimeUpdateDto, ReceiptDto, ReceiptSubjectDto,
+        RequirementDto, SubjectDto, WorkScheduleMutationReadbackDto, WorkScheduleReadbackDto,
+        WorkScheduleUpdateDto, WorkflowAssetDto, WorkflowCriterionDto, WorkflowInputDto,
+        WorkflowPackageDto, WorkflowShowDto, ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION,
+        ARTIFACT_RESULT_BIND_SCHEMA_VERSION, ARTIFACT_RESULT_READBACK_SCHEMA_VERSION,
+        CLOSE_READINESS_READBACK_SCHEMA_VERSION, EXTERNAL_WAIT_CREATE_SCHEMA_VERSION,
+        EXTERNAL_WAIT_READBACK_SCHEMA_VERSION, EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
+        PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION, PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+        WORK_SCHEDULE_READBACK_SCHEMA_VERSION, WORK_SCHEDULE_UPDATE_SCHEMA_VERSION,
     },
     schema, ApplicationOutcome, DetailReference, Envelope, ErrorCode, ProtocolError,
     TransportOutcome, API_VERSION,
 };
-use boreal_source::SourceCatalog;
+use boreal_source::{ArtifactRightsProvenance, SourceCatalog, SourceIdentity};
 use boreal_store::identity::{IdentityError, IdentityStore, WorkspaceBinding};
 use boreal_store::{
-    AuditEventRecord, EvidenceExecutionState, MaintenanceJobInput, MaintenanceJobTransition,
-    OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation, ReceiptOutcome,
-    ReceiptRecord, SqliteBackupPackageReport, SqliteRestorePackageReport, SqliteStore, StoreError,
-    WorkRecord,
+    acceptance::{
+        AcceptanceResultRecord, AcceptanceStore, ArtifactInspectionAvailability,
+        CompletionAttestationInput,
+    },
+    AuditEventRecord, EvidenceExecutionState, ExternalWaitV1Input, MaintenanceJobInput,
+    MaintenanceJobTransition, OperationOutcome as StoreOperationOutcome, OperationRecord,
+    ProjectCivilTimeV1Input, ReceiptAttestation, ReceiptOutcome, ReceiptRecord,
+    SqliteBackupPackageReport, SqliteRestorePackageReport, SqliteStore, StoreError,
+    V3MutationContext, WorkRecord, WorkScheduleV3Input,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -51,6 +87,7 @@ use std::os::unix::process::CommandExt;
 mod authority;
 mod command_registry;
 mod completion_commands;
+mod container_commands;
 mod credentials;
 mod cycle_commands;
 mod dashboard;
@@ -64,6 +101,7 @@ mod global_service;
 mod history_commands;
 mod knowledge_maintenance;
 mod knowledge_parity;
+mod machine_update;
 mod memory_commands;
 mod operational_commands;
 mod orchestration_commands;
@@ -85,11 +123,23 @@ const LEGACY_SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
 const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 const MAX_JSON_BYTES: usize = boreal_protocol::bounds::MAX_INLINE_OUTPUT_BYTES;
 const ENVELOPE_METADATA_BUDGET: usize = 4096;
+// `prime` carries a bounded status page plus its guide, workflow index, and
+// project instructions. Give this composite brief its own metadata reserve;
+// `print_envelope` still checks the complete encoded response against
+// MAX_JSON_BYTES.
+const PRIME_ENVELOPE_METADATA_BUDGET: usize = 2048;
 const DEFAULT_ACTOR: &str = "operator";
 const DEFAULT_HARNESS: &str = "cli";
 const DEFAULT_SESSION: &str = "session-operator";
 const MAX_GATE_RUNTIME_MS: u64 = 30_000;
 const GATE_COMMANDS_DIR: &str = "gates";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PlanningContractFileV2 {
+    requirements: Vec<DeliverableRequirementV2Dto>,
+    inputs: Vec<AcceptedInputBindingV2Dto>,
+}
 const MAX_SOURCE_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const HELP: &str = r#"bwrk v2
@@ -108,6 +158,8 @@ Usage:
   bwrk setup [PROJECT_DIR] [--project ID] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk install [PROJECT_DIR] [--project ID] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk update [--json]
+  bwrk update status [--json]
+  bwrk update recover --yes [--operation-id ID] [--json]
   bwrk upgrade --machine [--json]  (alias for update)
   bwrk backup --project PROJECT PACKAGE_DIR [--socket PATH] [--json]
   bwrk restore PACKAGE_DIR [--db PATH] [--json]
@@ -118,8 +170,8 @@ Usage:
   bwrk service run --db PATH --socket PATH [--max-requests N] [--dispatch-workers N] [--dispatch-capacity N] [--json]
   bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
   bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--json]
-  bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--hold CODE] [--session SESSION_ID] --expected-revision N [--db PATH] [--json]
-  bwrk work edit <project> <work-id> [--title TEXT] [--description TEXT] [--parent WORK_ID] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N
+  bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--execution-mode direct|container] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--acceptance PROFILE[/VERSION]] [--hold CODE] [--session SESSION_ID] --expected-revision N [--db PATH] [--json]
+  bwrk work edit <project> <work-id> [--title TEXT] [--description TEXT] [--parent WORK_ID|--clear-parent] [--execution-mode direct|container] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N
   bwrk work rollup <project> <container-id> [--socket PATH] [--json]
   bwrk dep remove <project> <prerequisite-id> <dependent-id> --expected-revision N
   bwrk work hold add <project> <work-id> --reason CODE --expected-revision N
@@ -129,12 +181,16 @@ Usage:
   bwrk dep tree <project> [--db PATH] [--json]
   bwrk dep cycles <project> [--db PATH] [--json]
   bwrk source add <project> --input PATH --origin ORIGIN [--media-type TYPE] [--session ID --expected-revision N --socket PATH] [--db PATH] [--json]
-  bwrk source show <project> <source-version-id> [--db PATH] [--json]
+  bwrk source show <project> <source-version-id> [--socket PATH] [--db PATH] [--json]
   bwrk source list <project> [--limit N] [--offset N] [--db PATH] [--json]
-  bwrk source verify <project> <source-version-id> [--db PATH] [--json]
+  bwrk source verify <project> <source-version-id> [--socket PATH] [--db PATH] [--json]
+  bwrk intake bucket <project> <bucket-id> <name> [--expected-revision N] [--socket PATH] [--db PATH] [--json]
+  bwrk intake capture <project> <intake-id> <content> --bucket ID [--expected-revision N] [--kind note|discovery|question|revisit] [--socket PATH] [--db PATH] [--json]
   bwrk doctor [--project PROJECT] [--db PATH] [--json]
   bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk work show <project> <work-id> [--db PATH] [--json]
+  bwrk work close-readiness <project> <work-id> [--socket PATH] [--db PATH] [--json]
+  bwrk work disposition --project PROJECT CONTAINER_ID DESCENDANT_ID --kind accepted_closed|accepted_cancelled|deferred|replaced [--replacement WORK_ID] [--supersedes DISPOSITION_ID] [--reason TEXT] --expected-revision N --yes [--operation-id ID] [--socket PATH] [--json]
   bwrk work claim <project> <work-id> --source-version ID --config-identity ID [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--db PATH] [--json]
   bwrk work accept <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
   bwrk work heartbeat <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
@@ -152,6 +208,19 @@ Usage:
   bwrk agent finish WORK_ID --close --project PROJECT --attempt ATTEMPT_ID --fence N --receipt PATH --summary PATH [--session SESSION_ID] [--socket PATH] [--json]
   bwrk agent finish WORK_ID --release --project PROJECT --attempt ATTEMPT_ID --fence N [--session SESSION_ID] [--socket PATH] [--reason CODE] [--json]
   bwrk evidence run --project PROJECT --work WORK_ID --gate GATE_ID [--attempt ATTEMPT_ID --fence N] [--json]
+  bwrk evidence bind-result --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N --source-version ID --content-digest SHA --expected-revision N --expected-entity-revision N --expected-proof-revision N [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk evidence receipts --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--limit N --offset N --socket PATH --json]
+  bwrk artifact result bind --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk artifact result attempt --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--socket PATH --json]
+  bwrk artifact result operation --project PROJECT OPERATION_ID [--socket PATH --json]
+  bwrk project civil-time set --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk project civil-time show --project PROJECT [--socket PATH --json]
+  bwrk work schedule set --project PROJECT WORK_ID --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk work schedule show --project PROJECT WORK_ID [--socket PATH --json]
+  bwrk wait create --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk wait resolve --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]
+  bwrk wait list --project PROJECT [--socket PATH --json]
+  bwrk wait show --project PROJECT WAIT_ID [--socket PATH --json]
   bwrk gate policy publish --project PROJECT --gate GATE_ID --input PATH --expected-revision N --yes [--socket PATH] [--json]
   bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]
   bwrk session start --project PROJECT --session SESSION_ID --harness HARNESS_ID [--json]
@@ -747,6 +816,19 @@ fn run_with_operation_at(
             message,
         ));
     }
+    if update::is_machine_route(&parsed) {
+        if let Some(selector) = update::explicit_authority_selector(args) {
+            return Err(CliError::invalid(format!(
+                "machine update does not accept {selector}; omit project, database, and service selectors"
+            )));
+        }
+        if parsed.path == ["update", "recover"] && !parsed.options.setup.yes {
+            return Err(CliError::invalid(
+                "update recover requires explicit --yes authorization",
+            ));
+        }
+        return machine_update::run(&parsed, operation);
+    }
     if parsed.options.socket.is_some()
         && !setup::is_setup_command(&parsed.path)
         && !command_registry::is_registry_path(&parsed.path)
@@ -883,27 +965,6 @@ fn run_with_operation_at(
             return doctor_result(&parsed, &store);
         }
         return diagnostic_commands::run(&parsed, operation, &store);
-    }
-    if parsed.path.len() == 1 && matches!(parsed.path[0].as_str(), "update" | "upgrade") {
-        if parsed.options.socket.is_none() {
-            let context = project_context::resolve(&parsed)?;
-            let store = SqliteStore::open_read_only_for_diagnostics(&context.database)
-                .map_err(map_store_error)?;
-            project_context::validate_store(&context, &store)?;
-            credentials::authenticate(&parsed, &store)?;
-            require_operator(&store, &context.project_id, &parsed.options.actor)?;
-        }
-        if parsed.options.socket.is_some() {
-            if service::supports(&parsed) {
-                return service::request(&parsed, operation);
-            }
-            return Err(CliError::with(
-                ErrorCode::UnknownCommandNamespace,
-                ApplicationOutcome::Rejected,
-                "the requested update command is not available through the selected service socket",
-            ));
-        }
-        return service::run_update(&parsed, operation);
     }
     if matches!(parsed.path.as_slice(), [path] if path == "backup" || path == "restore") {
         if parsed.options.socket.is_some() {
@@ -1643,6 +1704,9 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
     if cycle_commands::read_kind(&parsed.path).is_some() {
         return cycle_commands::read(parsed, store);
     }
+    if container_commands::supported(&parsed.path) {
+        return container_commands::run(parsed, operation, app);
+    }
     if directive_commands::supported(&parsed.path) {
         return directive_commands::run(parsed, operation, store);
     }
@@ -1671,14 +1735,15 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["status"] => status_result(parsed, store),
         ["work", "list"] => list_result(parsed, app),
         ["work", "show"] => show_work_result(parsed, app, store),
+        ["work", "close-readiness"] => close_readiness_command(parsed, app),
         ["work", "rollup"] => container_rollup_result(parsed, app),
         ["migration", "dry-run"] => migration_result(parsed, store, false),
         ["migration", "verify"] => migration_result(parsed, store, true),
         ["migration", "apply"] => migration_apply_result(parsed, operation, store),
         ["gate", "policy", "publish"] => gate_policy_publish_result(parsed, operation, store),
         ["maintenance", "show"] => maintenance_show_result(parsed, store),
-        ["work", "create"] => create_work_result(parsed, app, operation),
-        ["work", "edit"] => work_edit_result(parsed, app, operation),
+        ["work", "create"] => create_work_result(parsed, app, operation, store),
+        ["work", "edit"] => work_edit_result(parsed, app, operation, store),
         ["work", "hold", "add"] => work_hold_add_result(parsed, app, operation),
         ["work", "hold", "resolve"] => work_hold_resolve_result(parsed, app, operation),
         ["work", "dispatch", "set"] => work_dispatch_set_result(parsed, app, operation),
@@ -1771,6 +1836,21 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["operation", "show"] => operation_show_result(parsed, store),
         ["next"] | ["agent", "next"] => next_result(parsed, app, store),
         ["evidence", "add"] => evidence_add_result(parsed, app),
+        ["evidence", "bind-result"] => evidence_bind_result_result(parsed, operation, app, store),
+        ["evidence", "receipts"] => evidence_receipts_result(parsed, app),
+        ["artifact", "result", "bind"] => {
+            artifact_result_bind_command(parsed, operation, app, store)
+        }
+        ["artifact", "result", "attempt"] => artifact_result_for_attempt_command(parsed, app),
+        ["artifact", "result", "operation"] => artifact_result_for_operation_command(parsed, app),
+        ["project", "civil-time", "set"]
+        | ["project", "civil-time", "show"]
+        | ["work", "schedule", "set"]
+        | ["work", "schedule", "show"]
+        | ["wait", "create"]
+        | ["wait", "resolve"]
+        | ["wait", "list"]
+        | ["wait", "show"] => scheduling_route(parsed, operation, app, store),
         ["evidence", "run"] => evidence_run_result(
             parsed,
             app,
@@ -1968,6 +2048,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--target-id"
                 | "--decision"
                 | "--supersedes"
+                | "--replacement"
                 | "--citation"
                 | "--purpose"
                 | "--policy"
@@ -1976,6 +2057,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--touched-path"
                 | "--blocker"
                 | "--acceptance"
+                | "--execution-mode"
                 | "--workspace"
                 | "--todo"
                 | "--statement"
@@ -2003,6 +2085,9 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--minimum-bytes"
                 | "--max-bytes"
                 | "--direction"
+                | "--content-digest"
+                | "--expected-entity-revision"
+                | "--expected-proof-revision"
         ) {
             let value = option_value(args, &mut index, arg)?;
             options.extra.entry(arg.clone()).or_default().push(value);
@@ -2159,6 +2244,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 "--kind" => {
                     let kind = value.unwrap();
                     let intake_kind = path.as_slice() == ["intake", "capture"];
+                    let disposition_kind = path.as_slice() == ["work", "disposition"];
                     let relationship_kind = path.iter().map(String::as_str).collect::<Vec<_>>()
                         == ["global", "relationship", "add"]
                         || path.iter().map(String::as_str).collect::<Vec<_>>()
@@ -2166,20 +2252,26 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                     if relationship_kind && kind.trim().is_empty() {
                         return Err(CliError::invalid("--kind must not be empty"));
                     }
-                    if !relationship_kind
-                        && ((intake_kind
-                            && !matches!(
+                    if !relationship_kind {
+                        let valid_kind = if intake_kind {
+                            matches!(kind.as_str(), "note" | "discovery" | "question" | "revisit")
+                        } else if disposition_kind {
+                            matches!(
                                 kind.as_str(),
-                                "note" | "discovery" | "question" | "revisit"
-                            ))
-                            || (!intake_kind
-                                && !matches!(kind.as_str(), "milestone" | "sprint" | "task")))
-                    {
-                        return Err(CliError::invalid(if intake_kind {
-                            "--kind must be note, discovery, question, or revisit"
+                                "accepted_closed" | "accepted_cancelled" | "deferred" | "replaced"
+                            )
                         } else {
-                            "--kind must be milestone, sprint, or task"
-                        }));
+                            matches!(kind.as_str(), "milestone" | "sprint" | "task")
+                        };
+                        if !valid_kind {
+                            return Err(CliError::invalid(if intake_kind {
+                                "--kind must be note, discovery, question, or revisit"
+                            } else if disposition_kind {
+                                "--kind must be accepted_closed, accepted_cancelled, deferred, or replaced"
+                            } else {
+                                "--kind must be milestone, sprint, or task"
+                            }));
+                        }
                     }
                     options.kind = Some(kind);
                 }
@@ -2394,6 +2486,10 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["workflows", "list"] => options.positionals.is_empty(),
         ["workflows", "show"] => options.positionals.len() == 1,
         ["update"] => options.positionals.is_empty() && !options.machine,
+        ["update", "status"] => options.positionals.is_empty() && !options.machine,
+        ["update", "recover"] => {
+            options.positionals.is_empty() && !options.machine && options.setup.yes
+        }
         ["upgrade"] => options.positionals.is_empty() && options.machine,
         ["backup"] => positionals == 1,
         ["restore"] => positionals == 1 && options.socket.is_none(),
@@ -2436,11 +2532,31 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         }
         ["work", "create"] => positionals == 2 + usize::from(options.project.is_none()),
         ["work", "edit"] => positionals == 1 + usize::from(options.project.is_none()),
+        ["work", "disposition"] => {
+            positionals == 2 + usize::from(options.project.is_none())
+                && options.project.is_some()
+                && options.expected_revision.is_some()
+                && options.kind.is_some()
+                && options.setup.yes
+        }
         ["work", "rollup"] => positionals == 1 + usize::from(options.project.is_none()),
         ["work", "hold", "add"] | ["work", "dispatch", "set"] => {
             positionals == 1 + usize::from(options.project.is_none())
         }
         ["work", "hold", "resolve"] => positionals == 2 + usize::from(options.project.is_none()),
+        ["project", "civil-time", "set"] => {
+            positionals == usize::from(options.project.is_none()) && options.input.is_some()
+        }
+        ["project", "civil-time", "show"] => positionals == usize::from(options.project.is_none()),
+        ["work", "schedule", "set"] => {
+            positionals == 1 + usize::from(options.project.is_none()) && options.input.is_some()
+        }
+        ["work", "schedule", "show"] => positionals == 1 + usize::from(options.project.is_none()),
+        ["wait", "create"] | ["wait", "resolve"] => {
+            positionals == usize::from(options.project.is_none()) && options.input.is_some()
+        }
+        ["wait", "list"] => positionals == usize::from(options.project.is_none()),
+        ["wait", "show"] => positionals == 1 + usize::from(options.project.is_none()),
         ["dep", "tree"] | ["dep", "cycles"] => {
             positionals == usize::from(options.project.is_none())
         }
@@ -2466,9 +2582,10 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         | ["cycle" | "sprint", "list" | "current"]
         | ["operation", "list" | "stats"]
         | ["export", "json" | "markdown"] => positionals == usize::from(options.project.is_none()),
-        ["work", "history"] | ["work", "split"] | ["work", "split", "show"] => {
-            positionals == 1 + usize::from(options.project.is_none())
-        }
+        ["work", "history"]
+        | ["work", "close-readiness"]
+        | ["work", "split"]
+        | ["work", "split", "show"] => positionals == 1 + usize::from(options.project.is_none()),
         ["sprint", "board" | "report"] => positionals == 1 + usize::from(options.project.is_none()),
         ["orchestrate", "start" | "list"]
         | ["orchestrate", "daemon", "run" | "status"]
@@ -2510,6 +2627,34 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
         ["agent", "status"] => positionals == 0,
         ["agent", "heartbeat"] | ["agent", "renew"] => positionals == 0 && options.work.is_some(),
         ["evidence", "run"] => positionals == 0 && options.work.is_some() && options.gate.is_some(),
+        ["evidence", "bind-result"] => {
+            positionals == 0
+                && options.work.is_some()
+                && options.attempt.is_some()
+                && options.fence.is_some()
+                && options.source_version.is_some()
+                && extra_value(options, "--content-digest").is_some()
+                && options.expected_revision.is_some()
+                && extra_value(options, "--expected-entity-revision").is_some()
+                && extra_value(options, "--expected-proof-revision").is_some()
+        }
+        ["evidence", "receipts"] => {
+            positionals == 0
+                && options.work.is_some()
+                && options.attempt.is_some()
+                && options.fence.is_some()
+        }
+        ["artifact", "result", "bind"] => {
+            positionals == 0 && options.input.is_some() && options.project.is_some()
+        }
+        ["artifact", "result", "attempt"] => {
+            positionals == 0
+                && options.project.is_some()
+                && options.work.is_some()
+                && options.attempt.is_some()
+                && options.fence.is_some()
+        }
+        ["artifact", "result", "operation"] => positionals == 1 && options.project.is_some(),
         ["evidence", "add"] => {
             positionals == 0
                 && options.work.is_some()
@@ -2527,6 +2672,9 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
     if matches!(
         path.as_slice(),
         ["evidence", "run"]
+            | ["evidence", "bind-result"]
+            | ["evidence", "receipts"]
+            | ["artifact", "result", "attempt"]
             | ["evidence", "add"]
             | ["work", "accept"]
             | ["work", "heartbeat"]
@@ -2593,6 +2741,14 @@ fn work_argument(parsed: &ParsedCommand, index: usize) -> Result<String, CliErro
         .clone()
         .or_else(|| parsed.options.positionals.get(index).cloned())
         .ok_or_else(|| CliError::invalid("missing work identifier"))
+}
+
+fn extra_value<'a>(options: &'a CliOptions, name: &str) -> Option<&'a str> {
+    options
+        .extra
+        .get(name)
+        .and_then(|values| values.last())
+        .map(String::as_str)
 }
 
 fn parse_revision(value: &str) -> Result<u64, CliError> {
@@ -2696,6 +2852,7 @@ fn work_edit_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
     operation: &str,
+    store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
     let offset = usize::from(parsed.options.project.is_none());
@@ -2705,36 +2862,97 @@ fn work_edit_result(
         .get(offset)
         .cloned()
         .ok_or_else(|| CliError::invalid("work edit requires a work identifier"))?;
-    let result = app
-        .edit_work_as(
-            &project,
-            &work_id,
-            &parsed.options.actor,
-            parsed.options.parent.clone().map(Some),
-            parsed.options.title.clone(),
-            parsed.options.description.clone(),
-            parsed.options.priority,
-            parsed.options.dispatch.clone(),
-            parsed.options.expected_revision,
-            &now(),
-            operation.to_owned(),
-        )
+    let planning_contract = planning_contract_for_work(parsed, &project, &work_id)?;
+    let clear_parent = parsed.options.extra.contains_key("--clear-parent");
+    if clear_parent && parsed.options.parent.is_some() {
+        return Err(CliError::invalid(
+            "--clear-parent cannot be combined with --parent",
+        ));
+    }
+    let current = app
+        .show_work(&project, &work_id)
         .map_err(map_application_error)?;
-    bounded_result(
-        Some(json!({
-            "project_id": result.value.project_id,
-            "work_id": result.value.work_id,
-            "title": result.value.title,
-            "description": result.value.description,
-            "priority": result.value.priority,
-            "dispatch_policy": result.value.dispatch_policy,
-            "hard_holds": result.value.hard_holds.iter().map(ReasonCode::stable_code).collect::<Vec<_>>(),
-            "replayed": !result.changed,
-        })),
-        Some(result.snapshot_revision),
-    )
-    .map(|mut view| {
-        view.outcome = if result.changed { ApplicationOutcome::Changed } else { ApplicationOutcome::Unchanged };
+    let requested_mode = parsed
+        .options
+        .extra
+        .get("--execution-mode")
+        .and_then(|values| values.last())
+        .map(|value| execution_mode_from_token(value))
+        .transpose()?;
+    let expected_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("work edit requires --expected-revision"))?;
+    let at = now();
+    let (revision, changed) = if current.kind == "sprint" && planning_contract.is_none() {
+        if clear_parent || parsed.options.parent.is_some() || requested_mode.is_some() {
+            return Err(CliError::invalid(
+                "Sprint parent and execution-mode edits require the atomic planning projection route",
+            ));
+        }
+        let result = app
+            .edit_work_as(
+                &project,
+                &work_id,
+                &parsed.options.actor,
+                None,
+                parsed.options.title.clone(),
+                parsed.options.description.clone(),
+                parsed.options.priority,
+                parsed.options.dispatch.clone(),
+                Some(expected_revision),
+                &at,
+                operation.to_owned(),
+            )
+            .map_err(map_application_error)?;
+        (result.snapshot_revision, result.changed)
+    } else {
+        let canonical_parent_id = if clear_parent {
+            Some(None)
+        } else {
+            parsed
+                .options
+                .parent
+                .as_ref()
+                .map(|parent| Some(WorkId::new(parent.clone())))
+        };
+        let dispatch_policy = parsed.options.dispatch.as_deref().map(|value| match value {
+            "automatic" => DispatchPolicy::Automatic,
+            "operator_only" => DispatchPolicy::OperatorOnly,
+            "paused" => DispatchPolicy::Paused,
+            _ => unreachable!("parser validates dispatch policy"),
+        });
+        let input = WorkPlanningEditV3Input {
+            work_id: WorkId::new(work_id.clone()),
+            canonical_parent_id,
+            title: parsed.options.title.clone(),
+            description: parsed.options.description.clone(),
+            priority: parsed.options.priority,
+            dispatch_policy,
+            execution_mode: requested_mode,
+            planning_contract,
+        };
+        let scope = PlanningScope::new(project.clone(), parsed.options.actor.clone())
+            .with_session(parsed.options.session.clone())
+            .at_revision(expected_revision);
+        let result = app
+            .edit_planning_work_v3(&scope, operation.to_owned(), &input, &at)
+            .map_err(map_application_error)?;
+        (result.snapshot_revision, result.changed)
+    };
+    let projected = store
+        .work(project.as_str(), &work_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CliError::invalid("edited work disappeared during readback"))?;
+    let mut data = work_projection_json(&projected, store);
+    data["planning_contract"] = planning_contract_detail_json(store, project.as_str(), &work_id)?;
+    data["replayed"] = json!(!changed);
+    bounded_result(Some(data), Some(revision)).map(|mut view| {
+        view.outcome = if changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
         view
     })
 }
@@ -3203,19 +3421,43 @@ fn review_list_result(
     store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
-    let reviews = app
-        .review_list(
-            &project,
-            parsed.options.limit.unwrap_or(50).clamp(1, 500),
+    let page = app
+        .review_history_list(
+            project.as_str(),
+            None,
+            parsed.options.limit.unwrap_or(50).clamp(1, 100),
             parsed.options.offset.unwrap_or(0),
         )
         .map_err(map_application_error)?;
+    let mut items = Vec::with_capacity(page.items.len());
+    for record in &page.items {
+        let legacy = match record.provenance {
+            boreal_store::completion::ReviewHistoryProvenance::LegacyReview => {
+                let id = record.event_id.strip_prefix("legacy:").ok_or_else(|| {
+                    CliError::with(
+                        ErrorCode::ProtocolMismatch,
+                        ApplicationOutcome::Failed,
+                        "legacy review history returned an unqualified event id",
+                    )
+                })?;
+                Some(
+                    app.review_show(&project, id)
+                        .map_err(map_application_error)?,
+                )
+            }
+            boreal_store::completion::ReviewHistoryProvenance::CanonicalEvent => None,
+        };
+        items.push(review_history_record_json(record, legacy.as_ref()));
+    }
     let revision = store_revision(store, &project)?;
     bounded_result(
         Some(json!({
             "command": "review_list",
             "project_id": project.as_str(),
-            "items": reviews.iter().map(review_record_json).collect::<Vec<_>>(),
+            "items": items,
+            "limit": page.limit,
+            "offset": page.offset,
+            "has_more": page.has_more,
         })),
         Some(revision),
     )
@@ -3233,18 +3475,89 @@ fn review_show_result(
         .positionals
         .get(index)
         .ok_or_else(|| CliError::invalid("review show requires a review identifier"))?;
-    let review = app
-        .review_show(&project, review_id)
-        .map_err(map_application_error)?;
+    let history = if review_id.starts_with("canonical:") || review_id.starts_with("legacy:") {
+        app.review_history_show(project.as_str(), review_id)
+            .map_err(map_application_error)?
+    } else {
+        // Keep the historical unqualified legacy ID spelling working. If it
+        // is not a legacy row, accept a raw canonical event ID as a fallback.
+        match app
+            .review_history_show(project.as_str(), &format!("legacy:{review_id}"))
+            .map_err(map_application_error)?
+        {
+            Some(legacy) => Some(legacy),
+            None => app
+                .review_history_show(project.as_str(), &format!("canonical:{review_id}"))
+                .map_err(map_application_error)?,
+        }
+    }
+    .ok_or_else(|| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("review history event not found: {review_id}"),
+        )
+    })?;
+    let legacy = match history.provenance {
+        boreal_store::completion::ReviewHistoryProvenance::LegacyReview => {
+            let id = history.event_id.strip_prefix("legacy:").ok_or_else(|| {
+                CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    "legacy review history returned an unqualified event id",
+                )
+            })?;
+            Some(
+                app.review_show(&project, id)
+                    .map_err(map_application_error)?,
+            )
+        }
+        boreal_store::completion::ReviewHistoryProvenance::CanonicalEvent => None,
+    };
     let revision = store_revision(store, &project)?;
     bounded_result(
         Some(json!({
             "command": "review_show",
             "project_id": project.as_str(),
-            "review": review_record_json(&review),
+            "review": review_history_record_json(&history, legacy.as_ref()),
         })),
         Some(revision),
     )
+}
+
+fn review_history_record_json(
+    record: &boreal_store::completion::ReviewHistoryRecord,
+    legacy: Option<&boreal_store::ReviewRecord>,
+) -> Value {
+    let mut value = legacy.map(review_record_json).unwrap_or_else(|| {
+        json!({
+            "review_id": record.event_id,
+            "project_id": record.project_id,
+            "work_id": record.work_id,
+            "attempt_id": record.attempt_id,
+            "fence": record.fence,
+            "gate_id": record.gate_id,
+            "reviewer_actor_id": record.reviewer_actor_id,
+            "decision": record.outcome,
+            "reason": record.reason,
+            "source_version_id": null,
+            "policy_digest": null,
+            "created_at": record.created_at,
+        })
+    });
+    if record.provenance == boreal_store::completion::ReviewHistoryProvenance::CanonicalEvent {
+        value["review_id"] = json!(record.event_id);
+    }
+    value["event_id"] = json!(record.event_id);
+    value["provenance"] = json!(match record.provenance {
+        boreal_store::completion::ReviewHistoryProvenance::CanonicalEvent => "canonical_event",
+        boreal_store::completion::ReviewHistoryProvenance::LegacyReview => "legacy_review",
+    });
+    value["submission_id"] = json!(record.submission_id);
+    value["operation_id"] = json!(record.operation_id);
+    value["outcome"] = json!(record.outcome);
+    value["superseded_by"] = json!(record.superseded_by);
+    value
 }
 
 fn review_record_json(review: &boreal_store::ReviewRecord) -> Value {
@@ -3671,10 +3984,11 @@ fn intake_bucket_result(
         .intake_items_v3(&project)
         .map_err(map_application_error)?
         .revision;
+    let expected_revision = parsed.options.expected_revision.unwrap_or(revision);
     let scope =
         boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
-            .at_revision(parsed.options.expected_revision.unwrap_or(revision));
+            .at_revision(expected_revision);
     let result = app
         .create_intake_bucket_v3(&scope, operation.to_owned(), &bucket, &now())
         .map_err(map_application_error)?;
@@ -3744,10 +4058,11 @@ fn intake_capture_result(
         .intake_items_v3(&project)
         .map_err(map_application_error)?
         .revision;
+    let expected_revision = parsed.options.expected_revision.unwrap_or(revision);
     let scope =
         boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
-            .at_revision(parsed.options.expected_revision.unwrap_or(revision));
+            .at_revision(expected_revision);
     let result = app
         .create_intake_item_v3(
             &scope,
@@ -4269,7 +4584,7 @@ fn status_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
         )
     })?;
     bounded_result(
-        Some(status_snapshot_json(&snapshot, None)),
+        Some(status_snapshot_json(&snapshot, None, store)),
         Some(snapshot.project_revision.0),
     )
     .map(|mut result| {
@@ -4281,6 +4596,7 @@ fn status_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
 fn status_snapshot_json(
     snapshot: &boreal_application::StatusSnapshot,
     recovery: Option<Value>,
+    store: &SqliteStore,
 ) -> Value {
     let counts = &snapshot.counts;
     let mut result = json!({
@@ -4357,7 +4673,7 @@ fn status_snapshot_json(
             result["items"]
                 .as_array_mut()
                 .expect("array created above")
-                .push(status_item_json(item));
+                .push(status_item_json(item, store));
         }
         for diagnostic in snapshot.diagnostics.iter().filter(|d| &d.work_id == id) {
             result["diagnostics"]
@@ -4400,7 +4716,14 @@ fn attention_queue_json(queue: &boreal_application::AttentionQueue) -> Value {
     })
 }
 
-fn status_item_json(item: &boreal_application::StatusWork) -> Value {
+fn status_item_json(item: &boreal_application::StatusWork, store: &SqliteStore) -> Value {
+    let planning = planning_projection_json(
+        store,
+        item.work.project_id.as_str(),
+        item.work.id.as_str(),
+        work_kind_name(item.work.kind),
+        item.work.parent_id.as_ref().map(|id| id.as_str()),
+    );
     let gates = item
         .gates
         .gates
@@ -4467,6 +4790,10 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "lifecycle": lifecycle_name(item.work.lifecycle),
         "priority": item.work.priority,
         "dispatch_policy": dispatch_policy_name(item.work.dispatch_policy),
+        "execution_mode": planning["execution_mode"],
+        "planning_parent_id": planning["planning_parent_id"],
+        "planning_integrity": planning["planning_integrity"],
+        "planning_diagnostic": planning["planning_diagnostic"],
         // `status` is the status/2 compatibility field. Keep the richer
         // status/3 value in `display_status` so newer clients can render
         // expiry as its own recovery state without breaking older clients.
@@ -4480,6 +4807,10 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         "claimable_for_actor": item.claimable_for_actor(),
         "primary_reason": item.decision.primary_reason.stable_code(),
         "reason_codes": item.decision.reason_codes.iter().map(|reason| reason.stable_code()).collect::<Vec<_>>(),
+        "due_today": item.decision.due_today,
+        "overdue": item.decision.overdue,
+        "blocking_external_wait_ids": item.decision.blocking_external_wait_ids,
+        "follow_up_due_wait_ids": item.decision.follow_up_due_wait_ids,
         "next_action": item.decision.next_action.map(domain_action_name),
         "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
         "attempt": attempt,
@@ -4621,7 +4952,14 @@ fn status2_name(status: boreal_domain::DerivedStatus) -> &'static str {
     }
 }
 
-pub(crate) fn work_projection_json(item: &WorkRecord) -> Value {
+pub(crate) fn work_projection_json(item: &WorkRecord, store: &SqliteStore) -> Value {
+    let planning = planning_projection_json(
+        store,
+        &item.project_id,
+        &item.work_id,
+        &item.kind,
+        item.parent_id.as_deref(),
+    );
     json!({
         "work_id": item.work_id,
         "project_id": item.project_id,
@@ -4637,7 +4975,359 @@ pub(crate) fn work_projection_json(item: &WorkRecord) -> Value {
             .collect::<Vec<_>>(),
         "title": item.title,
         "description": item.description,
+        "execution_mode": planning["execution_mode"],
+        "planning_parent_id": planning["planning_parent_id"],
+        "planning_integrity": planning["planning_integrity"],
+        "planning_diagnostic": planning["planning_diagnostic"],
     })
+}
+
+fn planning_contract_detail_json(
+    store: &SqliteStore,
+    project_id: &str,
+    work_id: &str,
+) -> Result<Value, CliError> {
+    let snapshot = store
+        .work_planning_contract_snapshot(project_id, work_id)
+        .map_err(map_store_error)?;
+    let Some(record) = snapshot.contract else {
+        return Ok(json!({
+            "project_revision": snapshot.project_revision,
+            "contract_revision": 0,
+            "template_id": null,
+            "template_version": null,
+            "requirements": [],
+            "inputs": [],
+        }));
+    };
+    let requirements = serde_json::from_str::<Vec<Value>>(&record.requirements_json)
+        .map_err(|error| CliError::invalid(format!("stored planning requirements are corrupt: {error}")))?
+        .into_iter()
+        .map(|requirement| {
+            let criteria = requirement["criteria"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|criterion| match criterion["kind"].as_str().unwrap_or_default() {
+                    "min_bytes" => json!({"kind":"minimum_bytes","value":criterion["value"]}),
+                    "max_bytes" => json!({"kind":"maximum_bytes","value":criterion["value"]}),
+                    "non_empty" => json!({"kind":"non_empty"}),
+                    "digest_present" => json!({"kind":"digest_present"}),
+                    "json_document" => json!({"kind":"json_document"}),
+                    "text_contains" => json!({"kind":"text_contains","text":criterion["text"]}),
+                    _ => criterion.clone(),
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "schema_version": boreal_protocol::models::DELIVERABLE_REQUIREMENT_V2_SCHEMA_VERSION,
+                "requirement_key": requirement["key"],
+                "purpose": requirement["purpose"],
+                "required": requirement["required"],
+                "deliverable_type": requirement["deliverable_type"],
+                "allowed_media_types": requirement["allowed_media_types"],
+                "min_count": requirement["min_count"],
+                "max_count": requirement["max_count"],
+                "criteria": criteria,
+            })
+        })
+        .collect::<Vec<_>>();
+    let inputs = serde_json::from_str::<Vec<Value>>(&record.inputs_json)
+        .map_err(|error| CliError::invalid(format!("stored planning inputs are corrupt: {error}")))?
+        .into_iter()
+        .map(|input| {
+            let producer = input.get("produced_by").cloned().unwrap_or(Value::Null);
+            let accepted = input.get("accepted_result").cloned().unwrap_or(Value::Null);
+            let accepted_result = accepted.as_object().map(|_| {
+                json!({
+                    "producer": accepted["producer"],
+                    "decision_id": accepted["decision_id"],
+                    "submission_id": accepted["submission_id"],
+                    "artifact_set_digest": accepted["artifact_set_digest"],
+                })
+            });
+            json!({
+                "input_key": input.get("input_key").cloned().unwrap_or(Value::Null),
+                "required": input.get("required").cloned().unwrap_or(json!(false)),
+                "role": input["role"],
+                "access_scope": input["scope"],
+                "artifact": {
+                    "project_id": input["project_id"],
+                    "source_version_id": input["source_version_id"],
+                    "content_digest": input["content_digest"],
+                    "media_type": input.get("media_type").cloned().unwrap_or(Value::Null),
+                    "byte_count": input.get("byte_count").cloned().unwrap_or(Value::Null),
+                    "availability": input.get("availability").cloned().unwrap_or(Value::Null),
+                },
+                "produced_by": producer,
+                "accepted_result": accepted_result,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "project_revision": snapshot.project_revision,
+        "contract_revision": record.contract_revision,
+        "template_id": record.template_id,
+        "template_version": record.template_version,
+        "requirements": requirements,
+        "inputs": inputs,
+    }))
+}
+
+/// Build a typed planning projection without hiding legacy rows or damaged
+/// siblings from the canonical work/status page. Only `valid` v3 rows are
+/// safe for v3 planning actions such as cycle assignment.
+fn planning_projection_json(
+    store: &SqliteStore,
+    project_id: &str,
+    work_id: &str,
+    kind: &str,
+    canonical_parent_id: Option<&str>,
+) -> Value {
+    let projection = |integrity: &str,
+                      mode: Option<String>,
+                      parent: Option<String>,
+                      diagnostic: Option<String>| {
+        json!({
+            "execution_mode": mode,
+            "planning_parent_id": parent,
+            "planning_integrity": integrity,
+            "planning_diagnostic": diagnostic,
+        })
+    };
+    if kind == "sprint" {
+        return projection("legacy", None, None, None);
+    }
+    if !matches!(kind, "milestone" | "task") {
+        return projection(
+            "inconsistent",
+            None,
+            None,
+            Some("unknown canonical work kind".to_owned()),
+        );
+    }
+    match store.work_model_v3_enabled() {
+        Ok(true) => {}
+        Ok(false) => return projection("unavailable", None, None, None),
+        Err(error) => return projection("unreadable", None, None, Some(error.to_string())),
+    }
+    let node = match store.work_node_v3(project_id, work_id) {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            return projection(
+                "missing",
+                None,
+                None,
+                Some("v3 work node is missing".to_owned()),
+            )
+        }
+        Err(error) => return projection("unreadable", None, None, Some(error.to_string())),
+    };
+    let expected_parent = if kind == "milestone" {
+        if canonical_parent_id.is_some() {
+            return projection(
+                "inconsistent",
+                Some(node.execution_mode),
+                node.parent_id,
+                Some("milestones cannot have a canonical parent".to_owned()),
+            );
+        }
+        None
+    } else if let Some(sprint_id) = canonical_parent_id {
+        let sprint = match store.work(project_id, sprint_id) {
+            Ok(Some(work)) if work.kind == "sprint" => work,
+            Ok(Some(_)) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("nested tasks require a Sprint canonical parent".to_owned()),
+                )
+            }
+            Ok(None) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("canonical Sprint parent is missing".to_owned()),
+                )
+            }
+            Err(error) => {
+                return projection(
+                    "unreadable",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some(error.to_string()),
+                )
+            }
+        };
+        let Some(milestone_id) = sprint.parent_id else {
+            return projection(
+                "inconsistent",
+                Some(node.execution_mode),
+                node.parent_id,
+                Some("nested task Sprint has no Milestone parent".to_owned()),
+            );
+        };
+        let milestone = match store.work(project_id, &milestone_id) {
+            Ok(Some(work)) if work.kind == "milestone" => work,
+            Ok(Some(_)) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("Sprint parent is not a Milestone".to_owned()),
+                )
+            }
+            Ok(None) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("Sprint Milestone parent is missing".to_owned()),
+                )
+            }
+            Err(error) => {
+                return projection(
+                    "unreadable",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some(error.to_string()),
+                )
+            }
+        };
+        let milestone_node = match store.work_node_v3(project_id, &milestone_id) {
+            Ok(Some(node)) => node,
+            Ok(None) => {
+                return projection(
+                    "inconsistent",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some("canonical Milestone parent has no v3 projection".to_owned()),
+                )
+            }
+            Err(error) => {
+                return projection(
+                    "unreadable",
+                    Some(node.execution_mode),
+                    node.parent_id,
+                    Some(error.to_string()),
+                )
+            }
+        };
+        if milestone_node.decomposition_kind != "milestone"
+            || milestone_node.execution_mode != "container"
+            || milestone_node.parent_id.is_some()
+            || milestone.work_id != milestone_id
+        {
+            return projection(
+                "inconsistent",
+                Some(node.execution_mode),
+                node.parent_id,
+                Some("Sprint Milestone projection is inconsistent".to_owned()),
+            );
+        }
+        Some(milestone_id)
+    } else {
+        None
+    };
+    if node.decomposition_kind != kind
+        || !matches!(node.execution_mode.as_str(), "direct" | "container")
+        || (kind == "milestone" && node.execution_mode != "container")
+        || node.parent_id != expected_parent
+    {
+        return projection(
+            "inconsistent",
+            Some(node.execution_mode),
+            node.parent_id,
+            Some("v3 node disagrees with canonical kind, parent, or execution mode".to_owned()),
+        );
+    }
+    projection("valid", Some(node.execution_mode), node.parent_id, None)
+}
+
+fn close_readiness_command(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project_id = project_argument(parsed, 0)?;
+    let work_index = usize::from(parsed.options.project.is_none());
+    let work_id = parsed
+        .options
+        .positionals
+        .get(work_index)
+        .ok_or_else(|| CliError::invalid("work close-readiness requires a work identifier"))?;
+    let (readback, revision) = close_readiness_readback_for_work(&project_id, work_id, app)?;
+    let data = serde_json::to_value(readback).map_err(|error| {
+        CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Failed,
+            format!("cannot encode close-readiness readback: {error}"),
+        )
+    })?;
+    bounded_result(Some(data), Some(revision)).map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn close_readiness_readback_for_work(
+    project_id: &str,
+    work_id: &str,
+    app: &WorkApplication<'_>,
+) -> Result<(CloseReadinessReadbackDto, u64), CliError> {
+    if !app.work_model_v3_enabled().map_err(map_application_error)? {
+        return Err(CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Rejected,
+            "close readiness requires work-model/3; schema-v2 was left unchanged",
+        ));
+    }
+    let projection = app
+        .read_close_readiness_readback(project_id, work_id)
+        .map_err(map_application_error)?;
+    let revision = projection.project_revision;
+    let gates = projection
+        .readiness
+        .gates
+        .into_iter()
+        .map(|gate| CloseReadinessGateDto {
+            gate_id: gate.gate_id.as_str().to_owned(),
+            state: gate_state_name(gate.state).to_owned(),
+            reason_code: gate.reason.map(|reason| reason.as_str().to_owned()),
+        })
+        .collect();
+    let gaps = projection
+        .readiness
+        .gaps
+        .into_iter()
+        .map(|gap| {
+            let gate_id = match &gap {
+                boreal_application::CloseoutGap::GateUnsatisfied(gate_id)
+                | boreal_application::CloseoutGap::ReviewRequired(gate_id)
+                | boreal_application::CloseoutGap::ReviewRejected(gate_id) => {
+                    Some(gate_id.as_str().to_owned())
+                }
+                _ => None,
+            };
+            CloseReadinessGapDto {
+                gap_code: gap.code().to_owned(),
+                gate_id,
+            }
+        })
+        .collect();
+    Ok((
+        CloseReadinessReadbackDto {
+            schema_version: CLOSE_READINESS_READBACK_SCHEMA_VERSION.to_owned(),
+            project_revision: projection.project_revision,
+            work_id: projection.work_id.as_str().to_owned(),
+            current_attempt_id: projection.attempt_id,
+            current_fence: projection.fence,
+            ready: projection.readiness.ready,
+            gates,
+            gaps,
+        },
+        revision,
+    ))
 }
 
 fn show_work_result(
@@ -4651,7 +5341,9 @@ fn show_work_result(
         .show_work(&project, &work_id)
         .map_err(map_application_error)?;
     let revision = store_revision(store, &project)?;
-    bounded_result(Some(work_projection_json(&item)), Some(revision))
+    let mut data = work_projection_json(&item, store);
+    data["planning_contract"] = planning_contract_detail_json(store, project.as_str(), &work_id)?;
+    bounded_result(Some(data), Some(revision))
 }
 
 fn operation_show_result(
@@ -5274,10 +5966,215 @@ fn acceptance_profile_option(parsed: &ParsedCommand) -> &str {
         .unwrap_or("focused")
 }
 
+fn acceptance_profile_from_token(value: &str) -> Result<AcceptanceProfile, CliError> {
+    resolve_planning_acceptance_profile(value).map_err(|error| CliError::invalid(error.to_string()))
+}
+
+fn execution_mode_from_token(value: &str) -> Result<ExecutionMode, CliError> {
+    match value {
+        "direct" => Ok(ExecutionMode::Direct),
+        "container" => Ok(ExecutionMode::Container),
+        _ => Err(CliError::invalid(
+            "execution mode must be direct or container",
+        )),
+    }
+}
+
+fn default_execution_mode(kind: WorkKind) -> ExecutionMode {
+    match kind {
+        WorkKind::Milestone => ExecutionMode::Container,
+        WorkKind::Sprint | WorkKind::Task => ExecutionMode::Direct,
+    }
+}
+
+fn planning_contract_file_value(parsed: &ParsedCommand) -> Result<Option<Value>, CliError> {
+    let Some(path) = extra_value(&parsed.options, "--planning-contract") else {
+        return Ok(None);
+    };
+    let relative = Path::new(path);
+    if !relative.starts_with(".boreal/contracts") {
+        return Err(CliError::invalid(
+            "planning contract input must be under .boreal/contracts",
+        ));
+    }
+    let context = project_context::resolve(parsed)?;
+    let path = project_context::confined_path(&context.root, relative, false)?;
+    let bytes = fs::read(&path).map_err(|error| {
+        CliError::invalid(format!("cannot read planning contract input: {error}"))
+    })?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(CliError::invalid(
+            "planning contract input exceeds the 1 MiB bound",
+        ));
+    }
+    let contract = serde_json::from_slice::<PlanningContractFileV2>(&bytes).map_err(|error| {
+        CliError::invalid(format!(
+            "planning contract input is not valid strict v2 JSON: {error}"
+        ))
+    })?;
+    serde_json::to_value(contract)
+        .map(Some)
+        .map_err(|error| CliError::invalid(format!("cannot normalize planning contract: {error}")))
+}
+
+fn planning_contract_from_value(
+    value: Value,
+    project_id: &ProjectId,
+    work_id: &str,
+) -> Result<boreal_store::WorkPlanningContractWrite, CliError> {
+    let payload = serde_json::from_value::<PlanningContractFileV2>(value).map_err(|error| {
+        CliError::invalid(format!("planning contract payload is invalid: {error}"))
+    })?;
+    let requirements = payload
+        .requirements
+        .into_iter()
+        .map(|requirement| {
+            if requirement.schema_version
+                != boreal_protocol::models::DELIVERABLE_REQUIREMENT_V2_SCHEMA_VERSION
+            {
+                return Err(CliError::invalid(format!(
+                    "deliverable requirement '{}' uses an unsupported schema version",
+                    requirement.requirement_key
+                )));
+            }
+            let deliverable_type = match requirement.deliverable_type {
+                DeliverableTypeDto::Code => DeliverableType::Code,
+                DeliverableTypeDto::Document => DeliverableType::Document,
+                DeliverableTypeDto::Image => DeliverableType::Image,
+                DeliverableTypeDto::Dataset => DeliverableType::Dataset,
+                DeliverableTypeDto::Report => DeliverableType::Report,
+                DeliverableTypeDto::Archive => DeliverableType::Archive,
+                DeliverableTypeDto::Other => DeliverableType::Other,
+            };
+            let criteria = requirement
+                .criteria
+                .into_iter()
+                .map(|criterion| match criterion {
+                    DeliverableCriterionV2Dto::NonEmpty => DeliverableCriterion::NonEmpty,
+                    DeliverableCriterionV2Dto::MinimumBytes { value } => {
+                        DeliverableCriterion::MinBytes(value)
+                    }
+                    DeliverableCriterionV2Dto::MaximumBytes { value } => {
+                        DeliverableCriterion::MaxBytes(value)
+                    }
+                    DeliverableCriterionV2Dto::DigestPresent => DeliverableCriterion::DigestPresent,
+                    DeliverableCriterionV2Dto::JsonDocument => DeliverableCriterion::JsonDocument,
+                    DeliverableCriterionV2Dto::TextContains { text } => {
+                        DeliverableCriterion::TextContains(text)
+                    }
+                })
+                .collect();
+            Ok(DeliverableRequirement {
+                key: requirement.requirement_key,
+                purpose: requirement.purpose,
+                required: requirement.required,
+                deliverable_type,
+                allowed_media_types: requirement.allowed_media_types,
+                min_count: requirement.min_count,
+                max_count: requirement.max_count,
+                criteria,
+            })
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    boreal_domain::validate_deliverable_requirements(&requirements)
+        .map_err(|error| CliError::invalid(error.to_string()))?;
+
+    let inputs = payload
+        .inputs
+        .into_iter()
+        .map(|binding| {
+            let artifact = binding.artifact;
+            let input_project = ProjectId::parse(artifact.project_id)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            if input_project != *project_id {
+                return Err(CliError::invalid(
+                    "planning contract inputs must reference the current project",
+                ));
+            }
+            let role = match binding.role {
+                InputArtifactRoleV2Dto::Context => InputArtifactRole::Context,
+                InputArtifactRoleV2Dto::AcceptedInput => InputArtifactRole::AcceptedInput,
+                InputArtifactRoleV2Dto::Reference => InputArtifactRole::Reference,
+            };
+            let scope = match binding.access_scope {
+                InputArtifactScopeV2Dto::Project => InputArtifactScope::Project,
+                InputArtifactScopeV2Dto::Private => InputArtifactScope::Private,
+            };
+            let producer_from_dto =
+                |identity: boreal_protocol::models::ArtifactProductionIdentityDto| {
+                    Ok::<_, CliError>(ArtifactProductionIdentity {
+                        work_id: WorkId::parse(identity.work_id)
+                            .map_err(|error| CliError::invalid(error.to_string()))?,
+                        attempt_id: AttemptId::parse(identity.attempt_id)
+                            .map_err(|error| CliError::invalid(error.to_string()))?,
+                        result_id: identity.result_id,
+                    })
+                };
+            let produced_by = binding.produced_by.map(producer_from_dto).transpose()?;
+            let accepted_result = binding
+                .accepted_result
+                .map(|accepted| {
+                    let producer = producer_from_dto(accepted.producer)?;
+                    if produced_by
+                        .as_ref()
+                        .is_some_and(|current| current != &producer)
+                    {
+                        return Err(CliError::invalid(
+                            "accepted-result producer does not match input produced_by",
+                        ));
+                    }
+                    Ok(AcceptedResultIdentity {
+                        producer,
+                        decision_id: accepted.decision_id,
+                        submission_id: accepted.submission_id,
+                        artifact_set_digest: accepted.artifact_set_digest,
+                    })
+                })
+                .transpose()?;
+            let produced_by = produced_by.or_else(|| {
+                accepted_result
+                    .as_ref()
+                    .map(|accepted| accepted.producer.clone())
+            });
+            let input = InputArtifactRef {
+                input_key: Some(binding.input_key),
+                required: binding.required,
+                project_id: input_project,
+                source_version_id: SourceVersionId::parse(artifact.source_version_id)
+                    .map_err(|error| CliError::invalid(error.to_string()))?,
+                content_digest: artifact.content_digest,
+                media_type: Some(artifact.media_type),
+                byte_count: Some(artifact.byte_count),
+                availability: Some(artifact.availability),
+                role,
+                scope,
+                produced_by,
+                accepted_result,
+            };
+            boreal_domain::validate_input_artifact_ref(&input, project_id)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            Ok(input)
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    boreal_application::encode_planning_contract(work_id.to_owned(), &requirements, &inputs)
+        .map_err(|error| CliError::invalid(error.to_string()))
+}
+
+fn planning_contract_for_work(
+    parsed: &ParsedCommand,
+    project_id: &ProjectId,
+    work_id: &str,
+) -> Result<Option<boreal_store::WorkPlanningContractWrite>, CliError> {
+    planning_contract_file_value(parsed)?
+        .map(|value| planning_contract_from_value(value, project_id, work_id))
+        .transpose()
+}
+
 fn create_work_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
     operation: &str,
+    store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
     let positional_offset = usize::from(parsed.options.project.is_none());
@@ -5302,6 +6199,12 @@ fn create_work_result(
         "task" => WorkKind::Task,
         _ => unreachable!("parser validates work kind"),
     };
+    let planning_contract = planning_contract_for_work(parsed, &project, &work_id)?;
+    if kind == WorkKind::Sprint && planning_contract.is_some() {
+        return Err(CliError::invalid(
+            "structured deliverable and input contracts are supported on Milestones and Tasks, not legacy Sprint containers",
+        ));
+    }
     let work = WorkItem {
         id: WorkId::new(work_id),
         project_id: project,
@@ -5324,26 +6227,62 @@ fn create_work_result(
             .into_iter()
             .map(ReasonCode::HardHold)
             .collect(),
-        acceptance_profile: match acceptance_profile_option(parsed) {
-            "focused" => AcceptanceProfile::focused(),
-            "reviewed" => AcceptanceProfile::reviewed(),
-            _ => {
-                return Err(CliError::invalid(
-                    "--acceptance must be focused or reviewed",
-                ));
-            }
-        },
+        acceptance_profile: acceptance_profile_from_token(acceptance_profile_option(parsed))?,
     };
-    let result = app
-        .create_work_as_session_checked(
+    let requested_mode = parsed
+        .options
+        .extra
+        .get("--execution-mode")
+        .and_then(|values| values.last())
+        .map(|value| execution_mode_from_token(value))
+        .transpose()?;
+    let mode = requested_mode.unwrap_or_else(|| default_execution_mode(work.kind));
+    let at = now();
+    let result = if work.kind == WorkKind::Sprint {
+        if requested_mode.is_some() {
+            return Err(CliError::invalid(
+                "Sprint is a legacy grouping row and has no execution mode",
+            ));
+        }
+        app.create_work_as_session_checked(
             &work,
             &parsed.options.actor,
             &parsed.options.session,
             parsed.options.expected_revision,
-            &now(),
+            &at,
             operation.to_owned(),
         )
-        .map_err(map_application_error)?;
+        .map_err(map_application_error)?
+    } else {
+        let expected_revision = parsed
+            .options
+            .expected_revision
+            .ok_or_else(|| CliError::invalid("work creation requires --expected-revision"))?;
+        let scope = PlanningScope::new(work.project_id.clone(), parsed.options.actor.clone())
+            .with_session(parsed.options.session.clone())
+            .at_revision(expected_revision);
+        app.create_planning_work_v3_with_contract(
+            &scope,
+            operation.to_owned(),
+            &work,
+            mode,
+            planning_contract,
+            &at,
+        )
+        .map_err(map_application_error)?
+    };
+    let planning = planning_projection_json(
+        store,
+        &result.value.project_id,
+        &result.value.work_id,
+        &result.value.kind,
+        result.value.parent_id.as_deref(),
+    );
+    let planning_contract = planning_contract_detail_json(
+        store,
+        result.value.project_id.as_str(),
+        &result.value.work_id,
+    )?;
     bounded_result(
         Some(json!({
             "project_id": result.value.project_id,
@@ -5358,6 +6297,11 @@ fn create_work_result(
                 "id": work.acceptance_profile.id.as_str(),
                 "version": work.acceptance_profile.version,
             },
+            "execution_mode": planning["execution_mode"],
+            "planning_parent_id": planning["planning_parent_id"],
+            "planning_integrity": planning["planning_integrity"],
+            "planning_diagnostic": planning["planning_diagnostic"],
+            "planning_contract": planning_contract,
             "hard_holds": result
                 .value
                 .hard_holds
@@ -5856,7 +6800,84 @@ fn guide_for_work(
         .iter()
         .map(|reason| reason.stable_code().to_owned())
         .collect::<Vec<_>>();
-    let selected = boreal_application::guided_action(&item);
+    let selected_descriptor = boreal_application::guided_action_descriptor(&item);
+    let selected = selected_descriptor.map(|descriptor| descriptor.action);
+    let action_descriptor = selected_descriptor.map(|descriptor| {
+        use boreal_domain::actions::ActionInputKind;
+
+        boreal_protocol::models::AgentActionDescriptorDto {
+            schema_version: "boreal.agent_action_descriptor.v1".to_owned(),
+            action: action_kind_name(descriptor.action).to_owned(),
+            target: boreal_protocol::models::AgentActionTargetDto {
+                project_id: descriptor.target.project_id.as_str().to_owned(),
+                work_id: descriptor.target.work_id.as_str().to_owned(),
+                entity_revision: descriptor.target.revision.get(),
+            },
+            expected_project_revision: descriptor.expected_project_revision.0,
+            expected_entity_revision: descriptor.expected_entity_revision.get(),
+            expected_proof_revision: descriptor.expected_proof_revision.map(|revision| revision.get()),
+            attempt: descriptor
+                .attempt
+                .as_ref()
+                .map(|attempt| boreal_protocol::models::AgentActionAttemptDto {
+                    attempt_id: attempt.attempt_id.as_str().to_owned(),
+                    fence: attempt.fence.get(),
+                }),
+            required_roles: descriptor
+                .required_roles
+                .iter()
+                .map(|role| match role {
+                    boreal_domain::ActorRole::Agent => boreal_protocol::models::AgentActionRoleDto::Agent,
+                    boreal_domain::ActorRole::Reviewer => boreal_protocol::models::AgentActionRoleDto::Reviewer,
+                    boreal_domain::ActorRole::Operator => boreal_protocol::models::AgentActionRoleDto::Operator,
+                    boreal_domain::ActorRole::Publisher => boreal_protocol::models::AgentActionRoleDto::Publisher,
+                })
+                .collect(),
+            required_inputs: descriptor
+                .required_inputs
+                .iter()
+                .map(|input| {
+                    let value_type = match input {
+                        ActionInputKind::ExpectedProjectRevision
+                        | ActionInputKind::ExpectedEntityRevision
+                        | ActionInputKind::ExpectedProofRevision
+                        | ActionInputKind::Fence => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::UnsignedInteger
+                        }
+                        ActionInputKind::AttemptId
+                        | ActionInputKind::SessionId
+                        | ActionInputKind::OperationId => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::Identifier
+                        }
+                        ActionInputKind::Confirmation => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::Boolean
+                        }
+                        ActionInputKind::Reason
+                        | ActionInputKind::Comment
+                        | ActionInputKind::Summary => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::Text
+                        }
+                        ActionInputKind::Evidence => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::EvidencePayload
+                        }
+                        ActionInputKind::ReviewDecision => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::ReviewDecision
+                        }
+                        ActionInputKind::RecoveryDisposition => {
+                            boreal_protocol::models::AgentActionInputValueTypeDto::RecoveryDisposition
+                        }
+                    };
+                    boreal_protocol::models::AgentActionInputDto {
+                        kind: action_input_name(*input).to_owned(),
+                        value_type,
+                    }
+                })
+                .collect(),
+            confirmation: descriptor.confirmation.map(str::to_owned),
+            read_only: descriptor.read_only,
+            recovery: descriptor.recovery,
+        }
+    });
     let next_action = if let Some(kind) = selected {
         if kind == boreal_domain::actions::ActionKind::Claim {
             Some(start_action(
@@ -5914,17 +6935,49 @@ fn guide_for_work(
                 subject:SubjectDto{subject_type:"work".into(),id:work_id.into()},
                 safe_argv:vec!["bwrk".into(),"evidence".into(),"run".into(),"--project".into(),project.to_string(),"--work".into(),work_id.into(),"--gate".into(),gate.to_string(),"--attempt".into(),attempt.attempt_id.to_string(),"--fence".into(),attempt.fence.get().to_string(),"--actor".into(),parsed.options.actor.clone(),"--session".into(),parsed.options.session.clone(),"--json".into()],cwd:".".into(),runner:"boreal_cli".into(),shell:false,
             })
+        } else if kind == boreal_domain::actions::ActionKind::Inspect {
+            Some(NextActionDto {
+                directive_id: "guidance.inspect@v1".into(),
+                severity: "advisory".into(),
+                title: "Inspect the current work item".into(),
+                instruction: "Read the current work item and its action descriptor. The descriptor is advisory; the application rechecks authorization and revisions for any later request.".into(),
+                subject: SubjectDto { subject_type: "work".into(), id: work_id.into() },
+                safe_argv: vec!["bwrk".into(), "work".into(), "show".into(), project.to_string(), work_id.into(), "--json".into()],
+                cwd: ".".into(), runner: "boreal_cli".into(), shell: false,
+            })
+        } else if kind == boreal_domain::actions::ActionKind::ReadHistory {
+            Some(NextActionDto {
+                directive_id: "guidance.read_history@v1".into(),
+                severity: "advisory".into(),
+                title: "Read the work history".into(),
+                instruction: "Read the bounded work audit and operation history for this item."
+                    .into(),
+                subject: SubjectDto {
+                    subject_type: "work".into(),
+                    id: work_id.into(),
+                },
+                safe_argv: vec![
+                    "bwrk".into(),
+                    "work".into(),
+                    "history".into(),
+                    "--project".into(),
+                    project.to_string(),
+                    work_id.into(),
+                    "--json".into(),
+                ],
+                cwd: ".".into(),
+                runner: "boreal_cli".into(),
+                shell: false,
+            })
         } else {
-            // Non-claim actions require structured proof/decision inputs. Explain the
-            // exact server descriptor via a read rather than manufacturing an argv.
             Some(NextActionDto {
                 directive_id: format!("guidance.{}@v1", action_kind_name(kind)),
-                severity: "advisory".into(),
-                title: format!("Inspect the {} action", action_kind_name(kind)),
-                instruction: "Load the current server descriptor, bind its required inputs and confirmation, then submit that action. Guidance itself is not permission.".into(),
+                severity: "required".into(),
+                title: format!("Prepare the {} action request", action_kind_name(kind)),
+                instruction: "Build a structured request from the adjacent typed action descriptor. Bind every required input and its expected revisions and attempt fence, then submit it through the application; guidance does not authorize the transition.".into(),
                 subject: SubjectDto { subject_type: "work".into(), id: work_id.into() },
-                safe_argv: vec!["bwrk".into(), "work".into(), "show".into(), work_id.into(), "--project".into(), project.to_string(), "--json".into()],
-                cwd: ".".into(), runner: "boreal_cli".into(), shell: false,
+                safe_argv: Vec::new(),
+                cwd: ".".into(), runner: "agent_input".into(), shell: false,
             })
         }
     } else {
@@ -5997,6 +7050,7 @@ fn guide_for_work(
             )
             .collect(),
         next_action,
+        action_descriptor,
         provenance: GuidanceProvenanceDto {
             registry_version: "directives.v1".to_owned(),
             registry_path: "boreal.agent.directive.registry.v1".to_owned(),
@@ -6027,9 +7081,6 @@ fn guide_for_work(
             "finish or explicitly release",
             "refresh guidance after every transition"
         ]);
-        if let Some(kind) = selected {
-            data["action_descriptor"] = item.actions.as_ref().and_then(|actions| actions.allowed.iter().find(|a|a.action==kind)).map(|a|json!({"action":action_kind_name(a.action),"expected_project_revision":a.expected_project_revision.0,"expected_entity_revision":a.expected_entity_revision.get(),"expected_proof_revision":a.expected_proof_revision.map(|p|p.get()),"required_inputs":a.required_inputs.iter().map(|i|action_input_name(*i)).collect::<Vec<_>>(),"confirmation":a.confirmation})).unwrap_or(Value::Null);
-        }
     }
     Ok(result)
 }
@@ -6131,6 +7182,7 @@ fn guide_idle(
             })
             .collect(),
         next_action: None,
+        action_descriptor: None,
         provenance: GuidanceProvenanceDto {
             registry_version: "directives.v1".to_owned(),
             registry_path: "boreal.agent.directive.registry.v1".to_owned(),
@@ -6186,6 +7238,7 @@ fn next_from_guide(
             selection_key: guide.selection_key,
         },
         next_action: guide.next_action,
+        action_descriptor: guide.action_descriptor,
         context_refs: guide
             .status
             .work_id
@@ -6607,6 +7660,1635 @@ fn evidence_add_result(
         ),
         Some(result.revision),
     )
+}
+
+fn evidence_bind_result_result(
+    parsed: &ParsedCommand,
+    operation: &str,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project_id = project_argument(parsed, 0)?;
+    let work_id = work_argument(parsed, 0)?;
+    let attempt_id = parsed
+        .options
+        .attempt
+        .clone()
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --attempt"))?;
+    let fence = parsed
+        .options
+        .fence
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --fence"))?;
+    let source_version_id = parsed
+        .options
+        .source_version
+        .clone()
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --source-version"))?;
+    let content_digest = extra_value(&parsed.options, "--content-digest")
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --content-digest"))?
+        .to_owned();
+    let expected_project_revision = parsed
+        .options
+        .expected_revision
+        .ok_or_else(|| CliError::invalid("evidence bind-result requires --expected-revision"))?;
+    let expected_entity_revision =
+        required_extra_revision(&parsed.options, "--expected-entity-revision")?;
+    let expected_proof_revision =
+        required_extra_revision(&parsed.options, "--expected-proof-revision")?;
+    let database_path = store.database_path().ok_or_else(|| {
+        CliError::invalid("final-result binding requires a file-backed source catalog")
+    })?;
+    let catalog = source_catalog(&source_catalog_root(&database_path.to_string_lossy()))?;
+    let result = app
+        .bind_final_result(
+            &catalog,
+            &boreal_application::FinalResultCaptureRequest {
+                project_id,
+                work_id,
+                actor_id: parsed.options.actor.clone(),
+                session_id: parsed.options.session.clone(),
+                attempt_id,
+                fence,
+                expected_project_revision,
+                expected_entity_revision,
+                expected_proof_revision,
+                source_version_id,
+                content_digest,
+                operation_id: operation.to_owned(),
+                at: now(),
+            },
+        )
+        .map_err(map_application_error)?;
+    let changed = result.changed;
+    let snapshot_revision = result.snapshot_revision;
+    let binding = result.value.binding;
+    bounded_result(
+        Some(json!({
+            "binding_id": binding.binding_id,
+            "project_id": binding.project_id,
+            "work_id": binding.work_id,
+            "attempt_id": binding.attempt_id,
+            "fence": binding.fence,
+            "source_version_id": binding.source_version_id,
+            "content_digest": binding.content_digest,
+            "config_identity": binding.config_identity,
+            "profile_id": binding.profile_id,
+            "profile_version": binding.profile_version,
+            "profile_digest": binding.profile_digest,
+            "entity_revision": binding.entity_revision,
+            "prior_proof_revision": binding.prior_proof_revision,
+            "proof_revision": binding.proof_revision,
+            "operation_id": binding.operation_id,
+            "request_digest": binding.request_digest,
+            "project_revision": binding.project_revision,
+            "created_at": binding.created_at,
+            "lineage_pending": result.value.lineage_pending,
+            "replayed": !result.changed,
+        })),
+        Some(snapshot_revision),
+    )
+    .map(|mut cli_result| {
+        cli_result.outcome = if changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
+        cli_result
+    })
+}
+
+fn scheduling_route(
+    parsed: &ParsedCommand,
+    operation: &str,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let actor = parsed.options.actor.clone();
+    let session = parsed.options.session.clone();
+    match parsed
+        .path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["project", "civil-time", "set"] => {
+            let request: ProjectCivilTimeUpdateDto =
+                read_scheduling_request(parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("project civil-time set requires --input REQUEST.json")
+                })?)?;
+            project_civil_time_set(&project, &actor, &session, operation, request, app, store)
+        }
+        ["project", "civil-time", "show"] => project_civil_time_show(&project, store),
+        ["work", "schedule", "set"] => {
+            let index = usize::from(parsed.options.project.is_none());
+            let work_id =
+                parsed.options.positionals.get(index).ok_or_else(|| {
+                    CliError::invalid("work schedule set requires a work identifier")
+                })?;
+            let request: WorkScheduleUpdateDto =
+                read_scheduling_request(parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("work schedule set requires --input REQUEST.json")
+                })?)?;
+            work_schedule_set(
+                &project, work_id, &actor, &session, operation, request, app, store,
+            )
+        }
+        ["work", "schedule", "show"] => {
+            let index = usize::from(parsed.options.project.is_none());
+            let work_id = parsed.options.positionals.get(index).ok_or_else(|| {
+                CliError::invalid("work schedule show requires a work identifier")
+            })?;
+            work_schedule_show(&project, work_id, store)
+        }
+        ["wait", "create"] => {
+            let request: ExternalWaitCreateDto =
+                read_scheduling_request(parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("wait create requires --input REQUEST.json")
+                })?)?;
+            external_wait_create(&project, &actor, &session, operation, request, app, store)
+        }
+        ["wait", "resolve"] => {
+            let request: ExternalWaitResolveDto =
+                read_scheduling_request(parsed.options.input.as_deref().ok_or_else(|| {
+                    CliError::invalid("wait resolve requires --input REQUEST.json")
+                })?)?;
+            external_wait_resolve(&project, &actor, &session, operation, request, app, store)
+        }
+        ["wait", "list"] => external_wait_read(&project, None, store),
+        ["wait", "show"] => {
+            let index = usize::from(parsed.options.project.is_none());
+            let wait_id = parsed
+                .options
+                .positionals
+                .get(index)
+                .ok_or_else(|| CliError::invalid("wait show requires a wait identifier"))?;
+            external_wait_read(&project, Some(wait_id), store)
+        }
+        _ => Err(CliError::invalid("unknown scheduling route")),
+    }
+}
+
+fn read_scheduling_request<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, CliError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("cannot read request file {path}: {error}"),
+        )
+    })?;
+    if metadata.len() > MAX_JSON_BYTES as u64 {
+        return Err(CliError::invalid(
+            "scheduling request exceeds the JSON size limit",
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| CliError::invalid(error.to_string()))?;
+    if bytes.len() > MAX_JSON_BYTES {
+        return Err(CliError::invalid(
+            "scheduling request exceeds the JSON size limit",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        CliError::invalid(format!("invalid versioned scheduling request: {error}"))
+    })
+}
+
+fn require_scheduling_schema(actual: &str, expected: &str) -> Result<(), CliError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Rejected,
+            format!("unsupported scheduling request schema; expected {expected}, found {actual}"),
+        ))
+    }
+}
+
+fn ensure_scheduling_enabled(app: &WorkApplication<'_>) -> Result<(), CliError> {
+    if app.work_model_v3_enabled().map_err(map_application_error)? {
+        Ok(())
+    } else {
+        Err(CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Rejected,
+            "date and external-wait routes require the registered work-model/3 schema",
+        ))
+    }
+}
+
+fn scheduling_snapshot(
+    store: &SqliteStore,
+    project_id: &str,
+    planning_revision: u64,
+) -> Result<SchedulingSnapshot, CliError> {
+    for _ in 0..3 {
+        let status = store
+            .read_project_status(project_id)
+            .map_err(map_store_error)?;
+        let nodes = store
+            .work_nodes_v3(project_id)
+            .map_err(map_store_error)?
+            .into_iter()
+            .map(|record| {
+                let project = ProjectId::new(record.project_id);
+                let work_id = WorkId::new(record.work_id);
+                let parent_id = record.parent_id.map(WorkId::new);
+                match record.decomposition_kind.as_str() {
+                    "milestone" if record.execution_mode == "container" => {
+                        Ok(WorkNode::milestone(project, work_id, ""))
+                    }
+                    "task" => {
+                        let mode = match record.execution_mode.as_str() {
+                            "direct" => ExecutionMode::Direct,
+                            "container" => ExecutionMode::Container,
+                            _ => {
+                                return Err(StoreError::Corrupt(
+                                    "unknown work execution mode".into(),
+                                ))
+                            }
+                        };
+                        Ok(WorkNode::task(project, work_id, mode, parent_id, ""))
+                    }
+                    _ => Err(StoreError::Corrupt(
+                        "unknown work decomposition kind".into(),
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_store_error)?;
+        let dependencies = status
+            .dependencies
+            .into_iter()
+            .map(|edge| DirectDependency {
+                blocker_id: edge.prerequisite_id,
+                blocked_id: edge.dependent_id,
+            })
+            .collect();
+        let project_civil_time = store
+            .project_civil_time_v1(project_id)
+            .map_err(map_store_error)?;
+        let schedules = store
+            .work_schedules_v3(project_id)
+            .map_err(map_store_error)?;
+        let external_waits = store
+            .external_waits_v1(project_id)
+            .map_err(map_store_error)?;
+        let after = store
+            .project_revision(project_id)
+            .map_err(map_store_error)?
+            .0;
+        if status.revision.0 == after {
+            return Ok(SchedulingSnapshot {
+                project_id: ProjectId::new(project_id),
+                revision: planning_revision,
+                project_civil_time,
+                nodes,
+                dependencies,
+                schedules,
+                external_waits,
+            });
+        }
+    }
+    Err(CliError::with(
+        ErrorCode::RevisionConflict,
+        ApplicationOutcome::Conflict,
+        "project changed while reading date and external-wait planning facts; refresh and retry",
+    ))
+}
+
+fn scheduling_replay_candidate(
+    store: &SqliteStore,
+    project: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    command: &str,
+    expected_revision: u64,
+) -> Result<bool, CliError> {
+    let Some(existing) = store.operation(operation).map_err(map_store_error)? else {
+        return Ok(false);
+    };
+    Ok(existing.project_id == project
+        && existing.actor_id == actor
+        && existing.session_id.as_deref() == Some(session)
+        && existing.command == command
+        && existing.expected_revision == Some(expected_revision)
+        && existing.outcome == StoreOperationOutcome::Changed)
+}
+
+fn project_civil_time_set(
+    project: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    request: ProjectCivilTimeUpdateDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    require_scheduling_schema(
+        &request.schema_version,
+        PROJECT_CIVIL_TIME_UPDATE_SCHEMA_VERSION,
+    )?;
+    ensure_scheduling_enabled(app)?;
+    let replay = scheduling_replay_candidate(
+        store,
+        project,
+        actor,
+        session,
+        operation,
+        "project.civil-time.update.v1",
+        request.expected_project_revision,
+    )?;
+    let mut snapshot = scheduling_snapshot(store, project, request.expected_project_revision)?;
+    let timestamp = if replay {
+        let current = snapshot.project_civil_time.as_ref().ok_or_else(|| {
+            CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "civil-time update replay readback is missing",
+            )
+        })?;
+        if current.revision != request.expected_setting_revision.saturating_add(1) {
+            return Err(CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "civil-time update is no longer the current revision; inspect operation readback",
+            ));
+        }
+        current.changed_at
+    } else {
+        TimestampMs::from_millis(now_ms_u64())
+    };
+    if replay {
+        if request.expected_setting_revision == 0 {
+            snapshot.project_civil_time = None;
+        } else if let Some(setting) = snapshot.project_civil_time.as_mut() {
+            setting.revision = request.expected_setting_revision;
+        }
+    }
+    let identity = SystemTimeZoneDatabase::system()
+        .resolve(
+            &request.timezone,
+            LocalDateTime::new(LocalDate::new(1970, 1, 1), LocalTime::new(0, 0, 0)),
+            GapPolicy::NextValid,
+            FoldPolicy::EarlierOffset,
+        )
+        .map_err(|error| map_application_error(ApplicationError::from(error)))?;
+    let scope = PlanningScope::new(ProjectId::new(project), actor.to_owned())
+        .with_session(session.to_owned())
+        .at_revision(request.expected_project_revision);
+    let plan = plan_project_civil_time_update(
+        &snapshot,
+        &ProjectCivilTimeUpdateRequest {
+            scope,
+            operation_id: operation.to_owned(),
+            expected_setting_revision: request.expected_setting_revision,
+            timezone: request.timezone,
+            tzdb_identity: identity.tzdb_identity,
+            updated_at: timestamp,
+        },
+        &SystemTimeZoneDatabase::system(),
+    )
+    .map_err(|error| map_application_error(ApplicationError::from(error)))?;
+    let mutation = store
+        .update_project_civil_time_v1(
+            &V3MutationContext {
+                project_id: plan.project_id.to_string(),
+                actor_id: plan.actor_id,
+                session_id: plan.session_id,
+                operation_id: plan.operation_id.clone(),
+                request_digest: plan.request_digest,
+                expected_revision: Some(plan.expected_revision),
+                now: stamp(timestamp.as_millis()),
+            },
+            &ProjectCivilTimeV1Input {
+                setting: plan.value,
+                expected_setting_revision: request.expected_setting_revision,
+            },
+        )
+        .map_err(map_store_error)?;
+    let setting = store
+        .project_civil_time_v1(project)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            CliError::invalid("civil-time update completed without a setting readback")
+        })?;
+    let readback = ProjectCivilTimeMutationReadbackDto {
+        schema_version: PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION.to_owned(),
+        operation_id: operation.to_owned(),
+        replayed: mutation.replayed,
+        project_revision: mutation.revision,
+        setting: civil_time_setting_dto(&setting),
+    };
+    scheduling_cli_result(
+        "project_civil_time_update_v1",
+        readback,
+        mutation.revision,
+        mutation.replayed,
+    )
+}
+
+fn project_civil_time_show(project: &str, store: &SqliteStore) -> Result<CliResult, CliError> {
+    let revision = store.project_revision(project).map_err(map_store_error)?.0;
+    let setting = store
+        .project_civil_time_v1(project)
+        .map_err(map_store_error)?;
+    let readback = ProjectCivilTimeReadbackDto {
+        schema_version: PROJECT_CIVIL_TIME_READBACK_SCHEMA_VERSION.to_owned(),
+        project_revision: revision,
+        setting: setting.as_ref().map(civil_time_setting_dto),
+    };
+    scheduling_read_cli_result("project_civil_time_readback_v1", readback, revision)
+}
+
+fn work_schedule_set(
+    project: &str,
+    work_id: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    request: WorkScheduleUpdateDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    require_scheduling_schema(&request.schema_version, WORK_SCHEDULE_UPDATE_SCHEMA_VERSION)?;
+    ensure_scheduling_enabled(app)?;
+    let replay = scheduling_replay_candidate(
+        store,
+        project,
+        actor,
+        session,
+        operation,
+        "work.schedule.update.v3",
+        request.expected_project_revision,
+    )?;
+    let mut snapshot = scheduling_snapshot(store, project, request.expected_project_revision)?;
+    let current = store
+        .work_schedule_v3(project, work_id)
+        .map_err(map_store_error)?;
+    let timestamp = if replay {
+        let value = current.as_ref().ok_or_else(|| {
+            CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "schedule update replay readback is missing",
+            )
+        })?;
+        if value.revision != request.expected_schedule_revision.saturating_add(1) {
+            return Err(CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "schedule update is no longer the current revision; inspect operation readback",
+            ));
+        }
+        value.updated_at
+    } else {
+        TimestampMs::from_millis(now_ms_u64())
+    };
+    if replay {
+        snapshot
+            .schedules
+            .retain(|record| record.work_id.as_str() != work_id);
+        if let Some(mut record) = current.clone() {
+            if request.expected_schedule_revision > 0 {
+                record.revision = request.expected_schedule_revision;
+                snapshot.schedules.push(record);
+            }
+        }
+    }
+    let schedule = schedule_from_update_dto(request.schedule)?;
+    let scope = PlanningScope::new(ProjectId::new(project), actor.to_owned())
+        .with_session(session.to_owned())
+        .at_revision(request.expected_project_revision);
+    let plan = app
+        .plan_work_schedule_update(
+            &snapshot,
+            &WorkScheduleUpdateRequest {
+                scope,
+                operation_id: operation.to_owned(),
+                work_id: WorkId::parse(work_id.to_owned())
+                    .map_err(|error| CliError::invalid(error.to_string()))?,
+                expected_schedule_revision: request.expected_schedule_revision,
+                schedule,
+                updated_at: timestamp,
+            },
+        )
+        .map_err(map_application_error)?;
+    let mutation = store
+        .append_work_schedule_v3(
+            &V3MutationContext {
+                project_id: plan.project_id.to_string(),
+                actor_id: plan.actor_id,
+                session_id: plan.session_id,
+                operation_id: plan.operation_id.clone(),
+                request_digest: plan.request_digest,
+                expected_revision: Some(plan.expected_revision),
+                now: stamp(timestamp.as_millis()),
+            },
+            &WorkScheduleV3Input {
+                record: plan.value,
+                expected_schedule_revision: request.expected_schedule_revision,
+            },
+        )
+        .map_err(map_store_error)?;
+    let record = store
+        .work_schedule_v3(project, work_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CliError::invalid("schedule update completed without a readback"))?;
+    let readback = WorkScheduleMutationReadbackDto {
+        schema_version: WORK_SCHEDULE_READBACK_SCHEMA_VERSION.to_owned(),
+        operation_id: operation.to_owned(),
+        replayed: mutation.replayed,
+        project_revision: mutation.revision,
+        work_id: record.work_id.to_string(),
+        schedule_revision: record.revision,
+        schedule: business_schedule_dto(&record.schedule),
+    };
+    scheduling_cli_result(
+        "work_schedule_update_v1",
+        readback,
+        mutation.revision,
+        mutation.replayed,
+    )
+}
+
+fn work_schedule_show(
+    project: &str,
+    work_id: &str,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let work = store.work(project, work_id).map_err(map_store_error)?;
+    if work.is_none() {
+        return Err(CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("work item not found: {work_id}"),
+        ));
+    }
+    let revision = store.project_revision(project).map_err(map_store_error)?.0;
+    let record = store
+        .work_schedule_v3(project, work_id)
+        .map_err(map_store_error)?;
+    let legacy_due_at = store
+        .legacy_due_at_v3_if_no_schedule(project, work_id)
+        .map_err(map_store_error)?;
+    let readback = WorkScheduleReadbackDto {
+        schema_version: WORK_SCHEDULE_READBACK_SCHEMA_VERSION.to_owned(),
+        project_revision: revision,
+        work_id: work_id.to_owned(),
+        schedule_revision: record.as_ref().map_or(0, |value| value.revision),
+        schedule: record
+            .as_ref()
+            .map(|value| business_schedule_dto(&value.schedule)),
+        legacy_due_at,
+    };
+    scheduling_read_cli_result("work_schedule_readback_v1", readback, revision)
+}
+
+fn external_wait_create(
+    project: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    request: ExternalWaitCreateDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    require_scheduling_schema(&request.schema_version, EXTERNAL_WAIT_CREATE_SCHEMA_VERSION)?;
+    ensure_scheduling_enabled(app)?;
+    if request.expected_wait_revision != 0 {
+        return Err(CliError::invalid(
+            "new external waits require expected_wait_revision 0",
+        ));
+    }
+    let replay = scheduling_replay_candidate(
+        store,
+        project,
+        actor,
+        session,
+        operation,
+        "external-wait.create.v1",
+        request.expected_project_revision,
+    )?;
+    let mut snapshot = scheduling_snapshot(store, project, request.expected_project_revision)?;
+    let existing = snapshot
+        .external_waits
+        .iter()
+        .find(|wait| wait.id.as_str() == request.wait_id)
+        .cloned();
+    let timestamp = if replay {
+        let value = existing.as_ref().ok_or_else(|| {
+            CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "external-wait create replay readback is missing",
+            )
+        })?;
+        if value.revision != 1 {
+            return Err(CliError::with(ErrorCode::RevisionConflict, ApplicationOutcome::Conflict, "external-wait create is no longer the current revision; inspect operation readback"));
+        }
+        value.created_at
+    } else {
+        TimestampMs::from_millis(now_ms_u64())
+    };
+    if replay {
+        snapshot
+            .external_waits
+            .retain(|wait| wait.id.as_str() != request.wait_id);
+    }
+    let follow_up = request
+        .follow_up
+        .0
+        .map(business_date_from_dto)
+        .transpose()?;
+    let wait = ExternalWait {
+        id: ExternalWaitId::parse(request.wait_id.clone())
+            .map_err(|error| CliError::invalid(error.to_string()))?,
+        project_id: ProjectId::new(project),
+        source_work_id: WorkId::parse(request.source_work_id)
+            .map_err(|error| CliError::invalid(error.to_string()))?,
+        affected_work_ids: request
+            .affected_work_ids
+            .into_iter()
+            .map(WorkId::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| CliError::invalid(error.to_string()))?,
+        category: wait_category_from_dto(request.category),
+        reason: request.reason,
+        accountable: accountable_from_dto(request.accountable),
+        expected_decision: request.expected_decision.0,
+        expected_output: request.expected_output.0,
+        follow_up,
+        civil_time_setting_revision: None,
+        revision: 1,
+        state: ExternalWaitState::Open,
+        created_by: actor.to_owned(),
+        created_at: timestamp,
+        resolution: None,
+    };
+    let scope = PlanningScope::new(ProjectId::new(project), actor.to_owned())
+        .with_session(session.to_owned())
+        .at_revision(request.expected_project_revision);
+    let plan = app
+        .plan_external_wait_create(
+            &snapshot,
+            &ExternalWaitCreateRequest {
+                scope,
+                operation_id: operation.to_owned(),
+                wait,
+            },
+        )
+        .map_err(map_application_error)?;
+    let mutation = store
+        .append_external_wait_v1(
+            &V3MutationContext {
+                project_id: plan.project_id.to_string(),
+                actor_id: plan.actor_id,
+                session_id: plan.session_id,
+                operation_id: plan.operation_id.clone(),
+                request_digest: plan.request_digest,
+                expected_revision: Some(plan.expected_revision),
+                now: stamp(timestamp.as_millis()),
+            },
+            &ExternalWaitV1Input {
+                wait: plan.value,
+                expected_wait_revision: 0,
+            },
+        )
+        .map_err(map_store_error)?;
+    let created = store
+        .external_waits_v1(project)
+        .map_err(map_store_error)?
+        .into_iter()
+        .find(|wait| wait.id.as_str() == request.wait_id)
+        .ok_or_else(|| CliError::invalid("external-wait create completed without a readback"))?;
+    let readback = ExternalWaitMutationReadbackDto {
+        schema_version: EXTERNAL_WAIT_READBACK_SCHEMA_VERSION.to_owned(),
+        operation_id: operation.to_owned(),
+        replayed: mutation.replayed,
+        project_revision: mutation.revision,
+        wait: external_wait_dto(&created),
+    };
+    scheduling_cli_result(
+        "external_wait_create_v1",
+        readback,
+        mutation.revision,
+        mutation.replayed,
+    )
+}
+
+fn external_wait_resolve(
+    project: &str,
+    actor: &str,
+    session: &str,
+    operation: &str,
+    request: ExternalWaitResolveDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    require_scheduling_schema(
+        &request.schema_version,
+        EXTERNAL_WAIT_RESOLVE_SCHEMA_VERSION,
+    )?;
+    ensure_scheduling_enabled(app)?;
+    let next_state = wait_state_from_dto(request.next_state);
+    if !matches!(
+        next_state,
+        ExternalWaitState::Resolved | ExternalWaitState::Cancelled
+    ) {
+        return Err(CliError::invalid(
+            "external-wait resolution requires resolved or cancelled state",
+        ));
+    }
+    let replay = scheduling_replay_candidate(
+        store,
+        project,
+        actor,
+        session,
+        operation,
+        "external-wait.resolve.v1",
+        request.expected_project_revision,
+    )?;
+    let mut snapshot = scheduling_snapshot(store, project, request.expected_project_revision)?;
+    let current = snapshot
+        .external_waits
+        .iter()
+        .find(|wait| wait.id.as_str() == request.wait_id)
+        .cloned()
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("external wait not found: {}", request.wait_id),
+            )
+        })?;
+    let timestamp = if replay {
+        let resolution = current.resolution.as_ref().ok_or_else(|| {
+            CliError::with(
+                ErrorCode::RevisionConflict,
+                ApplicationOutcome::Conflict,
+                "external-wait resolution replay readback is missing",
+            )
+        })?;
+        if current.revision != request.expected_wait_revision.saturating_add(1) {
+            return Err(CliError::with(ErrorCode::RevisionConflict, ApplicationOutcome::Conflict, "external-wait resolution is no longer the current revision; inspect operation readback"));
+        }
+        resolution.recorded_at
+    } else {
+        TimestampMs::from_millis(now_ms_u64())
+    };
+    if replay {
+        if let Some(wait) = snapshot
+            .external_waits
+            .iter_mut()
+            .find(|wait| wait.id.as_str() == request.wait_id)
+        {
+            wait.revision = request.expected_wait_revision;
+            wait.state = ExternalWaitState::Open;
+            wait.resolution = None;
+        }
+    }
+    let scope = PlanningScope::new(ProjectId::new(project), actor.to_owned())
+        .with_session(session.to_owned())
+        .at_revision(request.expected_project_revision);
+    let plan = app
+        .plan_external_wait_resolution(
+            &snapshot,
+            &ExternalWaitResolutionRequest {
+                scope,
+                operation_id: operation.to_owned(),
+                wait_id: ExternalWaitId::parse(request.wait_id.clone())
+                    .map_err(|error| CliError::invalid(error.to_string()))?,
+                expected_wait_revision: request.expected_wait_revision,
+                next_state,
+                resolution: ExternalWaitResolution {
+                    outcome: wait_outcome_from_dto(request.outcome),
+                    detail: request.detail,
+                    output_ref: request.output_ref.0,
+                    supplied_by: accountable_from_dto(request.supplied_by),
+                    recorded_by: actor.to_owned(),
+                    recorded_as: ActorRole::Operator,
+                    recorded_at: timestamp,
+                },
+            },
+        )
+        .map_err(map_application_error)?;
+    let mutation = store
+        .append_external_wait_v1(
+            &V3MutationContext {
+                project_id: plan.project_id.to_string(),
+                actor_id: plan.actor_id,
+                session_id: plan.session_id,
+                operation_id: plan.operation_id.clone(),
+                request_digest: plan.request_digest,
+                expected_revision: Some(plan.expected_revision),
+                now: stamp(timestamp.as_millis()),
+            },
+            &ExternalWaitV1Input {
+                wait: plan.value,
+                expected_wait_revision: request.expected_wait_revision,
+            },
+        )
+        .map_err(map_store_error)?;
+    let resolved = store
+        .external_waits_v1(project)
+        .map_err(map_store_error)?
+        .into_iter()
+        .find(|wait| wait.id.as_str() == request.wait_id)
+        .ok_or_else(|| CliError::invalid("external-wait resolve completed without a readback"))?;
+    let readback = ExternalWaitMutationReadbackDto {
+        schema_version: EXTERNAL_WAIT_READBACK_SCHEMA_VERSION.to_owned(),
+        operation_id: operation.to_owned(),
+        replayed: mutation.replayed,
+        project_revision: mutation.revision,
+        wait: external_wait_dto(&resolved),
+    };
+    scheduling_cli_result(
+        "external_wait_resolve_v1",
+        readback,
+        mutation.revision,
+        mutation.replayed,
+    )
+}
+
+fn external_wait_read(
+    project: &str,
+    selected: Option<&str>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let revision = store.project_revision(project).map_err(map_store_error)?.0;
+    let mut waits = store.external_waits_v1(project).map_err(map_store_error)?;
+    if let Some(wait_id) = selected {
+        waits.retain(|wait| wait.id.as_str() == wait_id);
+        if waits.is_empty() {
+            return Err(CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("external wait not found: {wait_id}"),
+            ));
+        }
+    }
+    let readback = ExternalWaitReadbackDto {
+        schema_version: EXTERNAL_WAIT_READBACK_SCHEMA_VERSION.to_owned(),
+        project_revision: revision,
+        waits: waits.iter().map(external_wait_dto).collect(),
+    };
+    scheduling_read_cli_result("external_wait_readback_v1", readback, revision)
+}
+
+fn schedule_from_update_dto(dto: BusinessScheduleUpdateDto) -> Result<BusinessSchedule, CliError> {
+    Ok(BusinessSchedule {
+        not_before: dto.not_before.0.map(business_date_from_dto).transpose()?,
+        due: dto.due.0.map(business_date_from_dto).transpose()?,
+        planned_start: dto
+            .planned_start
+            .0
+            .map(business_date_from_dto)
+            .transpose()?,
+        planned_end: dto.planned_end.0.map(business_date_from_dto).transpose()?,
+    })
+}
+
+fn business_date_from_dto(dto: BusinessDateDto) -> Result<BusinessDate, CliError> {
+    match dto {
+        BusinessDateDto::Instant { at_ms } => {
+            Ok(BusinessDate::Instant(TimestampMs::from_millis(at_ms)))
+        }
+        BusinessDateDto::LocalDate { year, month, day } => {
+            let date = LocalDate::new(year, month, day);
+            date.validate()
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            Ok(BusinessDate::LocalDate(date))
+        }
+        BusinessDateDto::ResolvedLocal {
+            nominal_local,
+            utc_instant_ms,
+            utc_offset_minutes,
+            timezone,
+            tzdb_identity,
+            gap_policy,
+            fold_policy,
+        } => {
+            let local = LocalDateTime::new(
+                LocalDate::new(nominal_local.year, nominal_local.month, nominal_local.day),
+                LocalTime::new(
+                    nominal_local.hour,
+                    nominal_local.minute,
+                    nominal_local.second,
+                ),
+            );
+            let gap_policy = match gap_policy {
+                GapPolicyDto::NextValid => GapPolicy::NextValid,
+            };
+            let fold_policy = match fold_policy {
+                FoldPolicyDto::EarlierOffset => FoldPolicy::EarlierOffset,
+                FoldPolicyDto::LaterOffset => FoldPolicy::LaterOffset,
+            };
+            let actual = SystemTimeZoneDatabase::system()
+                .resolve(&timezone, local, gap_policy, fold_policy)
+                .map_err(|error| CliError::invalid(error.to_string()))?;
+            if actual.utc_instant.as_millis() != utc_instant_ms
+                || actual.utc_offset_minutes != utc_offset_minutes
+                || actual.tzdb_identity != tzdb_identity
+            {
+                return Err(CliError::invalid(
+                    "resolved local date-time does not match the installed timezone database",
+                ));
+            }
+            Ok(BusinessDate::ResolvedLocal(actual))
+        }
+    }
+}
+
+fn business_date_dto(value: &BusinessDate) -> BusinessDateDto {
+    match value {
+        BusinessDate::Instant(at) => BusinessDateDto::Instant {
+            at_ms: at.as_millis(),
+        },
+        BusinessDate::LocalDate(date) => BusinessDateDto::LocalDate {
+            year: date.year,
+            month: date.month,
+            day: date.day,
+        },
+        BusinessDate::ResolvedLocal(TimeResolution {
+            nominal_local,
+            utc_instant,
+            utc_offset_minutes,
+            timezone,
+            tzdb_identity,
+            gap_policy,
+            fold_policy,
+        }) => BusinessDateDto::ResolvedLocal {
+            nominal_local: LocalDateTimeDto {
+                year: nominal_local.date.year,
+                month: nominal_local.date.month,
+                day: nominal_local.date.day,
+                hour: nominal_local.time.hour,
+                minute: nominal_local.time.minute,
+                second: nominal_local.time.second,
+            },
+            utc_instant_ms: utc_instant.as_millis(),
+            utc_offset_minutes: *utc_offset_minutes,
+            timezone: timezone.clone(),
+            tzdb_identity: tzdb_identity.clone(),
+            gap_policy: match gap_policy {
+                GapPolicy::NextValid => GapPolicyDto::NextValid,
+            },
+            fold_policy: match fold_policy {
+                FoldPolicy::EarlierOffset => FoldPolicyDto::EarlierOffset,
+                FoldPolicy::LaterOffset => FoldPolicyDto::LaterOffset,
+            },
+        },
+    }
+}
+
+fn business_schedule_dto(schedule: &BusinessSchedule) -> BusinessScheduleDto {
+    BusinessScheduleDto {
+        not_before: schedule.not_before.as_ref().map(business_date_dto),
+        due: schedule.due.as_ref().map(business_date_dto),
+        planned_start: schedule.planned_start.as_ref().map(business_date_dto),
+        planned_end: schedule.planned_end.as_ref().map(business_date_dto),
+    }
+}
+
+fn civil_time_setting_dto(value: &ProjectCivilTimeSetting) -> ProjectCivilTimeSettingDto {
+    ProjectCivilTimeSettingDto {
+        setting_revision: value.revision,
+        timezone: value.timezone.clone(),
+        tzdb_identity: value.tzdb_identity.clone(),
+        changed_by: value.changed_by.clone(),
+        changed_at_ms: value.changed_at.as_millis(),
+    }
+}
+
+fn role_from_dto(value: ExternalWaitRoleDto) -> ActorRole {
+    match value {
+        ExternalWaitRoleDto::Agent => ActorRole::Agent,
+        ExternalWaitRoleDto::Operator => ActorRole::Operator,
+        ExternalWaitRoleDto::Reviewer => ActorRole::Reviewer,
+        ExternalWaitRoleDto::Publisher => ActorRole::Publisher,
+    }
+}
+
+fn role_dto(value: ActorRole) -> ExternalWaitRoleDto {
+    match value {
+        ActorRole::Agent => ExternalWaitRoleDto::Agent,
+        ActorRole::Operator => ExternalWaitRoleDto::Operator,
+        ActorRole::Reviewer => ExternalWaitRoleDto::Reviewer,
+        ActorRole::Publisher => ExternalWaitRoleDto::Publisher,
+    }
+}
+
+fn accountable_from_dto(value: ExternalWaitAccountableDto) -> ExternalWaitAccountable {
+    match value {
+        ExternalWaitAccountableDto::Person {
+            reference,
+            display_name,
+        } => ExternalWaitAccountable::Person {
+            reference,
+            display_name,
+        },
+        ExternalWaitAccountableDto::Role { role } => {
+            ExternalWaitAccountable::Role(role_from_dto(role))
+        }
+        ExternalWaitAccountableDto::Service {
+            reference,
+            display_name,
+        } => ExternalWaitAccountable::Service {
+            reference,
+            display_name,
+        },
+    }
+}
+
+fn accountable_dto(value: &ExternalWaitAccountable) -> ExternalWaitAccountableDto {
+    match value {
+        ExternalWaitAccountable::Person {
+            reference,
+            display_name,
+        } => ExternalWaitAccountableDto::Person {
+            reference: reference.clone(),
+            display_name: display_name.clone(),
+        },
+        ExternalWaitAccountable::Role(role) => ExternalWaitAccountableDto::Role {
+            role: role_dto(*role),
+        },
+        ExternalWaitAccountable::Service {
+            reference,
+            display_name,
+        } => ExternalWaitAccountableDto::Service {
+            reference: reference.clone(),
+            display_name: display_name.clone(),
+        },
+    }
+}
+
+fn wait_category_from_dto(value: ExternalWaitCategoryDto) -> ExternalWaitCategory {
+    match value {
+        ExternalWaitCategoryDto::Decision => ExternalWaitCategory::Decision,
+        ExternalWaitCategoryDto::Approval => ExternalWaitCategory::Approval,
+        ExternalWaitCategoryDto::Information => ExternalWaitCategory::Information,
+        ExternalWaitCategoryDto::Access => ExternalWaitCategory::Access,
+        ExternalWaitCategoryDto::Service => ExternalWaitCategory::Service,
+        ExternalWaitCategoryDto::Other => ExternalWaitCategory::Other,
+    }
+}
+
+fn wait_category_dto(value: ExternalWaitCategory) -> ExternalWaitCategoryDto {
+    match value {
+        ExternalWaitCategory::Decision => ExternalWaitCategoryDto::Decision,
+        ExternalWaitCategory::Approval => ExternalWaitCategoryDto::Approval,
+        ExternalWaitCategory::Information => ExternalWaitCategoryDto::Information,
+        ExternalWaitCategory::Access => ExternalWaitCategoryDto::Access,
+        ExternalWaitCategory::Service => ExternalWaitCategoryDto::Service,
+        ExternalWaitCategory::Other => ExternalWaitCategoryDto::Other,
+    }
+}
+
+fn wait_state_from_dto(value: ExternalWaitStateDto) -> ExternalWaitState {
+    match value {
+        ExternalWaitStateDto::Open => ExternalWaitState::Open,
+        ExternalWaitStateDto::Resolved => ExternalWaitState::Resolved,
+        ExternalWaitStateDto::Cancelled => ExternalWaitState::Cancelled,
+    }
+}
+
+fn wait_state_dto(value: ExternalWaitState) -> ExternalWaitStateDto {
+    match value {
+        ExternalWaitState::Open => ExternalWaitStateDto::Open,
+        ExternalWaitState::Resolved => ExternalWaitStateDto::Resolved,
+        ExternalWaitState::Cancelled => ExternalWaitStateDto::Cancelled,
+    }
+}
+
+fn wait_outcome_from_dto(value: ExternalWaitOutcomeDto) -> ExternalWaitOutcome {
+    match value {
+        ExternalWaitOutcomeDto::Approved => ExternalWaitOutcome::Approved,
+        ExternalWaitOutcomeDto::Rejected => ExternalWaitOutcome::Rejected,
+        ExternalWaitOutcomeDto::DecisionProvided => ExternalWaitOutcome::DecisionProvided,
+        ExternalWaitOutcomeDto::OutputProvided => ExternalWaitOutcome::OutputProvided,
+        ExternalWaitOutcomeDto::Declined => ExternalWaitOutcome::Declined,
+        ExternalWaitOutcomeDto::Unavailable => ExternalWaitOutcome::Unavailable,
+        ExternalWaitOutcomeDto::Cancelled => ExternalWaitOutcome::Cancelled,
+    }
+}
+
+fn wait_outcome_dto(value: ExternalWaitOutcome) -> ExternalWaitOutcomeDto {
+    match value {
+        ExternalWaitOutcome::Approved => ExternalWaitOutcomeDto::Approved,
+        ExternalWaitOutcome::Rejected => ExternalWaitOutcomeDto::Rejected,
+        ExternalWaitOutcome::DecisionProvided => ExternalWaitOutcomeDto::DecisionProvided,
+        ExternalWaitOutcome::OutputProvided => ExternalWaitOutcomeDto::OutputProvided,
+        ExternalWaitOutcome::Declined => ExternalWaitOutcomeDto::Declined,
+        ExternalWaitOutcome::Unavailable => ExternalWaitOutcomeDto::Unavailable,
+        ExternalWaitOutcome::Cancelled => ExternalWaitOutcomeDto::Cancelled,
+    }
+}
+
+fn external_wait_dto(value: &ExternalWait) -> ExternalWaitDto {
+    ExternalWaitDto {
+        wait_id: value.id.to_string(),
+        source_work_id: value.source_work_id.to_string(),
+        affected_work_ids: value
+            .affected_work_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        category: wait_category_dto(value.category),
+        reason: value.reason.clone(),
+        accountable: accountable_dto(&value.accountable),
+        expected_decision: value.expected_decision.clone(),
+        expected_output: value.expected_output.clone(),
+        follow_up: value.follow_up.as_ref().map(business_date_dto),
+        civil_time_setting_revision: value.civil_time_setting_revision,
+        wait_revision: value.revision,
+        state: wait_state_dto(value.state),
+        created_by: value.created_by.clone(),
+        created_at_ms: value.created_at.as_millis(),
+        resolution: value
+            .resolution
+            .as_ref()
+            .map(|resolution| ExternalWaitResolutionDto {
+                outcome: wait_outcome_dto(resolution.outcome),
+                detail: resolution.detail.clone(),
+                output_ref: resolution.output_ref.clone(),
+                supplied_by: accountable_dto(&resolution.supplied_by),
+                recorded_by: resolution.recorded_by.clone(),
+                recorded_as: role_dto(resolution.recorded_as),
+                recorded_at_ms: resolution.recorded_at.as_millis(),
+            }),
+    }
+}
+
+fn scheduling_cli_result<T: Serialize>(
+    command: &str,
+    readback: T,
+    revision: u64,
+    replayed: bool,
+) -> Result<CliResult, CliError> {
+    let mut result = bounded_result(
+        Some(json!({"command":command,"readback":readback})),
+        Some(revision),
+    )?;
+    result.outcome = if replayed {
+        ApplicationOutcome::Unchanged
+    } else {
+        ApplicationOutcome::Changed
+    };
+    Ok(result)
+}
+
+fn scheduling_read_cli_result<T: Serialize>(
+    command: &str,
+    readback: T,
+    revision: u64,
+) -> Result<CliResult, CliError> {
+    let mut result = bounded_result(
+        Some(json!({"command":command,"readback":readback})),
+        Some(revision),
+    )?;
+    result.outcome = ApplicationOutcome::Unchanged;
+    Ok(result)
+}
+
+fn artifact_result_bind_command(
+    parsed: &ParsedCommand,
+    operation: &str,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let path =
+        parsed.options.input.as_deref().ok_or_else(|| {
+            CliError::invalid("artifact result bind requires --input REQUEST.json")
+        })?;
+    let request = read_artifact_result_bind_request(path)?;
+    artifact_result_bind_request_result(
+        &project_argument(parsed, 0)?,
+        &parsed.options.actor,
+        &parsed.options.session,
+        operation,
+        request,
+        app,
+        store,
+    )
+}
+
+fn read_artifact_result_bind_request(path: &str) -> Result<ArtifactResultBindRequestDto, CliError> {
+    let bytes = fs::read(path).map_err(|error| {
+        CliError::invalid(format!("cannot read artifact result request: {error}"))
+    })?;
+    if bytes.len() > MAX_JSON_BYTES {
+        return Err(CliError::invalid(
+            "artifact result request exceeds the inline protocol bound",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        CliError::invalid(format!(
+            "artifact result request is not valid strict JSON: {error}"
+        ))
+    })
+}
+
+fn artifact_result_bind_request_result(
+    project_id: &str,
+    actor_id: &str,
+    session_id: &str,
+    operation: &str,
+    request: ArtifactResultBindRequestDto,
+    app: &WorkApplication<'_>,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    if request.schema_version != ARTIFACT_RESULT_BIND_SCHEMA_VERSION {
+        return Err(CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Rejected,
+            "artifact result request DTO schema version is not supported",
+        ));
+    }
+    if !app.work_model_v3_enabled().map_err(map_application_error)? {
+        return Err(artifact_result_schema_unavailable());
+    }
+    let database = store.database_path().ok_or_else(|| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Rejected,
+            "artifact result binding requires a file-backed source catalog",
+        )
+    })?;
+    let catalog = source_catalog(&source_catalog_root(&database.to_string_lossy()))?;
+    let request = ArtifactAcceptanceRequest {
+        project_id: project_id.to_owned(),
+        work_id: request.work_id,
+        actor_id: actor_id.to_owned(),
+        session_id: session_id.to_owned(),
+        attempt_id: request.attempt_id,
+        fence: request.fence,
+        expected_project_revision: request.expected_project_revision,
+        expected_entity_revision: request.expected_entity_revision,
+        expected_proof_revision: request.expected_proof_revision,
+        result_id: request.result_id,
+        contract_revision: request.contract_revision,
+        outputs: request
+            .outputs
+            .into_iter()
+            .map(|output| ProducedArtifactInput {
+                requirement_key: output.requirement_key,
+                source: SourceIdentity {
+                    project_id: output.source.project_id,
+                    source_version_id: output.source.source_version_id,
+                    content_digest: output.source.content_digest,
+                },
+                relationship_id: output.relationship_id,
+                rights: ArtifactRightsProvenance {
+                    attribution: output.rights.attribution,
+                    rights_statement: output.rights.rights_statement,
+                    license: output.rights.license,
+                },
+            })
+            .collect(),
+        attestation: request
+            .attestation
+            .map(|attestation| CompletionAttestationInput {
+                statement: attestation.statement,
+            }),
+        operation_id: operation.to_owned(),
+        at: now(),
+    };
+    let result = app
+        .bind_artifact_result(&catalog, &request)
+        .map_err(map_application_error)?;
+    let readback = ArtifactResultBindReadbackDto {
+        schema_version: ARTIFACT_RESULT_BIND_READBACK_SCHEMA_VERSION.to_owned(),
+        result: artifact_result_record_dto(&result.value.result),
+        source_relationship_ids: result.value.source_relationship_ids,
+        lineage_pending: result.value.lineage_pending,
+    };
+    let mut cli_result = bounded_result(
+        Some(serde_json::to_value(readback).map_err(|error| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                format!("cannot encode artifact result readback: {error}"),
+            )
+        })?),
+        Some(result.snapshot_revision),
+    )?;
+    cli_result.outcome = if result.changed {
+        ApplicationOutcome::Changed
+    } else {
+        ApplicationOutcome::Unchanged
+    };
+    Ok(cli_result)
+}
+
+fn artifact_result_for_attempt_command(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let work_id = parsed
+        .options
+        .work
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("artifact result attempt requires --work"))?;
+    let attempt_id = parsed
+        .options
+        .attempt
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("artifact result attempt requires --attempt"))?;
+    let fence = parsed
+        .options
+        .fence
+        .ok_or_else(|| CliError::invalid("artifact result attempt requires --fence"))?;
+    artifact_result_for_attempt_result(
+        &project_argument(parsed, 0)?,
+        work_id,
+        attempt_id,
+        fence,
+        app,
+    )
+}
+
+fn artifact_result_for_operation_command(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let operation_id = parsed
+        .options
+        .positionals
+        .first()
+        .ok_or_else(|| CliError::invalid("artifact result operation requires OPERATION_ID"))?;
+    artifact_result_for_operation_result(&project_argument(parsed, 0)?, operation_id, app)
+}
+
+fn artifact_result_schema_unavailable() -> CliError {
+    CliError::with(
+        ErrorCode::ServiceUnavailable,
+        ApplicationOutcome::Rejected,
+        "artifact result routes require the work-model/3 acceptance schema; schema-v2 was left unchanged",
+    )
+}
+
+fn artifact_result_for_attempt_result(
+    project_id: &str,
+    work_id: &str,
+    attempt_id: &str,
+    fence: u64,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    if !app.work_model_v3_enabled().map_err(map_application_error)? {
+        return Err(artifact_result_schema_unavailable());
+    }
+    let result = app
+        .artifact_result_for_attempt(project_id, work_id, attempt_id, fence)
+        .map_err(map_application_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                "artifact result was not found for the exact attempt fence",
+            )
+        })?;
+    let revision = result.project_revision;
+    let readback = ArtifactResultReadbackDto {
+        schema_version: ARTIFACT_RESULT_READBACK_SCHEMA_VERSION.to_owned(),
+        result: artifact_result_record_dto(&result),
+    };
+    bounded_result(
+        Some(serde_json::to_value(readback).map_err(|error| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                format!("cannot encode artifact result readback: {error}"),
+            )
+        })?),
+        Some(revision),
+    )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn artifact_result_for_operation_result(
+    project_id: &str,
+    operation_id: &str,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    if !app.work_model_v3_enabled().map_err(map_application_error)? {
+        return Err(artifact_result_schema_unavailable());
+    }
+    let result = app
+        .artifact_result_for_operation(project_id, operation_id)
+        .map_err(map_application_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                "artifact result was not found for this project operation",
+            )
+        })?;
+    let revision = result.project_revision;
+    let readback = ArtifactResultReadbackDto {
+        schema_version: ARTIFACT_RESULT_READBACK_SCHEMA_VERSION.to_owned(),
+        result: artifact_result_record_dto(&result),
+    };
+    bounded_result(
+        Some(serde_json::to_value(readback).map_err(|error| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                format!("cannot encode artifact result readback: {error}"),
+            )
+        })?),
+        Some(revision),
+    )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn artifact_result_record_dto(record: &AcceptanceResultRecord) -> ArtifactResultRecordDto {
+    ArtifactResultRecordDto {
+        result_id: record.result_id.clone(),
+        project_id: record.project_id.clone(),
+        work_id: record.work_id.clone(),
+        attempt_id: record.attempt_id.clone(),
+        fence: record.fence,
+        entity_revision: record.entity_revision,
+        proof_revision: record.proof_revision,
+        actor_id: record.actor_id.clone(),
+        session_id: record.session_id.clone(),
+        source_version_id: record.source_version_id.clone(),
+        config_identity: record.config_identity.clone(),
+        profile_id: record.profile_id.clone(),
+        profile_version: record.profile_version,
+        profile_digest: record.profile_digest.clone(),
+        contract_revision: record.contract_revision,
+        result_digest: record.result_digest.clone(),
+        outputs: record
+            .outputs
+            .iter()
+            .map(|output| ArtifactResultOutputReadbackDto {
+                requirement_key: output.requirement_key.clone(),
+                relationship_id: output.relationship_id.clone(),
+                rights: ArtifactResultRightsDto {
+                    attribution: output.attribution.clone(),
+                    rights_statement: output.rights_statement.clone(),
+                    license: output.license.clone(),
+                },
+                source: ArtifactResultSourceIdentityDto {
+                    project_id: record.project_id.clone(),
+                    source_version_id: output.source_version_id.clone(),
+                    content_digest: output.content_digest.clone(),
+                },
+                media_type: output.media_type.clone(),
+                availability: match output.availability {
+                    ArtifactInspectionAvailability::Available => {
+                        ArtifactResultAvailabilityDto::Available
+                    }
+                    ArtifactInspectionAvailability::Missing => {
+                        ArtifactResultAvailabilityDto::Missing
+                    }
+                    ArtifactInspectionAvailability::Corrupt => {
+                        ArtifactResultAvailabilityDto::Corrupt
+                    }
+                    ArtifactInspectionAvailability::TooLarge => {
+                        ArtifactResultAvailabilityDto::TooLarge
+                    }
+                },
+                media_type_allowed: output.media_type_allowed,
+                byte_count: output.byte_count,
+                criteria: output
+                    .criteria
+                    .iter()
+                    .map(|criterion| ArtifactResultCriterionDto {
+                        criterion_id: criterion.criterion_id.clone(),
+                        passed: criterion.passed,
+                        observed: criterion.observed.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        attestation: record
+            .attestation
+            .as_ref()
+            .map(|attestation| ArtifactResultAttestationDto {
+                statement: attestation.statement.clone(),
+            }),
+        operation_id: record.operation_id.clone(),
+        request_digest: record.request_digest.clone(),
+        project_revision: record.project_revision,
+        created_at: record.created_at.clone(),
+        replayed: record.replayed,
+    }
+}
+
+fn evidence_receipts_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project_id = project_argument(parsed, 0)?;
+    let work_id = work_argument(parsed, 0)?;
+    let attempt_id = parsed
+        .options
+        .attempt
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("evidence receipts requires --attempt"))?;
+    let fence = parsed
+        .options
+        .fence
+        .ok_or_else(|| CliError::invalid("evidence receipts requires --fence"))?;
+    let page = app
+        .read_receipts_for_attempt(
+            &project_id,
+            &work_id,
+            attempt_id,
+            fence,
+            parsed.options.limit.unwrap_or(50),
+            parsed.options.offset.unwrap_or(0),
+        )
+        .map_err(map_application_error)?;
+    let items = page
+        .items
+        .iter()
+        .map(|receipt| {
+            let mut item = json!({
+                "receipt_id": receipt.receipt_id,
+                "project_id": receipt.project_id,
+                "work_id": receipt.work_id,
+                "attempt_id": receipt.attempt_id,
+                "fence": receipt.fence,
+                "operation_id": receipt.operation_id,
+                "gate_id": receipt.gate_id,
+                "executable": receipt.executable,
+                "argv_json": receipt.argv_json,
+                "cwd": receipt.cwd,
+                "exit_code": receipt.exit_code,
+                "started_at": receipt.started_at,
+                "ended_at": receipt.ended_at,
+                "source_version_id": receipt.source_version_id,
+                "config_identity": receipt.config_identity,
+                "environment_fingerprint": receipt.environment_fingerprint,
+                "output_digest": receipt.output_digest,
+                "output_ref": receipt.output_ref,
+                "subject_json": receipt.subject_json,
+                "coverage_json": receipt.coverage_json,
+                "attestation": receipt_attestation_name(receipt.attestation),
+                "result": receipt_outcome_name(receipt.result),
+                "rejection_code": receipt.rejection_code,
+                "created_at": receipt.created_at,
+            });
+            match receipt_record_json(receipt) {
+                Ok(payload) => item["receipt_payload"] = payload,
+                Err(error) => {
+                    item["receipt_payload"] = Value::Null;
+                    item["receipt_payload_diagnostic"] = json!(error.message);
+                }
+            }
+            item
+        })
+        .collect::<Vec<_>>();
+    bounded_result(
+        Some(json!({
+            "project_id": project_id,
+            "work_id": work_id,
+            "attempt_id": attempt_id,
+            "fence": fence,
+            "items": items,
+            "limit": page.limit,
+            "offset": page.offset,
+            "has_more": page.has_more,
+        })),
+        None,
+    )
+}
+
+fn required_extra_revision(options: &CliOptions, name: &str) -> Result<u64, CliError> {
+    let value = extra_value(options, name)
+        .ok_or_else(|| CliError::invalid(format!("missing required option {name}")))?;
+    parse_revision(value)
+}
+
+fn receipt_attestation_name(attestation: ReceiptAttestation) -> &'static str {
+    match attestation {
+        ReceiptAttestation::BorealWitnessed => "boreal_witnessed",
+        ReceiptAttestation::ExternalAttested => "external_attested",
+        ReceiptAttestation::SelfReported => "self_reported",
+        ReceiptAttestation::Unknown => "unknown",
+    }
+}
+
+fn receipt_outcome_name(outcome: ReceiptOutcome) -> &'static str {
+    match outcome {
+        ReceiptOutcome::Passed => "passed",
+        ReceiptOutcome::Failed => "failed",
+        ReceiptOutcome::Rejected => "rejected",
+        ReceiptOutcome::Unknown => "unknown",
+        ReceiptOutcome::Stale => "stale",
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -7256,7 +9938,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
                 "evidence run requires a current attempt",
             )
         })?;
-    let source_version_id = attempt_record.source_version_id.as_deref().ok_or_else(|| {
+    let claim_source_version_id = attempt_record.source_version_id.as_deref().ok_or_else(|| {
         CliError::with(
             ErrorCode::ReceiptPolicyMismatch,
             ApplicationOutcome::Rejected,
@@ -7264,7 +9946,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         )
     })?;
     let captured_source = store
-        .source_version(project.as_str(), source_version_id)
+        .source_version(project.as_str(), claim_source_version_id)
         .map_err(map_store_error)?
         .ok_or_else(|| {
             CliError::with(
@@ -7284,9 +9966,9 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         ));
     }
     let source = knowledge
-        .show_source(project.as_str(), source_version_id)
+        .show_source(project.as_str(), claim_source_version_id)
         .map_err(map_knowledge_error)?;
-    let source_bytes = catalog.verify(&source).map_err(|error| {
+    let _claim_source_bytes = catalog.verify(&source).map_err(|error| {
         CliError::with(
             ErrorCode::IntegrityQuarantined,
             ApplicationOutcome::Rejected,
@@ -7302,8 +9984,77 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             "captured source catalog bytes do not match the immutable project registration",
         ));
     }
+    let final_result = AcceptanceStore::new(store)
+        .current_final_result_for_attempt(&attempt_record)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::ReceiptSourceMismatch,
+                ApplicationOutcome::Rejected,
+                "evidence run requires a current immutable final-result binding; capture and bind the produced workspace before verification",
+            )
+        })?;
+    if final_result.project_id != project.as_str()
+        || final_result.work_id != work_id
+        || final_result.attempt_id != attempt_record.attempt_id
+        || final_result.fence != attempt_record.fence
+        || final_result.actor_id != attempt_record.actor_id
+        || attempt_record.session_id.as_deref() != Some(final_result.session_id.as_str())
+        || final_result.config_identity != attempt_record.config_identity
+        || final_result.source_version_id == claim_source_version_id
+        || final_result.content_digest == captured_source.content_digest
+    {
+        return Err(CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "current final-result binding does not describe a changed result for this attempt and pinned configuration",
+        ));
+    }
+    let result_source_record = store
+        .source_version(project.as_str(), &final_result.source_version_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                "bound final-result workspace snapshot is not registered in this project",
+            )
+        })?;
+    if result_source_record.project_id != project.as_str()
+        || result_source_record.availability != "available"
+        || result_source_record.media_type != "application/vnd.boreal.workspace-snapshot.v1"
+        || result_source_record.content_digest != final_result.content_digest
+    {
+        return Err(CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            "bound final-result source is not an available, digest-matched workspace snapshot",
+        ));
+    }
+    let result_source = knowledge
+        .show_source(project.as_str(), &final_result.source_version_id)
+        .map_err(map_knowledge_error)?;
+    let result_bytes = catalog.verify(&result_source).map_err(|error| {
+        CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            format!("bound final-result workspace snapshot failed digest verification: {error}"),
+        )
+    })?;
+    if result_source.content_digest != final_result.content_digest
+        || result_source.byte_count as u64 != result_source_record.byte_count
+    {
+        return Err(CliError::with(
+            ErrorCode::IntegrityQuarantined,
+            ApplicationOutcome::Rejected,
+            "bound result catalog bytes do not match the immutable project registration",
+        ));
+    }
+    // Keep the claim source as attempt and published-policy lineage, while
+    // running the verifier against the exact immutable output bound by the
+    // current final-result proof generation.
     let temporary_workspace = TemporaryWorkspace::for_evidence(&context.root, operation)?;
-    let workspace_root = temporary_workspace.unpack(&source_bytes)?;
+    let workspace_root = temporary_workspace.unpack(&result_bytes)?;
     let (declaration, policy_record) = gate_policy_for_attempt(
         store,
         &catalog,
@@ -7311,7 +10062,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         &policy_gate_id,
         &attempt_record.config_identity,
     )?;
-    if declaration.source_snapshot_hash != source_version_id
+    if declaration.source_snapshot_hash != claim_source_version_id
         || attempt_record.config_identity != declaration.config_identity
     {
         return Err(CliError::with(
@@ -7407,6 +10158,21 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         .ok_or_else(|| {
             CliError::invalid("evidence run gate is not declared by the work acceptance profile")
         })?;
+    let pinned_requirements =
+        boreal_store::profiles::ProfileStore::new(store)
+            .current_pinned_requirements(project.as_str(), &work_id)
+            .map_err(map_store_error)?;
+    if final_result.profile_id != status_work.work.acceptance_profile.id.as_str()
+        || final_result.profile_version.to_string()
+            != status_work.work.acceptance_profile.version
+        || final_result.profile_digest != pinned_requirements.profile.policy_digest
+    {
+        return Err(CliError::with(
+            ErrorCode::ReceiptPolicyMismatch,
+            ApplicationOutcome::Rejected,
+            "current final-result binding does not match the attempt's pinned acceptance profile",
+        ));
+    }
     let kind = parse_gate_kind(&declaration.kind)?;
     if kind != gate.kind || declaration.gate_id != policy_gate_id {
         return Err(CliError::with(
@@ -7423,7 +10189,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         work_id: WorkId::new(work_id.clone()),
         attempt_id: AttemptId::new(attempt_id.clone()),
         fence: Fence::new(fence),
-        source_snapshot_hash: SourceVersionId::new(declaration.source_snapshot_hash.clone()),
+        source_snapshot_hash: SourceVersionId::new(final_result.source_version_id.clone()),
         config_identity: ConfigIdentity::new(declaration.config_identity.clone()),
         profile_id: status_work.work.acceptance_profile.id.clone(),
         profile_version: status_work.work.acceptance_profile.version.clone(),
@@ -8788,6 +11554,14 @@ fn typed_result<T: serde::Serialize>(
 }
 
 fn bounded_result(data: Option<Value>, revision: Option<u64>) -> Result<CliResult, CliError> {
+    bounded_result_with_metadata_budget(data, revision, ENVELOPE_METADATA_BUDGET)
+}
+
+fn bounded_result_with_metadata_budget(
+    data: Option<Value>,
+    revision: Option<u64>,
+    metadata_budget: usize,
+) -> Result<CliResult, CliError> {
     if let Some(value) = &data {
         if serde_json::to_vec(value)
             .map_err(|error| {
@@ -8798,7 +11572,7 @@ fn bounded_result(data: Option<Value>, revision: Option<u64>) -> Result<CliResul
                 )
             })?
             .len()
-            > MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET)
+            > MAX_JSON_BYTES.saturating_sub(metadata_budget)
         {
             return Err(CliError::with(
                 ErrorCode::InvalidArgument,
@@ -9776,6 +12550,14 @@ fn map_application_error(error: ApplicationError) -> CliError {
             CliError::with(code, ApplicationOutcome::Rejected, error.to_string())
         }
         ApplicationError::Invalid(message) => CliError::invalid(message),
+        ApplicationError::Planning(boreal_application::PlanningError::RevisionConflict {
+            expected,
+            actual,
+        }) => CliError::with(
+            ErrorCode::RevisionConflict,
+            ApplicationOutcome::Conflict,
+            format!("stale planning revision: expected {expected}, actual {actual}"),
+        ),
         ApplicationError::Planning(error) => CliError::invalid(error.to_string()),
     }
 }
@@ -9858,6 +12640,9 @@ fn map_store_error(error: StoreError) -> CliError {
     let (code, outcome) = match error {
         StoreError::Unavailable(_) => (ErrorCode::ServiceUnavailable, ApplicationOutcome::Failed),
         StoreError::Busy(_) => (ErrorCode::ServiceBusy, ApplicationOutcome::Busy),
+        StoreError::Invalid(ref message) if message.contains("principal role does not permit") => {
+            (ErrorCode::PermissionDenied, ApplicationOutcome::Rejected)
+        }
         StoreError::Invalid(_) => (ErrorCode::InvalidArgument, ApplicationOutcome::Rejected),
         StoreError::Conflict(_) => (ErrorCode::ClaimConflict, ApplicationOutcome::Conflict),
         StoreError::StaleRevision { .. } => {
@@ -10101,6 +12886,86 @@ mod tests {
     }
 
     #[test]
+    fn planning_contract_v2_round_trips_keyed_inputs_and_all_requirement_types() {
+        let value = json!({
+            "requirements": [{
+                "schema_version": boreal_protocol::models::DELIVERABLE_REQUIREMENT_V2_SCHEMA_VERSION,
+                "requirement_key": "release-report",
+                "purpose": "Publish the release report",
+                "required": false,
+                "deliverable_type": "report",
+                "allowed_media_types": ["application/pdf"],
+                "min_count": 0,
+                "max_count": 2,
+                "criteria": [
+                    {"kind": "non_empty"},
+                    {"kind": "minimum_bytes", "value": 10},
+                    {"kind": "maximum_bytes", "value": 5000},
+                    {"kind": "digest_present"},
+                    {"kind": "json_document"},
+                    {"kind": "text_contains", "text": "release"}
+                ]
+            }],
+            "inputs": [{
+                "input_key": "approved-source",
+                "role": "accepted_input",
+                "required": true,
+                "access_scope": "project",
+                "artifact": {
+                    "project_id": "planning-project",
+                    "source_version_id": "source-version-1",
+                    "content_digest": "sha256:source",
+                    "media_type": "text/plain",
+                    "byte_count": 32,
+                    "availability": "available"
+                },
+                "produced_by": {
+                    "work_id": "source-work",
+                    "attempt_id": "attempt-1",
+                    "result_id": "result-1"
+                },
+                "accepted_result": {
+                    "producer": {
+                        "work_id": "source-work",
+                        "attempt_id": "attempt-1",
+                        "result_id": "result-1"
+                    },
+                    "decision_id": "decision-1",
+                    "submission_id": "submission-1",
+                    "artifact_set_digest": "sha256:accepted"
+                }
+            }]
+        });
+        let contract = planning_contract_from_value(
+            value,
+            &ProjectId::new("planning-project"),
+            "consumer-work",
+        )
+        .expect("strict v2 planning DTO encodes into the durable contract");
+
+        let requirements: Value = serde_json::from_str(&contract.requirements_json).unwrap();
+        assert_eq!(requirements[0]["key"], "release-report");
+        assert_eq!(requirements[0]["required"], false);
+        assert_eq!(requirements[0]["deliverable_type"], "report");
+        assert_eq!(requirements[0]["criteria"].as_array().unwrap().len(), 6);
+
+        let inputs: Value = serde_json::from_str(&contract.inputs_json).unwrap();
+        assert_eq!(inputs[0]["input_key"], "approved-source");
+        assert_eq!(inputs[0]["required"], true);
+        assert_eq!(inputs[0]["source_version_id"], "source-version-1");
+        assert_eq!(inputs[0]["produced_by"]["result_id"], "result-1");
+        assert_eq!(inputs[0]["accepted_result"]["decision_id"], "decision-1");
+        assert_eq!(
+            inputs[0]["accepted_result"]["submission_id"],
+            "submission-1"
+        );
+        assert_eq!(
+            inputs[0]["accepted_result"]["artifact_set_digest"],
+            "sha256:accepted"
+        );
+    }
+
+    #[test]
     fn duplicate_session_registration_match_is_exact_and_session_scoped() {
         let session = SessionId::new("session-one");
         let duplicate = ApplicationError::Store(StoreError::Conflict(
@@ -10199,6 +13064,53 @@ mod tests {
             )
             .expect("fixture source captures and registers");
         (catalog, captured.source.source_version_id)
+    }
+
+    fn register_fixture_workspace_source(
+        database: &Path,
+        project: &str,
+        actor: &str,
+    ) -> (String, String) {
+        let database_arg = database.to_string_lossy();
+        let catalog = source_catalog_create(&source_catalog_root(&database_arg))
+            .expect("persistent source catalog opens");
+        let workspace = database
+            .parent()
+            .and_then(Path::parent)
+            .expect("fixture database has a project root")
+            .join(format!("result-workspace-{}", now_ms_u64()));
+        fs::create_dir_all(&workspace).expect("result workspace creates");
+        fs::write(workspace.join("README.md"), "distinct final result snapshot")
+            .expect("result workspace content writes");
+        let bytes = boreal_source::workspace_snapshot::pack(
+            &workspace,
+            boreal_source::workspace_snapshot::DEFAULT_MAX_SNAPSHOT_BYTES,
+        )
+        .expect("result workspace snapshot packs");
+        let _ = fs::remove_dir_all(&workspace);
+        let store = SqliteStore::open(database, PRODUCTION_SCHEMA).expect("fixture database opens");
+        let captured = KnowledgeApplication::new(&catalog)
+            .capture_source_with_store(
+                &store,
+                boreal_application::SourceCaptureInput {
+                    operation_id: format!(
+                        "op_cli_fixture_result_{}_{}",
+                        std::process::id(),
+                        now_ms_u64()
+                    ),
+                    project_id: project.to_owned(),
+                    origin: "tests/cli-final-result-workspace".to_owned(),
+                    media_type: "application/vnd.boreal.workspace-snapshot.v1".to_owned(),
+                    bytes,
+                },
+                actor,
+                &now(),
+            )
+            .expect("persistent final-result workspace source captures");
+        (
+            captured.source.source_version_id,
+            captured.source.content_digest,
+        )
     }
 
     fn enroll_fixture_agent(database: &Path, project: &str, session: Option<&str>) -> &'static str {
@@ -10462,6 +13374,52 @@ mod tests {
     }
 
     #[test]
+    fn direct_intake_routes_keep_the_current_revision_fallback() {
+        assert!(parse(&args(&[
+            "intake",
+            "bucket",
+            "project-1",
+            "bucket-1",
+            "Inbox",
+        ]))
+        .is_ok());
+
+        assert!(parse(&args(&[
+            "intake",
+            "capture",
+            "project-1",
+            "intake-1",
+            "A note",
+            "--bucket",
+            "bucket-1",
+        ]))
+        .is_ok());
+
+        assert!(parse(&args(&[
+            "intake",
+            "bucket",
+            "project-1",
+            "bucket-1",
+            "Inbox",
+            "--expected-revision",
+            "7",
+        ]))
+        .is_ok());
+        assert!(parse(&args(&[
+            "intake",
+            "capture",
+            "project-1",
+            "intake-1",
+            "A note",
+            "--bucket",
+            "bucket-1",
+            "--expected-revision",
+            "7",
+        ]))
+        .is_ok());
+    }
+
+    #[test]
     fn evidence_execution_state_readback_uses_protocol_terminal_names() {
         assert_eq!(
             evidence_execution_state_name(EvidenceExecutionState::ReceiptCommitted),
@@ -10553,60 +13511,162 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_selected_socket_rejects_direct_only_source_routes() {
-        let error = run_with_operation(
-            &args(&[
-                "source",
-                "show",
-                "project-1",
-                "source-1",
-                "--socket",
-                "/tmp/boreal-unavailable-route.sock",
-            ]),
-            "op_unavailable_route",
-        )
-        .expect_err("direct-only source route must fail closed");
-        assert_eq!(error.code, ErrorCode::UnknownCommandNamespace);
-        assert_eq!(error.outcome, ApplicationOutcome::Rejected);
-        assert!(error
-            .message
-            .contains("not available through the selected service socket"));
+    fn parser_accepts_revisioned_container_disposition_inputs() {
+        let disposition = parse(&args(&[
+            "work",
+            "disposition",
+            "container-1",
+            "task-1",
+            "--project",
+            "project-1",
+            "--kind",
+            "replaced",
+            "--replacement",
+            "task-2",
+            "--supersedes",
+            "disposition-old",
+            "--reason",
+            "scope changed",
+            "--expected-revision",
+            "9",
+            "--operation-id",
+            "op-disposition-1",
+            "--yes",
+        ]))
+        .expect("work disposition contract parses");
+        assert_eq!(disposition.path, vec!["work", "disposition"]);
+        assert_eq!(disposition.options.project.as_deref(), Some("project-1"));
+        assert_eq!(
+            disposition.options.positionals,
+            vec!["container-1", "task-1"]
+        );
+        assert_eq!(disposition.options.kind.as_deref(), Some("replaced"));
+        assert_eq!(
+            extra_value(&disposition.options, "--replacement"),
+            Some("task-2")
+        );
+        assert_eq!(
+            extra_value(&disposition.options, "--supersedes"),
+            Some("disposition-old")
+        );
+        assert_eq!(disposition.options.reason.as_deref(), Some("scope changed"));
+        assert_eq!(disposition.options.expected_revision, Some(9));
+        assert_eq!(
+            disposition.options.operation_id.as_deref(),
+            Some("op-disposition-1")
+        );
+        assert!(disposition.options.setup.yes);
+
+        let bad_kind = parse(&args(&[
+            "work",
+            "disposition",
+            "container-1",
+            "task-1",
+            "--project",
+            "project-1",
+            "--kind",
+            "released",
+            "--expected-revision",
+            "9",
+            "--yes",
+        ]));
+        assert!(bad_kind.is_err());
     }
 
     #[test]
-    fn direct_only_v3_intake_service_route_is_rejected_before_database_open() {
-        let path = env::temp_dir().join(format!("boreal-cli-v3-gap-{}.sqlite", now_ms_u64()));
+    fn explicitly_selected_socket_routes_source_show_to_service() {
+        let path = project_db_path("source-show-unavailable-socket");
         let db = path.to_string_lossy().to_string();
-        let socket = env::temp_dir()
-            .join(format!("boreal-cli-v3-gap-{}.sock", now_ms_u64()))
-            .to_string_lossy()
-            .into_owned();
-        let _ = fs::remove_file(&path);
+        let root = path.parent().and_then(Path::parent).expect("project root");
+        cleanup_project_db(&path);
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        let socket = root.join(".boreal/unavailable.sock");
+        let socket = socket.to_string_lossy().to_string();
+        fs::write(&socket, b"no service is listening here")
+            .expect("unavailable endpoint exists inside the project boundary");
+        let error = run(
+            &args(&[
+                "source",
+                "show",
+                "p",
+                "source-1",
+                "--socket",
+                &socket,
+                "--db",
+                &db,
+            ]),
+        )
+        .expect_err("source route should reach the selected service socket");
+        assert_eq!(
+            error.code,
+            ErrorCode::ServiceUnavailable,
+            "selected socket route should report transport unavailability: {error:?}",
+        );
+        assert_eq!(error.outcome, ApplicationOutcome::Failed);
+        assert!(!error
+            .message
+            .contains("not available through the selected service socket"));
+        cleanup_project_db(&path);
+    }
+
+    #[test]
+    fn explicitly_selected_socket_routes_intake_capture_without_mutating_project_when_unavailable() {
+        let path = project_db_path("intake-capture-unavailable-socket");
+        let db = path.to_string_lossy().to_string();
+        let root = path.parent().and_then(Path::parent).expect("project root");
+        cleanup_project_db(&path);
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        let socket = root.join(".boreal/unavailable.sock");
+        let socket = socket.to_string_lossy().to_string();
+        fs::write(&socket, b"no service is listening here")
+            .expect("unavailable endpoint exists inside the project boundary");
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("project database opens");
+        let revision_before = store.project_revision("p").expect("project revision reads");
+        assert!(store
+            .intake_item_v3("p", "intake-1")
+            .expect("Intake fixture lookup succeeds")
+            .is_none());
+        drop(store);
 
         let error = run(&args(&[
             "intake",
             "capture",
             "--project",
-            "project-1",
+            "p",
             "intake-1",
             "captured note",
             "--bucket",
             "inbox",
+            "--expected-revision",
+            &revision_before.0.to_string(),
             "--db",
             &db,
             "--socket",
             &socket,
             "--json",
         ]))
-        .expect_err("direct-only V3 intake capture must be unavailable through a service socket");
-        assert_eq!(error.code, ErrorCode::UnknownCommandNamespace);
-        assert_eq!(error.outcome, ApplicationOutcome::Rejected);
-        assert!(error
+        .expect_err("Intake capture should reach the selected socket route");
+        assert_eq!(
+            error.code,
+            ErrorCode::ServiceUnavailable,
+            "selected socket route should report transport unavailability: {error:?}",
+        );
+        assert_eq!(error.outcome, ApplicationOutcome::Failed);
+        assert!(!error
             .message
             .contains("not available through the selected service socket"));
-        assert!(!path.exists(), "unavailable route opened a database");
-
-        let _ = fs::remove_file(path);
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA)
+            .expect("project database remains available after unavailable route");
+        assert_eq!(
+            store.project_revision("p").expect("project revision reads"),
+            revision_before,
+            "the failed transport performs no project mutation",
+        );
+        assert!(store
+            .intake_item_v3("p", "intake-1")
+            .expect("Intake fixture lookup succeeds")
+            .is_none());
+        cleanup_project_db(&path);
     }
 
     #[test]
@@ -11263,6 +14323,10 @@ mod tests {
             .expect("task row");
         assert_eq!(task["kind"], "task");
         assert_eq!(task["claimable_for_actor"], false);
+        assert_eq!(task["due_today"], false);
+        assert_eq!(task["overdue"], false);
+        assert_eq!(task["blocking_external_wait_ids"], json!([]));
+        assert_eq!(task["follow_up_due_wait_ids"], json!([]));
         let denied_actions = task["actions"]["denied"]
             .as_array()
             .expect("status includes the canonical denied-action list");
@@ -11295,6 +14359,133 @@ mod tests {
             .as_array()
             .is_some_and(|inputs| inputs.iter().any(|input| input == "session_id")));
 
+        cleanup_project_db(&path);
+    }
+
+    #[test]
+    fn shared_status_snapshot_readback_uses_canonical_due_and_wait_facts() {
+        let path = project_db_path("status-facts-readback");
+        let db = path.to_string_lossy().to_string();
+        cleanup_project_db(&path);
+
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        for work_id in ["due-today", "overdue"] {
+            run(&args(&[
+                "work",
+                "create",
+                "p",
+                work_id,
+                "Status facts fixture",
+                "--db",
+                &db,
+            ]))
+            .expect("work item creates");
+        }
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("fixture database opens");
+
+        // 1970-01-01 at unix-ms:0 keeps the date policy deterministic without
+        // introducing a host clock or timezone dependency into this mapper test.
+        let as_of = TimestampMs::from_millis(0);
+        let today = LocalDate::new(1970, 1, 1);
+        let yesterday = LocalDate::new(1969, 12, 31);
+        let project_id = ProjectId::new("p");
+        let business_time = boreal_domain::work_model_v3::BusinessTimeContext {
+            project_id: project_id.clone(),
+            setting_revision: 1,
+            as_of,
+            civil_date: today,
+            timezone: "Etc/UTC".to_owned(),
+            tzdb_identity: "fixture-tzdb/v1".to_owned(),
+        };
+
+        let mut due_today = boreal_application::StatusWorkInput::new(
+            WorkItem::new(
+                project_id.clone(),
+                WorkId::new("due-today"),
+                WorkKind::Task,
+                None,
+                "Due today",
+            )
+            .open(),
+        );
+        due_today.business_schedule = Some(BusinessSchedule {
+            due: Some(BusinessDate::LocalDate(today)),
+            ..BusinessSchedule::default()
+        });
+        due_today.business_schedule_revision = Some(1);
+        due_today.business_schedule_setting_revision = Some(1);
+        due_today.business_time = Some(business_time.clone());
+        due_today
+            .external_waits
+            .push(boreal_domain::decision_inputs::ExternalWaitScopeInput {
+                project_id: project_id.clone(),
+                wait_id: "wait-decision".to_owned(),
+                affected_work_id: WorkId::new("due-today"),
+                state: boreal_domain::decision_inputs::ExternalWaitPersistedState::Open,
+                follow_up: Some(BusinessDate::LocalDate(today)),
+                civil_time_setting_revision: Some(1),
+            });
+
+        let mut overdue = boreal_application::StatusWorkInput::new(
+            WorkItem::new(
+                project_id.clone(),
+                WorkId::new("overdue"),
+                WorkKind::Task,
+                None,
+                "Overdue",
+            )
+            .open(),
+        );
+        overdue.business_schedule = Some(BusinessSchedule {
+            due: Some(BusinessDate::LocalDate(yesterday)),
+            ..BusinessSchedule::default()
+        });
+        overdue.business_schedule_revision = Some(1);
+        overdue.business_schedule_setting_revision = Some(1);
+        overdue.business_time = Some(business_time);
+
+        let snapshot = boreal_application::project_status(
+            &project_id,
+            &boreal_domain::ActorContext {
+                actor_id: ActorId::new(DEFAULT_ACTOR),
+                role: ActorRole::Operator,
+            },
+            as_of,
+            boreal_domain::Revision(4),
+            &[due_today, overdue],
+            &[],
+            100,
+            0,
+        )
+        .expect("canonical status decisions are produced");
+        let readback = status_snapshot_json(&snapshot, None, &store);
+        let items = readback["items"].as_array().expect("status items");
+        let due_today = items
+            .iter()
+            .find(|item| item["work_id"] == "due-today")
+            .expect("due-today status row");
+        assert_eq!(due_today["due_today"], true);
+        assert_eq!(due_today["overdue"], false);
+        assert_eq!(
+            due_today["blocking_external_wait_ids"],
+            json!(["wait-decision"])
+        );
+        assert_eq!(
+            due_today["follow_up_due_wait_ids"],
+            json!(["wait-decision"])
+        );
+
+        let overdue = items
+            .iter()
+            .find(|item| item["work_id"] == "overdue")
+            .expect("overdue status row");
+        assert_eq!(overdue["due_today"], false);
+        assert_eq!(overdue["overdue"], true);
+        assert_eq!(overdue["blocking_external_wait_ids"], json!([]));
+        assert_eq!(overdue["follow_up_due_wait_ids"], json!([]));
+
+        // Both direct CLI status and the service's status command serialize
+        // through this shared snapshot mapper.
         cleanup_project_db(&path);
     }
 
@@ -11645,6 +14836,48 @@ mod tests {
                 .expect("current attempt exists")
                 .review_required_after_expiry
         );
+        drop(claimed_store);
+        let (result_source_version, result_content_digest) =
+            register_fixture_workspace_source(&db_path, "p", actor);
+        let bind_store =
+            SqliteStore::open(&db_path, PRODUCTION_SCHEMA).expect("database opens for result bind");
+        let (entity_revision, proof_revision) = bind_store
+            .work_revisions("p", "w")
+            .expect("work revisions read before result binding");
+        let expected_revision = bind_store
+            .project_revision("p")
+            .expect("project revision reads before result binding")
+            .0;
+        drop(bind_store);
+        run(&args(&[
+            "evidence",
+            "bind-result",
+            "--project",
+            "p",
+            "--work",
+            "w",
+            "--attempt",
+            attempt_id,
+            "--fence",
+            &fence.to_string(),
+            "--source-version",
+            &result_source_version,
+            "--content-digest",
+            &result_content_digest,
+            "--expected-revision",
+            &expected_revision.to_string(),
+            "--expected-entity-revision",
+            &entity_revision.to_string(),
+            "--expected-proof-revision",
+            &proof_revision.to_string(),
+            "--actor",
+            actor,
+            "--session",
+            "s",
+            "--db",
+            &db,
+        ]))
+        .expect("attempt binds its distinct immutable final-result workspace");
         fs::write(
             &receipt_path,
             serde_json::to_string(&json!({
@@ -11659,7 +14892,7 @@ mod tests {
                 "exit_code": 0,
                 "started_at": "unix-ms:10",
                 "ended_at": "unix-ms:11",
-                "source_snapshot_hash": source_version,
+                "source_snapshot_hash": result_source_version,
                 "config_identity": "test-cli-config/v1",
                 "environment_fingerprint": "env-1",
                 "output_digest": "output-1",

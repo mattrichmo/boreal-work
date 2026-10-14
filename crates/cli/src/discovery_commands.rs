@@ -344,11 +344,12 @@ fn prime(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliEr
         .map(|a| json!({"id":a.reference,"title":a.title}))
         .collect::<Vec<_>>();
     let guidance = project_guidance(&context.root)?;
-    let mut result = bounded_result(
+    let mut result = bounded_result_with_metadata_budget(
         Some(
             json!({"kind":"project_brief","schema_version":"boreal.project-brief/1","project_id":context.project_id,"project_root":context.root,"status":status.data,"guide":guide.data,"project_guidance":guidance,"workflows":workflows,"operating_loop":["prime","agent guide","agent start","work checkpoint","evidence run","agent finish","summary show"],"context_command":["bwrk","context","show","--project",project_argument(parsed,0)?.as_str(),"--json"],"toolchain":{"version":env!("CARGO_PKG_VERSION"),"source":env!("BOREAL_BUILD_SOURCE_ID")}}),
         ),
         status.revision,
+        PRIME_ENVELOPE_METADATA_BUDGET,
     )?;
     result.outcome = ApplicationOutcome::Unchanged;
     Ok(result)

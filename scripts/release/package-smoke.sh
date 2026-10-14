@@ -12,6 +12,23 @@ python3 "$root/scripts/release/build_release.py" --output-dir "$scratch/release"
 archive=$(find "$scratch/release" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)
 [ -n "$archive" ] || { echo "package smoke: archive missing" >&2; exit 1; }
 
+# The local publisher and GitHub candidate assembler must both emit the exact
+# asset basename consumed by install.sh's SHA256SUMS lookup.
+python3 - "$archive" "$scratch/release/SHA256SUMS" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+archive = Path(sys.argv[1])
+sums_path = Path(sys.argv[2])
+rows = [line.split() for line in sums_path.read_text(encoding="utf-8").splitlines()]
+if len(rows) != 1 or len(rows[0]) != 2 or rows[0][1] != archive.name:
+    raise SystemExit("package smoke: SHA256SUMS must name the release asset by basename")
+actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+if rows[0][0].lower() != actual:
+    raise SystemExit("package smoke: SHA256SUMS digest does not match the release asset")
+PY
+
 # Exercise the normal pinned-release download and SHA256SUMS lookup through a
 # local publication-layout fixture. Keep the --archive install below as its
 # own smoke path: it intentionally bypasses download/checksum handling.

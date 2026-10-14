@@ -7,6 +7,17 @@ export type TodoFilter = "today" | "overdue" | "unscheduled" | "waiting" | "all_
 export type ActivityRow = GlobalActivityEvent & { id: string };
 export type Row = Project | Item | Note | Status | Association | ActivityRow;
 export type ChoiceCollection = "projects" | "items" | "statuses";
+export type DailyClassificationView = { group: string; deadline: string; waiting: boolean; filters?: Partial<Record<TodoFilter,boolean>> };
+export type CivilTimeView = { observed_at_unix_ms: number; timezone: string; system_civil_date: string; tzdb_identity: string };
+type AttentionBlocker = { item_id: string; title: string; status_id: string; reason_code: string; reason: string };
+type BlockedAction = { item_id: string; title: string; prerequisites: AttentionBlocker[] };
+type ProjectAttentionView = {
+  open?: number; waiting?: number; overdue?: number; due_today?: number; unscheduled?: number; later?: number;
+  next_action?: { item_id: string; title: string; due_at: string | null; priority: number | null; status_id: string; status_label: string; kind: string } | null;
+  next_milestone?: { item_id: string; title: string; due_at: string | null; completed_children: number; total_children: number } | null;
+  blocked_by?: BlockedAction[]; next_action_unavailable_reason?: string | null;
+};
+type AttentionSnapshot = { portfolio?: Record<string, number>; projects?: Record<string, ProjectAttentionView>; personal?: ProjectAttentionView };
 type EntityKey = string;
 
 export class GlobalController {
@@ -62,11 +73,19 @@ export class GlobalController {
         this.refreshQueued = false;
         try {
           const prior=this.selectedRow();
+          const priorSearchMatchId=this.searchQuery.trim()&&this.route!=="history"&&prior?keyOf(prior):undefined;
+          const preservePriorSearchMatch=!!priorSearchMatchId&&this.searchMatchedIds.has(priorSearchMatchId);
           const next = await this.client.snapshot(); validateSnapshot(next);
           this.reconcileLinkedSamples(next);
           this.snapshot = next;
           this.pageOffsets.clear();this.pageTotals.clear();this.linkedOffsets.clear();this.archiveCollectionIndex=0;this.overviewCollectionIndex=0;this.searchMatchedIds.clear();this.pageError=undefined;
-          if(prior)await this.retainSelectedRow(prior);
+          if(prior){
+            await this.retainSelectedRow(prior);
+            // A server search can match fields omitted from local row filtering
+            // (for example due dates). Preserve that stable selection across
+            // the refresh after rehydrating the selected row.
+            if(preservePriorSearchMatch&&priorSearchMatchId&&this.snapshotContainsRow(prior))this.searchMatchedIds.add(priorSearchMatchId);
+          }
           await this.loadHistory();if(prior&&"operation_id" in prior&&!this.historyEvents.some(e=>e.operation_id===prior.operation_id))this.historyEvents.push(prior); this.sampledAt = Date.now(); this.lastRefreshError = undefined;
           if(this.searchQuery.trim()&&this.route!=="history")await this.loadMoreRows();
           this.reconcileSelection();
@@ -218,6 +237,18 @@ export class GlobalController {
     }catch{/* Keep the last selection if it can still be resolved from the retained snapshot. */}
   }
 
+  private snapshotContainsRow(row:Row):boolean{
+    const snapshot=this.snapshot;if(!snapshot)return false;
+    if("id" in row){
+      if("status_id" in row)return snapshot.items.some(candidate=>candidate.id===row.id);
+      if("name" in row)return snapshot.projects.some(candidate=>candidate.id===row.id);
+      return snapshot.notes.some(candidate=>candidate.id===row.id);
+    }
+    if("status_id" in row)return snapshot.statuses.some(candidate=>candidate.project_id===row.project_id&&candidate.status_id===row.status_id);
+    if("identity" in row)return snapshot.associations.some(candidate=>candidate.project_id===row.project_id&&candidate.kind===row.kind&&candidate.identity===row.identity);
+    return false;
+  }
+
   async mutate(command: string, payload: Record<string, unknown>): Promise<void> {
     if (this.unresolvedOperation) throw new Error(`operation ${this.unresolvedOperation} has an unknown outcome; inspect current state before making another change`);
     const revision = this.snapshot?.revision;
@@ -268,11 +299,10 @@ export class GlobalController {
   }
   actionItems(route: "todos"|"inbox"): Item[] {
     const snap=this.snapshot; if(!snap)return [];
-    const now=Date.now();
     const archivedOwners=new Set(snap.projects.filter(p=>p.archived).map(p=>p.id));
     const q=this.searchQuery.trim().toLocaleLowerCase();
-    return snap.items.filter(i=>!i.archived&&!(i.project_id&&archivedOwners.has(i.project_id))&&(route==="inbox"?(this.projectId?i.project_id===this.projectId:(i.project_id===null||isInbox(this.statusFor(i)))):(!this.projectId||i.project_id===this.projectId))&&!isDone(this.statusFor(i))&&(route==="inbox"?(i.project_id===null||isInbox(this.statusFor(i))):matchesTodoFilter(i,this.statusFor(i),this.todoFilter,now))&&(!q||this.searchMatchedIds.has(i.id)||[i.title,i.description??"",this.projectName(i.project_id),this.statusFor(i)?.label??""].some(v=>v.toLocaleLowerCase().includes(q))))
-      .sort((a,b)=>route==="todos"&&isWaiting(this.statusFor(a))&&isWaiting(this.statusFor(b))?(Date.parse(a.follow_up_at??"")||Number.MAX_SAFE_INTEGER)-(Date.parse(b.follow_up_at??"")||Number.MAX_SAFE_INTEGER):urgency(a,now)-urgency(b,now)||a.position-b.position);
+    return snap.items.filter(i=>!i.archived&&!(i.project_id&&archivedOwners.has(i.project_id))&&(route==="inbox"?(this.projectId?i.project_id===this.projectId:true):(!this.projectId||i.project_id===this.projectId))&&!isDone(this.statusFor(i))&&(route==="inbox"?isInbox(this.statusFor(i)):matchesTodoFilter(i,this.todoFilter))&&(!q||this.searchMatchedIds.has(i.id)||[i.title,i.description??"",this.projectName(i.project_id),this.statusFor(i)?.label??""].some(v=>v.toLocaleLowerCase().includes(q))))
+      .sort((a,b)=>route==="todos"?compareDailyItems(a,b,this.todoFilter):urgency(a)-urgency(b)||a.position-b.position||a.id.localeCompare(b.id));
   }
   statusFor(item:Item):Status|undefined{return this.snapshot?.statuses.find(s=>s.project_id===item.project_id&&s.status_id===item.status_id);}
   selectedRow(): Row | undefined { return this.route === "board" ? this.boardSelected : this.rows()[this.selected]; }
@@ -324,15 +354,19 @@ export class GlobalController {
   statusHistoryFor(item:Item):Array<{item_id:string;from_status_id:string|null;to_status_id:string;revision:number;changed_at:string}>{return (this.snapshot as (GlobalSnapshot & {status_history?:Array<{item_id:string;from_status_id:string|null;to_status_id:string;revision:number;changed_at:string}>})|undefined)?.status_history?.filter(h=>h.item_id===item.id)??[];}
   relationshipsFor(row:Row|undefined):Relationship[]{if(!row||!("title" in row&&"status_id" in row))return [];const item=row as Item;return (this.snapshot?.relationships??[]).filter(r=>r.source_id===item.id||r.target_id===item.id);}
   projectName(id:string|null):string{return this.snapshot?.projects.find(p=>p.id===id)?.name??(id?"Unknown project":"Personal inbox");}
-  projectAttention(project:Project):{next_action?:{item_id:string;title:string;due_at:string|null;priority:number|null;status_id:string;status_label:string;kind:string}|null;next_milestone?:{item_id:string;title:string;due_at:string|null;completed_children:number;total_children:number}|null}{return (((this.snapshot?.attention as unknown as {projects?:Record<string,unknown>}|undefined)?.projects?.[project.id])??{}) as ReturnType<GlobalController["projectAttention"]>;}
-  projectNextAction(project:Project):{id:string;title:string;due_at:string|null;priority:number|null;status_id:string;status_label:string;kind:string}|Item|undefined{const a=this.projectAttention(project).next_action;if(a)return{id:a.item_id,title:a.title,due_at:a.due_at,priority:a.priority,status_id:a.status_id,status_label:a.status_label,kind:a.kind};return (this.snapshot?.items??[]).filter(i=>{const status=this.statusFor(i);return i.project_id===project.id&&!i.archived&&!isDone(status)&&status?.category!=="waiting"&&status?.category!=="blocked";}).sort((x,y)=>urgency(x,Date.now())-urgency(y,Date.now())||(y.priority??-1)-(x.priority??-1)||x.position-y.position)[0];}
-  projectNextMilestone(project:Project):{id:string;title:string;due_at:string|null;completed_children:number;total_children:number}|Item|undefined{const m=this.projectAttention(project).next_milestone;if(m)return{id:m.item_id,title:m.title,due_at:m.due_at,completed_children:m.completed_children,total_children:m.total_children};return (this.snapshot?.items??[]).filter(i=>i.project_id===project.id&&i.kind==="milestone"&&!i.archived&&!isDone(this.statusFor(i))).sort((x,y)=>urgency(x,Date.now())-urgency(y,Date.now())||x.position-y.position)[0];}
+  projectAttention(project:Project):ProjectAttentionView{return this.attentionSnapshot()?.projects?.[project.id]??{};}
+  personalAttention():ProjectAttentionView{return this.attentionSnapshot()?.personal??{};}
+  portfolioAttention():Record<string,number>|undefined{return this.attentionSnapshot()?.portfolio;}
+  civilTime():CivilTimeView|undefined{return (this.snapshot as (GlobalSnapshot&{civil_time?:CivilTimeView})|undefined)?.civil_time;}
+  attentionSnapshot():AttentionSnapshot|undefined{return (this.snapshot as (GlobalSnapshot&{attention?:AttentionSnapshot})|undefined)?.attention;}
+  projectNextAction(project:Project):ProjectAttentionView["next_action"]{return this.projectAttention(project).next_action??undefined;}
+  projectNextMilestone(project:Project):ProjectAttentionView["next_milestone"]{return this.projectAttention(project).next_milestone??undefined;}
   itemBreadcrumb(item:Item):string[]{const byId=new Map((this.snapshot?.items??[]).map(i=>[i.id,i]));const parts:string[]=[];const seen=new Set<string>();let current:Item|undefined=item;while(current?.parent_id&&!seen.has(current.parent_id)){seen.add(current.parent_id);const parent=byId.get(current.parent_id);if(!parent)break;parts.unshift(parent.title);current=parent;}return parts;}
   milestoneProgress(item:Item):{completed:number;total:number;visibleOnly:boolean}{const p=item.project_id?this.snapshot?.projects.find(x=>x.id===item.project_id):undefined;const m=p?this.projectAttention(p).next_milestone:undefined;if(m?.item_id===item.id)return{completed:m.completed_children,total:m.total_children,visibleOnly:false};const children=(this.snapshot?.items??[]).filter(i=>i.parent_id===item.id&&!i.archived);return{completed:children.filter(i=>this.statusFor(i)?.category==="completed").length,total:children.length,visibleOnly:true};}
   projectLastActivity(project:Project):ActivityRow|undefined{const entities=new Set([project.id,...(this.snapshot?.items??[]).filter(i=>i.project_id===project.id).map(i=>i.id),...(this.snapshot?.notes??[]).filter(n=>n.project_id===project.id).map(n=>n.id)]);return this.historyEvents.filter(e=>e.entity_id&&entities.has(e.entity_id)).sort((a,b)=>b.created_at.localeCompare(a.created_at))[0];}
   overviewRows():Row[]{
     const snap=this.snapshot;if(!snap)return[];const q=this.searchQuery.trim().toLocaleLowerCase();const match=(...v:string[])=>!q||v.some(x=>x.toLocaleLowerCase().includes(q));
-    const open=this.items.filter(i=>!isDone(this.statusFor(i))).sort((a,b)=>urgency(a,Date.now())-urgency(b,Date.now())||(b.priority??-1)-(a.priority??-1)||a.position-b.position);
+    const open=this.items.filter(i=>!isDone(this.statusFor(i))).sort((a,b)=>urgency(a)-urgency(b)||(b.priority??-1)-(a.priority??-1)||a.position-b.position);
     const projects=this.projects.filter(p=>match(p.name,p.description,p.lifecycle??"",p.health??""));
     const scopedOpen=open.filter(i=>!this.projectId||i.project_id===this.projectId);
     const action=scopedOpen.filter(i=>!q||this.searchMatchedIds.has(i.id)||match(i.title,i.description??"",this.projectName(i.project_id),this.statusFor(i)?.label??""));
@@ -351,15 +385,25 @@ export class GlobalController {
   }
 }
 
-export function validateSnapshot(v:GlobalSnapshot):void{if(!v||v.schema_version!==2||!Number.isSafeInteger(v.revision)||v.revision<0)throw new Error("global snapshot schema or revision is invalid");for(const k of ["projects","items","notes","statuses","relationships","associations"] as const)if(!Array.isArray(v[k]))throw new Error(`global snapshot ${k} must be an array`);for(const p of v.projects)if(typeof p.id!=="string"||typeof p.name!=="string")throw new Error("global snapshot contains malformed project");for(const i of v.items)if(typeof i.id!=="string"||typeof i.title!=="string"||typeof i.status_id!=="string")throw new Error("global snapshot contains malformed item");}
+export function validateSnapshot(v:GlobalSnapshot):void{if(!v||![2,3].includes(v.schema_version)||!Number.isSafeInteger(v.revision)||v.revision<0)throw new Error("global snapshot schema or revision is invalid");for(const k of ["projects","items","notes","statuses","relationships","associations"] as const)if(!Array.isArray(v[k]))throw new Error(`global snapshot ${k} must be an array`);for(const p of v.projects)if(typeof p.id!=="string"||typeof p.name!=="string")throw new Error("global snapshot contains malformed project");for(const i of v.items)if(typeof i.id!=="string"||typeof i.title!=="string"||typeof i.status_id!=="string")throw new Error("global snapshot contains malformed item");}
 export function isDone(status:Status|undefined):boolean{return status?.category==="completed"||status?.category==="cancelled";}
-export function isOverdue(item:Item,now=Date.now()):boolean{if(!item.due_at)return false;if(dateOnly(item.due_at))return item.due_at<utcDay(now);const due=Date.parse(item.due_at);return Number.isFinite(due)&&utcDay(due)<utcDay(now);}
-function urgency(i:Item,now:number):number{return isOverdue(i,now)?0:i.due_at?1:2;}
-function dateOnly(value:string):boolean{return /^\d{4}-\d{2}-\d{2}$/u.test(value);}
-function utcDay(time:number):string{return new Date(time).toISOString().slice(0,10);}
+export function dailyClassification(item:Item):DailyClassificationView|undefined{return (item as Item&{daily_classification?:DailyClassificationView}).daily_classification;}
+export function isOverdue(item:Item):boolean{return dailyClassification(item)?.deadline==="overdue";}
+function urgency(item:Item):number{const group=dailyClassification(item)?.group;return group==="overdue"?0:group==="due_today"?1:group==="waiting"?2:group==="unscheduled"?3:group==="later"?4:5;}
+function isWaiting(item:Item):boolean{return dailyClassification(item)?.waiting===true;}
+function followUpTime(item:Item):number{const value=item.follow_up_at;if(typeof value!=="string")return Number.MAX_SAFE_INTEGER;const time=Date.parse(value);return Number.isFinite(time)?time:Number.MAX_SAFE_INTEGER;}
+function compareDailyItems(left:Item,right:Item,filter:TodoFilter):number{
+  if(filter==="waiting")return followUpTime(left)-followUpTime(right)||(right.priority??-1)-(left.priority??-1)||left.position-right.position||left.id.localeCompare(right.id);
+  const leftWaiting=isWaiting(left),rightWaiting=isWaiting(right);
+  return urgency(left)-urgency(right)
+    ||Number(rightWaiting)-Number(leftWaiting)
+    ||(leftWaiting?followUpTime(left)-followUpTime(right):0)
+    ||(right.priority??-1)-(left.priority??-1)
+    ||left.position-right.position
+    ||left.id.localeCompare(right.id);
+}
 function isInbox(s:Status|undefined):boolean{return s?.category==="inbox"||s?.status_id.toLowerCase()==="inbox";}
-function isWaiting(s:Status|undefined):boolean{return s?.category==="waiting"||s?.status_id.toLowerCase()==="waiting";}
-function matchesTodoFilter(i:Item,s:Status|undefined,f:TodoFilter,now:number):boolean{if(f==="all_open")return true;if(f==="waiting")return isWaiting(s);if(f==="overdue")return isOverdue(i,now)&&!isWaiting(s);if(f==="unscheduled")return !i.due_at&&!isWaiting(s);if(isWaiting(s))return false;if(!i.due_at)return true;const due=Date.parse(i.due_at);return Number.isFinite(due)&&utcDay(due)===utcDay(now);}
+function matchesTodoFilter(item:Item,filter:TodoFilter):boolean{if(filter==="all_open")return true;return dailyClassification(item)?.filters?.[filter]===true;}
 function keyOf(r:Row|undefined):EntityKey|undefined{return r?("operation_id" in r?`operation:${r.operation_id}`:"id" in r?r.id:"status_id" in r?`status:${r.project_id??""}\0${r.status_id}`:"identity" in r?`association:${r.project_id}\0${r.kind}\0${r.identity}`:undefined):undefined;}
 function publicRowId(r:Row):string|undefined{return "operation_id" in r?r.operation_id:"id" in r?r.id:"status_id" in r?r.status_id:"identity" in r?r.identity:undefined;}
 function summaryVisibleCount(snapshot:GlobalSnapshot,collection:string,data:unknown[],projectId:string|undefined,includeArchived:boolean):number{

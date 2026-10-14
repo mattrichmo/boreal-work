@@ -95,6 +95,44 @@ test('search uses server-filtered revision-pinned pages and retains selection th
   assert.equal(pageCalls.at(-1).offset, 0);
 });
 
+test('refresh retains a selected server search match when only a server-searchable field matches', async () => {
+  const dueDate = '2026-11-14';
+  const base = snapshot({
+    snapshot_limit: 1,
+    totals: { items: 3, projects: 1, statuses: 1 },
+    items: [item('summary-1', 'Unrelated summary row', 'p1', 0)],
+  });
+  const matches = [
+    { ...item('page-101', 'First result without matching title', 'p1', 101), due_at: dueDate },
+    { ...item('page-102', 'Selected result without matching title', 'p1', 102), due_at: dueDate },
+  ];
+  let revision = 1;
+  const client = {
+    snapshot: async () => ({ ...structuredClone(base), revision }),
+    execute: async (command, payload) => {
+      assert.equal(command, 'task show');
+      return matches.find(row => row.id === payload.item_id);
+    },
+    detailPage: async (_collection, options) => {
+      const rows = matches.slice(options.offset, options.offset + 1);
+      const next = options.offset + rows.length < matches.length ? options.offset + rows.length : null;
+      return { rows, total: matches.length, limit: options.limit, offset: options.offset, has_more: next !== null, next_offset: next, revision };
+    },
+  };
+  const controller = new GlobalController(client);
+  await controller.refresh();
+  controller.setScope('p1');
+  controller.setRoute('list');
+  await controller.search(dueDate);
+  assert.equal(await controller.loadMoreRows(), true);
+  controller.selectId('page-102');
+  assert.equal(controller.selectedRow()?.id, 'page-102');
+
+  revision = 2;
+  await controller.refresh();
+  assert.equal(controller.selectedRow()?.id, 'page-102');
+});
+
 test('complete project, status, and parent choices page through capped summaries at one revision', async () => {
   const projects = Array.from({ length: 101 }, (_, index) => project(`p${index + 1}`, `Project ${index + 1}`));
   const items = Array.from({ length: 101 }, (_, index) => item(`item-${index + 1}`, `Parent ${index + 1}`, 'p1', index));
@@ -207,7 +245,7 @@ test('detailed item form searches and selects project, parent, and status choice
   await h.key('Created from complete choices');
   await h.key('\x13');
   await waitFor(() => writes.length === 1, 'detailed item mutation did not submit');
-  assert.equal(writes[0].command, 'todo add');
+  assert.equal(writes[0].command, 'task add');
   assert.equal(writes[0].payload.project_id, 'p101');
   assert.equal(writes[0].payload.parent_id, 'p101-item-101');
   assert.equal(writes[0].payload.status_id, 'p101-status-101');

@@ -1,0 +1,55 @@
+    Finished `release` profile [optimized] target(s) in 0.32s
+
+> build
+> tsc --outDir /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/boreal-release-0e3kaf6o/tui
+
+
+> build
+> tsc --outDir /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/boreal-release-0e3kaf6o/global-tui
+
+{"manifest": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/bwrk-v0.2.1-aarch64-apple-darwin.contracts.json", "ok": true, "snapshot_identity": "sha256:b285bc524ebfa60e370bb434589d3453f574972ed04380f70938da3925517a95"}
+release package manifest and workflow/skill capability identities verified
++ rustc -vV
++ cargo build --release --locked -p boreal-cli --bin bwrk
++ npm --prefix /Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/tui run build -- --outDir /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/boreal-release-0e3kaf6o/tui
++ npm --prefix /Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/apps/global-tui run build -- --outDir /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/boreal-release-0e3kaf6o/global-tui
++ /opt/homebrew/opt/python@3.14/bin/python3.14 /Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/scripts/release/release_identity.py manifest --root /Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work --output /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/bwrk-v0.2.1-aarch64-apple-darwin.contracts.json
++ rustc --version
++ cargo --version
++ node --version
++ tsc --version
++ /opt/homebrew/opt/python@3.14/bin/python3.14 /Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/scripts/release/verify_release_package.py /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/bwrk-v0.2.1-aarch64-apple-darwin /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/bwrk-v0.2.1-aarch64-apple-darwin/share/boreal/release.json
+{"archive": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/bwrk-v0.2.1-aarch64-apple-darwin.tar.gz", "release_manifest": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.t1jnbV/release/bwrk-v0.2.1-aarch64-apple-darwin.release.json", "sha256": "sha256:8c89ae99a3b65b649fad53b4df1e00520e3a0f61de7da598f198cae78fc17ebf", "target": "aarch64-apple-darwin", "version": "0.2.1"}
+package release fixture: PASS (bwrk-v0.2.1-aarch64-apple-darwin.tar.gz; exact download/checksum path, fail-closed cases)
+
+  BOREAL / WORK
+  Machine installation · project data stays untouched
+
+  [1/4] Resolve installation source
+
+  [2/4] Verify and inspect the release archive
+
+  [3/4] Stage selected components
+bwrk 0.2.1 (api 2; source sha256:6c3a8ec75edb37b2292514bc4ac9f649af250d5c1cdd095ac3bbf71358d8cec4)
+
+  [4/4] Publish installation
+bwrk 0.2.1 (api 2; source sha256:6c3a8ec75edb37b2292514bc4ac9f649af250d5c1cdd095ac3bbf71358d8cec4)
+Boreal 0.2.1 installed to /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.t1jnbV/prefix
+  binary: /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.t1jnbV/prefix/bin/bwrk
+  TUI:    /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.t1jnbV/prefix/lib/boreal/tui/entrypoint.js
+  global: provisioned (run bwrk dashboard global)
+  add /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.t1jnbV/prefix/bin to PATH to invoke bwrk
+  Next: run bwrk dashboard global; for code projects run bwrk init, then bwrk dashboard.
+package smoke: release manifest and asset digests verified
+PASS: installed asset hashes, explicit local init, repeated status/doctor, two-project and uninitialized rejection
+Traceback (most recent call last):
+  File "/Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/scripts/validation/global/smoke.py", line 157, in <module>
+    if __name__=='__main__': main()
+                             ~~~~^^
+  File "/Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/scripts/validation/global/smoke.py", line 91, in main
+    cli('work','create','smoke-code','code-task','Write checkout flow','--kind','task','--actor','global-smoke','--session','global-smoke-session','--db',database,'--expected-revision',str(code_status['revision']),cwd=code)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/cybertron/.codex/worktrees/v4-s02-t90/boreal-work/scripts/validation/global/smoke.py", line 28, in cli
+    raise AssertionError(f'{argv}: {result.stderr} {result.stdout}')
+AssertionError: ('work', 'create', 'smoke-code', 'code-task', 'Write checkout flow', '--kind', 'task', '--actor', 'global-smoke', '--session', 'global-smoke-session', '--db', '/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/bg-qs2nv8cl/code/.boreal/boreal.sqlite', '--expected-revision', '2'):  {"api_version":"2","schema_version":"boreal.protocol.envelope.v1","operation_id":"op_cli_1791927074845_56314_0","revision":null,"as_of":"unix-ms:1791927074855","next_status_change_at":null,"transport":"ok","outcome":"conflict","data":null,"detail_ref":null,"error":{"code":"claim_conflict","message":"Unique: UNIQUE constraint failed: work_node_v3.project_id, work_node_v3.work_id","retryable":false}}
+

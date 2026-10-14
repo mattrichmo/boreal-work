@@ -47,12 +47,14 @@ the exact identity again, rejects traversal and symlink components, and never
 overwrites conflicting bytes. The returned path is relative to that root and
 is not part of artifact identity.
 
-A complete portable backup therefore preserves the work database and its
-attempt/evidence history, the source catalog metadata and referenced content
-blobs, and the published memory Git history as separate components. Restoring
-the database alone does not make source bytes available; relationships whose
-bytes were omitted must be reported unavailable, not reconstructed from a
-mutable local path.
+A complete portable recovery preserves four separate authorities: the
+Project database and its live work/attempt/evidence history; the Global
+database and its Inbox and management records; source catalog metadata and
+referenced content blobs; and the published curated memory Git history. A
+Project database backup does not include the Global database, source bytes,
+or Git history. Restoring databases alone does not make omitted source bytes
+available; relationships whose bytes were omitted must be reported
+unavailable, not reconstructed from a mutable local path.
 
 ## Work split
 

@@ -132,8 +132,8 @@ pub fn guide(context: GuidanceContext<'_>) -> Directive {
         return Directive {
             registry_id: "guidance.no_goal",
             version: "1",
-            explanation: "create or select a project goal before mutating work",
-            safe_argv: &["bwrk", "init", "<project>", "--json"],
+            explanation: "ask the project-scoped next route to derive eligible work or an explicit idle/intervention result",
+            safe_argv: &["bwrk", "agent", "next", "--project", "<project>", "--json"],
             severity: DirectiveSeverity::Required,
             action_required: true,
             runner: "boreal_cli",
@@ -144,8 +144,8 @@ pub fn guide(context: GuidanceContext<'_>) -> Directive {
         DerivedStatus::Queued => Directive {
             registry_id: "guidance.wait_prerequisite",
             version: "1",
-            explanation: "wait for the close-only prerequisite",
-            safe_argv: &["bwrk", "status", "<project>", "--json"],
+            explanation: "refresh the project-scoped next route for a typed wait reason or newly eligible work",
+            safe_argv: &["bwrk", "agent", "next", "--project", "<project>", "--json"],
             severity: DirectiveSeverity::Advisory,
             action_required: false,
             runner: "boreal_cli",
@@ -154,8 +154,8 @@ pub fn guide(context: GuidanceContext<'_>) -> Directive {
         DerivedStatus::Blocked | DerivedStatus::Paused => Directive {
             registry_id: "guidance.resolve_hold",
             version: "1",
-            explanation: "resolve the operator hold before claiming",
-            safe_argv: &["bwrk", "status", "<project>", "--json"],
+            explanation: "request the current project-scoped intervention from the trusted next route",
+            safe_argv: &["bwrk", "agent", "next", "--project", "<project>", "--json"],
             severity: DirectiveSeverity::Blocking,
             action_required: true,
             runner: "boreal_cli",
@@ -164,8 +164,8 @@ pub fn guide(context: GuidanceContext<'_>) -> Directive {
         DerivedStatus::ExpiredReview => Directive {
             registry_id: "guidance.review_expiry",
             version: "1",
-            explanation: "review the expired attempt before redispatch",
-            safe_argv: &["bwrk", "status", "<project>", "--json"],
+            explanation: "request the current fenced recovery or review action before redispatch",
+            safe_argv: &["bwrk", "agent", "next", "--project", "<project>", "--json"],
             severity: DirectiveSeverity::Blocking,
             action_required: true,
             runner: "boreal_cli",
@@ -174,8 +174,8 @@ pub fn guide(context: GuidanceContext<'_>) -> Directive {
         DerivedStatus::Ready => Directive {
             registry_id: "guidance.claim",
             version: "1",
-            explanation: "claim the eligible work with a fenced attempt",
-            safe_argv: &["bwrk", "work", "claim", "<project>", "<work>", "--json"],
+            explanation: "request the exact claim/start action and its required source, configuration, revision, and session inputs",
+            safe_argv: &["bwrk", "agent", "next", "--project", "<project>", "--work", "<work>", "--json"],
             severity: DirectiveSeverity::Required,
             action_required: true,
             runner: "boreal_cli",
@@ -194,8 +194,8 @@ pub fn guide(context: GuidanceContext<'_>) -> Directive {
         _ => Directive {
             registry_id: "guidance.inspect",
             version: "1",
-            explanation: "inspect the current attempt and required gates",
-            safe_argv: &["bwrk", "status", "<project>", "--json"],
+            explanation: "request the current project-scoped next action with its required typed inputs",
+            safe_argv: &["bwrk", "agent", "next", "--project", "<project>", "--json"],
             severity: DirectiveSeverity::Required,
             action_required: true,
             runner: "boreal_cli",
@@ -263,21 +263,53 @@ pub fn guidance_subject(
 
 /// Guidance selects among already-authorized descriptors; status prose cannot
 /// authorize an action and imported workflow files are never executed.
-pub fn guided_action(item: &crate::StatusWork) -> Option<boreal_domain::actions::ActionKind> {
+pub fn guided_action_descriptor(
+    item: &crate::StatusWork,
+) -> Option<&boreal_domain::actions::ActionDescriptor> {
     use boreal_domain::actions::ActionKind;
     let actions = item.actions.as_ref()?;
-    let order = [
-        ActionKind::Claim,
-        ActionKind::AcceptAttempt,
-        ActionKind::StartAttempt,
-        ActionKind::FinishClose,
-        ActionKind::AttachEvidence,
-        ActionKind::Checkpoint,
-        ActionKind::Review,
-        ActionKind::Recover,
-        ActionKind::Inspect,
-    ];
-    order.into_iter().find(|kind| actions.allows(*kind))
+    let order: &[ActionKind] = if item.attempt.is_some() {
+        &[
+            ActionKind::Recover,
+            ActionKind::AcceptAttempt,
+            ActionKind::StartAttempt,
+            ActionKind::Checkpoint,
+            ActionKind::AttachEvidence,
+            ActionKind::Submit,
+            ActionKind::RequestReview,
+            ActionKind::Review,
+            ActionKind::FinishClose,
+            ActionKind::Release,
+            ActionKind::Inspect,
+            ActionKind::ReadHistory,
+        ]
+    } else {
+        &[
+            ActionKind::Claim,
+            ActionKind::Recover,
+            ActionKind::Review,
+            ActionKind::Inspect,
+            ActionKind::ReadHistory,
+            ActionKind::StartAttempt,
+            ActionKind::AcceptAttempt,
+            ActionKind::Checkpoint,
+            ActionKind::AttachEvidence,
+            ActionKind::Submit,
+            ActionKind::RequestReview,
+            ActionKind::FinishClose,
+            ActionKind::Release,
+        ]
+    };
+    order
+        .iter()
+        .find_map(|kind| actions.allowed.iter().find(|action| action.action == *kind))
+}
+
+/// Select the action kind from its canonical descriptor. Adapters that need
+/// to build a request should prefer [`guided_action_descriptor`] so they keep
+/// the snapshot revisions, attempt fence, roles and required typed inputs.
+pub fn guided_action(item: &crate::StatusWork) -> Option<boreal_domain::actions::ActionKind> {
+    guided_action_descriptor(item).map(|descriptor| descriptor.action)
 }
 
 #[cfg(test)]
@@ -335,7 +367,7 @@ mod tests {
         assert!(!directive.shell);
         assert_eq!(
             directive.safe_argv,
-            &["bwrk", "init", "<project>", "--json"]
+            &["bwrk", "agent", "next", "--project", "<project>", "--json"]
         );
     }
 

@@ -1,0 +1,86 @@
+warning: unused import: `run_update`
+     --> crates/cli/src/service.rs:12140:45
+      |
+12140 | pub(crate) use unix::{request, run_service, run_update};
+      |                                             ^^^^^^^^^^
+      |
+      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `run_update` is never used
+   --> crates/cli/src/service.rs:814:19
+    |
+814 |     pub(crate) fn run_update(
+    |                   ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `boreal-cli` (bin "bwrk") generated 2 warnings (run `cargo fix --bin "bwrk" -p boreal-cli` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.21s
+
+> build
+> tsc --outDir /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/boreal-release-mbkv04ge/tui
+
+
+> build
+> tsc --outDir /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/boreal-release-mbkv04ge/global-tui
+
+{"manifest": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/bwrk-v0.2.2-aarch64-apple-darwin.contracts.json", "ok": true, "snapshot_identity": "sha256:1b4c260456a1c5fffd3a5c7fc7a5adf577ffe5b3e0f3493cf2b8540f03d7247b"}
+release package manifest and workflow/skill capability identities verified
++ rustc -vV
++ cargo build --release --locked -p boreal-cli --bin bwrk
++ npm --prefix /Users/cybertron/.codex/worktrees/s02-t90-fixed-head/boreal-work/apps/tui run build -- --outDir /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/boreal-release-mbkv04ge/tui
++ npm --prefix /Users/cybertron/.codex/worktrees/s02-t90-fixed-head/boreal-work/apps/global-tui run build -- --outDir /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/boreal-release-mbkv04ge/global-tui
++ /opt/homebrew/opt/python@3.14/bin/python3.14 /Users/cybertron/.codex/worktrees/s02-t90-fixed-head/boreal-work/scripts/release/release_identity.py manifest --root /Users/cybertron/.codex/worktrees/s02-t90-fixed-head/boreal-work --output /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/bwrk-v0.2.2-aarch64-apple-darwin.contracts.json
++ rustc --version
++ cargo --version
++ node --version
++ tsc --version
++ /opt/homebrew/opt/python@3.14/bin/python3.14 /Users/cybertron/.codex/worktrees/s02-t90-fixed-head/boreal-work/scripts/release/verify_release_package.py /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/bwrk-v0.2.2-aarch64-apple-darwin /private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/bwrk-v0.2.2-aarch64-apple-darwin/share/boreal/release.json
+{"archive": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/bwrk-v0.2.2-aarch64-apple-darwin.tar.gz", "release_manifest": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-package-smoke.8QXw4Z/release/bwrk-v0.2.2-aarch64-apple-darwin.release.json", "sha256": "sha256:753fe0790601f0152a62ea87c0cfde77cc8531631abcf4f7c41687bc1fdbcfb3", "target": "aarch64-apple-darwin", "version": "0.2.2"}
+package release fixture: PASS (bwrk-v0.2.2-aarch64-apple-darwin.tar.gz; exact download/checksum path, fail-closed cases)
+
+  BOREAL / WORK
+  Machine installation · project data stays untouched
+
+  [1/4] Resolve installation source
+
+  [2/4] Verify and inspect the release archive
+
+  [3/4] Stage selected components
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+
+  [4/4] Publish installation
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+Boreal 0.2.2 installed to /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.8QXw4Z/prefix
+  binary: /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.8QXw4Z/prefix/bin/bwrk
+  TUI:    /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.8QXw4Z/prefix/lib/boreal/tui/entrypoint.js
+  global: provisioned (run bwrk dashboard global)
+  add /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.8QXw4Z/prefix/bin to PATH to invoke bwrk
+  Next: run bwrk dashboard global; for code projects run bwrk init, then bwrk dashboard.
+package smoke: release manifest and asset digests verified
+PASS: installed asset hashes, explicit local init, repeated status/doctor, two-project and uninitialized rejection
+PASS global CLI cwd independence, configurable workflow, hierarchy, notes, dependency cycle rejection, revision conflict, durable replay, project execution while Global is unavailable, real framed TUI and export/import
+
+  BOREAL / WORK
+  Machine installation · project data stays untouched
+
+  [1/4] Resolve installation source
+
+  [2/4] Verify and inspect the release archive
+
+  [3/4] Stage selected components
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+
+  [4/4] Publish installation
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+Boreal 0.2.2 installed to /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.8QXw4Z/prefix
+  binary: /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.8QXw4Z/prefix/bin/bwrk
+  TUI:    /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.8QXw4Z/prefix/lib/boreal/tui/entrypoint.js
+  global: provisioned (run bwrk dashboard global)
+  add /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.8QXw4Z/prefix/bin to PATH to invoke bwrk
+  Next: run bwrk dashboard global; for code projects run bwrk init, then bwrk dashboard.
+package smoke: automatic global provisioning and reinstall preservation verified
+package smoke: PASS (/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T//boreal-package-smoke.8QXw4Z/release/bwrk-v0.2.2-aarch64-apple-darwin.tar.gz)
+
+command=LC_ALL=C LANG=C sh scripts/release/package-smoke.sh
+exit_code=0

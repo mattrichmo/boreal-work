@@ -1,0 +1,8 @@
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 0.239s
+
+OK
+
+command=python3 scripts/validation/test_run_full_suite.py
+exit_code=0

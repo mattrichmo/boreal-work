@@ -893,6 +893,15 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "dry-run or atomically instantiate a versioned work template",
     },
     CommandSpec {
+        path: "template amend",
+        syntax: "bwrk template amend --project PROJECT --input .boreal/templates/NAME.json --prefix ID --expected-revision N --expected-template-version N [--var KEY=VALUE] [--dry-run | --apply --yes] [--json]",
+        action: "mutate",
+        output: "template",
+        direct: true,
+        service: true,
+        summary: "review and revision-fence an explicit amendment to an existing draft template prefix",
+    },
+    CommandSpec {
         path: "template capture",
         syntax: "bwrk template capture --project PROJECT --work ID --out PATH [--json]",
         action: "read",
@@ -1119,7 +1128,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "global todo add",
-        syntax: "bwrk global todo add --title TITLE [--project PROJECT] [--json]",
+        syntax: "bwrk global todo add --title TITLE [--project PROJECT] [--source-ref REF] [--json]",
         action: "mutate",
         output: "global_item",
         direct: true,
@@ -1128,12 +1137,12 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "global todo list",
-        syntax: "bwrk global todo list [--project PROJECT] [--include-archived] [--json]",
+        syntax: "bwrk global todo list [--project PROJECT] [--filter today|overdue|waiting|unscheduled|all-open] [--include-archived] [--limit N] [--offset N] [--json]",
         action: "read",
         output: "global_items",
         direct: true,
         service: true,
-        summary: "list management tasks",
+        summary: "list management tasks with application-owned daily filters and bounded paging",
     },
     CommandSpec {
         path: "global todo show",
@@ -1740,21 +1749,21 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "intake capture",
-        syntax: "bwrk intake capture [ARGS] [--json]",
+        syntax: "bwrk intake capture PROJECT INTAKE_ID CONTENT --bucket BUCKET_ID [--expected-revision N] [--kind note|discovery|question|revisit] [--socket PATH --json]",
         action: "mutate",
         output: "intake",
         direct: true,
-        service: false,
-        summary: "project-scoped intake through the canonical application",
+        service: true,
+        summary: "capture typed project intake through the canonical application; service requests require an expected revision and reject schema-v2 without migration",
     },
     CommandSpec {
         path: "intake bucket",
-        syntax: "bwrk intake bucket [ARGS] [--json]",
+        syntax: "bwrk intake bucket PROJECT BUCKET_ID NAME [--expected-revision N] [--socket PATH --json]",
         action: "mutate",
         output: "intake",
         direct: true,
-        service: false,
-        summary: "project-scoped intake through the canonical application",
+        service: true,
+        summary: "create a project intake bucket through the canonical application; service requests require an expected revision and reject schema-v2 without migration",
     },
     CommandSpec {
         path: "intake show",
@@ -1762,7 +1771,7 @@ const COMMANDS: &[CommandSpec] = &[
         action: "read",
         output: "intake",
         direct: true,
-        service: false,
+        service: true,
         summary: "project-scoped intake through the canonical application",
     },
     CommandSpec {
@@ -2231,7 +2240,25 @@ const COMMANDS: &[CommandSpec] = &[
         output: "machine_update",
         direct: true,
         service: false,
-        summary: "update a release-installed bwrk binary and its packaged TUI",
+        summary: "invoke the packaged updater for the current bwrk installation",
+    },
+    CommandSpec {
+        path: "update status",
+        syntax: "bwrk update status [--json]",
+        action: "read",
+        output: "machine_update_journal",
+        direct: true,
+        service: false,
+        summary: "read the per-installation machine update journal without changing it",
+    },
+    CommandSpec {
+        path: "update recover",
+        syntax: "bwrk update recover --yes [--operation-id ID] [--json]",
+        action: "mutate",
+        output: "machine_update_journal",
+        direct: true,
+        service: false,
+        summary: "explicitly reconcile machine update package state from verified readback",
     },
     CommandSpec {
         path: "upgrade",
@@ -2240,7 +2267,7 @@ const COMMANDS: &[CommandSpec] = &[
         output: "machine_update",
         direct: true,
         service: false,
-        summary: "v1-compatible alias for the machine update operation",
+        summary: "v1-compatible spelling for the packaged machine updater",
     },
     CommandSpec {
         path: "backup",
@@ -2342,8 +2369,17 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "read one exact work item",
     },
     CommandSpec {
+        path: "work close-readiness",
+        syntax: "bwrk work close-readiness PROJECT WORK_ID [--socket PATH --json]",
+        action: "read",
+        output: "close_readiness",
+        direct: true,
+        service: true,
+        summary: "read exact application-owned close blockers from one revision-consistent snapshot",
+    },
+    CommandSpec {
         path: "work create",
-        syntax: "bwrk work create --project PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--acceptance focused|reviewed] [--hold CODE] [--session SESSION_ID] --expected-revision N [--json]",
+        syntax: "bwrk work create --project PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID] [--execution-mode direct|container] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--acceptance focused|reviewed|PROFILE/VERSION] [--hold CODE] [--planning-contract .boreal/contracts/NAME.json] [--session SESSION_ID] --expected-revision N [--json]",
         action: "mutate",
         output: "work",
         direct: true,
@@ -2352,12 +2388,21 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "work edit",
-        syntax: "bwrk work edit PROJECT WORK_ID [--title TEXT] [--description TEXT] [--parent WORK_ID] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N",
+        syntax: "bwrk work edit PROJECT WORK_ID [--title TEXT] [--description TEXT] [--parent WORK_ID|--clear-parent] [--execution-mode direct|container] [--priority N] [--dispatch automatic|operator_only|paused] [--planning-contract .boreal/contracts/NAME.json] --expected-revision N",
         action: "mutate",
         output: "work",
         direct: true,
         service: true,
         summary: "edit planning fields under an expected project revision",
+    },
+    CommandSpec {
+        path: "work disposition",
+        syntax: "bwrk work disposition --project PROJECT CONTAINER_ID DESCENDANT_ID --kind accepted_closed|accepted_cancelled|deferred|replaced [--replacement WORK_ID] [--supersedes DISPOSITION_ID] [--reason TEXT] --expected-revision N --yes [--operation-id ID] [--socket PATH] [--json]",
+        action: "mutate",
+        output: "container_disposition",
+        direct: true,
+        service: true,
+        summary: "account for one descendant through revision-bound container closeout",
     },
     CommandSpec {
         path: "work rollup",
@@ -2567,6 +2612,123 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "run an admitted bounded verifier",
     },
     CommandSpec {
+        path: "evidence bind-result",
+        syntax: "bwrk evidence bind-result --project PROJECT --work WORK_ID --attempt ID --fence N --source-version ID --content-digest SHA --expected-revision N --expected-entity-revision N --expected-proof-revision N [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "final_result_binding",
+        direct: true,
+        service: true,
+        summary: "bind verified produced-source bytes to the current attempt and next proof generation",
+    },
+    CommandSpec {
+        path: "evidence receipts",
+        syntax: "bwrk evidence receipts --project PROJECT --work WORK_ID --attempt ID --fence N [--limit N --offset N --socket PATH --json]",
+        action: "read",
+        output: "receipt_page",
+        direct: true,
+        service: true,
+        summary: "read bounded receipt history for one exact attempt fence",
+    },
+    CommandSpec {
+        path: "project civil-time set",
+        syntax: "bwrk project civil-time set --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "project_civil_time",
+        direct: true,
+        service: true,
+        summary: "append an operator-authorized project timezone revision with the installed TZif identity",
+    },
+    CommandSpec {
+        path: "project civil-time show",
+        syntax: "bwrk project civil-time show --project PROJECT [--socket PATH --json]",
+        action: "read",
+        output: "project_civil_time",
+        direct: true,
+        service: true,
+        summary: "read the current project civil-time setting and revision",
+    },
+    CommandSpec {
+        path: "work schedule set",
+        syntax: "bwrk work schedule set --project PROJECT WORK_ID --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "work_schedule",
+        direct: true,
+        service: true,
+        summary: "replace the full business schedule at expected project and schedule revisions",
+    },
+    CommandSpec {
+        path: "work schedule show",
+        syntax: "bwrk work schedule show --project PROJECT WORK_ID [--socket PATH --json]",
+        action: "read",
+        output: "work_schedule",
+        direct: true,
+        service: true,
+        summary: "read the current business schedule, explicit clear revision, or untouched legacy due value",
+    },
+    CommandSpec {
+        path: "wait create",
+        syntax: "bwrk wait create --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "external_wait",
+        direct: true,
+        service: true,
+        summary: "create an operator-authorized external decision or output obligation",
+    },
+    CommandSpec {
+        path: "wait resolve",
+        syntax: "bwrk wait resolve --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "external_wait",
+        direct: true,
+        service: true,
+        summary: "resolve or explicitly cancel an open external wait with attributed evidence",
+    },
+    CommandSpec {
+        path: "wait list",
+        syntax: "bwrk wait list --project PROJECT [--socket PATH --json]",
+        action: "read",
+        output: "external_wait",
+        direct: true,
+        service: true,
+        summary: "read current project-scoped external waits",
+    },
+    CommandSpec {
+        path: "wait show",
+        syntax: "bwrk wait show --project PROJECT WAIT_ID [--socket PATH --json]",
+        action: "read",
+        output: "external_wait",
+        direct: true,
+        service: true,
+        summary: "read one external wait and its attributed resolution history",
+    },
+    CommandSpec {
+        path: "artifact result bind",
+        syntax: "bwrk artifact result bind --project PROJECT --input REQUEST.json [--actor ID --session ID --operation-id ID --socket PATH --json]",
+        action: "mutate",
+        output: "artifact_result",
+        direct: true,
+        service: true,
+        summary: "inspect exact registered source versions and bind typed output facts to the current attempt",
+    },
+    CommandSpec {
+        path: "artifact result attempt",
+        syntax: "bwrk artifact result attempt --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--socket PATH --json]",
+        action: "read",
+        output: "artifact_result",
+        direct: true,
+        service: true,
+        summary: "read the immutable typed output result for one exact attempt fence",
+    },
+    CommandSpec {
+        path: "artifact result operation",
+        syntax: "bwrk artifact result operation --project PROJECT OPERATION_ID [--socket PATH --json]",
+        action: "read",
+        output: "artifact_result",
+        direct: true,
+        service: true,
+        summary: "read the immutable typed output result bound by one project operation",
+    },
+    CommandSpec {
         path: "gate policy publish",
         syntax: "bwrk gate policy publish --project PROJECT --gate GATE_ID --input PATH --expected-revision N --yes",
         action: "mutate",
@@ -2658,12 +2820,12 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "source show",
-        syntax: "bwrk source show PROJECT SOURCE_VERSION_ID",
+        syntax: "bwrk source show PROJECT SOURCE_VERSION_ID [--socket PATH --json]",
         action: "read",
         output: "source",
         direct: true,
-        service: false,
-        summary: "read one exact source version and its registration",
+        service: true,
+        summary: "read one exact source version and its registration through the workspace-bound service catalog",
     },
     CommandSpec {
         path: "source list",
@@ -2685,12 +2847,12 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "source verify",
-        syntax: "bwrk source verify PROJECT SOURCE_VERSION_ID",
+        syntax: "bwrk source verify PROJECT SOURCE_VERSION_ID [--socket PATH --json]",
         action: "read",
         output: "source_verification",
         direct: true,
-        service: false,
-        summary: "verify a source blob against its immutable digest",
+        service: true,
+        summary: "verify a source blob against its immutable digest through the workspace-bound service catalog",
     },
 ];
 
@@ -3065,6 +3227,81 @@ fn flag_metadata(command: &CommandSpec) -> Vec<Value> {
 }
 fn input_schema(path: &str) -> Value {
     match path {
+        "project civil-time set" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["schema_version", "expected_project_revision", "expected_setting_revision", "timezone"],
+            "properties": {
+                "schema_version": {"const": "boreal.project_civil_time_update.v1"},
+                "expected_project_revision": {"type": "integer", "minimum": 0},
+                "expected_setting_revision": {"type": "integer", "minimum": 0},
+                "timezone": {"type": "string", "minLength": 1, "maxLength": 255}
+            }
+        }),
+        "project civil-time show" | "wait list" => json!({
+            "type": "object", "additionalProperties": false, "properties": {}
+        }),
+        "work schedule set" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["schema_version", "expected_project_revision", "expected_schedule_revision", "schedule"],
+            "properties": {
+                "schema_version": {"const": "boreal.work_schedule_update.v1"},
+                "expected_project_revision": {"type": "integer", "minimum": 0},
+                "expected_schedule_revision": {"type": "integer", "minimum": 0},
+                "schedule": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["not_before", "due", "planned_start", "planned_end"],
+                    "properties": {
+                        "not_before": {"anyOf": [business_date_schema(), {"type":"null"}]},
+                        "due": {"anyOf": [business_date_schema(), {"type":"null"}]},
+                        "planned_start": {"anyOf": [business_date_schema(), {"type":"null"}]},
+                        "planned_end": {"anyOf": [business_date_schema(), {"type":"null"}]}
+                    }
+                }
+            }
+        }),
+        "work schedule show" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["work_id"],
+            "properties": {"work_id": {"type":"string", "minLength":1}}
+        }),
+        "wait create" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["schema_version", "expected_project_revision", "expected_wait_revision", "wait_id", "source_work_id", "affected_work_ids", "category", "reason", "accountable", "expected_decision", "expected_output", "follow_up"],
+            "properties": {
+                "schema_version": {"const": "boreal.external_wait_create.v1"},
+                "expected_project_revision": {"type":"integer", "minimum":0},
+                "expected_wait_revision": {"const":0},
+                "wait_id": {"type":"string", "minLength":1},
+                "source_work_id": {"type":"string", "minLength":1},
+                "affected_work_ids": {"type":"array", "minItems":1, "uniqueItems":true, "items":{"type":"string", "minLength":1}},
+                "category": {"enum":["decision","approval","information","access","service","other"]},
+                "reason": {"type":"string", "minLength":1},
+                "accountable": {"anyOf":[accountable_schema()]},
+                "expected_decision": {"anyOf":[{"type":"string"},{"type":"null"}]},
+                "expected_output": {"anyOf":[{"type":"string"},{"type":"null"}]},
+                "follow_up": {"anyOf":[business_date_schema(),{"type":"null"}]}
+            }
+        }),
+        "wait resolve" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["schema_version", "expected_project_revision", "expected_wait_revision", "wait_id", "next_state", "outcome", "detail", "output_ref", "supplied_by"],
+            "properties": {
+                "schema_version": {"const": "boreal.external_wait_resolve.v1"},
+                "expected_project_revision": {"type":"integer", "minimum":0},
+                "expected_wait_revision": {"type":"integer", "minimum":1},
+                "wait_id": {"type":"string", "minLength":1},
+                "next_state": {"enum":["resolved","cancelled"]},
+                "outcome": {"enum":["approved","rejected","decision_provided","output_provided","declined","unavailable","cancelled"]},
+                "detail": {"type":"string", "minLength":1},
+                "output_ref": {"anyOf":[{"type":"string"},{"type":"null"}]},
+                "supplied_by": {"anyOf":[accountable_schema()]}
+            }
+        }),
+        "wait show" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["wait_id"],
+            "properties": {"wait_id": {"type":"string", "minLength":1}}
+        }),
         "merge plan" | "merge apply" | "compact apply" => {
             let merging = path.starts_with("merge");
             let applying = path.ends_with("apply");
@@ -3116,6 +3353,63 @@ fn input_schema(path: &str) -> Value {
         "merge show" | "compact show" => {
             json!({"type":"object","required":["source_kind","source_id"],"properties":{"source_kind":{"type":"string"},"source_id":{"type":"string"}}})
         }
+        "work close-readiness" => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["work_id"],
+            "properties": {"work_id": {"type": "string", "minLength": 1}},
+            "description": "The service evaluates canonical persisted proof; project, actor and session come from the authenticated envelope."
+        }),
+        "artifact result bind" => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema_version", "work_id", "attempt_id", "fence", "expected_project_revision", "expected_entity_revision", "expected_proof_revision", "result_id", "contract_revision", "outputs"],
+            "properties": {
+                "schema_version": {"const": "boreal.artifact_result_bind.v1"},
+                "work_id": {"type": "string", "minLength": 1},
+                "attempt_id": {"type": "string", "minLength": 1},
+                "fence": {"type": "integer", "minimum": 1},
+                "expected_project_revision": {"type": "integer", "minimum": 1},
+                "expected_entity_revision": {"type": "integer", "minimum": 0},
+                "expected_proof_revision": {"type": "integer", "minimum": 1},
+                "result_id": {"type": "string", "minLength": 1},
+                "contract_revision": {"type": "integer", "minimum": 0},
+                "outputs": {
+                    "type": "array", "maxItems": 32,
+                    "items": {
+                        "type": "object", "additionalProperties": false,
+                        "required": ["requirement_key", "source", "relationship_id", "rights"],
+                        "properties": {
+                            "requirement_key": {"type": "string", "minLength": 1},
+                            "source": {
+                                "type": "object", "additionalProperties": false,
+                                "required": ["project_id", "source_version_id", "content_digest"],
+                                "properties": {"project_id": {"type": "string"}, "source_version_id": {"type": "string"}, "content_digest": {"type": "string"}}
+                            },
+                            "relationship_id": {"type": "string", "minLength": 1},
+                            "rights": {
+                                "type": "object", "additionalProperties": false,
+                                "properties": {"attribution": {"type": ["string", "null"]}, "rights_statement": {"type": ["string", "null"]}, "license": {"type": ["string", "null"]}}
+                            }
+                        }
+                    }
+                },
+                "attestation": {"type": ["object", "null"], "additionalProperties": false, "properties": {"statement": {"type": "string", "minLength": 1, "maxLength": 4096}}}
+            },
+            "description": "Project/actor/session/operation/time come from the authenticated envelope or service. Source identity is revalidated against the local catalog; do not submit inspection facts or catalog paths."
+        }),
+        "artifact result attempt" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["work_id", "attempt_id", "fence"],
+            "properties": {"work_id": {"type": "string"}, "attempt_id": {"type": "string"}, "fence": {"type": "integer", "minimum": 1}},
+            "description": "Read one immutable result by exact project/work/attempt/fence."
+        }),
+        "artifact result operation" => json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["target_operation_id"],
+            "properties": {"target_operation_id": {"type": "string", "minLength": 1}},
+            "description": "Read one immutable result by a project-scoped operation ID; the read request's own operation ID is envelope-owned."
+        }),
         "orchestrate pool configure" => {
             json!({"type":"object","additionalProperties":false,"required":["workers"],"properties":{"workers":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["actor_id","session_id","harness_id"],"properties":{"actor_id":{"type":"string"},"session_id":{"type":"string"},"harness_id":{"type":"string"}}}}},"description":"Distinct active sessions with project-local private credentials and registered harness policies."})
         }
@@ -3188,7 +3482,7 @@ fn input_schema(path: &str) -> Value {
                 "description": "Copy the current server-issued Recover descriptor exactly. Pass its expected_project_revision again as --expected-revision; --yes confirms the descriptor confirmation. Disposition records the typed recovery choice; it does not replace recovery.resolve."
             })
         }
-        "template validate" | "template run" => {
+        "template validate" | "template run" | "template amend" => {
             json!({
                 "type": "object",
                 "required": ["schema_version", "id", "version", "title", "description", "parameters", "items"],
@@ -3243,6 +3537,26 @@ fn input_schema(path: &str) -> Value {
         }
         _ => Value::Null,
     }
+}
+
+fn business_date_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"type":"object","additionalProperties":false,"required":["kind","at_ms"],"properties":{"kind":{"const":"instant"},"at_ms":{"type":"integer","minimum":0}}},
+            {"type":"object","additionalProperties":false,"required":["kind","year","month","day"],"properties":{"kind":{"const":"local_date"},"year":{"type":"integer"},"month":{"type":"integer","minimum":1,"maximum":12},"day":{"type":"integer","minimum":1,"maximum":31}}},
+            {"type":"object","additionalProperties":false,"required":["kind","nominal_local","utc_instant_ms","utc_offset_minutes","timezone","tzdb_identity","gap_policy","fold_policy"],"properties":{"kind":{"const":"resolved_local"},"nominal_local":{"type":"object","additionalProperties":false,"required":["year","month","day","hour","minute"],"properties":{"year":{"type":"integer"},"month":{"type":"integer","minimum":1,"maximum":12},"day":{"type":"integer","minimum":1,"maximum":31},"hour":{"type":"integer","minimum":0,"maximum":23},"minute":{"type":"integer","minimum":0,"maximum":59},"second":{"type":"integer","minimum":0,"maximum":59}}},"utc_instant_ms":{"type":"integer","minimum":0},"utc_offset_minutes":{"type":"integer","minimum":-1440,"maximum":1440},"timezone":{"type":"string","minLength":1},"tzdb_identity":{"type":"string","minLength":1},"gap_policy":{"const":"next_valid"},"fold_policy":{"enum":["earlier_offset","later_offset"]}}}
+        ]
+    })
+}
+
+fn accountable_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"type":"object","additionalProperties":false,"required":["kind","reference","display_name"],"properties":{"kind":{"const":"person"},"reference":{"type":"string","minLength":1},"display_name":{"type":"string","minLength":1}}},
+            {"type":"object","additionalProperties":false,"required":["kind","role"],"properties":{"kind":{"const":"role"},"role":{"enum":["agent","operator","reviewer","publisher"]}}},
+            {"type":"object","additionalProperties":false,"required":["kind","reference","display_name"],"properties":{"kind":{"const":"service"},"reference":{"type":"string","minLength":1},"display_name":{"type":"string","minLength":1}}}
+        ]
+    })
 }
 
 fn completion_result(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
@@ -3398,6 +3712,7 @@ const LEGACY_COMMANDS: &[&str] = &[
     "template show",
     "template validate",
     "template run",
+    "template amend",
     "template capture",
     "install",
     "install codex",
@@ -3662,7 +3977,7 @@ mod tests {
         assert_eq!(route["path"], "source show");
         assert_eq!(route["availability"], "available");
         assert_eq!(route["adapters"]["direct"], true);
-        assert_eq!(route["adapters"]["service"], false);
+        assert_eq!(route["adapters"]["service"], true);
 
         let memory = registry_result(Some("memory")).unwrap();
         let memory_data = memory.data.unwrap();
@@ -3671,6 +3986,139 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn artifact_result_routes_publish_typed_inputs_and_exact_read_keys() {
+        let bind = COMMANDS
+            .iter()
+            .find(|command| command.path == "artifact result bind")
+            .expect("artifact result bind is registered");
+        let bind = command_json(bind);
+        assert_eq!(bind["action"], "mutate");
+        assert_eq!(bind["adapters"]["direct"], true);
+        assert_eq!(bind["adapters"]["service"], true);
+        assert!(bind["syntax"]
+            .as_str()
+            .unwrap()
+            .contains("--input REQUEST.json"));
+        assert_eq!(
+            bind["input_schema"]["properties"]["schema_version"]["const"],
+            "boreal.artifact_result_bind.v1"
+        );
+        assert!(bind["input_schema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "expected_proof_revision"));
+        assert_eq!(bind["input_schema"]["additionalProperties"], false);
+
+        for (path, action, expected) in [
+            (
+                "artifact result attempt",
+                "read",
+                ["work_id", "attempt_id", "fence"].as_slice(),
+            ),
+            (
+                "artifact result operation",
+                "read",
+                ["target_operation_id"].as_slice(),
+            ),
+        ] {
+            let route = COMMANDS
+                .iter()
+                .find(|command| command.path == path)
+                .unwrap_or_else(|| panic!("{path} is registered"));
+            let data = command_json(route);
+            assert_eq!(data["action"], action, "{path}");
+            for field in expected {
+                assert!(
+                    data["input_schema"]["required"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|required| required == field),
+                    "{path} input schema must require {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scheduling_routes_advertise_versioned_inputs_and_clear_semantics() {
+        for (path, action, direct, service) in [
+            ("project civil-time set", "mutate", true, true),
+            ("project civil-time show", "read", true, true),
+            ("work schedule set", "mutate", true, true),
+            ("work schedule show", "read", true, true),
+            ("wait create", "mutate", true, true),
+            ("wait resolve", "mutate", true, true),
+            ("wait list", "read", true, true),
+            ("wait show", "read", true, true),
+        ] {
+            let route = COMMANDS
+                .iter()
+                .find(|command| command.path == path)
+                .unwrap_or_else(|| panic!("{path} is registered"));
+            let data = command_json(route);
+            assert_eq!(data["action"], action, "{path}");
+            assert_eq!(data["adapters"]["direct"], direct, "{path}");
+            assert_eq!(data["adapters"]["service"], service, "{path}");
+            assert_eq!(
+                data["input_schema"]["additionalProperties"], false,
+                "{path}"
+            );
+        }
+
+        let schedule = COMMANDS
+            .iter()
+            .find(|command| command.path == "work schedule set")
+            .map(command_json)
+            .unwrap();
+        assert_eq!(
+            schedule["input_schema"]["properties"]["schema_version"]["const"],
+            "boreal.work_schedule_update.v1"
+        );
+        assert_eq!(
+            schedule["input_schema"]["properties"]["schedule"]["required"],
+            json!(["not_before", "due", "planned_start", "planned_end"])
+        );
+        assert_eq!(
+            schedule["input_schema"]["properties"]["schedule"]["additionalProperties"],
+            false
+        );
+
+        let wait_create = COMMANDS
+            .iter()
+            .find(|command| command.path == "wait create")
+            .map(command_json)
+            .unwrap();
+        assert_eq!(
+            wait_create["input_schema"]["properties"]["schema_version"]["const"],
+            "boreal.external_wait_create.v1"
+        );
+        for field in ["expected_decision", "expected_output", "follow_up"] {
+            assert!(wait_create["input_schema"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|required| required == field));
+        }
+    }
+
+    #[test]
+    fn close_readiness_is_a_typed_read_route_without_caller_facts() {
+        let route = COMMANDS
+            .iter()
+            .find(|command| command.path == "work close-readiness")
+            .expect("close-readiness route is registered");
+        let data = command_json(route);
+        assert_eq!(data["action"], "read");
+        assert_eq!(data["adapters"]["direct"], true);
+        assert_eq!(data["adapters"]["service"], true);
+        assert_eq!(data["input_schema"]["required"], json!(["work_id"]));
+        assert_eq!(data["input_schema"]["additionalProperties"], false);
+        assert_eq!(data["output"], "close_readiness");
     }
 
     #[test]

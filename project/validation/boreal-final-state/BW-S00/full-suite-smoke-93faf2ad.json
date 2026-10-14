@@ -1,0 +1,206 @@
+{
+  "result_version": "boreal.full-suite/1",
+  "started_at": "2026-10-13T23:00:41.556131+00:00",
+  "finished_at": "2026-10-13T23:03:16.843850+00:00",
+  "profile": "smoke",
+  "strict": false,
+  "policy": {
+    "require_no_skips": false,
+    "allow_skips": false,
+    "require_current_binary": true,
+    "require_sqlite_floor": false,
+    "require_benchmark": false,
+    "timeout_seconds": 900.0,
+    "soak_rounds": 10
+  },
+  "binary": "/Users/cybertron/.codex/worktrees/v4-coordinator/boreal-work/target/debug/bwrk",
+  "validation_identity": {
+    "schema": "boreal.global-tui-validation-identity/1",
+    "source": {
+      "commit": "93faf2ad14323986f4bfc487acd9b516fad4c15b",
+      "dirty": false,
+      "dirty_sha256": "33c2da2f369cc6a117055a71d327f41de48fe448131a6a62c936189bf2d3e4c3",
+      "sha256": "2d86ade619f56988dbf1a3653f8c4af068ffb821494cbc448c3097e4a9e01f77"
+    },
+    "binary": {
+      "file_name": "bwrk",
+      "size_bytes": 103835368,
+      "sha256": "1f9b5f8ef954c9e528b22b5cd6a71b93cbd0208034a330c09b97998e4944b91b"
+    },
+    "global_tui": {
+      "entrypoint": "entrypoint.js",
+      "entrypoint_sha256": "6d44a634944bb97714bea8a04b33b112958121a6f92900bd4811fa44516de492",
+      "bundle": {
+        "file_count": 11,
+        "sha256": "1468d4ed1bfab35a91a626cc0131cb6abd5ff70f9543bcb11883e4bc9ba41852"
+      }
+    },
+    "runtime": {
+      "node": {
+        "version": "v26.8.2"
+      }
+    }
+  },
+  "validation_identity_error": null,
+  "host": {
+    "system": "Darwin",
+    "release": "24.2.0",
+    "machine": "arm64"
+  },
+  "checks": [
+    {
+      "label": "cargo-workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "status": "pass",
+      "reason": null,
+      "duration_ms": 144497.39,
+      "timeout_seconds": 900.0,
+      "stdout_log": "/private/tmp/full-suite-20261013T230041Z/cargo-workspace.stdout.log",
+      "stderr_log": "/private/tmp/full-suite-20261013T230041Z/cargo-workspace.stderr.log",
+      "setup_command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "/Users/cybertron/.codex/worktrees/v4-coordinator/boreal-work/crates/domain/tests/generate_production_oracle_manifest.py",
+        "--output",
+        "/private/tmp/boreal-full-suite-oracle-e7dj8bph/production-oracle-manifest.txt"
+      ],
+      "oracle_manifest_external": true
+    },
+    {
+      "label": "binary-build",
+      "command": [
+        "cargo",
+        "build",
+        "--bin",
+        "bwrk",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "status": "pass",
+      "reason": null,
+      "duration_ms": 348.757,
+      "timeout_seconds": 900.0,
+      "stdout_log": "/private/tmp/full-suite-20261013T230041Z/binary-build.stdout.log",
+      "stderr_log": "/private/tmp/full-suite-20261013T230041Z/binary-build.stderr.log"
+    },
+    {
+      "label": "binary-identity",
+      "command": [],
+      "exit_code": 0,
+      "status": "pass",
+      "reason": null,
+      "duration_ms": 0.0,
+      "timeout_seconds": null,
+      "stdout_log": null,
+      "stderr_log": null
+    },
+    {
+      "label": "binary-freshness",
+      "command": [],
+      "exit_code": 0,
+      "status": "pass",
+      "reason": null,
+      "duration_ms": 0.0,
+      "timeout_seconds": null,
+      "stdout_log": null,
+      "stderr_log": null
+    },
+    {
+      "label": "tui",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/tui",
+        "test"
+      ],
+      "exit_code": 0,
+      "status": "pass",
+      "reason": null,
+      "duration_ms": 3830.489,
+      "timeout_seconds": 900.0,
+      "stdout_log": "/private/tmp/full-suite-20261013T230041Z/tui.stdout.log",
+      "stderr_log": "/private/tmp/full-suite-20261013T230041Z/tui.stderr.log"
+    },
+    {
+      "label": "global-tui-typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck",
+        "--prefix",
+        "apps/global-tui"
+      ],
+      "exit_code": 0,
+      "status": "pass",
+      "reason": null,
+      "duration_ms": 609.516,
+      "timeout_seconds": 900.0,
+      "stdout_log": "/private/tmp/full-suite-20261013T230041Z/global-tui-typecheck.stdout.log",
+      "stderr_log": "/private/tmp/full-suite-20261013T230041Z/global-tui-typecheck.stderr.log"
+    },
+    {
+      "label": "global-tui-tests",
+      "command": [
+        "npm",
+        "test",
+        "--prefix",
+        "apps/global-tui"
+      ],
+      "exit_code": 0,
+      "status": "pass",
+      "reason": null,
+      "duration_ms": 2401.255,
+      "timeout_seconds": 900.0,
+      "stdout_log": "/private/tmp/full-suite-20261013T230041Z/global-tui-tests.stdout.log",
+      "stderr_log": "/private/tmp/full-suite-20261013T230041Z/global-tui-tests.stderr.log"
+    },
+    {
+      "label": "creation",
+      "command": [
+        "python3",
+        "scripts/validation/creation/run_suite.py",
+        "--bin",
+        "/Users/cybertron/.codex/worktrees/v4-coordinator/boreal-work/target/debug/bwrk",
+        "--chain-length",
+        "16",
+        "--output",
+        "/private/tmp/full-suite-20261013T230041Z/creation.json",
+        "--report",
+        "/private/tmp/full-suite-20261013T230041Z/creation.md"
+      ],
+      "exit_code": 0,
+      "status": "pass",
+      "reason": null,
+      "duration_ms": 3495.218,
+      "timeout_seconds": 900.0,
+      "stdout_log": "/private/tmp/full-suite-20261013T230041Z/creation.stdout.log",
+      "stderr_log": "/private/tmp/full-suite-20261013T230041Z/creation.stderr.log"
+    },
+    {
+      "label": "validation-identity",
+      "command": [],
+      "exit_code": 0,
+      "status": "pass",
+      "reason": null,
+      "duration_ms": 0.0,
+      "timeout_seconds": null,
+      "stdout_log": null,
+      "stderr_log": null,
+      "source_sha256": "2d86ade619f56988dbf1a3653f8c4af068ffb821494cbc448c3097e4a9e01f77",
+      "binary_sha256": "1f9b5f8ef954c9e528b22b5cd6a71b93cbd0208034a330c09b97998e4944b91b",
+      "global_tui_sha256": "1468d4ed1bfab35a91a626cc0131cb6abd5ff70f9543bcb11883e4bc9ba41852"
+    }
+  ],
+  "counts": {
+    "pass": 9,
+    "fail": 0,
+    "skip": 0
+  },
+  "policy_failures": [],
+  "log_dir": "/private/tmp/full-suite-20261013T230041Z"
+}

@@ -10,7 +10,7 @@ The file, not a function name, is the write-lock unit. Existing large root modul
 | `crates/*/src/lib.rs`, CLI `main.rs` | Crate integration steward; module/trait/export additions and existing monolith changes serialized. |
 | `crates/cli/src/service.rs`, `command_registry.rs` | Interface coordinator; route/name/descriptor changes cannot be edited concurrently. |
 | Protocol models/manifests and accepted contract manifest | Version steward; coordinated schema versions, compatibility vectors and consumer updates. |
-| Schema manifests, SQL migrations and migration ordering | Store/migration steward; unique order/checksum and fresh/upgrade verification. |
+| Schema manifests, SQL migrations and migration ordering (including `project/spec/scheduling-v1.sql`) | Store/migration steward; unique order/checksum and fresh/upgrade verification. |
 | Workflow/skill registries | Workflow/interface steward; exported assets and executable command references agree. |
 | Installer/release generators, embedded installer, release IDs, CI workflows | Release/integration steward; source/generated/embedded identity and full asset inventory verified. |
 | Plan graph, state ledger and acceptance records | Coordinator; agents submit changes as proposals, not self-acceptance. |

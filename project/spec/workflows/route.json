@@ -1,6 +1,6 @@
 {
   "schema_version": "boreal.workflow_asset.v1",
-  "asset_version": "1.2.0",
+  "asset_version": "1.3.0",
   "ref": "boreal.workflow.route.v1",
   "kind": "route",
   "title": "Route the next safe project action",
@@ -12,17 +12,19 @@
     "audit": "boreal.workflow.audit.v1",
     "health": "boreal.workflow.health.v1",
     "handoff": "boreal.workflow.handoff.v1",
-    "memory": "boreal.workflow.memory.v1"
+    "memory": "boreal.workflow.memory.v1",
+    "onboarding": "boreal.workflow.onboarding.v1"
   },
   "allowed_commands": [
     "bwrk commands --json",
     "bwrk workflows list --json",
-    "bwrk agent guide --json",
-    "bwrk agent next --json",
-    "bwrk status --json",
-    "bwrk prime --json",
-    "bwrk directives list --json",
-    "bwrk work ready --json"
+    "bwrk workflows show <workflow_ref> --json",
+    "bwrk agent guide --project <project_id> --json",
+    "bwrk agent next --project <project_id> --json",
+    "bwrk status <project_id> --json",
+    "bwrk prime --project <project_id> --json",
+    "bwrk directives list --project <project_id> --json",
+    "bwrk work ready --project <project_id> --json"
   ],
   "typed_inputs": [
     {
@@ -30,28 +32,70 @@
       "type": "project_id",
       "required": false,
       "source": "request",
-      "validation": "project_scope"
+      "validation": "exact_project_scope"
     },
     {
       "name": "actor_id",
       "type": "actor_id",
       "required": true,
-      "source": "session",
-      "validation": "credential_bound"
+      "source": "authenticated_request_context",
+      "validation": "credential_bound_and_rechecked"
+    },
+    {
+      "name": "harness_id",
+      "type": "harness_id",
+      "required": true,
+      "source": "authenticated_request_context",
+      "validation": "supported_harness_identity"
+    },
+    {
+      "name": "session_id",
+      "type": "session_id",
+      "required": true,
+      "source": "authenticated_request_context",
+      "validation": "current_project_actor_harness_binding"
+    },
+    {
+      "name": "current_attempt",
+      "type": "nullable_attempt_identity",
+      "required": false,
+      "source": "canonical_snapshot",
+      "validation": "attempt_id_and_fence_match_current_owner"
+    },
+    {
+      "name": "source_identity",
+      "type": "nullable_source_identity",
+      "required": false,
+      "source": "canonical_attempt_or_bound_result",
+      "validation": "project_version_and_digest_checked"
+    },
+    {
+      "name": "configuration_identity",
+      "type": "nullable_config_identity",
+      "required": false,
+      "source": "authoritative_work_and_attempt",
+      "validation": "pinned_profile_and_policy_match"
+    },
+    {
+      "name": "project_revision",
+      "type": "revision",
+      "required": false,
+      "source": "canonical_snapshot",
+      "validation": "single_revision_or_stale_context"
+    },
+    {
+      "name": "transport",
+      "type": "transport_context",
+      "required": true,
+      "source": "versioned_request_envelope",
+      "validation": "preserve_direct_or_socket_endpoint_and_request_identity"
     },
     {
       "name": "goal",
       "type": "nullable_string",
       "required": false,
       "source": "request",
-      "validation": "bounded; never executable"
-    },
-    {
-      "name": "expected_revision",
-      "type": "revision",
-      "required": false,
-      "source": "snapshot",
-      "validation": "non_negative_integer"
+      "validation": "bounded_display_filter_never_executable"
     },
     {
       "name": "server_action",
@@ -64,17 +108,27 @@
   "finish_criteria": [
     {
       "id": "route.snapshot",
-      "type": "revision_bound_context",
+      "type": "single_revision_bound_context_including_actor_session_harness_attempt_and_transport",
       "required": true
     },
     {
       "id": "route.selection",
-      "type": "one_action_or_idle",
+      "type": "one_trusted_action_with_exact_typed_inputs_or_explicit_idle_wait_operator_input",
+      "required": true
+    },
+    {
+      "id": "route.empty_sources",
+      "type": "empty_source_bank_returns_operator_capture_and_configuration_input",
       "required": true
     },
     {
       "id": "route.trust",
-      "type": "registry_and_argv_validated",
+      "type": "registry_and_argv_validated_guidance_never_authorizes_mutation",
+      "required": true
+    },
+    {
+      "id": "route.resume",
+      "type": "resume_reloads_current_fence_and_unknown_operations_use_durable_readback",
       "required": true
     },
     {
@@ -85,6 +139,7 @@
   ],
   "next_refs": [
     "boreal.workflow.context.v1",
+    "boreal.workflow.onboarding.v1",
     "boreal.workflow.plan.v1",
     "boreal.workflow.claim.v1",
     "boreal.workflow.review.v1",

@@ -70,6 +70,7 @@ model_id!(IntakeBucketId);
 model_id!(IntakeItemId);
 model_id!(PromotionId);
 model_id!(CloseoutDispositionId);
+model_id!(ExternalWaitId);
 
 /// Work decomposition is deliberately smaller than the schema-2 kind enum.
 /// A sprint/cycle is not a work parent in this model.
@@ -312,11 +313,408 @@ impl WorkSchedule {
     }
 }
 
+/// A business planning value. Instants retain their absolute meaning,
+/// local dates are interpreted in the owning project's civil-time context,
+/// and resolved local date-times preserve the exact resolution selected when
+/// they were entered. Civil dates are intentionally not converted to UTC at
+/// write time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BusinessDate {
+    Instant(TimestampMs),
+    LocalDate(LocalDate),
+    ResolvedLocal(TimeResolution),
+}
+
+impl BusinessDate {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        match self {
+            Self::Instant(_) => Ok(()),
+            Self::LocalDate(date) => date.validate(),
+            Self::ResolvedLocal(resolution) => resolution.validate(),
+        }
+    }
+
+    /// Parse the deliberately narrow legacy `due_at` surface. Date-only
+    /// values stay civil dates; absolute timestamps must carry an explicit
+    /// UTC designator or numeric offset. Ambiguous local timestamps and
+    /// historic synthetic strings are rejected instead of guessed.
+    pub fn parse_legacy_due(value: &str) -> Result<Self, ModelError> {
+        if let Some(digits) = value.strip_prefix("unix-ms:") {
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(ModelError::InvalidSchedule(
+                    "legacy due timestamp must be canonical unix milliseconds",
+                ));
+            }
+            let millis = digits.parse::<u64>().map_err(|_| {
+                ModelError::InvalidSchedule("legacy due timestamp is outside the supported range")
+            })?;
+            return Ok(Self::Instant(TimestampMs(millis)));
+        }
+
+        if value.len() == 10 {
+            let date = parse_iso_date(value)?;
+            return Ok(Self::LocalDate(date));
+        }
+
+        parse_explicit_timestamp(value).map(Self::Instant)
+    }
+
+    fn instant(&self) -> Option<TimestampMs> {
+        match self {
+            Self::Instant(value) => Some(*value),
+            Self::LocalDate(_) => None,
+            Self::ResolvedLocal(value) => Some(value.utc_instant),
+        }
+    }
+}
+
+/// Business schedule values are separate from retry delay, lease expiry, and
+/// hard execution deadlines. Replacing this value also makes clear semantics
+/// explicit: every absent field is cleared in the new schedule revision.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BusinessSchedule {
+    pub not_before: Option<BusinessDate>,
+    pub due: Option<BusinessDate>,
+    pub planned_start: Option<BusinessDate>,
+    pub planned_end: Option<BusinessDate>,
+}
+
+impl BusinessSchedule {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn validate(&self) -> Result<(), ModelError> {
+        for value in [
+            self.not_before.as_ref(),
+            self.due.as_ref(),
+            self.planned_start.as_ref(),
+            self.planned_end.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            value.validate()?;
+        }
+
+        if let (Some(start), Some(end)) = (&self.planned_start, &self.planned_end) {
+            match (start, end) {
+                (BusinessDate::LocalDate(start), BusinessDate::LocalDate(end)) if end <= start => {
+                    return Err(ModelError::InvalidSchedule(
+                        "planned_end date must be after planned_start date",
+                    ));
+                }
+                (BusinessDate::LocalDate(_), BusinessDate::LocalDate(_)) => {}
+                (
+                    BusinessDate::LocalDate(_),
+                    BusinessDate::Instant(_) | BusinessDate::ResolvedLocal(_),
+                )
+                | (
+                    BusinessDate::Instant(_) | BusinessDate::ResolvedLocal(_),
+                    BusinessDate::LocalDate(_),
+                ) => {
+                    return Err(ModelError::InvalidSchedule(
+                        "planned window endpoints must use the same date or instant basis",
+                    ));
+                }
+                _ => {
+                    if end.instant() <= start.instant() {
+                        return Err(ModelError::InvalidSchedule(
+                            "planned_end instant must be after planned_start instant",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Project civil-time facts observed for one status evaluation. The store or
+/// application adapter must obtain the timezone from project configuration
+/// and resolve `civil_date` using the same timezone database identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BusinessTimeContext {
+    pub project_id: ProjectId,
+    pub setting_revision: u64,
+    pub as_of: TimestampMs,
+    pub civil_date: LocalDate,
+    pub timezone: String,
+    pub tzdb_identity: String,
+}
+
+impl BusinessTimeContext {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        self.civil_date.validate()?;
+        if self.project_id.as_str().trim().is_empty()
+            || self.setting_revision == 0
+            || self.timezone.trim().is_empty()
+            || self.tzdb_identity.trim().is_empty()
+            || self.timezone.len() > 255
+            || self.tzdb_identity.len() > 512
+            || self.timezone.chars().any(char::is_control)
+            || self.tzdb_identity.chars().any(char::is_control)
+        {
+            return Err(ModelError::MissingTimeZoneIdentity);
+        }
+        Ok(())
+    }
+}
+
+/// Application-resolved timing facts that may be reused by a transactional
+/// claim. The store checks the observed project and schedule revisions again
+/// before applying these facts, while timezone resolution remains in the
+/// application layer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BusinessStatusContext {
+    pub time: BusinessTimeContext,
+    pub project_revision: u64,
+    pub work_schedule_revision: Option<u64>,
+    pub not_before_at: Option<TimestampMs>,
+    pub schedule_next_change_at: Option<TimestampMs>,
+    pub external_wait_next_change_at: Option<TimestampMs>,
+}
+
+/// Versioned, attributable project timezone configuration. A date-only
+/// schedule records which setting revision was current when it was written;
+/// status evaluation uses the current setting supplied in
+/// [`BusinessTimeContext`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectCivilTimeSetting {
+    pub project_id: ProjectId,
+    pub revision: u64,
+    pub timezone: String,
+    pub tzdb_identity: String,
+    pub changed_by: String,
+    pub changed_at: TimestampMs,
+}
+
+impl ProjectCivilTimeSetting {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.project_id.as_str().trim().is_empty()
+            || self.revision == 0
+            || self.timezone.trim().is_empty()
+            || self.timezone.len() > 255
+            || self.timezone.chars().any(char::is_control)
+            || self.tzdb_identity.trim().is_empty()
+            || self.tzdb_identity.len() > 512
+            || self.tzdb_identity.chars().any(char::is_control)
+            || self.changed_by.trim().is_empty()
+            || self.changed_by.len() > 255
+            || self.changed_by.chars().any(char::is_control)
+        {
+            return Err(ModelError::MissingTimeZoneIdentity);
+        }
+        Ok(())
+    }
+
+    pub fn context(
+        &self,
+        as_of: TimestampMs,
+        civil_date: LocalDate,
+    ) -> Result<BusinessTimeContext, ModelError> {
+        self.validate()?;
+        let context = BusinessTimeContext {
+            project_id: self.project_id.clone(),
+            setting_revision: self.revision,
+            as_of,
+            civil_date,
+            timezone: self.timezone.clone(),
+            tzdb_identity: self.tzdb_identity.clone(),
+        };
+        context.validate()?;
+        Ok(context)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BusinessDateBoundary {
+    Instant(TimestampMs),
+    LocalDateStart(LocalDate),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BusinessScheduleView {
+    pub available: bool,
+    /// Date-only deadlines are due through their named local day.
+    pub due_today: bool,
+    pub overdue: bool,
+    /// Civil-date boundaries remain dates here. The application adapter must
+    /// resolve them to local midnight with the project timezone and S05 gap /
+    /// fold policy before scheduling a timer.
+    pub next_changes: Vec<BusinessDateBoundary>,
+}
+
+/// Evaluate calendar planning values against one project-local time context.
+/// A date-only due value stays on time for its named civil day and becomes
+/// overdue at the next local date boundary. Time passing never mutates data.
+pub fn evaluate_business_schedule(
+    schedule: &BusinessSchedule,
+    context: &BusinessTimeContext,
+    terminal: bool,
+) -> Result<BusinessScheduleView, ModelError> {
+    schedule.validate()?;
+    context.validate()?;
+    let available = match &schedule.not_before {
+        None => true,
+        Some(BusinessDate::LocalDate(date)) => context.civil_date >= *date,
+        Some(value) => value.instant().is_some_and(|at| context.as_of >= at),
+    };
+    let due_today = !terminal
+        && matches!(
+            schedule.due,
+            Some(BusinessDate::LocalDate(date)) if date == context.civil_date
+        );
+    let overdue = !terminal
+        && match &schedule.due {
+            None => false,
+            Some(BusinessDate::LocalDate(date)) => context.civil_date > *date,
+            Some(value) => value.instant().is_some_and(|at| context.as_of >= at),
+        };
+
+    let mut candidates = Vec::new();
+    if !available {
+        if let Some(value) = &schedule.not_before {
+            match value {
+                BusinessDate::LocalDate(date) => {
+                    let boundary = BusinessDateBoundary::LocalDateStart(*date);
+                    if !candidates.contains(&boundary) {
+                        candidates.push(boundary);
+                    }
+                }
+                _ => {
+                    let boundary = BusinessDateBoundary::Instant(
+                        value
+                            .instant()
+                            .expect("non-date business value has an instant"),
+                    );
+                    if !candidates.contains(&boundary) {
+                        candidates.push(boundary);
+                    }
+                }
+            }
+        }
+    }
+    if !terminal {
+        if let Some(value) = &schedule.due {
+            match value {
+                BusinessDate::LocalDate(date) => {
+                    let boundary_date = if context.civil_date < *date {
+                        Some(*date)
+                    } else if context.civil_date == *date {
+                        Some(date.add_days(1)?)
+                    } else {
+                        None
+                    };
+                    if let Some(boundary_date) = boundary_date {
+                        let boundary = BusinessDateBoundary::LocalDateStart(boundary_date);
+                        if !candidates.contains(&boundary) {
+                            candidates.push(boundary);
+                        }
+                    }
+                }
+                _ if !overdue => {
+                    let boundary = BusinessDateBoundary::Instant(
+                        value
+                            .instant()
+                            .expect("non-date business value has an instant"),
+                    );
+                    if !candidates.contains(&boundary) {
+                        candidates.push(boundary);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let next_changes = candidates
+        .into_iter()
+        .filter(|candidate| match candidate {
+            BusinessDateBoundary::Instant(at) => *at > context.as_of,
+            BusinessDateBoundary::LocalDateStart(date) => *date > context.civil_date,
+        })
+        .collect::<Vec<_>>();
+    Ok(BusinessScheduleView {
+        available,
+        due_today,
+        overdue,
+        next_changes,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScheduleView {
     pub available: bool,
     pub overdue: bool,
     pub next_change_at: Option<TimestampMs>,
+}
+
+/// The revisioned schedule projection associated with one canonical work
+/// item. A missing row is represented by revision zero and an empty schedule
+/// at the application boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkScheduleRecord {
+    pub project_id: ProjectId,
+    pub work_id: WorkId,
+    pub revision: u64,
+    pub schedule: BusinessSchedule,
+    /// Setting revision captured when one or more date-only values were
+    /// entered. Current evaluations intentionally use the latest setting.
+    pub civil_time_setting_revision: Option<u64>,
+    pub updated_at: TimestampMs,
+}
+
+impl WorkScheduleRecord {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        self.schedule.validate()?;
+        if self.revision == 0
+            || self.project_id.as_str().trim().is_empty()
+            || self.work_id.as_str().trim().is_empty()
+        {
+            return Err(ModelError::InvalidSchedule(
+                "schedule identity and revision are required",
+            ));
+        }
+        let has_local_date = [
+            self.schedule.not_before.as_ref(),
+            self.schedule.due.as_ref(),
+            self.schedule.planned_start.as_ref(),
+            self.schedule.planned_end.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| matches!(value, BusinessDate::LocalDate(_)));
+        if has_local_date != self.civil_time_setting_revision.is_some()
+            || self.civil_time_setting_revision == Some(0)
+        {
+            return Err(ModelError::InvalidSchedule(
+                "date-only schedule values require their project civil-time setting revision",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn evaluate(
+        &self,
+        context: &BusinessTimeContext,
+        terminal: bool,
+    ) -> Result<BusinessScheduleView, ModelError> {
+        if self.project_id != context.project_id {
+            return Err(ModelError::InvalidSchedule(
+                "schedule and business-time context belong to different projects",
+            ));
+        }
+        self.validate()?;
+        if self
+            .civil_time_setting_revision
+            .is_some_and(|revision| revision > context.setting_revision)
+        {
+            return Err(ModelError::InvalidSchedule(
+                "schedule references an unavailable future civil-time setting revision",
+            ));
+        }
+        evaluate_business_schedule(&self.schedule, context, terminal)
+    }
 }
 
 pub fn evaluate_schedule(
@@ -337,6 +735,343 @@ pub fn evaluate_schedule(
         overdue,
         next_change_at,
     })
+}
+
+/// The kind of external party accountable for supplying a decision or output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExternalWaitAccountable {
+    Person {
+        reference: String,
+        display_name: String,
+    },
+    Role(crate::ActorRole),
+    Service {
+        reference: String,
+        display_name: String,
+    },
+}
+
+impl ExternalWaitAccountable {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        let valid_text = |value: &str| {
+            !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+        };
+        match self {
+            Self::Person {
+                reference,
+                display_name,
+            }
+            | Self::Service {
+                reference,
+                display_name,
+            } if !valid_text(reference) || !valid_text(display_name) => {
+                Err(ModelError::InvalidExternalWait(
+                    "accountable person or service needs a bounded reference and display name",
+                ))
+            }
+            Self::Role(_) | Self::Person { .. } | Self::Service { .. } => Ok(()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalWaitCategory {
+    Decision,
+    Approval,
+    Information,
+    Access,
+    Service,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalWaitState {
+    Open,
+    Resolved,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalWaitOutcome {
+    Approved,
+    Rejected,
+    DecisionProvided,
+    OutputProvided,
+    Declined,
+    Unavailable,
+    Cancelled,
+}
+
+/// A resolution records both who supplied the external answer and which
+/// enrolled project principal recorded it. It is evidence about the wait;
+/// it does not change the lifecycle of any affected work item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalWaitResolution {
+    pub outcome: ExternalWaitOutcome,
+    pub detail: String,
+    pub output_ref: Option<String>,
+    pub supplied_by: ExternalWaitAccountable,
+    pub recorded_by: String,
+    pub recorded_as: crate::ActorRole,
+    pub recorded_at: TimestampMs,
+}
+
+impl ExternalWaitResolution {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        self.supplied_by.validate()?;
+        if self.detail.trim().is_empty()
+            || self.detail.len() > 16_384
+            || self.detail.chars().any(char::is_control)
+        {
+            return Err(ModelError::InvalidExternalWait(
+                "resolution detail must be bounded, nonempty text",
+            ));
+        }
+        if self.recorded_by.trim().is_empty()
+            || self.recorded_by.len() > 255
+            || self.recorded_by.chars().any(char::is_control)
+        {
+            return Err(ModelError::InvalidExternalWait(
+                "resolution recorder identity is invalid",
+            ));
+        }
+        if self.output_ref.as_ref().is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 2_048 || value.chars().any(char::is_control)
+        }) {
+            return Err(ModelError::InvalidExternalWait(
+                "resolution output reference is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// An external decision obligation attached to one source task and an exact
+/// set of directly dependent tasks. Follow-up time only raises attention; it
+/// never clears the open obligation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalWait {
+    pub id: ExternalWaitId,
+    pub project_id: ProjectId,
+    pub source_work_id: WorkId,
+    pub affected_work_ids: Vec<WorkId>,
+    pub category: ExternalWaitCategory,
+    pub reason: String,
+    pub accountable: ExternalWaitAccountable,
+    pub expected_decision: Option<String>,
+    pub expected_output: Option<String>,
+    pub follow_up: Option<BusinessDate>,
+    /// Setting revision captured when a date-only follow-up was written.
+    /// Current due evaluation uses the latest project setting.
+    pub civil_time_setting_revision: Option<u64>,
+    pub revision: u64,
+    pub state: ExternalWaitState,
+    pub created_by: String,
+    pub created_at: TimestampMs,
+    pub resolution: Option<ExternalWaitResolution>,
+}
+
+impl ExternalWait {
+    pub fn validate(
+        &self,
+        nodes: &[WorkNode],
+        dependencies: &[DirectDependency],
+    ) -> Result<(), ModelError> {
+        validate_direct_dependencies(nodes, dependencies)?;
+        if self.revision == 0 {
+            return Err(ModelError::InvalidExternalWait(
+                "wait revision must be positive",
+            ));
+        }
+        if self.reason.trim().is_empty()
+            || self.reason.len() > 4_096
+            || self.reason.chars().any(char::is_control)
+        {
+            return Err(ModelError::InvalidExternalWait(
+                "wait reason must be bounded, nonempty text",
+            ));
+        }
+        self.accountable.validate()?;
+        if let Some(follow_up) = &self.follow_up {
+            follow_up.validate()?;
+        }
+        if self
+            .follow_up
+            .as_ref()
+            .is_some_and(|value| matches!(value, BusinessDate::LocalDate(_)))
+            != self.civil_time_setting_revision.is_some()
+            || self.civil_time_setting_revision == Some(0)
+        {
+            return Err(ModelError::InvalidExternalWait(
+                "date-only follow-up requires its project civil-time setting revision",
+            ));
+        }
+        let valid_expectation = |value: &Option<String>| {
+            value.as_ref().is_some_and(|text| {
+                !text.trim().is_empty()
+                    && text.len() <= 4_096
+                    && !text.chars().any(char::is_control)
+            })
+        };
+        if !valid_expectation(&self.expected_decision) && !valid_expectation(&self.expected_output)
+        {
+            return Err(ModelError::InvalidExternalWait(
+                "expected decision or output is required",
+            ));
+        }
+        if self.expected_decision.as_ref().is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 4_096 || value.chars().any(char::is_control)
+        }) || self.expected_output.as_ref().is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 4_096 || value.chars().any(char::is_control)
+        }) {
+            return Err(ModelError::InvalidExternalWait(
+                "expected decision and output must be bounded, nonempty text when supplied",
+            ));
+        }
+        if self.created_by.trim().is_empty()
+            || self.created_by.len() > 255
+            || self.created_by.chars().any(char::is_control)
+        {
+            return Err(ModelError::InvalidExternalWait(
+                "creator identity is invalid",
+            ));
+        }
+
+        let source = nodes
+            .iter()
+            .find(|node| node.id == self.source_work_id)
+            .ok_or_else(|| ModelError::MissingWork(self.source_work_id.clone()))?;
+        if source.project_id != self.project_id || !source.is_direct() {
+            return Err(ModelError::InvalidExternalWait(
+                "wait source must be a direct task in its project",
+            ));
+        }
+        if self.affected_work_ids.is_empty() {
+            return Err(ModelError::InvalidExternalWait(
+                "wait must name at least one affected task",
+            ));
+        }
+        let mut affected = BTreeSet::new();
+        for work_id in &self.affected_work_ids {
+            if !affected.insert(work_id.clone()) {
+                return Err(ModelError::InvalidExternalWait(
+                    "affected work scope contains a duplicate task",
+                ));
+            }
+            let node = nodes
+                .iter()
+                .find(|node| &node.id == work_id)
+                .ok_or_else(|| ModelError::MissingWork(work_id.clone()))?;
+            if node.project_id != self.project_id || !node.is_direct() {
+                return Err(ModelError::InvalidExternalWait(
+                    "affected work must be direct tasks in the wait's project",
+                ));
+            }
+            if !is_dependency_of(&self.source_work_id, work_id, dependencies) {
+                return Err(ModelError::InvalidExternalWait(
+                    "affected work must be the source task or one of its dependents",
+                ));
+            }
+        }
+
+        match (self.state, &self.resolution) {
+            (ExternalWaitState::Open, None) => Ok(()),
+            (ExternalWaitState::Open, Some(_)) => Err(ModelError::InvalidExternalWait(
+                "an open wait cannot contain a resolution",
+            )),
+            (ExternalWaitState::Resolved, Some(resolution))
+                if resolution.outcome != ExternalWaitOutcome::Cancelled =>
+            {
+                resolution.validate()
+            }
+            (ExternalWaitState::Cancelled, Some(resolution))
+                if resolution.outcome == ExternalWaitOutcome::Cancelled =>
+            {
+                resolution.validate()
+            }
+            (ExternalWaitState::Resolved, None) | (ExternalWaitState::Cancelled, None) => Err(
+                ModelError::InvalidExternalWait("closed waits require an attributed resolution"),
+            ),
+            _ => Err(ModelError::InvalidExternalWait(
+                "wait state and resolution outcome disagree",
+            )),
+        }
+    }
+
+    pub fn blocks_work(&self, work_id: &WorkId) -> bool {
+        self.state == ExternalWaitState::Open && self.affected_work_ids.contains(work_id)
+    }
+
+    pub fn follow_up_due(&self, context: &BusinessTimeContext) -> Result<bool, ModelError> {
+        context.validate()?;
+        if self.project_id != context.project_id {
+            return Err(ModelError::InvalidExternalWait(
+                "wait and business-time context belong to different projects",
+            ));
+        }
+        if self
+            .civil_time_setting_revision
+            .is_some_and(|revision| revision > context.setting_revision)
+        {
+            return Err(ModelError::InvalidExternalWait(
+                "wait references an unavailable future civil-time setting revision",
+            ));
+        }
+        if self.state != ExternalWaitState::Open {
+            return Ok(false);
+        }
+        if let Some(follow_up) = &self.follow_up {
+            follow_up.validate()?;
+        }
+        Ok(match &self.follow_up {
+            None => false,
+            Some(BusinessDate::LocalDate(date)) => context.civil_date >= *date,
+            Some(value) => value.instant().is_some_and(|at| context.as_of >= at),
+        })
+    }
+
+    pub fn close(
+        &self,
+        state: ExternalWaitState,
+        resolution: ExternalWaitResolution,
+    ) -> Result<Self, ModelError> {
+        if self.state != ExternalWaitState::Open {
+            return Err(ModelError::InvalidExternalWait(
+                "only an open wait can be resolved or cancelled",
+            ));
+        }
+        let mut next = self.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(ModelError::InvalidExternalWait("wait revision overflow"))?;
+        next.state = state;
+        next.resolution = Some(resolution);
+        Ok(next)
+    }
+}
+
+fn is_dependency_of(source: &WorkId, affected: &WorkId, dependencies: &[DirectDependency]) -> bool {
+    if source == affected {
+        return true;
+    }
+    let mut pending = vec![source.clone()];
+    let mut visited = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        for edge in dependencies
+            .iter()
+            .filter(|edge| edge.blocker_id == current)
+        {
+            if &edge.blocked_id == affected {
+                return true;
+            }
+            pending.push(edge.blocked_id.clone());
+        }
+    }
+    false
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -606,6 +1341,15 @@ pub struct LocalDate {
 impl LocalDate {
     pub const fn new(year: i32, month: u8, day: u8) -> Self {
         Self { year, month, day }
+    }
+
+    /// Convert a signed number of days since 1970-01-01 without consulting
+    /// the host timezone or locale.
+    pub fn from_epoch_days(days: i64) -> Result<Self, ModelError> {
+        let (year, month, day) = civil_from_days(days);
+        let date = Self::new(year, month, day);
+        date.validate()?;
+        Ok(date)
     }
 
     pub fn validate(self) -> Result<(), ModelError> {
@@ -1156,6 +1900,7 @@ pub enum ModelError {
     DuplicateDependency { blocker: WorkId, blocked: WorkId },
     DependencyCycle(WorkId),
     InvalidSchedule(&'static str),
+    InvalidExternalWait(&'static str),
     IllegalCycleTransition,
     CycleHasLiveAssignments,
     AssignmentProjectMismatch(String),
@@ -1213,6 +1958,7 @@ impl fmt::Display for ModelError {
             Self::InvalidSchedule(message) | Self::InvalidRecurrence(message) => {
                 f.write_str(message)
             }
+            Self::InvalidExternalWait(message) => f.write_str(message),
             Self::IllegalCycleTransition => f.write_str("illegal cycle transition"),
             Self::CycleHasLiveAssignments => f.write_str("cycle has live assignments"),
             Self::AssignmentProjectMismatch(id) => write!(f, "assignment project mismatch: {id}"),
@@ -1267,6 +2013,132 @@ fn days_in_month(year: i32, month: u8) -> u8 {
         2 => 28,
         _ => 0,
     }
+}
+
+fn parse_iso_date(value: &str) -> Result<LocalDate, ModelError> {
+    let bytes = value.as_bytes();
+    if !value.is_ascii() || bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return Err(ModelError::InvalidSchedule(
+            "legacy due date must be YYYY-MM-DD or an explicitly zoned timestamp",
+        ));
+    }
+    let year = parse_ascii_digits(&bytes[0..4])? as i32;
+    let month = parse_ascii_digits(&bytes[5..7])? as u8;
+    let day = parse_ascii_digits(&bytes[8..10])? as u8;
+    let date = LocalDate::new(year, month, day);
+    date.validate()?;
+    Ok(date)
+}
+
+fn parse_explicit_timestamp(value: &str) -> Result<TimestampMs, ModelError> {
+    let invalid = || {
+        ModelError::InvalidSchedule(
+            "legacy due timestamp must include Z or an explicit numeric UTC offset",
+        )
+    };
+    let bytes = value.as_bytes();
+    if !value.is_ascii()
+        || bytes.len() < 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b'T' | b't')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return Err(invalid());
+    }
+    let date = parse_iso_date(&value[..10])?;
+    let hour = parse_ascii_digits(&bytes[11..13])? as u8;
+    let minute = parse_ascii_digits(&bytes[14..16])? as u8;
+    let second = parse_ascii_digits(&bytes[17..19])? as u8;
+    let time = LocalTime::new(hour, minute, second);
+    time.validate()?;
+
+    let zone_start = match bytes.last().copied() {
+        Some(b'Z' | b'z') => bytes.len() - 1,
+        Some(b'0'..=b'9') => bytes
+            .iter()
+            .enumerate()
+            .skip(19)
+            .rev()
+            .find_map(|(index, byte)| matches!(byte, b'+' | b'-').then_some(index))
+            .ok_or_else(invalid)?,
+        _ => return Err(invalid()),
+    };
+
+    let millis = if zone_start == 19 {
+        0
+    } else {
+        if bytes[19] != b'.' || zone_start <= 20 {
+            return Err(invalid());
+        }
+        let fraction = &bytes[20..zone_start];
+        if fraction.is_empty() || !fraction.iter().all(u8::is_ascii_digit) {
+            return Err(invalid());
+        }
+        let retained = fraction.len().min(3);
+        let mut fraction_millis = parse_ascii_digits(&fraction[..retained])? as u16;
+        if retained == 1 {
+            fraction_millis *= 100;
+        } else if retained == 2 {
+            fraction_millis *= 10;
+        }
+        fraction_millis
+    };
+
+    let offset_seconds = if zone_start == bytes.len() - 1 {
+        if !matches!(bytes[zone_start], b'Z' | b'z') {
+            return Err(invalid());
+        }
+        0_i64
+    } else {
+        let sign = match bytes[zone_start] {
+            b'+' => 1_i64,
+            b'-' => -1_i64,
+            _ => return Err(invalid()),
+        };
+        if zone_start + 6 != bytes.len() || bytes[zone_start + 3] != b':' {
+            return Err(invalid());
+        }
+        let hours = parse_ascii_digits(&bytes[zone_start + 1..zone_start + 3])? as i64;
+        let minutes = parse_ascii_digits(&bytes[zone_start + 4..zone_start + 6])? as i64;
+        if hours > 23 || minutes > 59 {
+            return Err(invalid());
+        }
+        sign * (hours * 3_600 + minutes * 60)
+    };
+
+    let local_seconds = days_from_civil(date.year, date.month, date.day)
+        .checked_mul(86_400)
+        .and_then(|value| value.checked_add(hour as i64 * 3_600))
+        .and_then(|value| value.checked_add(minute as i64 * 60))
+        .and_then(|value| value.checked_add(second as i64))
+        .ok_or_else(invalid)?;
+    let utc_seconds = local_seconds
+        .checked_sub(offset_seconds)
+        .ok_or_else(invalid)?;
+    let utc_millis = utc_seconds
+        .checked_mul(1_000)
+        .and_then(|value| value.checked_add(millis as i64))
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(invalid)?;
+    Ok(TimestampMs(utc_millis))
+}
+
+fn parse_ascii_digits(bytes: &[u8]) -> Result<u32, ModelError> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return Err(ModelError::InvalidSchedule(
+            "legacy due value contains invalid numeric fields",
+        ));
+    }
+    bytes.iter().try_fold(0_u32, |value, byte| {
+        value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add((*byte - b'0') as u32))
+            .ok_or(ModelError::InvalidSchedule(
+                "legacy due numeric field is outside the supported range",
+            ))
+    })
 }
 
 // Proleptic Gregorian civil-date conversion, based on integer-only formulas.
@@ -1343,4 +2215,261 @@ pub fn project_planning_actions(
             expected_project_revision:revision,allowed:denial.is_none(),denial_reason:denial,
             confirmation:"Confirm the project-scoped planning change at this revision."}
     }).collect()
+}
+
+#[cfg(test)]
+mod legacy_due_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_due_parser_preserves_dates_and_normalizes_explicit_offsets() {
+        assert_eq!(
+            BusinessDate::parse_legacy_due("2026-01-01").unwrap(),
+            BusinessDate::LocalDate(LocalDate::new(2026, 1, 1))
+        );
+        assert_eq!(
+            BusinessDate::parse_legacy_due("2026-01-01T00:00:00Z").unwrap(),
+            BusinessDate::Instant(TimestampMs(1_767_225_600_000))
+        );
+        assert_eq!(
+            BusinessDate::parse_legacy_due("2025-12-31T19:00:00-05:00").unwrap(),
+            BusinessDate::Instant(TimestampMs(1_767_225_600_000))
+        );
+        assert_eq!(
+            BusinessDate::parse_legacy_due("2026-01-01T00:00:00.123456Z").unwrap(),
+            BusinessDate::Instant(TimestampMs(1_767_225_600_123))
+        );
+        assert_eq!(
+            BusinessDate::parse_legacy_due("unix-ms:42").unwrap(),
+            BusinessDate::Instant(TimestampMs(42))
+        );
+    }
+
+    #[test]
+    fn legacy_due_parser_rejects_ambiguous_and_malformed_values() {
+        for value in [
+            "2026-02-30",
+            "2026-01-01T00:00:00",
+            "2026-01-01 00:00:00Z",
+            "tomorrow",
+            "unix-ms:-1",
+            "2026-01-01T00:00:00+25:00",
+            "２０２６-01-01",
+        ] {
+            assert!(
+                BusinessDate::parse_legacy_due(value).is_err(),
+                "accepted malformed legacy date {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_date_converts_from_epoch_days() {
+        assert_eq!(LocalDate::from_epoch_days(20_454).unwrap(), LocalDate::new(2026, 1, 1));
+    }
+}
+
+#[cfg(test)]
+mod external_wait_tests {
+    use super::*;
+
+    fn fixture_wait() -> (Vec<WorkNode>, Vec<DirectDependency>, ExternalWait) {
+        let project = ProjectId::new("p1");
+        let nodes = vec![
+            WorkNode::task(
+                project.clone(),
+                WorkId::new("source"),
+                ExecutionMode::Direct,
+                None,
+                "Decision",
+            ),
+            WorkNode::task(
+                project.clone(),
+                WorkId::new("dependent"),
+                ExecutionMode::Direct,
+                None,
+                "Dependent",
+            ),
+            WorkNode::task(
+                project.clone(),
+                WorkId::new("unrelated"),
+                ExecutionMode::Direct,
+                None,
+                "Unrelated",
+            ),
+        ];
+        let dependencies = vec![DirectDependency {
+            blocker_id: WorkId::new("source"),
+            blocked_id: WorkId::new("dependent"),
+        }];
+        let wait = ExternalWait {
+            id: ExternalWaitId::new("wait-1"),
+            project_id: project,
+            source_work_id: WorkId::new("source"),
+            affected_work_ids: vec![WorkId::new("dependent")],
+            category: ExternalWaitCategory::Approval,
+            reason: "Need review of the proposed scope".into(),
+            accountable: ExternalWaitAccountable::Role(crate::ActorRole::Reviewer),
+            expected_decision: Some("Approve or reject the scope".into()),
+            expected_output: None,
+            follow_up: Some(BusinessDate::Instant(TimestampMs::from_millis(100))),
+            civil_time_setting_revision: None,
+            revision: 1,
+            state: ExternalWaitState::Open,
+            created_by: "operator-1".into(),
+            created_at: TimestampMs::from_millis(10),
+            resolution: None,
+        };
+        (nodes, dependencies, wait)
+    }
+
+    #[test]
+    fn open_wait_blocks_only_explicit_dependents_and_follow_up_never_resolves_it() {
+        let (nodes, dependencies, wait) = fixture_wait();
+        wait.validate(&nodes, &dependencies).unwrap();
+        assert!(!wait.blocks_work(&WorkId::new("source")));
+        assert!(wait.blocks_work(&WorkId::new("dependent")));
+        assert!(!wait.blocks_work(&WorkId::new("unrelated")));
+        let time_context = |as_of| BusinessTimeContext {
+            project_id: ProjectId::new("p1"),
+            setting_revision: 1,
+            as_of: TimestampMs::from_millis(as_of),
+            civil_date: LocalDate::new(1970, 1, 1),
+            timezone: "Etc/UTC".into(),
+            tzdb_identity: "tzdb-test".into(),
+        };
+        assert!(!wait.follow_up_due(&time_context(99)).unwrap());
+        assert!(wait.follow_up_due(&time_context(100)).unwrap());
+        assert!(wait.follow_up_due(&time_context(10_000)).unwrap());
+        assert_eq!(wait.state, ExternalWaitState::Open);
+    }
+
+    #[test]
+    fn date_only_due_is_not_overdue_until_the_next_project_civil_day() {
+        let context = |as_of, civil_date| BusinessTimeContext {
+            project_id: ProjectId::new("p1"),
+            setting_revision: 1,
+            as_of: TimestampMs::from_millis(as_of),
+            civil_date,
+            timezone: "America/Los_Angeles".into(),
+            tzdb_identity: "project-tzdb".into(),
+        };
+        let schedule = BusinessSchedule {
+            not_before: Some(BusinessDate::LocalDate(LocalDate::new(2026, 3, 8))),
+            due: Some(BusinessDate::LocalDate(LocalDate::new(2026, 3, 8))),
+            planned_start: None,
+            planned_end: None,
+        };
+
+        let before_due_date = evaluate_business_schedule(
+            &schedule,
+            &context(1_772_913_600_000, LocalDate::new(2026, 3, 7)),
+            false,
+        )
+        .unwrap();
+        assert!(!before_due_date.available);
+        assert!(!before_due_date.due_today);
+        assert!(!before_due_date.overdue);
+        assert_eq!(
+            before_due_date.next_changes,
+            [BusinessDateBoundary::LocalDateStart(LocalDate::new(
+                2026, 3, 8
+            ))]
+        );
+
+        let on_due_date = evaluate_business_schedule(
+            &schedule,
+            &context(1_773_000_000_000, LocalDate::new(2026, 3, 8)),
+            false,
+        )
+        .unwrap();
+        assert!(on_due_date.available);
+        assert!(on_due_date.due_today);
+        assert!(!on_due_date.overdue);
+        assert_eq!(
+            on_due_date.next_changes,
+            [BusinessDateBoundary::LocalDateStart(LocalDate::new(
+                2026, 3, 9
+            ))]
+        );
+
+        let carried_over = evaluate_business_schedule(
+            &schedule,
+            &context(1_773_086_400_000, LocalDate::new(2026, 3, 9)),
+            false,
+        )
+        .unwrap();
+        assert!(carried_over.available);
+        assert!(!carried_over.due_today);
+        assert!(carried_over.overdue);
+        assert!(carried_over.next_changes.is_empty());
+    }
+
+    #[test]
+    fn date_only_not_before_uses_the_project_civil_date_boundary() {
+        let schedule = BusinessSchedule {
+            not_before: Some(BusinessDate::LocalDate(LocalDate::new(2026, 11, 1))),
+            ..BusinessSchedule::empty()
+        };
+        let context = BusinessTimeContext {
+            project_id: ProjectId::new("p1"),
+            setting_revision: 1,
+            as_of: TimestampMs::from_millis(1_793_520_000_000),
+            civil_date: LocalDate::new(2026, 10, 31),
+            timezone: "America/Havana".into(),
+            tzdb_identity: "havana-tzdb".into(),
+        };
+        let before = evaluate_business_schedule(&schedule, &context, false).unwrap();
+        assert!(!before.available);
+        assert_eq!(
+            before.next_changes,
+            [BusinessDateBoundary::LocalDateStart(LocalDate::new(
+                2026, 11, 1
+            ))]
+        );
+        let on_date = evaluate_business_schedule(
+            &schedule,
+            &BusinessTimeContext {
+                civil_date: LocalDate::new(2026, 11, 1),
+                ..context
+            },
+            false,
+        )
+        .unwrap();
+        assert!(on_date.available);
+    }
+
+    #[test]
+    fn resolution_is_attributed_and_does_not_change_work_identity_or_scope() {
+        let (nodes, dependencies, wait) = fixture_wait();
+        let resolution = ExternalWaitResolution {
+            outcome: ExternalWaitOutcome::Approved,
+            detail: "Reviewer approved the scope".into(),
+            output_ref: Some("source-version:approval-1".into()),
+            supplied_by: ExternalWaitAccountable::Role(crate::ActorRole::Reviewer),
+            recorded_by: "operator-2".into(),
+            recorded_as: crate::ActorRole::Operator,
+            recorded_at: TimestampMs::from_millis(200),
+        };
+        let resolved = wait.close(ExternalWaitState::Resolved, resolution).unwrap();
+        resolved.validate(&nodes, &dependencies).unwrap();
+        assert_eq!(resolved.id, wait.id);
+        assert_eq!(resolved.affected_work_ids, wait.affected_work_ids);
+        assert_eq!(resolved.revision, 2);
+        assert!(!resolved.blocks_work(&WorkId::new("dependent")));
+        assert!(resolved.resolution.is_some());
+        assert!(wait
+            .close(ExternalWaitState::Resolved, resolved.resolution.unwrap())
+            .is_ok());
+    }
+
+    #[test]
+    fn invalid_or_unrelated_affected_work_is_rejected() {
+        let (nodes, dependencies, mut wait) = fixture_wait();
+        wait.affected_work_ids = vec![WorkId::new("unrelated")];
+        assert!(matches!(
+            wait.validate(&nodes, &dependencies),
+            Err(ModelError::InvalidExternalWait(_))
+        ));
+    }
 }

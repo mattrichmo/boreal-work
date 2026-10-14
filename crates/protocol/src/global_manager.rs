@@ -10,6 +10,17 @@ pub const ATTENTION_PAGE_COMMAND: &str = "attention page";
 pub const LINKED_PAGE_COMMAND: &str = "linked page";
 pub const LINKED_JOB_SHOW_COMMAND: &str = "linked job show";
 
+/// Application-resolved system time context shared by Global clients. This is
+/// refreshed with each snapshot/read and is never persisted as policy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalCivilTimeContext {
+    pub observed_at_unix_ms: u64,
+    pub timezone: String,
+    pub system_civil_date: String,
+    pub tzdb_identity: String,
+}
+
 /// Deterministic page request for full-state global collections. Search is
 /// evaluated before pagination against the complete collection at one revision.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -65,6 +76,10 @@ pub struct GlobalPage<T> {
     pub has_more: bool,
     pub next_offset: Option<u64>,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub civil_time: Option<GlobalCivilTimeContext>,
     /// True when the caller's expected revision no longer matches the
     /// current snapshot; discard the cursor and resnapshot.
     #[serde(default)]
@@ -72,6 +87,9 @@ pub struct GlobalPage<T> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_revision: Option<u64>,
 }
+
+pub type GlobalAttentionPageResponse = GlobalPage<GlobalProjectAttention>;
+pub type GlobalDetailPageResponse = GlobalPage<Value>;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,6 +251,12 @@ impl GlobalManagerRequest {
             {
                 return Err("detail page limit must be from 1 to 200".into());
             }
+            if request.offset.unwrap_or(0) > 0 && request.expected_revision.is_none() {
+                return Err(
+                    "detail page continuation requires expected_revision; resnapshot before continuing"
+                        .into(),
+                );
+            }
         } else if self.command == ATTENTION_PAGE_COMMAND {
             let request: GlobalAttentionPageRequest = serde_json::from_value(self.payload.clone())
                 .map_err(|error| format!("invalid attention page request: {error}"))?;
@@ -241,6 +265,12 @@ impl GlobalManagerRequest {
                 .is_some_and(|limit| !(1..=200).contains(&limit))
             {
                 return Err("attention page limit must be from 1 to 200".into());
+            }
+            if request.offset.unwrap_or(0) > 0 && request.expected_revision.is_none() {
+                return Err(
+                    "attention page continuation requires expected_revision; resnapshot before continuing"
+                        .into(),
+                );
             }
         } else if self.command == LINKED_JOB_SHOW_COMMAND {
             let request: GlobalLinkedJobShowRequest = serde_json::from_value(self.payload.clone())
@@ -329,5 +359,82 @@ mod tests {
                 .validate()
                 .is_err()
         );
+        assert!(request(ATTENTION_PAGE_COMMAND, json!({"offset":1}))
+            .validate()
+            .is_err());
+        assert!(request(
+            DETAIL_PAGE_COMMAND,
+            json!({"collection":"projects","offset":1})
+        )
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn paged_read_responses_decode_the_exact_revision_and_civil_time() {
+        let payload = json!({
+            "rows": [{"project_id":"project-1","attention":{"open":2}}],
+            "total": 1,
+            "limit": 50,
+            "offset": 0,
+            "has_more": false,
+            "next_offset": null,
+            "revision": 12,
+            "resnapshot_required": false,
+            "requested_revision": 12,
+            "civil_time": {
+                "observed_at_unix_ms": 1000,
+                "timezone": "Etc/UTC",
+                "system_civil_date": "1970-01-01",
+                "tzdb_identity": "test-tzdb"
+            }
+        });
+        let response: GlobalAttentionPageResponse = serde_json::from_value(payload)
+            .expect("attention page matches the versioned response contract");
+        assert_eq!(response.revision, 12);
+        assert_eq!(response.requested_revision, Some(12));
+        assert_eq!(response.rows[0].project_id, "project-1");
+        assert_eq!(
+            response
+                .civil_time
+                .as_ref()
+                .map(|context| context.system_civil_date.as_str()),
+            Some("1970-01-01")
+        );
+        let attention_wire = serde_json::to_value(&response)
+            .expect("attention page reserializes with its resolved time context");
+        assert_eq!(attention_wire["civil_time"]["observed_at_unix_ms"], 1000);
+        assert_eq!(attention_wire["civil_time"]["timezone"], "Etc/UTC");
+        assert_eq!(
+            attention_wire["civil_time"]["system_civil_date"],
+            "1970-01-01"
+        );
+        assert_eq!(attention_wire["civil_time"]["tzdb_identity"], "test-tzdb");
+
+        let detail_payload = json!({
+            "collection": "projects",
+            "rows": [{"id":"project-1"}],
+            "total": 1,
+            "limit": 50,
+            "offset": 0,
+            "has_more": false,
+            "next_offset": null,
+            "revision": 12,
+            "resnapshot_required": false,
+            "requested_revision": null,
+            "civil_time": {
+                "observed_at_unix_ms": 1000,
+                "timezone": "Etc/UTC",
+                "system_civil_date": "1970-01-01",
+                "tzdb_identity": "test-tzdb"
+            }
+        });
+        let detail: GlobalDetailPageResponse = serde_json::from_value(detail_payload)
+            .expect("detail page matches the versioned response contract");
+        assert_eq!(detail.collection.as_deref(), Some("projects"));
+        assert_eq!(detail.revision, 12);
+        let detail_wire = serde_json::to_value(&detail)
+            .expect("detail page reserializes with its resolved time context");
+        assert_eq!(detail_wire["civil_time"]["system_civil_date"], "1970-01-01");
     }
 }

@@ -1,0 +1,43 @@
+
+  BOREAL / WORK
+  Machine installation · project data stays untouched
+
+  [1/4] Resolve installation source
+
+  [2/4] Verify and inspect the release archive
+
+  [3/4] Stage selected components
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+
+  [4/4] Publish installation
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+Boreal 0.2.2 installed to /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-s02-attempt4-reinstall-ru8t1nwt/prefix
+  binary: /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-s02-attempt4-reinstall-ru8t1nwt/prefix/bin/bwrk
+  TUI:    not selected (a previous installed dashboard was removed)
+  global: provisioned (run bwrk dashboard global)
+  add /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-s02-attempt4-reinstall-ru8t1nwt/prefix/bin to PATH to invoke bwrk
+  Next: run bwrk dashboard global; for code projects run bwrk init, then bwrk dashboard.
+{"api_version":"2","schema_version":"boreal.protocol.envelope.v1","operation_id":"op_cli_1791993330649_41441_0","revision":1,"as_of":"1791993330651","next_status_change_at":null,"transport":"ok","outcome":"changed","data":{"archived":false,"created_at":"1791993330650","description":"","health":"unknown","id":"project-41441-1791993330650-1","labels":[],"lifecycle":"planned","name":"Attempt 4 preservation","priority":0,"revision":1,"updated_at":"1791993330650"},"detail_ref":null,"error":null}
+
+  BOREAL / WORK
+  Machine installation · project data stays untouched
+
+  [1/4] Resolve installation source
+
+  [2/4] Verify and inspect the release archive
+
+  [3/4] Stage selected components
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+
+  [4/4] Publish installation
+bwrk 0.2.2 (api 2; source sha256:23661ffca26ddeaeb83596fa1ad05e8f87091563012238d579422c8beabea9ad)
+Boreal 0.2.2 installed to /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-s02-attempt4-reinstall-ru8t1nwt/prefix
+  binary: /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-s02-attempt4-reinstall-ru8t1nwt/prefix/bin/bwrk
+  TUI:    not selected (a previous installed dashboard was removed)
+  global: provisioned (run bwrk dashboard global)
+  add /var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-s02-attempt4-reinstall-ru8t1nwt/prefix/bin to PATH to invoke bwrk
+  Next: run bwrk dashboard global; for code projects run bwrk init, then bwrk dashboard.
+package reinstall preservation: PASS (temporary Global project retained; Node unavailable)
+
+command=python3 <temporary test harness>
+exit_code=0

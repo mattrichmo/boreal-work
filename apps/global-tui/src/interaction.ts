@@ -106,15 +106,46 @@ export async function runInteractive(controller: GlobalController, terminal: Key
   const signals = ["SIGINT", "SIGTERM", "SIGHUP"].map(sig => terminal.onSignal?.(sig as "SIGINT" | "SIGTERM" | "SIGHUP", cleanup)).filter((x): x is () => void => !!x);
   const poll = setInterval(() => { if (!alive || modal || busy) return; void controller.refresh().then(draw).catch(e => { notice = `Refresh failed: ${String(e)}`; draw(); }); }, 5000);
   (poll as unknown as { unref?: () => void }).unref?.();
-  const writeMutation = async (command: string, payload: Record<string, unknown>): Promise<void> => {
+  const writeMutation = async (command: string, payload: Record<string, unknown>): Promise<boolean> => {
     if (controller.unresolvedOperation) throw new Error("Resolve the uncertain write with r before making another change");
     if(!controller.snapshot)throw new Error("The global manager has no current snapshot; press r to connect before writing.");
+    const selectedIdBefore = controller.selectedId;
+    const selectedIndexBefore = controller.selected;
     busy = true; draw();
     try {
       await controller.mutate(command, payload);
       notice = controller.lastMutationRefreshFailed ? "Saved; refresh failed · press r to retry read" : "Saved";
+      if (controller.lastMutationRefreshFailed) {
+        controller.selectedId = selectedIdBefore;
+        controller.selected = selectedIndexBefore;
+        return false;
+      }
+      return true;
     }
     finally { busy = false; draw(); }
+  };
+  const inboxIds = (): string[] => controller.route === "inbox"
+    ? controller.rows().filter((row): row is Item => "status_id" in row && "title" in row).map(item => item.id)
+    : [];
+  const selectNextInboxItem = (priorOrder: string[], triagedIds: string[]): void => {
+    if (controller.route !== "inbox") return;
+    const triaged = new Set(triagedIds);
+    const remaining = inboxIds().filter(id => !triaged.has(id));
+    if (!remaining.length) {
+      controller.selectedId = undefined;
+      controller.selected = -1;
+      return;
+    }
+    const remainingSet = new Set(remaining);
+    const lastTriagedIndex = Math.max(-1, ...triagedIds.map(id => priorOrder.indexOf(id)));
+    let next: string | undefined;
+    if (lastTriagedIndex >= 0 && priorOrder.length) {
+      for (let step = 1; step <= priorOrder.length; step++) {
+        const candidate = priorOrder[(lastTriagedIndex + step) % priorOrder.length];
+        if (remainingSet.has(candidate)) { next = candidate; break; }
+      }
+    }
+    controller.selectId(next ?? remaining[0]);
   };
   const launchWrite = (command: string, payload: Record<string, unknown>): void => { void writeMutation(command, payload).catch(error => { notice = `Action failed: ${String(error)}`; draw(); }); };
   const formModal = (state: FormState, save: (values: Record<string, string | number | null>) => Promise<void>): FormState => { modal = { kind: "form", state, save }; draw(); return state; };
@@ -183,9 +214,9 @@ export async function runInteractive(controller: GlobalController, terminal: Key
             { key: "labels", label: "Labels", value: "", hint: "Separate labels with commas" }
           );
           const formState=inputForm(detail ? `New ${kind} · details` : `Quick capture · ${projectId ? controller.snapshot?.projects.find(p=>p.id===projectId)?.name ?? "selected project" : "Personal inbox"}`, fields, async v => {
-            const command = kind === "task" ? "todo add" : `${kind} add`;
+            const command = kind === "task" ? (detail ? "task add" : "todo add") : `${kind} add`;
             const destination = detail ? String(v.destination ?? projectId ?? "") || null : projectId;
-            await writeMutation(command, { project_id: destination, parent_id: detail ? (v.parent_id || null) : (parent?.id ?? null), title: v.title, ...(detail ? { description: v.description, status_id: v.status_id || undefined, ...(v.priority === null || v.priority === "" ? {} : { priority: v.priority }), due_at: v.due_at || null, follow_up_at: v.follow_up_at || null, labels: parseLabels(String(v.labels)) } : {}) }); modal = undefined;
+            await writeMutation(command, { project_id: destination, parent_id: detail ? (v.parent_id || null) : (parent?.id ?? null), title: v.title, ...(!detail && kind === "task" ? { capture_text: v.title } : {}), ...(detail ? { description: v.description, status_id: v.status_id || undefined, ...(v.priority === null || v.priority === "" ? {} : { priority: v.priority }), due_at: v.due_at || null, follow_up_at: v.follow_up_at || null, labels: parseLabels(String(v.labels)) } : {}) }); modal = undefined;
           });
           if(detail)ownerChoiceLoaders.set(formState,async owner=>{
             const parentRows=await controller.completeChoices<Item>("items",owner);
@@ -199,7 +230,10 @@ export async function runInteractive(controller: GlobalController, terminal: Key
         }catch{}
       })();
     };
-    const projectId = parent?.project_id ?? controller.projectId ?? null;
+    // Quick capture is classification-free and always belongs to the Personal
+    // Inbox. Detailed creation remains scoped to the current project, and
+    // child creation remains scoped to its parent.
+    const projectId = parent?.project_id ?? (detail ? controller.projectId ?? null : null);
     begin(projectId);
   };
   const editItem = (item: Item): void => {
@@ -223,11 +257,14 @@ export async function runInteractive(controller: GlobalController, terminal: Key
           { key: "position", label: "Card order", value: String(item.position), kind: "number" }
         ];
         const formState=inputForm("Edit item", fields, async v => {
+          const priorInboxOrder = inboxIds();
+          const wasInInbox = priorInboxOrder.includes(item.id);
           const payload:Record<string,unknown>={item_id:item.id,title:v.title,description:v.description,status_id:v.status_id,due_at:v.due_at||null,follow_up_at:v.follow_up_at||null,labels:parseLabels(String(v.labels)),position:v.position};
           if(v.priority!==null&&v.priority!=="")payload.priority=v.priority;
           if(String(v.project_id??"")!==(item.project_id??""))payload.project_id=String(v.project_id??"")||null;
           if(String(v.parent_id??"")!==(item.parent_id??""))payload.parent_id=v.parent_id||null;
-          await writeMutation("todo edit",payload); modal=undefined;
+          const refreshed=await writeMutation("todo edit",payload); modal=undefined;
+          if(refreshed&&wasInInbox&&!inboxIds().includes(item.id))selectNextInboxItem(priorInboxOrder,[item.id]);
         });
         ownerChoiceLoaders.set(formState,async owner=>{
           ownerItems=await controller.completeChoices<Item>("items",owner);
@@ -366,6 +403,7 @@ export async function runInteractive(controller: GlobalController, terminal: Key
   };
   const startBulkTriage = ():void => {
     const state=controller as GlobalController&{bulkSelectedIds?:Set<string>;clearBulkSelection?:()=>void};
+    const priorInboxOrder=inboxIds();
     void (async()=>{
       try{
         const ids=[...(state.bulkSelectedIds??[])],allItems=await loadChoices<Item>("items"),items=ids.map(id=>allItems.find(i=>i.id===id)).filter((x):x is Item=>!!x);
@@ -381,7 +419,17 @@ export async function runInteractive(controller: GlobalController, terminal: Key
               picker("Choose workflow status for selected work",statuses.map(s=>({label:`${s.label} · ${s.category}`,value:s.status_id})),statusId=>{
                 const changes:Array<{item_id:string;project_id:string|null;parent_id:string|null;status_id:string}> = [];
                 const chooseParent=(index:number):void=>{
-                  if(index>=items.length){modal=undefined;void writeMutation("todo bulk triage",{changes}).then(()=>{state.clearBulkSelection?.();notice=`Triaged ${changes.length} items`;}).catch(error=>{notice=`Bulk triage failed: ${String(error)}`;}).finally(draw);return;}
+                  if(index>=items.length){
+                    modal=undefined;
+                    const triagedIds=changes.map(change=>change.item_id);
+                    void writeMutation("todo bulk triage",{changes}).then(refreshed=>{
+                      if(!refreshed)return;
+                      state.clearBulkSelection?.();
+                      selectNextInboxItem(priorInboxOrder,triagedIds);
+                      notice=`Triaged ${changes.length} items`;
+                    }).catch(error=>{notice=`Bulk triage failed: ${String(error)}`;}).finally(draw);
+                    return;
+                  }
                   const item=items[index],candidates=parents.filter(i=>i.id!==item.id);
                   const choices=[{label:"No parent · clear parent",value:""},...candidates.map(i=>({label:i.title,value:i.id}))];
                   picker(`Parent for ${item.title} (${index+1}/${items.length})`,choices,parentId=>{changes.push({item_id:item.id,project_id:projectId,parent_id:parentId||null,status_id:statusId});chooseParent(index+1);});
@@ -608,7 +656,7 @@ function helpLines(c: GlobalController): string[] {
     planning:"Enter inspect · n new item · g milestone · h child · z collapse/expand · P parent",
     archive:"u restore selected record · Enter inspect",
     history:"Enter open activity · PgUp/PgDn page · ↑↓ scroll",
-    inbox:"n quick capture to selected project or Personal inbox · Enter inspect · e triage"
+    inbox:"n quick capture to Personal inbox · Enter inspect · e triage"
   };
   const selected=selectedItem(c)?"Selected work: e edit · h add child · m status · c complete · o reopen · b dependency · J jump related · K/W notes · y mark bulk triage · a archive":"";
   return [`${c.route} · ${c.activeProject?.name ?? "All projects"}`, routeActions[c.route], selected, "Tab focus · Space toggle all/last project · s choose scope · : search all views and actions", "? help · r refresh/read receipt · Esc back · q quit. Palette : contains every view and action."].filter(Boolean);
