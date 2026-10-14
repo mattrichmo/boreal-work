@@ -6,7 +6,10 @@ export const ENVELOPE_SCHEMA = "boreal.protocol.envelope.v1";
 export const MAX_FRAME_BYTES = 1024 * 1024;
 
 export interface Project { id: string; name: string; description: string; labels?: string[]; priority?:number; lifecycle?:string; health?:string; archived: boolean; created_at: string; updated_at: string }
-export interface Item { id: string; project_id: string | null; parent_id: string | null; kind: string; title: string; description?: string; labels?:string[]; status_id: string; priority: number | null; due_at: string | null; follow_up_at?: string | null; archived: boolean; position: number; created_at: string; updated_at: string; linked_notes?: Note[] }
+export interface CaptureOrigin { digest: string; source_ref?: string | null }
+export interface CaptureWitness { item_id: string; revision: number; captured_at: string; text: string; digest: string; source_ref?: string | null }
+export interface GlobalOperationResult { operation_id: string; request_digest: string; revision: number; result: Record<string, unknown>; created_at: string }
+export interface Item { id: string; project_id: string | null; parent_id: string | null; kind: string; title: string; description?: string; labels?:string[]; status_id: string; priority: number | null; due_at: string | null; follow_up_at?: string | null; capture_origin?: CaptureOrigin | null; archived: boolean; position: number; created_at: string; updated_at: string; linked_notes?: Note[] }
 export interface Note { id: string; project_id: string | null; title: string; body?: string; archived: boolean; created_at: string; updated_at: string; linked_items?: Item[] }
 export interface NoteLink { note_id:string; item_id:string }
 export interface ProjectAttentionItem { item_id:string; title:string; due_at:string|null; priority:number|null; status_id:string; status_label:string; kind:string }
@@ -116,7 +119,13 @@ export class GlobalServiceClient {
     return envelope.data;
   }
 
-  snapshot(): Promise<GlobalSnapshot> { return this.execute<GlobalSnapshot>("snapshot"); }
+  async snapshot(): Promise<GlobalSnapshot> {
+    const snapshot = await this.execute<GlobalSnapshot & { capture_witnesses?: unknown }>("snapshot");
+    // The service snapshot may carry its internal witness ledger. Keep routine
+    // TUI state compact and fetch one witness only through operation history.
+    const { capture_witnesses: _captureWitnesses, ...summary } = snapshot;
+    return summary;
+  }
   history(options: { projectId?: string; entityId?: string; limit?: number; offset?: number } = {}): Promise<GlobalHistory> {
     return this.execute<GlobalHistory>("history", {
       ...(options.projectId ? { project_id: options.projectId } : {}),
@@ -129,6 +138,7 @@ export class GlobalServiceClient {
     return this.execute<GlobalPage<T>>("detail page", { collection, ...(options.projectId ? {project_id:options.projectId}:{}), ...(options.limit === undefined ? {}:{limit:options.limit}), ...(options.offset === undefined ? {}:{offset:options.offset}), ...(options.includeArchived ? {include_archived:true}:{}), ...(options.kind ? {kind:options.kind}:{}), ...(options.query ? {query:options.query}:{}), ...(options.expectedRevision === undefined ? {}:{expected_revision:options.expectedRevision}) });
   }
   noteShow(noteId:string): Promise<Note> { return this.execute<Note>("note show",{note_id:noteId}); }
+  operationShow(operationId:string): Promise<GlobalOperationResult> { return this.execute<GlobalOperationResult>("operation show",{operation_id:operationId}); }
   linkedPage(projectId:string, identity:string, options:{limit?:number;offset?:number}={}): Promise<LinkedPage> {
     return this.execute<LinkedPage>("linked page",{project_id:projectId,identity,...(options.limit===undefined?{}:{limit:options.limit}),...(options.offset===undefined?{}:{offset:options.offset})});
   }

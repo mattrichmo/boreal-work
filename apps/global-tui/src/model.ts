@@ -1,4 +1,4 @@
-import { GlobalProtocolError, type GlobalServiceClient, type GlobalSnapshot, type GlobalActivityEvent, type GlobalPage, type Project, type Item, type Note, type Status, type Association, type Relationship, type LinkedProject, type LinkedWorkItem } from "./client.js";
+import { GlobalProtocolError, type GlobalServiceClient, type GlobalSnapshot, type GlobalActivityEvent, type GlobalPage, type GlobalOperationResult, type CaptureOrigin, type CaptureWitness, type Project, type Item, type Note, type Status, type Association, type Relationship, type LinkedProject, type LinkedWorkItem } from "./client.js";
 
 export type Route = "overview" | "projects" | "board" | "list" | "todos" | "notes" | "workflow" | "links" | "planning" | "archive" | "history" | "inbox";
 export type Focus = "navigation" | "work" | "inspector";
@@ -6,6 +6,13 @@ export type InspectorTab = "details" | "relationships" | "history" | "linked";
 export type TodoFilter = "today" | "overdue" | "unscheduled" | "waiting" | "all_open";
 export type ActivityRow = GlobalActivityEvent & { id: string };
 export type Row = Project | Item | Note | Status | Association | ActivityRow;
+export type CaptureInspection =
+  | { status: "not_loaded" }
+  | { status: "loading" }
+  | { status: "available"; witness: CaptureWitness }
+  | { status: "missing"; message: string }
+  | { status: "bounded"; message: string }
+  | { status: "unavailable"; message: string };
 export type ChoiceCollection = "projects" | "items" | "statuses";
 export type DailyClassificationView = { group: string; deadline: string; waiting: boolean; filters?: Partial<Record<TodoFilter,boolean>> };
 export type CivilTimeView = { observed_at_unix_ms: number; timezone: string; system_civil_date: string; tzdb_identity: string };
@@ -19,6 +26,9 @@ type ProjectAttentionView = {
 };
 type AttentionSnapshot = { portfolio?: Record<string, number>; projects?: Record<string, ProjectAttentionView>; personal?: ProjectAttentionView };
 type EntityKey = string;
+type CachedCaptureInspection = { digest: string; inspection: CaptureInspection };
+const CAPTURE_HISTORY_LIMIT = 200;
+const CAPTURE_INSPECTION_CACHE_LIMIT = 8;
 
 export class GlobalController {
   snapshot: GlobalSnapshot | undefined;
@@ -48,6 +58,8 @@ export class GlobalController {
   pageTotals = new Map<string,number>();
   private linkedOffsets = new Map<string,number>();
   private lastGoodLinked = new Map<string,LinkedProject>();
+  private captureInspections = new Map<string,CachedCaptureInspection>();
+  private captureInspectionLoads = new Map<string,Promise<void>>();
   private archiveCollectionIndex = 0;
   private overviewCollectionIndex = 0;
   private searchMatchedIds = new Set<string>();
@@ -75,7 +87,12 @@ export class GlobalController {
           const prior=this.selectedRow();
           const priorSearchMatchId=this.searchQuery.trim()&&this.route!=="history"&&prior?keyOf(prior):undefined;
           const preservePriorSearchMatch=!!priorSearchMatchId&&this.searchMatchedIds.has(priorSearchMatchId);
-          const next = await this.client.snapshot(); validateSnapshot(next);
+          const received = await this.client.snapshot(); validateSnapshot(received);
+          // Capture text belongs to the selected detail flow. The Global
+          // summary may include an internal witness ledger for backup/read
+          // compatibility, so discard it before keeping routine UI state.
+          const next = { ...received } as GlobalSnapshot & { capture_witnesses?: unknown };
+          delete next.capture_witnesses;
           this.reconcileLinkedSamples(next);
           this.snapshot = next;
           this.pageOffsets.clear();this.pageTotals.clear();this.linkedOffsets.clear();this.archiveCollectionIndex=0;this.overviewCollectionIndex=0;this.searchMatchedIds.clear();this.pageError=undefined;
@@ -181,8 +198,61 @@ export class GlobalController {
     const row=this.selectedRow();if(!row)return;this.detailLoading=true;
     try{
       if("title" in row&&!("status_id" in row)&&!("operation_id" in row)){const client=this.client as GlobalServiceClient&{noteShow?(noteId:string):Promise<Note>};const full=client.noteShow?await client.noteShow(row.id):await this.client.execute<Note>("note show",{note_id:row.id});this.replaceSnapshotRow("notes",row.id,full);}
-      else if("title" in row&&"status_id" in row){const full=await this.client.execute<Item>(row.kind==="milestone"?"milestone show":row.kind==="task"?"task show":"todo show",{item_id:row.id});this.replaceSnapshotRow("items",row.id,full);}
+      else if("title" in row&&"status_id" in row){const full=await this.client.execute<Item>(row.kind==="milestone"?"milestone show":row.kind==="task"?"task show":"todo show",{item_id:row.id});this.replaceSnapshotRow("items",row.id,full);const selected=this.snapshot?.items.find(item=>item.id===row.id);if(selected)await this.loadCaptureInspection(selected);}
     }finally{this.detailLoading=false;}
+  }
+
+  captureInspectionFor(item:Item):CaptureInspection|undefined{
+    const raw=(item as Item&{capture_origin?:unknown}).capture_origin;
+    if(raw===undefined||raw===null)return undefined;
+    const origin=captureOriginFor(item);
+    if(!origin)return{status:"unavailable",message:"Capture provenance metadata is malformed."};
+    const cached=this.captureInspections.get(item.id);
+    return cached?.digest===origin.digest?cached.inspection:{status:"not_loaded"};
+  }
+
+  private async loadCaptureInspection(item:Item):Promise<void>{
+    const raw=(item as Item&{capture_origin?:unknown}).capture_origin;
+    if(raw===undefined||raw===null)return;
+    const origin=captureOriginFor(item);
+    if(!origin){this.rememberCaptureInspection(item.id,"",{status:"unavailable",message:"Capture provenance metadata is malformed."});return;}
+    const cached=this.captureInspections.get(item.id);
+    if(cached?.digest===origin.digest&&["available","missing","bounded"].includes(cached.inspection.status))return;
+    const key=`${item.id}\0${origin.digest}`;
+    const existing=this.captureInspectionLoads.get(key);if(existing)return existing;
+    const pending=(async()=>{
+      this.rememberCaptureInspection(item.id,origin.digest,{status:"loading"});
+      try{
+        const historyClient=this.client as GlobalServiceClient&{history?: (options?:{entityId?:string;limit?:number;offset?:number})=>Promise<{events:GlobalActivityEvent[];current_revision:number;total:number;limit:number;offset:number;has_more:boolean;next_offset:number|null}>};
+        if(!historyClient.history){this.rememberCaptureInspection(item.id,origin.digest,{status:"unavailable",message:"This Global client cannot read capture activity history."});return;}
+        const page=await historyClient.history({entityId:item.id,limit:CAPTURE_HISTORY_LIMIT,offset:0});
+        if(!validCaptureHistoryPage(page)){
+          this.rememberCaptureInspection(item.id,origin.digest,{status:"unavailable",message:"Global returned an invalid capture history page; the origin digest remains available."});return;
+        }
+        const event=page.events.find(candidate=>candidate.entity_id===item.id&&candidate.command==="todo add");
+        if(!event){
+          const message=page.has_more
+            ? `The original capture is outside the newest ${CAPTURE_HISTORY_LIMIT} retained item history events; the origin digest remains available.`
+            : "No retained capture operation was found in item history; the origin digest remains available.";
+          this.rememberCaptureInspection(item.id,origin.digest,{status:page.has_more?"bounded":"missing",message});return;
+        }
+        const operationClient=this.client as GlobalServiceClient&{operationShow?: (operationId:string)=>Promise<GlobalOperationResult>};
+        const operation=operationClient.operationShow
+          ? await operationClient.operationShow(event.operation_id)
+          : await this.client.execute<GlobalOperationResult>("operation show",{operation_id:event.operation_id});
+        const witness=await captureWitnessFromOperation(operation,event,item,origin);
+        if(!witness){this.rememberCaptureInspection(item.id,origin.digest,{status:"unavailable",message:"The retained capture operation has no witness matching this item and origin digest; the digest remains available."});return;}
+        this.rememberCaptureInspection(item.id,origin.digest,{status:"available",witness});
+      }catch(error){
+        this.rememberCaptureInspection(item.id,origin.digest,{status:"unavailable",message:`Capture history could not be read: ${error instanceof Error?error.message:String(error)}. The origin digest remains available.`});
+      }
+    })().finally(()=>this.captureInspectionLoads.delete(key));
+    this.captureInspectionLoads.set(key,pending);return pending;
+  }
+
+  private rememberCaptureInspection(itemId:string,digest:string,inspection:CaptureInspection):void{
+    this.captureInspections.delete(itemId);this.captureInspections.set(itemId,{digest,inspection});
+    while(this.captureInspections.size>CAPTURE_INSPECTION_CACHE_LIMIT){const oldest=this.captureInspections.keys().next().value as string|undefined;if(oldest===undefined)break;this.captureInspections.delete(oldest);}
   }
 
   async loadMoreLinked():Promise<boolean>{
@@ -386,6 +456,37 @@ export class GlobalController {
 }
 
 export function validateSnapshot(v:GlobalSnapshot):void{if(!v||![2,3].includes(v.schema_version)||!Number.isSafeInteger(v.revision)||v.revision<0)throw new Error("global snapshot schema or revision is invalid");for(const k of ["projects","items","notes","statuses","relationships","associations"] as const)if(!Array.isArray(v[k]))throw new Error(`global snapshot ${k} must be an array`);for(const p of v.projects)if(typeof p.id!=="string"||typeof p.name!=="string")throw new Error("global snapshot contains malformed project");for(const i of v.items)if(typeof i.id!=="string"||typeof i.title!=="string"||typeof i.status_id!=="string")throw new Error("global snapshot contains malformed item");}
+export function captureOriginFor(item:Item):CaptureOrigin|undefined{
+  const value=(item as unknown as {capture_origin?:unknown}).capture_origin;
+  if(!value||typeof value!=="object"||Array.isArray(value))return undefined;
+  const origin=value as Record<string,unknown>;
+  if(typeof origin.digest!=="string"||!/^sha256:[0-9a-f]{64}$/u.test(origin.digest))return undefined;
+  if(origin.source_ref!==undefined&&origin.source_ref!==null&&typeof origin.source_ref!=="string")return undefined;
+  if(typeof origin.source_ref==="string"&&(origin.source_ref.trim().length===0||new TextEncoder().encode(origin.source_ref).length>4096||/\p{Cc}/u.test(origin.source_ref)))return undefined;
+  return{digest:origin.digest,...(origin.source_ref===undefined?{}:{source_ref:origin.source_ref as string|null})};
+}
+function validCaptureHistoryPage(page:{events:GlobalActivityEvent[];current_revision:number;total:number;limit:number;offset:number;has_more:boolean;next_offset:number|null}):boolean{
+  if(!page||!Array.isArray(page.events)||!Number.isSafeInteger(page.current_revision)||page.current_revision<0||!Number.isSafeInteger(page.total)||page.total<0||page.limit!==CAPTURE_HISTORY_LIMIT||page.offset!==0||page.events.length>page.limit||page.events.length>CAPTURE_HISTORY_LIMIT||page.total<page.events.length||typeof page.has_more!=="boolean")return false;
+  const next=page.events.length;
+  const hasMore=next<page.total;
+  if(page.has_more!==hasMore||page.next_offset!==(hasMore?next:null))return false;
+  if(hasMore&&page.events.length===0)return false;
+  return page.events.every(event=>!!event&&typeof event.operation_id==="string"&&event.operation_id.length>0&&Number.isSafeInteger(event.revision)&&event.revision>0&&event.revision<=page.current_revision&&typeof event.command==="string"&&(event.entity_id===null||typeof event.entity_id==="string"));
+}
+async function captureWitnessFromOperation(operation:GlobalOperationResult,event:GlobalActivityEvent,item:Item,origin:CaptureOrigin):Promise<CaptureWitness|undefined>{
+  if(!operation||operation.operation_id!==event.operation_id||operation.revision!==event.revision||!Number.isSafeInteger(operation.revision)||!operation.result||typeof operation.result!=="object"||Array.isArray(operation.result)||operation.result.id!==item.id)return undefined;
+  const raw=operation.result.capture_witness;
+  if(!raw||typeof raw!=="object"||Array.isArray(raw))return undefined;
+  const witness=raw as Record<string,unknown>;
+  if(witness.item_id!==item.id||witness.revision!==event.revision||typeof witness.captured_at!=="string"||typeof witness.text!=="string"||witness.digest!==origin.digest)return undefined;
+  const sourceRef=witness.source_ref;
+  if(sourceRef!==undefined&&sourceRef!==null&&typeof sourceRef!=="string")return undefined;
+  if((sourceRef??null)!==(origin.source_ref??null))return undefined;
+  const digestBytes=await globalThis.crypto.subtle.digest("SHA-256",new TextEncoder().encode(witness.text));
+  const digest=`sha256:${Array.from(new Uint8Array(digestBytes),byte=>byte.toString(16).padStart(2,"0")).join("")}`;
+  if(digest!==origin.digest)return undefined;
+  return{item_id:item.id,revision:event.revision,captured_at:witness.captured_at,text:witness.text,digest:origin.digest,...(sourceRef===undefined?{}:{source_ref:sourceRef as string|null})};
+}
 export function isDone(status:Status|undefined):boolean{return status?.category==="completed"||status?.category==="cancelled";}
 export function dailyClassification(item:Item):DailyClassificationView|undefined{return (item as Item&{daily_classification?:DailyClassificationView}).daily_classification;}
 export function isOverdue(item:Item):boolean{return dailyClassification(item)?.deadline==="overdue";}
