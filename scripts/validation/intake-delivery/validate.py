@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import io
 import json
@@ -339,8 +340,10 @@ def send_application_request(
         "service envelope schema mismatch",
     )
     envelope = app_response.get("data")
-    require(isinstance(envelope, str), "service response omitted the application envelope")
-    decoded = json.loads(envelope)
+    if isinstance(envelope, str):
+        decoded = json.loads(envelope)
+    else:
+        decoded = envelope
     require(isinstance(decoded, dict), "application response is not an object")
     require(
         decoded.get("operation_id") == operation_id,
@@ -477,7 +480,7 @@ def create_receipt_request(
     intake_id: str,
     content: str,
 ) -> dict[str, Any]:
-    bucket_id = "delivery-inbox"
+    bucket_id = "baseline-inbox"
     payload = {
         "schema": "boreal.intake_delivery.payload.v1",
         "bucket_id": bucket_id,
@@ -588,7 +591,10 @@ def main() -> int:
         root = scratch / "project"
         root.mkdir()
         database = Path(".boreal/boreal.sqlite")
-        socket_path = root / ".boreal" / "s08-t05.sock"
+        # Keep the Unix-domain socket directly under the project root. The
+        # service requires that scope, while a short basename avoids exceeding
+        # macOS sockaddr_un.sun_path when TMPDIR is already long.
+        socket_path = root / "s.sock"
         print(f"candidate source SHA: {candidate_sha}")
         print(f"candidate binary: {candidate}")
         print(f"candidate binary SHA-256: {file_sha256(candidate)}")
@@ -614,6 +620,48 @@ def main() -> int:
             "initialize-disposable-project",
         )
         require((root / database).is_file(), "init did not create the project database")
+
+        cli_json(
+            candidate,
+            [
+                "session",
+                "start",
+                "--project",
+                PROJECT_ID,
+                "--actor",
+                ACTOR_ID,
+                "--session",
+                SESSION_ID,
+                "--harness",
+                "codex",
+                "--db",
+                str(database),
+            ],
+            root,
+            "start-project-fixture-session",
+        )
+        session_read = cli_json(
+            candidate,
+            [
+                "session",
+                "show",
+                "--project",
+                PROJECT_ID,
+                "--session",
+                SESSION_ID,
+                "--db",
+                str(database),
+            ],
+            root,
+            "read-project-fixture-session",
+        )
+        session_data = object_data(session_read)
+        require(
+            session_data.get("actor_id") == ACTOR_ID
+            and session_data.get("session_id") == SESSION_ID
+            and session_data.get("state") == "active",
+            "fixture session registration did not read back as active for the expected actor",
+        )
 
         initial_revision = current_work_revision(candidate, root)
         cli_json(
@@ -838,13 +886,14 @@ def main() -> int:
         # immutable feature-table triggers.
         edited_content = "Edited mutable Intake fixture content."
         edited_digest = "sha256:" + hashlib.sha256(edited_content.encode()).hexdigest()
-        with sqlite3.connect(root / database) as connection:
-            changed = connection.execute(
-                "UPDATE intake_item_v3 "
-                "SET content=?, content_revision=content_revision+1, content_digest=? "
-                "WHERE project_id=? AND intake_id=?",
-                (edited_content, edited_digest, PROJECT_ID, "delivered-intake"),
-            ).rowcount
+        with closing(sqlite3.connect(root / database)) as connection:
+            with connection:
+                changed = connection.execute(
+                    "UPDATE intake_item_v3 "
+                    "SET content=?, content_revision=content_revision+1, content_digest=? "
+                    "WHERE project_id=? AND intake_id=?",
+                    (edited_content, edited_digest, PROJECT_ID, "delivered-intake"),
+                ).rowcount
         require(changed == 1, "fixture Intake edit did not update exactly one item")
 
         receipt_write_errors: list[str] = []
@@ -853,7 +902,7 @@ def main() -> int:
             "WHERE project_id=? AND delivery_key=?",
             "DELETE FROM intake_delivery_v1 WHERE project_id=? AND delivery_key=?",
         ]:
-            with sqlite3.connect(root / database) as connection:
+            with closing(sqlite3.connect(root / database)) as connection:
                 try:
                     if sql.startswith("UPDATE"):
                         connection.execute(sql, ("sha256:" + "0" * 64, PROJECT_ID, "delivery-key-1"))

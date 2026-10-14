@@ -10,12 +10,17 @@ The harness builds the candidate CLI and a predecessor CLI from source commit
 `f735a903fdc1470f29e98201aedbbb8b3c7d34df`, the parent of the commit that
 introduced `intake_delivery`. It verifies each binary's reported build
 revision. It then creates a disposable project root under the system temporary
-directory, runs ordinary work and Intake operations before delivery, receives
-and retries a receipt through the versioned project service, and exercises
-promotion, archive, backup, and restore against that fixture. It removes the
-disposable root when the run exits. The output records the candidate and
-predecessor binary SHA-256 values, the tested host/Python/SQLite versions,
-each CLI command and exit code, and the key delivery/restore readbacks.
+directory, starts and reads back an active operator session, runs ordinary
+work and Intake operations before delivery, receives and retries a receipt
+through the versioned project service, and exercises promotion, archive,
+backup, and restore against that fixture. The service socket uses a short name
+directly under the disposable project root to stay within Unix socket address
+limits. It removes the disposable root when the run exits. The
+output records the candidate and predecessor binary SHA-256 values, the tested
+host/Python/SQLite versions, each CLI command and exit code, and the key
+delivery/restore readbacks.
+The recorded current-host run is summarized in
+[`qualification-evidence.md`](qualification-evidence.md).
 
 On failure, the harness writes a mode-restricted `failure.json` under
 `$TMPDIR/boreal-s08-t05-failures/`. It retains source/runtime and binary
