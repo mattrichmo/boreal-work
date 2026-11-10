@@ -31,8 +31,17 @@ TUI bundle digests. This evidence was added after the measured source commit.
 | `python3 project/build-plan/boreal-final-state/validate_plan.py` | passed: 14 sprints, 85 required tasks, 100 work items, 24 journeys, 3 deferred tasks |
 | `git diff --check` | passed |
 
-The report files beside this README retain the full-suite JSON/Markdown and
-the standalone Global TUI identity. Measured artifact identities:
+The full-suite JSON/Markdown and standalone Global TUI identity reports are
+available in the [immutable pre-cleanup GitHub snapshot](https://github.com/mattrichmo/boreal-work/tree/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S00):
+
+- [Smoke JSON](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S00/full-suite-smoke.json)
+- [Smoke JSON (93faf2ad)](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S00/full-suite-smoke-93faf2ad.json)
+- [Smoke Markdown (93faf2ad)](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S00/full-suite-smoke-93faf2ad.md)
+- [Global TUI identity](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S00/global-tui-identity-93faf2ad.json)
+- [PTY identity](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S00/pty-identity.json)
+
+The current local checkout keeps the raw files; future report output stays
+local under the ignore rules. Measured artifact identities:
 
 - Source SHA-256: `2d86ade619f56988dbf1a3653f8c4af068ffb821494cbc448c3097e4a9e01f77`
 - Debug binary SHA-256: `1f9b5f8ef954c9e528b22b5cd6a71b93cbd0208034a330c09b97998e4944b91b`

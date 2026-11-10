@@ -1,2 +1,0 @@
-/dev/disk3s5   460Gi   417Gi   4.3Gi    99%    3.3M   46M    7%   /System/Volumes/Data
-3.3G	target

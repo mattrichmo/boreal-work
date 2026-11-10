@@ -1,5 +1,10 @@
 # PF-S00-T03 attempt 1 command record
 
+The captured stdout/stderr files are preserved at the [pinned baseline logs
+directory](https://github.com/mattrichmo/boreal-work/tree/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/production/baseline/logs).
+The paths below are the original run locations. Future raw command output
+stays local under the ignored baseline `logs/` directory.
+
 ## Execution identity
 
 - Task: `PF-S00-T03`; attempt: `1`.

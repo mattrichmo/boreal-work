@@ -3,8 +3,11 @@
 **Status: BLOCKED — BW-S02-T90 is not accepted.** This report captures the
 combined-tree results at source commit
 `6fe9913136f1414adee433b5e1563da85e8316e2` on branch `codex/v4-s02-t90`.
-No production files were changed. The only additions are this report and the
-raw logs in [`logs/`](logs/).
+No production files were changed. At the time of capture, the only additions
+were this report and the raw logs. Those logs are available in the [pinned
+pre-cleanup snapshot](https://github.com/mattrichmo/boreal-work/tree/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs).
+The current local checkout keeps the raw files; future validation output
+stays local under ignored `logs/` and `attempt-*/logs/` directories.
 
 The project and Global TUI tests both fail on the combined source, while the
 same suites pass at baseline `88b867a3340deab073ec15772c261fbc58504540`
@@ -29,26 +32,26 @@ build/install/launch smoke. macOS x86-64 and Linux x86-64 were not run locally.
 
 | Gate | Result | Evidence |
 | --- | --- | --- |
-| Project TUI typecheck | PASS | [`project-tui-typecheck.log`](logs/project-tui-typecheck.log) |
-| Global TUI typecheck | PASS | [`global-tui-typecheck.log`](logs/global-tui-typecheck.log) |
-| Project TUI tests, Node 26.8.2 | FAIL: one mounted-controller receipt rehydration assertion | [`project-tui-tests.log`](logs/project-tui-tests.log) |
-| Project TUI tests, Node 20.20.2 | FAIL: same assertion | [`project-tui-tests-node20.log`](logs/project-tui-tests-node20.log) |
-| Global TUI tests, Node 26.8.2 | FAIL: 10 of 91 | [`global-tui-tests.log`](logs/global-tui-tests.log) |
-| Global TUI tests, Node 20.20.2 | FAIL: same 10 of 91 | [`global-tui-tests-node20.log`](logs/global-tui-tests-node20.log) |
-| Baseline Project TUI tests, Node 20.20.2 | PASS: 99/99 | [`baseline-project-tui-tests-node20.log`](logs/baseline-project-tui-tests-node20.log) |
-| Baseline Global TUI tests, Node 20.20.2 | PASS: 91/91 | [`baseline-global-tui-tests-node20.log`](logs/baseline-global-tui-tests-node20.log) |
-| Dashboard Node preflight tests | PASS: 4 tests | [`node-preflight-tests.log`](logs/node-preflight-tests.log) |
-| Release identity tests | PASS: 5 tests | [`release-identity-tests.log`](logs/release-identity-tests.log) |
-| Release builder tests | PASS: 2 tests | [`release-builder-tests.log`](logs/release-builder-tests.log) |
-| Full-suite validation contract tests | PASS: 14 tests | [`full-suite-contract-tests.log`](logs/full-suite-contract-tests.log) |
-| Global TUI release identity tests | PASS: 4 tests | [`global-tui-identity-tests.log`](logs/global-tui-identity-tests.log) |
-| `package-smoke.sh`, default `C.UTF-8` locale | FAIL: checksum helper cannot set locale | [`package-smoke.log`](logs/package-smoke.log) |
-| `package-smoke.sh`, `en_US.UTF-8` locale | PARTIAL: package/install/hash/two-project checks pass; Global smoke's first work creation fails with a `work_node_v3` unique conflict | [`package-smoke-en_US.log`](logs/package-smoke-en_US.log) |
-| `package-smoke.sh`, `C` locale | PARTIAL: same package/install/hash/two-project passes; same first-work-create conflict | [`package-smoke-C.log`](logs/package-smoke-C.log) |
-| Global smoke create-path follow-up | FAIL reproduced in temporary state: two IDs conflict; CLI readbacks show no prior work | [`global-smoke-work-id-repro.log`](logs/global-smoke-work-id-repro.log), [`global-smoke-cli-isolation.log`](logs/global-smoke-cli-isolation.log) |
-| Release workflow in-flight check | PASS: no runs found for `codex/v4-completion`; no dispatch made | [`release-workflow-runs.json`](logs/release-workflow-runs.json) |
-| Native release archive build | PASS: `aarch64-apple-darwin`, version `0.2.1` | [`native-release-build.log`](logs/native-release-build.log) |
-| Native target package install/launch smoke | PASS: archive install, version, temporary Global root, `global project add`, and `dashboard global --json` with unavailable Node | [`native-package-target-smoke.log`](logs/native-package-target-smoke.log) |
+| Project TUI typecheck | PASS | [`project-tui-typecheck.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/project-tui-typecheck.log) |
+| Global TUI typecheck | PASS | [`global-tui-typecheck.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/global-tui-typecheck.log) |
+| Project TUI tests, Node 26.8.2 | FAIL: one mounted-controller receipt rehydration assertion | [`project-tui-tests.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/project-tui-tests.log) |
+| Project TUI tests, Node 20.20.2 | FAIL: same assertion | [`project-tui-tests-node20.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/project-tui-tests-node20.log) |
+| Global TUI tests, Node 26.8.2 | FAIL: 10 of 91 | [`global-tui-tests.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/global-tui-tests.log) |
+| Global TUI tests, Node 20.20.2 | FAIL: same 10 of 91 | [`global-tui-tests-node20.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/global-tui-tests-node20.log) |
+| Baseline Project TUI tests, Node 20.20.2 | PASS: 99/99 | [`baseline-project-tui-tests-node20.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/baseline-project-tui-tests-node20.log) |
+| Baseline Global TUI tests, Node 20.20.2 | PASS: 91/91 | [`baseline-global-tui-tests-node20.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/baseline-global-tui-tests-node20.log) |
+| Dashboard Node preflight tests | PASS: 4 tests | [`node-preflight-tests.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/node-preflight-tests.log) |
+| Release identity tests | PASS: 5 tests | [`release-identity-tests.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/release-identity-tests.log) |
+| Release builder tests | PASS: 2 tests | [`release-builder-tests.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/release-builder-tests.log) |
+| Full-suite validation contract tests | PASS: 14 tests | [`full-suite-contract-tests.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/full-suite-contract-tests.log) |
+| Global TUI release identity tests | PASS: 4 tests | [`global-tui-identity-tests.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/global-tui-identity-tests.log) |
+| `package-smoke.sh`, default `C.UTF-8` locale | FAIL: checksum helper cannot set locale | [`package-smoke.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/package-smoke.log) |
+| `package-smoke.sh`, `en_US.UTF-8` locale | PARTIAL: package/install/hash/two-project checks pass; Global smoke's first work creation fails with a `work_node_v3` unique conflict | [`package-smoke-en_US.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/package-smoke-en_US.log) |
+| `package-smoke.sh`, `C` locale | PARTIAL: same package/install/hash/two-project passes; same first-work-create conflict | [`package-smoke-C.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/package-smoke-C.log) |
+| Global smoke create-path follow-up | FAIL reproduced in temporary state: two IDs conflict; CLI readbacks show no prior work | [`global-smoke-work-id-repro.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/global-smoke-work-id-repro.log), [`global-smoke-cli-isolation.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/global-smoke-cli-isolation.log) |
+| Release workflow in-flight check | PASS: no runs found for `codex/v4-completion`; no dispatch made | [`release-workflow-runs.json`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/release-workflow-runs.json) |
+| Native release archive build | PASS: `aarch64-apple-darwin`, version `0.2.1` | [`native-release-build.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/native-release-build.log) |
+| Native target package install/launch smoke | PASS: archive install, version, temporary Global root, `global project add`, and `dashboard global --json` with unavailable Node | [`native-package-target-smoke.log`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/logs/native-package-target-smoke.log) |
 
 The package smoke passes the release-style checksum lookup, staged and
 installed asset digest/build identity checks, installer checks, and its

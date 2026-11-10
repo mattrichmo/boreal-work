@@ -1,2 +1,0 @@
-$ npm --prefix apps/global-tui test
-exit=0
