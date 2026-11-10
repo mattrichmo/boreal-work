@@ -4,7 +4,7 @@ You have one task ID, not an entire sprint. Your task is complete only when its 
 
 ## Load in this order
 
-Read the repository's current `AGENTS.md`, applicable directory instructions, this plan README, your sprint file and your complete task card. Read the actual source/archive identity in the dispatch record. Read every accepted prerequisite handoff and relevant contract named by `project/spec/production/contract-manifest.json` after PF-S01; if absent, stop that implementation scope.
+Read the [root contributor instructions at the recorded source revision](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENTS.md), applicable directory instructions, this plan README, your sprint file and your complete task card. Read the actual source/archive identity in the dispatch record. Read every accepted prerequisite handoff and relevant contract named by `project/spec/production/contract-manifest.json` after PF-S01; if absent, stop that implementation scope.
 
 Load each task reference excerpt and then the current full enclosing functions/types/tests. Exact baseline paths, lines and hashes are supplied as navigation, not an instruction to blindly patch old line numbers. Compare current source to upstream handoffs and inherited findings. Read the original M02/report where linked, keeping candidate claims unaccepted until proven.
 

@@ -50,4 +50,4 @@ crash at transaction commit. No focused test is described as full release.
 | P1-09 | complete | Coordinator | P1-08 combined tree | 2026-09-15T03:52:04Z | [revalidation](../../../../project/build-plan/P1-09-REVALIDATION.md); PASS with approved deferrals |
 
 After P1-09, dispatch P2-01 and P2-03 in parallel via
-[handoff](../../../../AGENT_HANDOFF.md).
+[archived handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md).

@@ -7,7 +7,7 @@ runtime dependency.
 
 The file-based execution authority is the root [master plan](../MASTER_PLAN.md)
 with [M01 sprint folders](../milestones/M01-v2-product/README.md) and
-[agent handoff](../AGENT_HANDOFF.md). The documents below are its behavior
+[archived agent handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md). The documents below are its behavior
 and architecture contracts.
 
 Read in this order:

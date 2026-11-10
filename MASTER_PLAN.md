@@ -80,7 +80,7 @@ not pass early. No agent gets a whole sprint as an undifferentiated assignment.
 1. Read this file, [milestone scope](milestones/M01-v2-product/README.md),
    the relevant sprint file, [task index](project/build-plan/TASK_INDEX.md),
    [review gates](project/build-plan/REVIEW_GATES.md), and
-   [handoff](AGENT_HANDOFF.md). Use task IDs, not invented `bwrk` records.
+   [archived handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md). Use task IDs, not invented `bwrk` records.
 2. Select a leaf only when **all** listed prerequisite IDs have accepted
    evidence and the last finding-producing review has passed through
    reconciliation and revalidation. `queued` means waiting for a planned
@@ -91,7 +91,7 @@ not pass early. No agent gets a whole sprint as an undifferentiated assignment.
    or crate file set. Shared interfaces are changed by their named steward
    or by a reviewed integration request.
 4. Agents report exact changed paths, checks, proof, limitations, and findings
-   using [AGENT_HANDOFF.md](AGENT_HANDOFF.md). The coordinator verifies the
+   using [archived AGENT_HANDOFF.md](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md). The coordinator verifies the
    claimed source snapshot and reviews diffs; a worker report is not a closed
    task. If an agent's timebox elapses, mark it for review, confirm the
    process/worktree has stopped, and reconcile its output before replacement.

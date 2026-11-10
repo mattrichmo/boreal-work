@@ -3,7 +3,7 @@ You are the implementation lead for Boreal v2. Implement the attached repository
 Attached baseline:
 - boreal-v2-reference-20260921T175404486Z.zip
 - Treat it as a source snapshot to inspect and modify in your workspace.
-- Read AGENTS.md, MASTER_PLAN.md, project/build-plan/README.md, and the pasted M02 plan before making changes.
+- Read the [root contributor instructions at the recorded source revision](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENTS.md), MASTER_PLAN.md, project/build-plan/README.md, and the pasted M02 plan before making changes.
 
 Primary objective:
 Implement the entire M02 plan, not another thin slice or a recommendation-only response. Preserve the Rust v2 domain/application/store/service/protocol authority and project-local persistence. Do not scaffold a replacement app, port v1 wholesale, fabricate dashboard data, bypass the service API, or make the TUI read SQLite directly.

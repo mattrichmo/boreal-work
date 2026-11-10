@@ -2,7 +2,7 @@
 
 Before editing:
 
-1. Read repository `AGENTS.md`.
+1. Read the [root contributor instructions at the recorded source revision](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENTS.md).
 2. Read `MASTER_PLAN.md`, your sprint `SPRINT.md`, and the complete selected task card.
 3. Read direct prerequisite handoffs/current source at the coordinator-provided revision.
 4. Confirm your isolated worktree and owned paths.

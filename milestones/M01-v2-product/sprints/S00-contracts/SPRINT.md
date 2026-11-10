@@ -52,7 +52,7 @@ current gate-owner disposition that supersedes its status wording follows it.
 | P0-07 | pass with approved deferrals | Coordinator validator | `p0-03.v2` | 2026-09-15 | [revalidation](../../../../project/build-plan/P0-07-REVALIDATION.md) |
 
 The three disjoint first-wave packets were dispatched on 2026-09-14 22:32
-UTC using [AGENT_HANDOFF.md](../../../../AGENT_HANDOFF.md). Their reports
+UTC using [archived AGENT_HANDOFF.md](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md). Their reports
 do not close the tasks; review and accepted evidence still gate P0-05.
 
 P0-03's first implementation packet was integrated on 2026-09-15 after the

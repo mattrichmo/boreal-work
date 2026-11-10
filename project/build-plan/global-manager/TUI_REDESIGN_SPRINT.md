@@ -2,7 +2,7 @@
 
 User dispatch: use Luna subagents to fix the audit and deliver a full global
 project-management TUI. Read project/README.md, project/build-plan/README.md,
-MASTER_PLAN.md, AGENT_HANDOFF.md, GLOBAL_MANAGER.md and TUI_AUDIT.md before
+MASTER_PLAN.md, the [archived agent handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md), GLOBAL_MANAGER.md and TUI_AUDIT.md before
 implementation. Preserve unrelated work in this shared dirty workspace.
 
 ## Disjoint vertical handoffs

@@ -46,4 +46,4 @@ only with an explicit parity entry. Preserve failed runs and provenance.
 | P4-10 | queued on P3-09 | — | — | — | — |
 
 After P4-09, dispatch independent P5-01/02/03 probes via
-[handoff](../../../../AGENT_HANDOFF.md).
+[archived handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md).

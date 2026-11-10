@@ -60,4 +60,4 @@ repair on the reconciled snapshot.
 
 After P3-09, dispatch migration P4-04 and workflow assets P4-10 in parallel
 with any remaining S04 UI work using
-[handoff](../../../../AGENT_HANDOFF.md).
+[archived handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md).

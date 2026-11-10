@@ -2,7 +2,7 @@
 
 User-authorized extension to the existing production baseline; preserve existing
 uncommitted work. Read project/README.md, project/build-plan/README.md,
-MASTER_PLAN.md, AGENT_HANDOFF.md and project/GLOBAL_MANAGER.md. The legacy
+MASTER_PLAN.md, the [archived agent handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md) and project/GLOBAL_MANAGER.md. The legacy
 v1/docs/product/GLOBAL_MANAGER_DESIGN.md is read-only behavioral reference.
 
 ## Vertical handoffs and exclusive writes

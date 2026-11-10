@@ -52,3 +52,10 @@
 /project/validation/boreal-final-state/BW-S00/global-tui-identity*.json
 /project/validation/boreal-final-state/BW-S00/pty-identity.json
 /project/validation/boreal-final-state/BW-S04/global-next-candidate-probe.json
+
+# Local agent workspace inputs and historical forensic output
+/AGENTS.md
+/AGENT_HANDOFF.md
+/.agents/skills/
+/scripts/validation/tui/forensic-closeout.latest.json
+/scripts/validation/tui/forensic-closeout.latest.md

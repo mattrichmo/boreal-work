@@ -116,8 +116,6 @@ const TEXT_EXTENSIONS = new Set([
 const TEXT_FILENAMES = new Set([".gitattributes", ".gitignore", ".gitkeep"]);
 
 const V2_ROOT_FILES = new Set([
-  "AGENTS.md",
-  "AGENT_HANDOFF.md",
   "Cargo.lock",
   "Cargo.toml",
   ".gitignore",
@@ -177,6 +175,8 @@ function isExcluded(relativePath) {
 
   if (
     relativePath.includes("/results/") ||
+    relativePath === "scripts/validation/tui/forensic-closeout.latest.json" ||
+    relativePath === "scripts/validation/tui/forensic-closeout.latest.md" ||
     relativePath.startsWith("test-project/")
   ) {
     return true;

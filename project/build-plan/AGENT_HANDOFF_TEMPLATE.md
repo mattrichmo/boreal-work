@@ -27,7 +27,7 @@ Revalidation task ID and phase advancement gate:
 
 ## Execution rules
 
-- Read the v2 root `AGENTS.md`, the [project packet](../README.md), the
+- Read the [v2 root contributor instructions at the recorded source revision](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENTS.md), the [project packet](../README.md), the
   matching [vertical handoff](verticals/), and [TASK_INDEX.md](TASK_INDEX.md)
   before changing code.
 - Respect the assigned write set. Ask the integration owner to coordinate a

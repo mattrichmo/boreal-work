@@ -89,7 +89,7 @@ formats or publication code are written.
 2. Choose one leaf from [TASK_INDEX.md](TASK_INDEX.md) whose prerequisites have
    passed their revalidation gate.
 3. Read that leaf's vertical handoff in [`verticals/`](verticals/).
-4. Send the filled [root agent handoff](../../AGENT_HANDOFF.md), using
+4. Send the filled [archived root agent handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md), using
    [AGENT_HANDOFF_TEMPLATE.md](AGENT_HANDOFF_TEMPLATE.md) for leaf-specific
    fields, owned paths, prerequisites, and evidence.
 5. Deliver changed files, test evidence, migration impact, and remaining

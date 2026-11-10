@@ -80,7 +80,7 @@ architecture steward's fixture update and an integration check, per
 5. Establish the legacy mapping inputs from the old knowledge source, raw
    inbox, source-backed claim/decision, FTS, and context-pack behavior. Treat
    legacy code as behavioral reference only, as required by
-   [`AGENTS.md`](../../../AGENTS.md) and
+   [archived `AGENTS.md`](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENTS.md) and
    [`docs/MIGRATION.md`](../../../docs/MIGRATION.md).
 
 ## Concrete outputs

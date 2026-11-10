@@ -55,4 +55,4 @@ before a confirmed stop or reviewed safe recovery.
 | P2-09 | bounded proof passed; release gate open | Kepler (Luna) + coordinator | P2-08 reconciled snapshot | 2026-09-15T05:30:00Z | [revalidation](../../../../project/build-plan/P2-09-REVALIDATION.md); application-backed route, three actor/harness claims, expiry fencing, simulated and scripted restart, direct finish-close diagnostics, service-routed evidence/finish-close payloads, three-harness declared-gate execution/restart transcript, focused failed-evidence/replay test, Rust `guide_checked` enforcement, and no-goal CLI action validation pass; external unfamiliar-harness non-skippability transcript remains open |
 
 After P2-09, dispatch P3-01 and P4-01 concurrently via
-[handoff](../../../../AGENT_HANDOFF.md).
+[archived handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md).

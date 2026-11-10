@@ -13,7 +13,7 @@ hierarchy authoritative, and producing release evidence.
 No `bwrk` planning records are created by this document. The repository root
 database is empty, and the available binary does not expose the workflow
 resolver required by the planning skill. This is therefore a file-based plan,
-consistent with `AGENTS.md` and the existing M01 dispatch protocol.
+consistent with the [root contributor instructions at the recorded source revision](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENTS.md) and the existing M01 dispatch protocol.
 
 ## 1. Current truth
 
@@ -125,9 +125,9 @@ focused evidence:
 - `[x]` Process race/soak validation now treats `service_busy` as transient
   ownership contention and retries the exact same operation identity; the
   standalone 16-worker race and 10-round soak both pass.
-- `[x]` The repository authority files `AGENT_HANDOFF.md` and `MASTER_PLAN.md`
-  were restored from `HEAD` after an accidental concurrent deletion and match
-  the committed versions exactly.
+- `[x]` At the recorded revision, the [root agent handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md)
+  and `MASTER_PLAN.md` had been restored from `HEAD` after an accidental
+  concurrent deletion.
 
 The following are not closed by those fixes:
 
@@ -791,7 +791,7 @@ work:
 | --- | --- | --- |
 | Coordinator | `CURRENT_V2_CLOSEOUT_PLAN.md`, `crates/cli/src/command_registry.rs`, `crates/cli/src/main.rs`, `crates/cli/src/service.rs`, `crates/cli/tests/command_registry.rs`, `scripts/validation/run_full_suite.py` | Current v2 service-route parity, v3-route truthfulness, exact work projection, and current-binary release gating. |
 | C4-B scale/concurrency | `scripts/validation/status/README.md`, `scripts/validation/status/production_client.py` | V11 service metrics and the explicit 16/4 query-count budget. |
-| C4-C TUI/PTY | `scripts/validation/tui/forensic-closeout.latest.json` | Current live TUI/PTY closeout evidence; timestamps and operation IDs are regenerated test evidence. |
+| C4-C TUI/PTY | [JSON snapshot](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/scripts/validation/tui/forensic-closeout.latest.json) / [Markdown snapshot](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/scripts/validation/tui/forensic-closeout.latest.md) | Historical pre-cleanup capture only, not current acceptance evidence; future raw output stays local under `scripts/validation/tui/results/`. |
 | C2-C memory/source | `memory/` (nested Git repository) | Preserve as an independent publication set. It has no commit yet, so it is not staged as a parent-repository change. |
 
 The full strict evidence is recorded in

@@ -33724,7 +33724,7 @@ sed -n '1,132p' 'MASTER_PLAN.md'
    60 | 1. Read this file, [milestone scope](milestones/M01-v2-product/README.md),
    61 |    the relevant sprint file, [task index](project/build-plan/TASK_INDEX.md),
    62 |    [review gates](project/build-plan/REVIEW_GATES.md), and
-   63 |    [handoff](AGENT_HANDOFF.md). Use task IDs, not invented `bwrk` records.
+   63 |    [archived handoff](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md). Use task IDs, not invented `bwrk` records.
    64 | 2. Select a leaf only when **all** listed prerequisite IDs have accepted
    65 |    evidence and the last finding-producing review has passed through
    66 |    reconciliation and revalidation. `queued` means waiting for a planned
@@ -33735,7 +33735,7 @@ sed -n '1,132p' 'MASTER_PLAN.md'
    71 |    or crate file set. Shared interfaces are changed by their named steward
    72 |    or by a reviewed integration request.
    73 | 4. Agents report exact changed paths, checks, proof, limitations, and findings
-   74 |    using [AGENT_HANDOFF.md](AGENT_HANDOFF.md). The coordinator verifies the
+   74 |    using [archived AGENT_HANDOFF.md](https://github.com/mattrichmo/boreal-work/blob/b7227a36329b481be37ca96d792889ff3e35b106/AGENT_HANDOFF.md). The coordinator verifies the
    75 |    claimed source snapshot and reviews diffs; a worker report is not a closed
    76 |    task. If an agent's timebox elapses, mark it for review, confirm the
    77 |    process/worktree has stopped, and reconcile its output before replacement.
