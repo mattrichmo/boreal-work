@@ -25,7 +25,7 @@ No production files were changed in this attempt. The accepted S02 work is evide
 - Release manifest SHA256: `sha256:18ca1b5aabd9135ece16eb6a0f221bb779190d33587648ccb312bb4c540d849d`
 - Artifact identity: `sha256:7f0453d37e9ec606c5c730e221faf11951f21da4f37f4582d233daf1c81fd15e`
 
-The exact manifest and identity record are in [`artifacts/`](artifacts/); raw package logs are in [`logs/`](logs/).
+The exact manifest and identity record are in [`artifacts/`](https://github.com/mattrichmo/boreal-work/tree/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/attempt-2/artifacts); raw package logs are in [`logs/`](https://github.com/mattrichmo/boreal-work/tree/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/attempt-2/logs).
 
 ## Residual qualification
 

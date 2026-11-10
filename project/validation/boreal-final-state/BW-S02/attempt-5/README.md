@@ -11,7 +11,7 @@ The source commit changes `validateSnapshot` to accept the supported schema vers
 - `npm --prefix apps/global-tui test` — PASS, 99/99 on Node 26.8.2.
 - A fresh `0.2.2` `aarch64-apple-darwin` archive built from the package-smoke release binary passed `package-target-smoke.sh` with Node unavailable. The check exercised installed Global JSON and verified failed-update rollback preserves the prior executable and Global database.
 
-Commands and full outputs are recorded in [`COMMANDS.md`](COMMANDS.md) and [`logs/`](logs/). The compact package identity is in [`artifacts/native-release-identity.json`](artifacts/native-release-identity.json); the matching release manifest and `SHA256SUMS` are retained beside it. The generated archive and staging directory were removed after the native package-target smoke.
+Commands and full outputs are recorded in [`COMMANDS.md`](COMMANDS.md) and [`logs/`](https://github.com/mattrichmo/boreal-work/tree/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/attempt-5/logs). The compact package identity is in [`artifacts/native-release-identity.json`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S02/attempt-5/artifacts/native-release-identity.json); the matching release manifest and `SHA256SUMS` are retained beside it. The generated archive and staging directory were removed after the native package-target smoke.
 
 ## Package identity
 

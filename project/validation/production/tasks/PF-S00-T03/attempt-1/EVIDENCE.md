@@ -1,5 +1,9 @@
 # PF-S00-T03 attempt 1 evidence
 
+The historical stdout/stderr files remain available in the [pinned baseline
+logs directory](https://github.com/mattrichmo/boreal-work/tree/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/production/baseline/logs);
+future raw run output stays local.
+
 ## Disposition
 
 This is current dirty-tree baseline evidence only. It is not a product acceptance, sprint acceptance, release, native-installation, published-channel, or independent-review claim. Historical archive checks remain historical and were not promoted.

@@ -43,6 +43,8 @@ No historical receipts/attempts/reviews or real project records were deleted,
 rewritten or used as fabricated passing evidence. Test inputs remain isolated.
 
 The report's changed-file appendix gives every path and purpose. Executed
-commands and their scope are under `evidence/run-01/`. Remaining critical
-risks and next safe task are in `REVIEW.md`; independent review and Rust
-revalidation are required before these candidates can be accepted.
+commands and their scope are in the [pinned run-01 evidence archive](https://github.com/mattrichmo/boreal-work/tree/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/m02/evidence/run-01).
+Future raw command output stays local under ignored `evidence/run-*/` paths.
+Remaining critical risks and next safe task are in `REVIEW.md`; independent
+review and Rust revalidation are required before these candidates can be
+accepted.

@@ -38,3 +38,17 @@
 
 # Project memory is maintained in its own Git repository
 /memory/
+
+# Local audit runs and generated delivery exports
+/REFERENCE_INDEX.md
+/handoff/delivery/
+/project/validation/production/baseline/logs/
+/project/validation/m02/evidence/run-*/
+/project/validation/boreal-final-state/*/logs/
+/project/validation/boreal-final-state/*/attempt-*/logs/
+/project/validation/boreal-final-state/*/attempt-*/artifacts/
+/project/validation/boreal-final-state/BW-S00/full-suite-smoke*.json
+/project/validation/boreal-final-state/BW-S00/full-suite-smoke*.md
+/project/validation/boreal-final-state/BW-S00/global-tui-identity*.json
+/project/validation/boreal-final-state/BW-S00/pty-identity.json
+/project/validation/boreal-final-state/BW-S04/global-next-candidate-probe.json

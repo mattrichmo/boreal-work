@@ -15,7 +15,7 @@ Python: `3.13.5`.
 
 Cargo, rustc and rustfmt were not available on PATH or in the inspected
 filesystem. Network/toolchain fetch attempts failed; no toolchain was
-installed. The seven Cargo checks in `evidence/run-01/checks.json` each
+installed. The seven Cargo checks in [`evidence/run-01/checks.json`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/m02/evidence/run-01/checks.json) each
 record exit 127 / tool unavailable; no compiler diagnostic or passing Rust
 test result is implied. Rust syntax, type correctness, formatting and runtime
 behavior are therefore unverified. No claim is made about successful macOS,

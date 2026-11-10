@@ -1,2 +1,0 @@
-$ npm --prefix apps/tui run typecheck
-exit=0

@@ -1,5 +1,11 @@
 # PF-S00-T01 source and evidence provenance
 
+Historical raw baseline logs are available in the [immutable pre-cleanup
+snapshot](https://github.com/mattrichmo/boreal-work/tree/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/production/baseline/logs).
+The current checkout preserves its local log bytes; future baseline
+stdout/stderr output stays local under the ignored `logs/` directory.
+`checks.json` remains the tracked result/hash summary.
+
 Status: worker handoff; unaccepted. This record freezes identity and evidence applicability only. It does not accept PF-S00-T01, PF-S00, or the production-completion plan.
 
 ## Immutable source lock

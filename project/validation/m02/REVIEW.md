@@ -53,7 +53,7 @@ This resolves that mismatch only, not the independent S00 review gate.
 
 ## Revalidation actually run
 
-`evidence/run-01/checks.json` records 19 commands: 12 passed; seven Cargo
+[`evidence/run-01/checks.json`](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/m02/evidence/run-01/checks.json) records 19 commands: 12 passed; seven Cargo
 commands were blocked before execution. The runner deliberately exits 1.
 Successful commands cover structural contract fixtures, TypeScript checking,
 core TUI plus 98 Node tests, generated-installer identity, shell/JavaScript

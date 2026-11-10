@@ -1,5 +1,10 @@
 # BW-S04-T90 validation handoff
 
+The generated probe JSON is preserved at the [immutable pre-cleanup GitHub
+file](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S04/global-next-candidate-probe.json).
+Fresh probe output stays local at `global-next-candidate-probe.json`, which is
+ignored; the adjacent Python source remains tracked.
+
 **Record status:** validation evidence recorded; this report does not claim BW-S04 is closed.
 
 ## Task handoff
@@ -77,7 +82,7 @@ git diff --quiet 8305cbec1eeb981d5952c66e6d2b65e9adfe316f HEAD -- crates/cli/src
 exit 0; the candidate-selection source paths match the preceding combined S04 source
 ```
 
-The reproducible harness and machine-readable result are [global-next-candidate-probe.py](global-next-candidate-probe.py) and [global-next-candidate-probe.json](global-next-candidate-probe.json). The probe creates and deletes a disposable Global root and workspace. It creates task `candidate-beyond-cap` at project revision 5, confirms `claimable_for_actor=true` for actor `agent-a` with active session `candidate-session`, then links the workspace as the 101st association (zero-based index 100, after the 100-row summary sample). The Global Next result reports complete registry coverage (`101/101` associations and projects, configured detail limit 1000), `passed=true`, and a valid participating workspace check, but returns candidate count 0, no candidates, and `selected=null`.
+The reproducible harness and machine-readable result are [global-next-candidate-probe.py](global-next-candidate-probe.py) and [global-next-candidate-probe.json](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S04/global-next-candidate-probe.json). The probe creates and deletes a disposable Global root and workspace. It creates task `candidate-beyond-cap` at project revision 5, confirms `claimable_for_actor=true` for actor `agent-a` with active session `candidate-session`, then links the workspace as the 101st association (zero-based index 100, after the 100-row summary sample). The Global Next result reports complete registry coverage (`101/101` associations and projects, configured detail limit 1000), `passed=true`, and a valid participating workspace check, but returns candidate count 0, no candidates, and `selected=null`.
 
 Artifact SHA-256: probe script `6cb81708f9f3bc143e8d62ac241dff91bc8f2c535324246d3719b68a988226e8`; result JSON `f89781513affe94e65dcdd56fcb0fb05c24b59065bf37330907c5cab22bfc227`.
 
@@ -115,7 +120,7 @@ exit 0
 
 The final disposable probe created 101 global associations, placed `candidate-workspace` at zero-based association index 100, and verified that `candidate-beyond-cap` is claimable for `agent-a` with active `candidate-session`. The workspace fixture initially had `operator` / `session-operator`, so the harness explicitly rebound only disposable metadata to `agent-a` / `candidate-session` for the matching-identity case. Global Next selected `candidate-beyond-cap` with complete coverage (`associations read=101/total=101`, `projects read=101/total=101`, `candidate_count=1`, `passed=true`). The registered syntax remains `bwrk global next [--limit N] [--json]` and offers no typed actor/session input; it uses the workspace metadata. Missing session, a session bound to `agent-b`, and an ended `candidate-session` each yielded `coverage.complete=false`, `coverage.state=partial`, `passed=false`, and a `read_failed` workspace check.
 
-Machine-readable result: [global-next-candidate-probe.json](global-next-candidate-probe.json). The exact command is the Python probe above. Its final rerun recorded source commit `eabc70e4d202f6bc924a73d2ef88d2364e4b7597`, binary SHA-256 `4f34f4f1279a934ff49a0c9226efdc273e184cd9193f1646eb64d4719381c8ad`, `result=PASS`, `candidate_selected=true`, and `invalid_sessions_are_partial=true`. The script and JSON are disposable evidence only; the harness removes its temporary Global root and workspace.
+Machine-readable result: [global-next-candidate-probe.json](https://github.com/mattrichmo/boreal-work/blob/c0b932e2538371d028e75f1787ef9a96c42dcd31/project/validation/boreal-final-state/BW-S04/global-next-candidate-probe.json). The exact command is the Python probe above. Its final rerun recorded source commit `eabc70e4d202f6bc924a73d2ef88d2364e4b7597`, binary SHA-256 `4f34f4f1279a934ff49a0c9226efdc273e184cd9193f1646eb64d4719381c8ad`, `result=PASS`, `candidate_selected=true`, and `invalid_sessions_are_partial=true`. The script and JSON are disposable evidence only; the harness removes its temporary Global root and workspace.
 
 The direct command `cargo test --workspace --locked --quiet` was also attempted on the preceding combined source and failed at `crates/domain/tests/production_properties.rs::oracle_identity_and_minimal_counterexample_replay_are_explicit` because `BOREAL_PRODUCTION_ORACLE_MANIFEST` was not set. This invocation is not a valid workspace gate: `scripts/validation/run_full_suite.py` generates the source-bound manifest before running the workspace suite. The coordinator will run that harness on the final combined tree; no full-suite pass is claimed here.
 
