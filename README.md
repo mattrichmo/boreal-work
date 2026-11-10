@@ -1,117 +1,168 @@
 # Boreal Work
 
-![Boreal Work — Shared plans. Coordinated work.](docs/assets/boreal-readme-banner.png)
+Boreal Work is a local project manager for personal plans, ongoing projects, and
+work shared with AI agents. Use the terminal dashboards to organize tasks and notes,
+review progress, and see what needs attention. Use the CLI for individual commands,
+scripts, and repeatable workflows against the same project data.
 
-**Local-first project management for people and AI agents.**
+There are two workspaces: **Global** keeps track of your projects and everyday tasks;
+**Project** manages work that needs dependencies, assigned ownership, evidence, and
+review before it is complete. A Global project can exist without a folder or repository.
 
-Keep everyday plans, business projects, and agent-assisted work organized in one place. See what needs attention, give each task a clear owner, and carry the evidence and context forward when the work changes hands.
+[Global dashboard](#global-dashboard) · [Project dashboard](#project-dashboard) ·
+[CLI examples](#cli-examples) · [Working with agents](#working-with-agents) ·
+[Documentation](#documentation)
 
-[Get started](#get-started) · [Agent workflows](#coordinate-project-work) · [MCP setup](crates/mcp/README.md) · [Documentation](#documentation)
+## Global dashboard
 
-## From the big picture to the next task
+See tasks across projects, keep notes alongside a plan, and switch between board and
+list views. Add priorities, due dates, labels, and custom workflow statuses. Use the
+inbox for work that has not yet been assigned to a project.
 
-**Global is your portfolio.** Manage personal and business projects, tasks, milestones, and notes from any directory. Projects can be folderless, associated with a folder, or linked to an existing Boreal execution workspace. Custom statuses, priorities, due dates, and relationships help keep the wider picture useful.
+![Boreal Global terminal dashboard showing the Paper Birch Study project, three tasks, and the selected task's details](docs/assets/boreal-global-dashboard-v10.png)
 
-**Project is your execution workspace.** Break work into milestones, sprints, and tasks with dependencies and explicit ownership. People and agents work through the same lifecycle: find ready work, claim an attempt, record progress, attach evidence, and finish or hand it off. Required reviews and evidence determine whether work can close and unblock its dependents.
+*Earlier development capture with fictional Paper Birch Study data. The current
+layout may differ; see [capture details](docs/README-CAPTURE-NOTES.md).*
 
-Sources, handoff summaries, and curated project memory keep the reasoning behind the work available for the next person or agent.
-
-## Get started
-
-The prebuilt installer supports **Apple Silicon macOS and x86_64 Linux**. Install **Node.js 20–26** before opening either dashboard; CLI commands work without Node.js.
+Open the Global terminal dashboard from any directory:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh -s -- --yes
-export PATH="$HOME/.local/bin:$PATH"
-bwrk --version
+bwrk dashboard global
 ```
 
-This installs the latest compatible release under `~/.local`, verifies its archive against `SHA256SUMS`, and creates your separate local Global store. Add `~/.local/bin` to your shell's PATH if it is not already there.
+In a task view:
 
-### Create your first project
+- Press `n` to capture a task or `N` for the detailed form.
+- Press `Enter` to inspect a selected item and `e` to edit it.
+- Press `s` to choose a project, or `Space` to switch between all projects and your
+  last selected project.
+- Press `?` for the current view's help and `q` to quit.
 
-Start with a small plan that needs no repository or project folder:
+Global tasks have their own completion state. Linking a Global project to a Project
+workspace shows that workspace's progress separately.
+
+## Project dashboard
+
+Use a Project workspace when a plan needs milestones, sprints, dependent tasks, or
+reviewed results. The dashboard shows the work queue and a detail panel for the
+selected item, including its current state, requirements, and available actions.
+
+![Boreal Project terminal dashboard showing a task queue and inspector for the readme-demo project](docs/assets/boreal-project-dashboard-v10.png)
+
+*Earlier development capture with fictional tasks. The demo session has no permission
+to claim work, so those actions are disabled. See [capture details](docs/README-CAPTURE-NOTES.md).*
+
+From an existing Project workspace, open its terminal dashboard:
+
+```sh
+bwrk dashboard
+```
+
+Use the numbered views to find ready, active, blocked, or closed work. Press `/` to
+search, `Enter` for details, `?` for help, and `q` to quit. Available actions depend on
+your role and the work item's state.
+
+### Plan, carry out, and review work
+
+1. **Plan the work.** Arrange milestones, sprints, and tasks. Record dependencies and
+   the evidence or review a task needs before it can close.
+2. **Choose the next task.** See what is ready, who owns an active attempt, and what
+   is blocking other work.
+3. **Record the result.** Keep progress, evidence, and review decisions with the work.
+   Closing a task follows its requirements before it can unblock dependent tasks.
+4. **Leave context for the next session.** Save a handoff summary, retain source
+   material, and publish useful project notes.
+
+The dashboard covers the queue, inspection, and supported work actions. Planning and
+other operations also have CLI workflows; see the [workflow guide](docs/WORKFLOWS.md)
+and [command reference](docs/CLI_WORKFLOWS.md).
+
+## CLI examples
+
+### Keep a small plan in Global
+
+Create a folderless project:
 
 ```sh
 bwrk global project add --name "Weekend plans" --json
 ```
 
-Copy the returned `data.id`. Replace `PROJECT_ID` below with that value:
+Copy `data.id` from the response and use it in place of `PROJECT_ID` below:
 
 ```sh
 bwrk global task add --project PROJECT_ID --title "Choose a hiking trail"
-bwrk global note add --project PROJECT_ID --title "Trail ideas" --body "Look for a short loop with a good picnic spot."
-bwrk dashboard global
+bwrk global note add --project PROJECT_ID --title "Trail ideas" --body "Look for a short loop with a picnic spot."
+bwrk global task list --project PROJECT_ID --json
 ```
 
-You now have a project, a task, and a note in your local portfolio. Open “Weekend plans” in the dashboard to explore them. Press `?` for help and `q` to quit.
+The same project, task, and note appear in the Global dashboard. Global commands work
+from any directory.
 
-See [installation and updates](docs/INSTALL.md) for pinned releases, archive verification, and source builds.
+### Inspect an existing Project workspace
 
-## Coordinate project work
-
-When a project needs structured execution and agent handoffs, initialize its working folder:
+Run these from a Project workspace, replacing `PROJECT` with its execution project ID.
+This is separate from a Global project's ID.
 
 ```sh
-cd your-project
-bwrk init --agents codex,claude --yes
-bwrk doctor
-bwrk agent guide --json
-bwrk dashboard
+bwrk work list --project PROJECT --json
+bwrk work ready --project PROJECT --json
+bwrk work list --project PROJECT --status blocked --json
 ```
 
-Setup creates the project record, memory layout, and selected agent skills. An empty project has no claimable work until its plan is created and launched.
+The ready-work list is specific to the current caller's permissions. Use the work
+details and workflow guidance to check what an action requires before changing it.
 
-- **Plan:** organize milestones, sprints, tasks, and dependencies.
-- **Coordinate:** use contextual guidance and ready-work selection so agents can claim distinct tasks.
-- **Verify:** retain progress, evidence, and review decisions with each attempt.
-- **Hand off:** save summaries and publish curated knowledge for the next session.
+### Find a command
 
-Start with [packaged workflows](docs/WORKFLOWS.md) and the [CLI workflow reference](docs/CLI_WORKFLOWS.md). [Local orchestration](docs/CLI_ORCHESTRATION.md) adds explicitly configured worker dispatch; installing Boreal alone does not launch agents.
+```sh
+bwrk commands
+bwrk help work create
+bwrk help work claim
+```
 
-## Three ways to work
+Commands with `--json` return structured results for scripts and integrations. The
+command list reflects your build; see [CLI workflows](docs/CLI_WORKFLOWS.md) for
+planning, handoffs, templates, history, and exports.
 
-- **Terminal dashboards:** use `bwrk dashboard global` for the portfolio and `bwrk dashboard` inside an initialized project.
-- **CLI:** inspect and automate workflows with structured JSON output. `bwrk commands` lists available routes; `bwrk help work create` shows command-specific syntax.
-- **MCP:** connect compatible agent clients to scoped Global reads and authorized Project operations through Boreal's local services.
+## Working with agents
 
-**MCP is available on current `main`, after the published v0.2.1 release.** Use the [source-build installer](docs/INSTALL.md#source-build-fallback) for these commands, then follow the [MCP guide](crates/mcp/README.md) for client compatibility, configuration, and permissions. Global MCP access is read-only; Project writes are separately scoped.
+Agents use the same project records and work requirements as people. They can inspect
+available work, claim a task, record evidence, and leave a summary for the next session.
+An active attempt records ownership, and required evidence and reviews still apply
+before the task can close.
 
-The source installer compiles the CLI and both dashboards. A bare `cargo install --path crates/cli --bin bwrk --locked` builds the Rust executable, including current-main MCP commands, but does not package the dashboards.
+The CLI provides contextual guidance through `bwrk agent guide`. Optional
+[local orchestration](docs/CLI_ORCHESTRATION.md) can dispatch explicitly configured
+workers; Boreal does not launch agents on its own.
 
-<details>
-<summary>See the project dashboard</summary>
+[MCP integration](crates/mcp/README.md) is available in current `main`, after the
+published v0.2.1 release. It exposes read-only Global access and separately authorized
+Project operations to compatible clients. See that guide for supported clients and
+permission scopes.
 
-![Boreal project dashboard with a task queue and work inspector](docs/assets/boreal-project-dashboard-v10.png)
+## Local data and history
 
-An earlier development build with synthetic demo data. See [capture details](docs/README-CAPTURE-NOTES.md).
+- **Global** stores your portfolio and notes in a separate per-user SQLite database.
+- **Project** keeps local configuration, operational records, credentials, and runtime
+  state in its ignored `.boreal/` directory. Curated notes live in `memory/`, with a
+  separate Git repository by default.
+- **Dashboards** connect to local services over Unix sockets. No Boreal-hosted account
+  or cloud sync is required. Configured agents, evidence commands, and MCP HTTP
+  integrations may use the network.
+- **History** retains failed evidence and interrupted attempts as well as completed work.
 
-</details>
-
-## Your data stays under your control
-
-- **Global:** a separate per-user SQLite store holds your portfolio and notes. It survives reinstalling the application.
-- **Project:** ignored `.boreal/` files hold local configuration, credentials, operational data, and runtime state. Curated notes live in `memory/`, with a separate Git repository by default.
-- **Connections:** dashboards use local Unix-socket services. No Boreal-hosted account or cloud-sync setup is required. Configured agents, evidence commands, and MCP HTTP integrations may use the network.
-- **History:** failed evidence and interrupted attempts remain part of the record.
-
-See [data locations and setup](docs/INSTALL.md), [operations and recovery](docs/CLI_OPERATIONS.md), and [security boundaries](docs/SECURITY.md).
-
-## Platforms and current limits
-
-Boreal Work v2 is under active development. Published v0.2.1 archives cover Apple Silicon macOS and x86_64 Linux; source builds also support Intel macOS. Windows and Linux ARM64 are not currently supported. Dashboards require Node.js 20–26.
-
-Features can differ between releases and `main`. Use `bwrk commands` to check your installed build.
+See [operations and recovery](docs/CLI_OPERATIONS.md) and
+[security boundaries](docs/SECURITY.md) for backups, recovery, and access rules.
 
 ## Documentation
 
-- [Install and update](docs/INSTALL.md)
+- [Setup and updates](docs/INSTALL.md)
 - [Workflows](docs/WORKFLOWS.md) · [CLI reference](docs/CLI_WORKFLOWS.md)
-- [Agent orchestration](docs/CLI_ORCHESTRATION.md) · [Sources and memory](docs/CLI_KNOWLEDGE.md)
+- [Project terminal dashboard](apps/tui/README.md) · [Global terminal dashboard](apps/global-tui/README.md)
+- [Sources and project notes](docs/CLI_KNOWLEDGE.md) · [Agent orchestration](docs/CLI_ORCHESTRATION.md)
 - [MCP integration](crates/mcp/README.md)
 - [Operations and recovery](docs/CLI_OPERATIONS.md) · [Security](docs/SECURITY.md)
 - [Architecture](docs/ARCHITECTURE.md) · [Build checks](docs/BUILD.md)
 - [Legacy migration](docs/MIGRATION.md)
 
-[MIT license](LICENSE).
-
+[PolyForm Noncommercial 1.0.0 license](LICENSE).
